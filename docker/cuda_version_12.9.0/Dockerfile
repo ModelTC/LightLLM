@@ -1,4 +1,4 @@
-ARG CUDA_VERSION=12.8.0
+ARG CUDA_VERSION=12.9.0
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 ARG PYTHON_VERSION=3.10
 ARG TARGETPLATFORM
@@ -38,7 +38,7 @@ COPY lightllm/__init__.py lightllm/
 
 # Install dependencies using uv (faster than pip)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -e . --no-cache-dir --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/cu128
+    uv pip install --system -e . --no-cache-dir --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/cu129
 
 # Install vllm for additional kernels
 RUN --mount=type=cache,target=/root/.cache/uv \

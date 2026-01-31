@@ -1,7 +1,8 @@
-ARG CUDA_VERSION=12.8.0
+ARG CUDA_VERSION=12.9.0
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 ARG PYTHON_VERSION=3.10
 ARG TARGETPLATFORM
+ARG DEEPEP_COMMIT=b6ce310bb0b75079682d09bc2ebc063a074fbd58
 
 ENV PATH=/root/.local/bin:/root/.cargo/bin:$PATH \
     UV_SYSTEM_PYTHON=1 \
@@ -35,20 +36,7 @@ RUN chmod 777 -R /tmp && apt-get update --allow-insecure-repositories && DEBIAN_
     rdma-core \
     libibverbs-dev \
     librdmacm-dev \
-    cmake \
-    automake \
-    autotools-dev \
-    libtool \
-    libz-dev \
-    pkg-config \
-    tmux \
-    net-tools \
-    libaio-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-# Reinstall RDMA packages
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
-    apt-get -y install --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev && \
+    cmake && \
     rm -rf /var/lib/apt/lists/*
 
 # Set python alias
@@ -66,15 +54,11 @@ COPY lightllm/__init__.py lightllm/
 
 # Install dependencies using uv (faster than pip)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -e . --no-cache-dir --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/cu128
+    uv pip install --system -e . --no-cache-dir --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/cu129
 
 # Install vllm for additional kernels
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system vllm --pre --index-strategy unsafe-best-match --extra-index-url https://wheels.vllm.ai/nightly
-
-# Install LightKernel
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-deps -v 'git+https://github.com/ModelTC/LightKernel.git@07f2f62af5deb41f10a22660f9f42dba9273361e#egg=lightllm_kernel'
 
 # Build and install gdrcopy
 RUN mkdir -p /tmp/gdrcopy && cd /tmp && \
@@ -84,44 +68,32 @@ RUN mkdir -p /tmp/gdrcopy && cd /tmp && \
     dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb && \
     cd / && rm -rf /tmp/gdrcopy
 
-# Build and install UCX with CUDA and gdrcopy support
-RUN rm -rf /usr/lib/ucx /opt/hpcx/ucx && \
-    cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx && \
-    git checkout v1.19.x && \
-    ./autogen.sh && ./configure \
-        --enable-shared \
-        --disable-static \
-        --disable-doxygen-doc \
-        --enable-optimizations \
-        --enable-cma \
-        --enable-devel-headers \
-        --with-cuda=/usr/local/cuda \
-        --with-verbs=yes \
-        --with-dm \
-        --with-gdrcopy=/usr/local \
-        --with-efa \
-        --enable-mt && \
-    make -j$(nproc) && \
-    make -j install-strip && \
-    ldconfig && \
-    rm -rf /usr/local/src/ucx
+# Fix DeepEP IBGDA symlink
+RUN ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
 
-# Build and install NixL
-RUN uv pip install --system --upgrade meson pybind11 patchelf && \
-    cd /usr/local/src && \
-    git clone https://github.com/ai-dynamo/nixl.git -b 0.8.0 && \
-    cd nixl && \
-    rm -rf build && \
-    mkdir build && \
-    meson setup build/ --prefix=/usr/local/nixl --buildtype=release && \
-    cd build && \
-    ninja && \
-    ninja install && \
-    cd .. && \
-    uv pip install --system . --no-deps && \
-    rm -rf /usr/local/src/nixl
+# Build and install NVSHMEM
+RUN wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.3.9/source/nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
+    tar -xf nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
+    mv nvshmem_src nvshmem && \
+    cd nvshmem && \
+    rm -f /root/nvshmem_src_cuda12-all-all-3.3.9.tar.gz && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/root/nvshmem/install -DCMAKE_CUDA_ARCHITECTURES=90 && \
+    cmake --build build --target install -j$(nproc)
+
+# Build and install DeepEP
+ENV NVSHMEM_DIR=/root/nvshmem/install
+RUN git clone https://github.com/deepseek-ai/DeepEP.git /root/DeepEP && \
+    cd /root/DeepEP && \
+    git checkout ${DEEPEP_COMMIT} && \
+    NVSHMEM_DIR=/root/nvshmem/install python setup.py install
 
 # Copy full source code and install in editable mode
 COPY . /lightllm

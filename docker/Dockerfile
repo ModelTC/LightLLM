@@ -1,48 +1,52 @@
 ARG CUDA_VERSION=12.6.1
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 ARG PYTHON_VERSION=3.10
-ARG MAMBA_VERSION=24.7.1-0
 ARG TARGETPLATFORM
-ENV PATH=/opt/conda/bin:$PATH \
-    CONDA_PREFIX=/opt/conda
 
+ENV PATH=/root/.local/bin:/root/.cargo/bin:$PATH \
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=0 \
+    UV_HTTP_TIMEOUT=300
+
+# Install system dependencies
 RUN chmod 777 -R /tmp && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl-dev \
     curl \
     g++ \
     make \
-    git && \
+    git \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python3-pip \
+    libnuma-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN case ${TARGETPLATFORM} in \
-    "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
-    *)              MAMBA_ARCH=x86_64   ;; \
-    esac && \
-    curl -fsSL -o ~/mambaforge.sh "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
-    bash ~/mambaforge.sh -b -p /opt/conda && \
-    rm ~/mambaforge.sh
+# Set python alias
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1
 
-RUN case ${TARGETPLATFORM} in \
-    "linux/arm64")  exit 1 ;; \
-    *)              /opt/conda/bin/conda update -y conda &&  \
-    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
-    esac && \
-    /opt/conda/bin/conda clean -ya
+# Install uv package manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
+WORKDIR /lightllm
+
+# Copy project files for dependency installation
+COPY pyproject.toml README.md ./
+COPY lightllm/__init__.py lightllm/
+
+# Install dependencies using uv (faster than pip)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -e . --no-cache-dir
+
+# Install vllm for additional kernels
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system vllm --pre --index-strategy unsafe-best-match --extra-index-url https://wheels.vllm.ai/nightly
+
+# Copy full source code and install in editable mode
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -e . --no-deps
 
 WORKDIR /root
-
-COPY ./requirements.txt /lightllm/requirements.txt
-RUN pip install -U pip
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir
-
-RUN pip install --no-cache-dir vllm --pre --extra-index-url https://wheels.vllm.ai/nightly 
-
-# TODO: offline compile
-# RUN git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel && pip install --no-deps -v .
-
-RUN apt-get update && apt-get install -y libnuma-dev # for sgl_kernel
-
-COPY . /lightllm
-RUN pip install -e /lightllm --no-cache-dir
