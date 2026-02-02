@@ -45,7 +45,7 @@ COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir
 RUN pip install --no-cache-dir vllm==${VLLM_VERSION}
-RUN git clone https://github.com/ModelTC/LightKernel.git && cd LightKernel && pip install --no-deps -v . && cd /root;
+RUN pip install https://github.com/ModelTC/LightKernel/releases/download/v1.0.1/lightllm_kernel-0.1.0-cp310-cp310-linux_x86_64.whl
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 
