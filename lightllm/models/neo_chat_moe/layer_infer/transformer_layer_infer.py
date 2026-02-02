@@ -10,6 +10,7 @@ from lightllm.models.neo_chat_moe.layer_weights.transformer_layer_weight import 
 from lightllm.distributed import all_reduce
 import torch.distributed as dist
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from lightllm.common.basemodel.attention.base_att import AttControl
 
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
@@ -193,7 +194,13 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_ * 2)
-        o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
+        att_control = AttControl()
+        if att_control.scale is None:
+            att_control.scale = 1.0 / (self.head_dim_ ** 0.5)
+        # att_control.mla_decode_dict["softmax_scale"] = 1.0 / (self.head_dim_ ** 0.5)
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q, k=_k, v=_v, att_control=att_control, alloc_func=self.alloc_tensor
+        )
         o_tensor = o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_ * 2)[:, :, : self.head_dim_].contiguous()
         return o_tensor
 
