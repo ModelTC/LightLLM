@@ -17,6 +17,9 @@ from .flashinfer.fp8 import Fp8FlashInferAttBackend
 from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
 
+# NSA backend
+from .nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
+
 logger = init_logger(__name__)
 
 # Backend class mappings by data type
@@ -43,6 +46,14 @@ mla_data_type_to_backend = {
         "triton": MlaTritonAttBackend,
         "fa3": MlaFa3AttBackend,
         "flashinfer": MlaFlashInferAttBackend,
+    },
+}
+
+# NSA (Native Sparse Attention) backend mappings
+nsa_data_type_to_backend = {
+    "None": {
+        "flashmla_sparse": NsaFlashMlaSparseAttBackend,
+        # Future backends: "fa3", "tilelang", "aiter"
     },
 }
 
@@ -105,3 +116,39 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "fla
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, is_mla=True, priority_list=priority_list)
+
+
+def get_nsa_prefill_att_backend_class(backend_str: str = "flashmla_sparse") -> BaseAttBackend:
+    """Get NSA prefill attention backend class.
+
+    Args:
+        backend_str: Backend name, currently only "flashmla_sparse" is supported.
+                     Future options: "fa3", "tilelang", "aiter"
+
+    Returns:
+        NSA attention backend class
+    """
+    # NSA currently only supports "None" dtype (no quantization)
+    llm_dtype = "None"
+    if backend_str not in nsa_data_type_to_backend[llm_dtype]:
+        logger.warning(f"NSA backend '{backend_str}' not found, falling back to flashmla_sparse")
+        backend_str = "flashmla_sparse"
+    return nsa_data_type_to_backend[llm_dtype][backend_str]
+
+
+def get_nsa_decode_att_backend_class(backend_str: str = "flashmla_sparse") -> BaseAttBackend:
+    """Get NSA decode attention backend class.
+
+    Args:
+        backend_str: Backend name, currently only "flashmla_sparse" is supported.
+                     Future options: "fa3", "tilelang", "aiter"
+
+    Returns:
+        NSA attention backend class
+    """
+    # NSA currently only supports "None" dtype (no quantization)
+    llm_dtype = "None"
+    if backend_str not in nsa_data_type_to_backend[llm_dtype]:
+        logger.warning(f"NSA backend '{backend_str}' not found, falling back to flashmla_sparse")
+        backend_str = "flashmla_sparse"
+    return nsa_data_type_to_backend[llm_dtype][backend_str]
