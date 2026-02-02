@@ -506,6 +506,7 @@ class HttpServerManager:
                     add_special_tokens=sampling_params.add_special_tokens,
                     already_tokenized=True,
                 )
+                return prompt_ids
             elif not self.enable_multimodal and not self.pd_mode.is_D():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
