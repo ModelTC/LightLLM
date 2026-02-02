@@ -17,6 +17,7 @@ MAX_STOP_SEQUENCES = int(os.getenv("LIGHTLLM_MAX_STOP_SEQUENCES", 10))
 REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_LENGTH", 2048))
 GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 2048))
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
+INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 
 
 class StopSequence(ctypes.Structure):
@@ -205,6 +206,25 @@ class AllowedTokenIds(ctypes.Structure):
         return list(self.ids[: self.size])
 
 
+class InvalidTokenIds(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [
+        ("ids", ctypes.c_int * INVALID_TOKEN_IDS_MAX_LENGTH),
+        ("size", ctypes.c_int),
+    ]
+
+    def initialize(self, ids: List[int]):
+        self.size = len(ids)
+        assert (
+            self.size <= INVALID_TOKEN_IDS_MAX_LENGTH
+        ), f"Too many invalid token IDs {self.size} > {INVALID_TOKEN_IDS_MAX_LENGTH}."
+        self.ids[: self.size] = ids[:]
+        return
+
+    def to_list(self):
+        return list(self.ids[: self.size])
+
+
 class ExponentialDecayLengthPenalty(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -306,6 +326,8 @@ class SamplingParams(ctypes.Structure):
         # processor which only retains scores for the given token ids. Defaults to None.
         # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
         ("allowed_token_ids", AllowedTokenIds),
+        # if provided, the invalid token ids will be ignored during generation
+        ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
@@ -394,6 +416,11 @@ class SamplingParams(ctypes.Structure):
         allowed_token_ids = kwargs.get("allowed_token_ids", [])
         self.allowed_token_ids = AllowedTokenIds()
         self.allowed_token_ids.initialize(allowed_token_ids)
+
+        # Initialize invalid_token_ids
+        invalid_token_ids = kwargs.get("invalid_token_ids", [])
+        self.invalid_token_ids = InvalidTokenIds()
+        self.invalid_token_ids.initialize(invalid_token_ids)
 
         if self.do_sample is False:
             self.temperature = 1.0
@@ -495,6 +522,7 @@ class SamplingParams(ctypes.Structure):
             "guided_grammar": self.guided_grammar.to_str(),
             "guided_json": self.guided_json.to_str(),
             "allowed_token_ids": self.allowed_token_ids.to_list(),
+            "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
             "move_kv_to_decode_node": self.move_kv_to_decode_node.to_dict(),
             "skip_special_tokens": self.skip_special_tokens,

@@ -266,6 +266,7 @@ class InferSamplingParams:
 
         self.fsm_current_state: int = 0
         self.allowed_token_ids = self.shm_param.allowed_token_ids.to_list()
+        self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
         if len(self.allowed_token_ids) == 0:
             self.allowed_token_ids = None
 
@@ -280,6 +281,11 @@ class InferSamplingParams:
             if not all(e < vocab_size for e in self.allowed_token_ids):
                 logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
                 self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
+
+        if len(self.invalid_token_ids) > 0:
+            if not all(e < vocab_size for e in self.invalid_token_ids):
+                logger.error("invalid_token_ids contain tokenid >= vobsize, we remove these token ids")
+                self.invalid_token_ids = [e for e in self.invalid_token_ids if e < vocab_size]
 
         # nixl decode node information
         if self.shm_param.nixl_params.data_len > 0:
