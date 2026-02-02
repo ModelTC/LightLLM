@@ -92,9 +92,14 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func, residual=residual)
 
     def __call__(
-        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+        self,
+        input: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+        residual: torch.Tensor = None,
     ) -> torch.Tensor:
-        return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+        return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func, residual=residual)
 
 
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
