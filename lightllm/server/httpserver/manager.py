@@ -493,7 +493,20 @@ class HttpServerManager:
 
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
-            if not self.enable_multimodal and not self.pd_mode.is_D():
+            if self.enable_multimodal:
+                assert (
+                    len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+                ), "too many multimodal items!"
+                if multimodal_params.audios:
+                    assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
+                await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                prompt_ids = self.tokenizer.encode(
+                    prompt,
+                    multimodal_params,
+                    add_special_tokens=sampling_params.add_special_tokens,
+                    already_tokenized=True,
+                )
+            elif not self.enable_multimodal and not self.pd_mode.is_D():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
