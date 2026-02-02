@@ -2,8 +2,6 @@ from functools import partial
 from typing import override
 
 import torch
-from sgl_kernel.flash_mla import flash_mla_sparse_fwd
-from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_infer.nsa_indexer_layer_inder import NSAIndexerInfer
@@ -12,6 +10,8 @@ from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionSt
 from lightllm.models.deepseek3_2.triton_kernel.token_group_quant import per_token_group_quant_mla_deep_gemm_masked_fp8
 from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.create_utils import get_nsa_prefill_att_backend_class
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -21,7 +21,18 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         self.indexer = NSAIndexerInfer(layer_idx=self.layer_num_, network_config=self.network_config_, mode=mode)
         self.topk_indices = None
+
+        # Initialize NSA attention backend (singleton, lazy initialization)
+        self._nsa_backend_class = get_nsa_prefill_att_backend_class()
+        self._nsa_backend = None
         return
+
+    def _get_nsa_backend(self):
+        """Get or create the NSA backend (lazy initialization)."""
+        if self._nsa_backend is None:
+            # NSA backend doesn't require model reference for basic operations
+            self._nsa_backend = self._nsa_backend_class(model=None)
+        return self._nsa_backend
 
     @override
     def _get_qkv(
@@ -80,16 +91,30 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-
+        # Model-specific q projection (uses layer weights)
         q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
-        mla_out, _, _ = flash_mla_sparse_fwd(
+
+        # Use NSA backend for attention computation
+        att_control = AttControl(
+            nsa_prefill=True,
+            nsa_prefill_dict={
+                "topk_indices": self.topk_indices,
+                "softmax_scale": self.softmax_scale,
+                "kv_lora_rank": self.kv_lora_rank,
+            },
+        )
+
+        # Create prefill state and execute attention
+        nsa_backend = self._get_nsa_backend()
+        prefill_state = nsa_backend.create_att_prefill_state(infer_state)
+        prefill_state.init_state()
+        mla_out = prefill_state.prefill_att(
             q=q_all,
-            kv=infer_state.mem_manager.kv_buffer[self.layer_num_],
-            indices=self.topk_indices.unsqueeze(1),
-            sm_scale=self.softmax_scale,
-            d_v=self.kv_lora_rank,
+            k=infer_state.mem_manager.kv_buffer[self.layer_num_],
+            v=None,
+            att_control=att_control,
         )
         return mla_out
 
@@ -100,23 +125,31 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ):
+        # Model-specific q projection (uses layer weights)
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        k_rope = kv[:, :, -self.qk_rope_head_dim :].reshape(-1, 1, 1, self.qk_rope_head_dim)
-        kv_nope = kv[:, :, : -self.qk_rope_head_dim].reshape(-1, 1, 1, self.kv_lora_rank)
 
-        o_tensor = flash_attn_with_kvcache(
-            q=q_rope,
-            k_cache=k_rope,
-            v_cache=kv_nope,
-            qv=q_nope,
-            page_table=self.topk_indices,
-            cache_seqlens=infer_state.nsa_cache_seqlens,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
-            cu_seqlens_k_new=infer_state.nsa_cu_seqlens_k,
-            max_seqlen_q=infer_state.max_q_seq_len,
-            softmax_scale=self.softmax_scale,
-            causal=True,
+        # Use NSA backend for attention computation
+        att_control = AttControl(
+            nsa_decode=True,
+            nsa_decode_dict={
+                "topk_indices": self.topk_indices,
+                "nsa_cache_seqlens": infer_state.nsa_cache_seqlens,
+                "nsa_cu_seqlens_k": infer_state.nsa_cu_seqlens_k,
+                "softmax_scale": self.softmax_scale,
+                "kv_lora_rank": self.kv_lora_rank,
+                "qk_rope_head_dim": self.qk_rope_head_dim,
+            },
+        )
+
+        # Create decode state and execute attention
+        nsa_backend = self._get_nsa_backend()
+        decode_state = nsa_backend.create_att_decode_state(infer_state)
+        decode_state.init_state()
+        o_tensor = decode_state.decode_att(
+            q=(q_nope, q_rope),
+            k=infer_state.mem_manager.kv_buffer[self.layer_num_],
+            v=None,
+            att_control=att_control,
         )
         return o_tensor
