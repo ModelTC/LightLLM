@@ -17,7 +17,7 @@ from lightllm.models.qwen3.triton_kernel.qk_norm import qk_rmsnorm_forward
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def __init__(self, data_type, network_config, mode):
-        self._is_merge_kv = network_config["is_merge_kv"]
+        self._is_merge_kv = network_config["merge_kv"]
         super().__init__(data_type, network_config, mode)
         return
 
