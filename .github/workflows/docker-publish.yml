@@ -98,9 +98,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CUDA_VERSION=12.8.0
-            ENABLE_DEEPEP=0
-            ENABLE_NIXL=0
-            ENABLE_CACHE=0
+            ENABLE_DEEPEP=1
+            ENABLE_NIXL=1
+            ENABLE_CACHE=1
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

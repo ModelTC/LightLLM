@@ -10,8 +10,8 @@ IMAGE_TAG="${IMAGE_TAG:-cuda${CUDA_VERSION}}"
 
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \
-  --build-arg ENABLE_DEEPEP=0 \
-  --build-arg ENABLE_NIXL=0 \
-  --build-arg ENABLE_CACHE=0 \
+  --build-arg ENABLE_DEEPEP=1 \
+  --build-arg ENABLE_NIXL=1 \
+  --build-arg ENABLE_CACHE=1 \
   -t "${IMAGE_PREFIX}:${IMAGE_TAG}" .
 
