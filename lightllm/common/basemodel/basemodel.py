@@ -1070,25 +1070,32 @@ class TpPartBaseModel:
 
     def release_kv_cache(self):
         self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
+        torch.cuda.empty_cache()
 
     def release_graph(self):
         self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
+        torch.cuda.empty_cache()
 
     def release_all(self):
         self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
         self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
         self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
+        torch.cuda.empty_cache()
 
     def resume_weight(self):
+        torch.cuda.empty_cache()
         self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
 
     def resume_kv_cache(self):
+        torch.cuda.empty_cache()
         self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
 
     def resume_graph(self):
+        torch.cuda.empty_cache()
         self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)
 
     def resume_all(self):
+        torch.cuda.empty_cache()
         self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
         self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
         self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)
