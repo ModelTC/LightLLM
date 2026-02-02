@@ -58,6 +58,12 @@ from .api_models import (
     CompletionRequest,
     CompletionResponse,
 )
+from .api_anthropic import (
+    AnthropicMessagesRequest,
+    _convert_anthropic_to_chat_request,
+    _convert_chat_response_to_anthropic,
+    _anthropic_message_stream_from_chat,
+)
 from .build_prompt import build_prompt, init_tokenizer
 
 logger = init_logger(__name__)
@@ -292,6 +298,48 @@ async def metrics() -> Response:
     response.mimetype = "text/plain"
     return response
 
+
+@app.post("/v1/messages")
+async def anthropic_messages(
+    request: AnthropicMessagesRequest,
+    raw_request: Request,
+) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface",
+        )
+
+    chat_req = _convert_anthropic_to_chat_request(request)
+
+    # Streaming path
+    if request.stream:
+        resp = await chat_completions_impl(chat_req, raw_request)
+
+        if isinstance(resp, StreamingResponse):
+            async def stream_wrapper():
+                async for item in _anthropic_message_stream_from_chat(
+                    resp.body_iterator
+                ):
+                    yield item
+
+            return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
+
+        if isinstance(resp, ChatCompletionResponse):
+            anthropic_resp = _convert_chat_response_to_anthropic(resp)
+            return JSONResponse(content=anthropic_resp.model_dump(exclude_none=True))
+
+        return resp
+
+    # Non-streaming path
+    chat_req.stream = False
+    chat_req.stream_options = None
+    resp = await chat_completions_impl(chat_req, raw_request)
+
+    if isinstance(resp, ChatCompletionResponse):
+        anthropic_resp = _convert_chat_response_to_anthropic(resp)
+        return JSONResponse(content=anthropic_resp.model_dump(exclude_none=True))
+
+    return resp
 
 @app.websocket("/pd_register")
 async def register_and_keep_alive(websocket: WebSocket):
