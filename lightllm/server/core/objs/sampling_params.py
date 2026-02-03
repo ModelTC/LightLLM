@@ -420,7 +420,7 @@ class SamplingParams(ctypes.Structure):
         # Initialize invalid_token_ids
         invalid_token_ids = map(int, kwargs.get("logit_bias", {}).keys())
         self.invalid_token_ids = InvalidTokenIds()
-        self.invalid_token_ids.initialize(list(invalid_token_ids))
+        self.invalid_token_ids.initialize(list[int](invalid_token_ids))
 
         if self.do_sample is False:
             self.temperature = 1.0
