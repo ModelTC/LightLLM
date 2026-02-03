@@ -54,6 +54,15 @@ QUESTION_TEMPLATES = {
         "Please describe it.\n"
         "<|im_end|><|im_start|>assistant\n"
     ),
+    "interns1": (
+        "<|im_start|>system\n"
+        "You are an expert reasoner with extensive experience in all areas. You approach problems through systematic thinking and rigorous reasoning. Your response should reflect deep understanding and precise logical thinking, making your solution path and reasoning clear to others. Please put your thinking process within <think>...</think> tags.<|im_end|>"
+        "<|im_start|>user\n"
+        "<IMG_CONTEXT>\n"
+        "Please describe the image explicitly.<|im_end|>"
+        "<|im_start|>assistant\n"
+        "<think>\n"
+    ),
     "qwen_vl": (
         "<|im_start|>system\n"
         "You are a helpful assistant.\n"
