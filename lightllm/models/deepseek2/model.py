@@ -43,6 +43,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         self.qk_rope_head_dim = self.config["qk_rope_head_dim"]
         self.q_lora_rank = self.config["q_lora_rank"]
         self.kv_lora_rank = self.config["kv_lora_rank"]
+        self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
     def _init_custom(self):

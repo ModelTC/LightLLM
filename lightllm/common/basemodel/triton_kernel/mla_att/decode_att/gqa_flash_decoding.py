@@ -67,7 +67,6 @@ def gqa_token_decode_attention_flash_decoding(
     )
 
     if not hasattr(infer_state, "decode_att_block_seq"):
-        assert batch_size <= 2048
         decode_att_block_seq = torch.empty(
             [
                 1,
@@ -89,6 +88,7 @@ def gqa_token_decode_attention_flash_decoding(
             vsm_count,
             batch_size,
             BLOCK_N=BLOCK_N,
+            MAX_BATCH_SIZE=triton.next_power_of_2(batch_size),
             num_warps=4,
         )
 
@@ -134,8 +134,11 @@ def _fwd_kernel_calcu_index_and_block_seq(
     num_sm,
     batch_size,
     BLOCK_N: tl.constexpr,
+    MAX_BATCH_SIZE: tl.constexpr,
 ):
-    b_seq_len = tl.load(b_seq_len_ptr + tl.arange(0, 2048), mask=tl.arange(0, 2048) < batch_size, other=0)
+    b_seq_len = tl.load(
+        b_seq_len_ptr + tl.arange(0, MAX_BATCH_SIZE), mask=tl.arange(0, MAX_BATCH_SIZE) < batch_size, other=0
+    )
     total_token_num = tl.sum(b_seq_len)
 
     block_seq = tl.cast(total_token_num / (num_sm * 4), dtype=tl.int32) + 1
@@ -144,6 +147,10 @@ def _fwd_kernel_calcu_index_and_block_seq(
     block_seq_len = tl.cdiv(b_seq_len, block_seq)
     cumsum_seq_len = tl.cumsum(block_seq_len)
     batch_start_index = cumsum_seq_len - block_seq_len
-    tl.store(mid_o_batch_start_index_ptr + tl.arange(0, 2048), batch_start_index, mask=tl.arange(0, 2048) < batch_size)
+    tl.store(
+        mid_o_batch_start_index_ptr + tl.arange(0, MAX_BATCH_SIZE),
+        batch_start_index,
+        mask=tl.arange(0, MAX_BATCH_SIZE) < batch_size,
+    )
     tl.store(mid_o_decode_att_block_seq_ptr, block_seq)
     return
