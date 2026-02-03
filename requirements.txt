@@ -79,7 +79,7 @@ ujson==5.10.0
 frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
-gunicorn==23.0.0
+hypercorn==0.18.0
 flashinfer-python==0.2.4
 sgl-kernel==0.3.7.post1
 httpx==0.28.1
