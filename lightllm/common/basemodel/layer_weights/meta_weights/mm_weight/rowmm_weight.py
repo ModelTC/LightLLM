@@ -112,10 +112,8 @@ class QKVROWNMMWeight(MMWeightTpl):
         assert q_head_num % self.tp_world_size_ == 0, (
             f"q_head_num must be divisible by tp_world_size_, " f"but found: {q_head_num} % {self.tp_world_size_}"
         )
-        assert kv_head_num % self.tp_world_size_ == 0 or self.tp_world_size_ % kv_head_num == 0, (
-            f"kv_head_num must be divisible by tp_world_size_ or "
-            f"tp_world_size_ must be divisible by kv_head_num, "
-            f"but found: {kv_head_num} % {self.tp_world_size_}"
+        assert kv_head_num % self.tp_world_size_ == 0, (
+            f"kv_head_num must be divisible by tp_world_size_" f"but found: {kv_head_num} % {self.tp_world_size_}"
         )
         q_hidden_size = (q_head_num // self.tp_world_size_) * head_dim
         kv_hidden_size = (kv_head_num // self.tp_world_size_) * head_dim
