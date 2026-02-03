@@ -105,8 +105,12 @@ def init_distributed_env(kvargs):
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
+    backend = "nccl"
+    # NCCL internal error when using 8 or 16 gpus.
+    if is_metax():
+        backend = "cpu:gloo,cuda:nccl"
     dist.init_process_group(
-        "nccl",
+        backend=backend,
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
