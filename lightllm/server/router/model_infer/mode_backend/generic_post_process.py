@@ -6,19 +6,46 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_con
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
-    (
-        b_req_idx,
-        b_temperatures,
-        b_top_ps,
-        b_top_ks,
-        b_length_penalty_param,
-        b_mask_eos_reqs,
-        is_all_greedy,
-    ) = _get_post_sample_tensors(reqs)
-    eos_ids = torch.tensor(eos_id, dtype=torch.int32, device="cpu", pin_memory=True).cuda(non_blocking=True)
+class SampleState:
+    def __init__(
+        self,
+        b_req_idx: torch.Tensor,
+        b_temperatures: torch.Tensor,
+        b_top_ps: torch.Tensor,
+        b_top_ks: torch.Tensor,
+        b_length_penalty_param: torch.Tensor,
+        b_mask_eos_reqs: torch.Tensor,
+        is_all_greedy: bool,
+    ):
+        self.b_req_idx = b_req_idx
+        self.b_temperatures = b_temperatures
+        self.b_top_ps = b_top_ps
+        self.b_top_ks = b_top_ks
+        self.b_length_penalty_param = b_length_penalty_param
+        self.b_mask_eos_reqs = b_mask_eos_reqs
+        self.is_all_greedy = is_all_greedy
 
-    sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
+    def copy_for_cuda_graph(self, new_infer_state: "SampleState"):
+        for attr_name, attr_value in vars(new_infer_state).items():
+            if isinstance(attr_value, torch.Tensor):
+                attr_ = getattr(self, attr_name, None)
+                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
+                    attr_.copy_(attr_value, non_blocking=True)
+
+        return
+
+
+def random_sample(probs: torch.Tensor):
+    q = torch.empty_like(probs)
+    # NOTE(woosuk): To batch-process the requests without their own seeds,
+    # which is the common case, we first assume that every request does
+    # not have its own seed. Then, we overwrite the values for the requests
+    # that have their own seeds.
+    q.exponential_()
+    return probs.div_(q).argmax(dim=-1).view(-1)
+
+
+def sample(logits: torch.Tensor):
 
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
@@ -32,64 +59,67 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
     # 使用int32类型进行计数大概需要600M的空间，这也不是一笔不菲的开销。
     # 所以需要根据具体的显卡，使用场景，来判断使用那种方式，默认情况下 为gpu模式，可以调整args.penalty_counter_mode
     # 参数来控制使用方式。
-    if sampling_params_manager.penalty_counter_mode == "cpu_counter":
-        (
-            p_token_ids,
-            p_token_counts,
-            p_cumsum_seq_len,
-        ) = sampling_params_manager.gen_cpu_out_token_counter_sampling_params(req_objs=reqs)
+    # if sampling_params_manager.penalty_counter_mode == "cpu_counter":
+    #     (
+    #         p_token_ids,
+    #         p_token_counts,
+    #         p_cumsum_seq_len,
+    #     ) = sampling_params_manager.gen_cpu_out_token_counter_sampling_params(req_objs=reqs)
 
-        apply_penalty(
-            Logits=logits,
-            b_req_idx=b_req_idx,
-            b_length_penalty_param=b_length_penalty_param,
-            b_mask_eos_reqs=b_mask_eos_reqs,
-            p_token_ids=p_token_ids,
-            p_token_counts=p_token_counts,
-            p_cumsum_seq_len=p_cumsum_seq_len,
-            eos_ids=eos_ids,
-            sampling_params_manager=sampling_params_manager,
-        )
-    else:
-        apply_penalty_gpu_cache(
-            Logits=logits,
-            b_req_idx=b_req_idx,
-            b_length_penalty_param=b_length_penalty_param,
-            b_mask_eos_reqs=b_mask_eos_reqs,
-            eos_ids=eos_ids,
-            sampling_params_manager=sampling_params_manager,
-        )
-    logits.div_(b_temperatures.view((-1, 1)))
+    #     apply_penalty(
+    #         Logits=logits,
+    #         b_req_idx=sample_state.b_req_idx,
+    #         b_length_penalty_param=sample_state.b_length_penalty_param,
+    #         b_mask_eos_reqs=sample_state.b_mask_eos_reqs,
+    #         p_token_ids=p_token_ids,
+    #         p_token_counts=p_token_counts,
+    #         p_cumsum_seq_len=p_cumsum_seq_len,
+    #         eos_ids=eos_ids,
+    #         sampling_params_manager=sampling_params_manager,
+    #     )
+    # else:
+    #     apply_penalty_gpu_cache(
+    #         Logits=logits,
+    #         b_req_idx=sample_state.b_req_idx,
+    #         b_length_penalty_param=sample_state.b_length_penalty_param,
+    #         b_mask_eos_reqs=sample_state.b_mask_eos_reqs,
+    #         eos_ids=eos_ids,
+    #         sampling_params_manager=sampling_params_manager,
+    #     )
+    # logits.div_(sample_state.b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
+    batch_next_token_ids = random_sample(probs)
+    batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+    return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
-    if is_all_greedy:
-        batch_next_token_ids = torch.argmax(logits, -1)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+    # if sample_state.is_all_greedy:
+    #     batch_next_token_ids = torch.argmax(logits, -1)
+    #     batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+    #     return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
-    elif get_env_start_args().sampling_backend == "triton":
-        probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
-        sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
-        next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
-        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
-        return next_token_ids.view(-1), next_token_logprobs.view(-1)
+    # elif get_env_start_args().sampling_backend == "triton":
+    #     probs_sort, probs_idx = _top_p_top_k(probs, sample_state.b_top_ps, sample_state.b_top_ks)
+    #     sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
+    #     next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
+    #     next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
+    #     return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
-    elif get_env_start_args().sampling_backend == "sglang_kernel":
-        from sgl_kernel import top_k_top_p_sampling_from_probs
+    # elif get_env_start_args().sampling_backend == "sglang_kernel":
+    #     from sgl_kernel import top_k_top_p_sampling_from_probs
 
-        batch_next_token_ids = top_k_top_p_sampling_from_probs(
-            probs,
-            b_top_ks,
-            b_top_ps,
-            filter_apply_order="joint",
-            check_nan=False,
-        )
-        int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
-        int64_batch_next_token_ids[:] = batch_next_token_ids
-        batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
-    else:
-        assert False, "dead path"
+    #     batch_next_token_ids = top_k_top_p_sampling_from_probs(
+    #         probs,
+    #         sample_state.b_top_ks,
+    #         sample_state.b_top_ps,
+    #         filter_apply_order="joint",
+    #         check_nan=False,
+    #     )
+    #     int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
+    #     int64_batch_next_token_ids[:] = batch_next_token_ids
+    #     batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
+    #     return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+    # else:
+    #     assert False, "dead path"
 
 
 def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):

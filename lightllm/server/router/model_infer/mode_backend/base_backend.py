@@ -6,6 +6,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.server.router.model_infer.mode_backend.post_cuda_graph import PostCudaGraph
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
@@ -37,7 +38,11 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import (
+    SampleState,
+    sample,
+    _get_post_sample_tensors,
+)
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
@@ -143,6 +148,7 @@ class ModeBackend:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
+        self.post_graph = PostCudaGraph()
         model_kvargs = {
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
@@ -234,6 +240,8 @@ class ModeBackend:
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
+
+        # 初始化 post cuda graph
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -755,28 +763,10 @@ class ModeBackend:
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
         return draft_next_token_ids_gpu
 
-    def _sample_and_scatter_token(
-        self,
-        logits: torch.Tensor,
-        b_req_idx: torch.Tensor,
-        b_mtp_index: torch.Tensor,
-        run_reqs: List[InferReq],
-        is_prefill: bool,
-        b_prefill_has_output_cpu: torch.Tensor = None,
-        mask_func: Optional[Callable] = None,
+    def _post_process(
+        self, logits: torch.Tensor, b_req_idx: torch.Tensor, b_mtp_index: torch.Tensor, b_has_out: torch.Tensor = None
     ):
-
-        if mask_func is not None:
-            assert len(run_reqs) == logits.shape[0]
-            mask_func(run_reqs, logits)
-
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
-        b_has_out = None
-        if is_prefill:
-            b_has_out = g_pin_mem_manager.gen_from_list(
-                key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
-
+        next_token_ids, next_token_logprobs = sample(logits)
         scatter_token(
             next_token_ids=next_token_ids,
             req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -793,6 +783,37 @@ class ModeBackend:
             next_token_ids, next_token_logprobs
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
+
+    def _sample_and_scatter_token(
+        self,
+        logits: torch.Tensor,
+        b_req_idx: torch.Tensor,
+        b_mtp_index: torch.Tensor,
+        run_reqs: List[InferReq],
+        is_prefill: bool,
+        b_prefill_has_output_cpu: torch.Tensor = None,
+        mask_func: Optional[Callable] = None,
+    ):
+
+        if mask_func is not None:
+            assert len(run_reqs) == logits.shape[0]
+            mask_func(run_reqs, logits)
+
+        # sample_state = SampleState(*_get_post_sample_tensors(run_reqs))
+
+        b_has_out = None
+        if is_prefill:
+            b_has_out = g_pin_mem_manager.gen_from_list(
+                key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
+            ).cuda(non_blocking=True)
+
+            return self._post_process(logits, b_req_idx, b_mtp_index, b_has_out)
+        else:
+            batch_size = logits.shape[0]
+            if self.post_graph.need_capture(batch_size):
+                return self.post_graph.capture_post_process(self._post_process, logits, b_req_idx, b_mtp_index)
+            else:
+                return self.post_graph.replay(logits, b_req_idx, b_mtp_index)
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
