@@ -1,6 +1,7 @@
 import os
 import math
 import ctypes
+import base64
 import numpy as np
 import time
 from .sampling_params import SamplingParams
@@ -226,6 +227,53 @@ class Req(ctypes.Structure):
         self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
         self.shm_logprobs.link_shm()
         return
+
+    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int):
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+        shape = (num_moe_layers, num_tokens, topk)
+        self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
+        self.shm_routing_data.create_shm()
+        return
+
+    def link_routing_data_shm_array(self, num_moe_layers: int, topk: int):
+        if num_moe_layers == 0:
+            return
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+        shape = (num_moe_layers, self.shm_cur_kv_len, topk)
+        self.shm_routing_data = ShmArray(name, shape, dtype=np.int32)
+        self.shm_routing_data.link_shm()
+        return
+
+    def get_routing_data(self):
+        if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
+            return None
+        return self.shm_routing_data.arr
+
+    def close_routing_data_shm_array(self):
+        if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
+            self.shm_routing_data.close_shm()
+            self.shm_routing_data = None
+        return
+
+    def get_routing_metadata(self, num_moe_layers: int, topk: int):
+        if num_moe_layers == 0 or topk == 0:
+            return None
+        try:
+            if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
+                self.link_routing_data_shm_array(num_moe_layers, topk)
+            routing_data = self.get_routing_data()
+            if routing_data is None:
+                return None
+            return {
+                "shape": list(routing_data.shape),
+                "dtype": str(routing_data.dtype),
+                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to read routing data for req {self.request_id}: {e}")
+            return None
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()

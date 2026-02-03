@@ -51,6 +51,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            microbatch_index=infer_state.microbatch_index,
         )
         return hidden_states.view(num_tokens, hidden_dim)
 

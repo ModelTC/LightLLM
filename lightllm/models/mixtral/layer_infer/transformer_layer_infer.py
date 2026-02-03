@@ -1,9 +1,6 @@
-import os
 import torch
-import torch.nn.functional as F
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.mixtral.layer_infer._custom_ops import fused_topk
 from lightllm.models.mixtral.layer_weights.transformer_layer_weight import MixtralTransformerLayerWeight
 
 
@@ -19,25 +16,15 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        router_logits = layer_weight.moe_gate.mm(input.view(-1, self.embed_dim_))
-        topk_weights, topk_ids = fused_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=self.num_experts_per_tok,
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        layer_weight.experts.experts(
+            hidden_states,
+            router_logits=router_logits,
+            top_k=self.num_experts_per_tok,
             renormalize=self.renormalize,
-            alloc_tensor_func=self.alloc_tensor,
+            use_grouped_topk=False,
+            topk_group=None,
+            num_expert_group=None,
+            microbatch_index=getattr(infer_state, "microbatch_index", 0),
         )
-        from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
-
-        return fused_experts_impl(
-            hidden_states=hidden_states,
-            w1=layer_weight.experts.w1[0],
-            w2=layer_weight.experts.w2[0],
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            use_fp8_w8a8=False,
-            w1_scale=None,
-            w2_scale=None,
-            alloc_tensor_func=self.alloc_tensor,
-        )
+        return hidden_states.view(num_tokens, hidden_dim)

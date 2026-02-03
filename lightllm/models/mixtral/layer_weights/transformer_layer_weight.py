@@ -57,4 +57,5 @@ class MixtralTransformerLayerWeight(LlamaTransformerLayerWeight):
             quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
             layer_num=self.layer_num_,
             network_config=self.network_config_,
+            moe_layer_index=self.layer_num_,
         )

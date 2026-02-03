@@ -8,6 +8,7 @@ from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.basemodel.routing_manager import g_routing_capture_manager
 
 logger = init_logger(__name__)
 
@@ -46,6 +47,7 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         num_fused_shared_experts: int = 0,
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
+        moe_layer_index: int = 0,
     ) -> None:
         network_config["norm_topk_prob"] = None
         super().__init__(
@@ -62,6 +64,7 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
             num_fused_shared_experts=num_fused_shared_experts,
             layer_num=layer_num,
             network_config=network_config,
+            moe_layer_index=moe_layer_index,
         )
 
         self.hidden_size = network_config["hidden_size"]
@@ -144,9 +147,14 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        microbatch_index: int = 0,
     ):
 
         topk_weights, topk_ids = self._router(router_logits, top_k)
+
+        # Rollout router replay
+        if g_routing_capture_manager is not None:
+            g_routing_capture_manager.capture(self.moe_layer_index, topk_ids, microbatch_index)
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2
