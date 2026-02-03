@@ -514,6 +514,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--mtp_draft_model_dir",
         type=str,
         default=None,
+        nargs="+",
         help="""Path to the draft model for the MTP multi-prediction feature,
         used for loading the MTP multi-output token model.""",
     )
