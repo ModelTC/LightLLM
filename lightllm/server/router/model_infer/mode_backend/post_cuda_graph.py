@@ -46,9 +46,9 @@ class PostCudaGraph:
 
     def replay(self, logits: torch.Tensor, b_req_idx: torch.Tensor, b_mtp_index: torch.Tensor):
         batch_size = logits.shape[0]
-        graph_obj, logits, b_req_idx, b_mtp_index, graph_output = self.graph[batch_size]
-        logits.copy_(logits, non_blocking=True)
-        b_req_idx.copy_(b_req_idx, non_blocking=True)
-        b_mtp_index.copy_(b_mtp_index, non_blocking=True)
+        graph_obj, graph_logits, graph_b_req_idx, graph_b_mtp_index, graph_output = self.graph[batch_size]
+        graph_logits.copy_(logits, non_blocking=True)
+        graph_b_req_idx.copy_(b_req_idx, non_blocking=True)
+        graph_b_mtp_index.copy_(b_mtp_index, non_blocking=True)
         graph_obj.replay()
         return graph_output
