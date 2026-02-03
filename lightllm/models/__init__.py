@@ -31,6 +31,7 @@ from lightllm.models.qwen2_reward.model import Qwen2RewardTpPartModel
 from lightllm.models.qwen3_vl.model import Qwen3VLTpPartModel
 from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel
 from lightllm.models.gemma3.model import Gemma3TpPartModel
+from lightllm.models.glm4v.model import GLM4VTpPartModel
 from lightllm.models.tarsier2.model import (
     Tarsier2Qwen2TpPartModel,
     Tarsier2Qwen2VLTpPartModel,

@@ -73,6 +73,8 @@ class LlamaTpPartModel(TpPartBaseModel):
         """
         rope_scaling = self.config.get("rope_scaling", None)
         if rope_scaling is None:
+            rope_scaling = self.config.get("rope_parameters", None)
+        if rope_scaling is None:
             self._init_to_get_rotary()
             return
 
@@ -99,13 +101,20 @@ class LlamaTpPartModel(TpPartBaseModel):
         return
 
     def _init_to_get_rotary(self, default_base=10000):
-        partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_)
+        rope_params = self.config.get("rope_parameters")
+        if rope_params is not None:
+            partial_rotary_factor = rope_params.get("partial_rotary_factor", 1)
+            base = rope_params.get("rope_theta", float(default_base))
+        else:
+            partial_rotary_factor = self.config.get("partial_rotary_factor", 1)
+            base = self.config.get("rope_theta", float(default_base))
+
+        partial_head_dim = int(partial_rotary_factor * self.head_dim_)
+
         if self.config.get("rope_scaling", {}) is None:
             rope_scaling_factor = 1.0
         else:
             rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
-
-        base = self.config.get("rope_theta", float(default_base))
 
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
