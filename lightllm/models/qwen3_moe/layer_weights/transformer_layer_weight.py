@@ -1,6 +1,6 @@
 import os
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeight, QKVROWNMMWeight
 
 
 class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
@@ -65,4 +65,17 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
             quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
             layer_num=self.layer_num_,
             network_config=self.network_config_,
+        )
+
+    def _init_qkv(self):
+        in_dim = self.n_embed
+        self.qkv_proj = QKVROWNMMWeight(
+            in_dim=in_dim,
+            q_head_num=self.q_head_num_,
+            kv_head_num=self.k_head_num_,
+            head_dim=self.head_dim,
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
+            data_type=self.data_type_,
+            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
+            quant_method=self.get_quant_method("qkv_proj"),
         )

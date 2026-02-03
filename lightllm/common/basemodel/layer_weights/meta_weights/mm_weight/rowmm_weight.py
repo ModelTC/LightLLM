@@ -92,6 +92,50 @@ class KVROWNMMWeight(MMWeightTpl):
             )
 
 
+class QKVROWNMMWeight(MMWeightTpl):
+    def __init__(
+        self,
+        in_dim: int,
+        q_head_num: int,
+        kv_head_num: int,
+        head_dim: int,
+        weight_names: Union[str, List[str]],
+        data_type: torch.dtype,
+        bias_names: Optional[Union[str, List[str]]] = None,
+        quant_method: QuantizationMethod = None,
+        tp_rank: int = None,
+        tp_world_size: int = None,
+    ) -> None:
+        self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
+        self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        self.repeat_times = 1
+        assert q_head_num % self.tp_world_size_ == 0, (
+            f"q_head_num must be divisible by tp_world_size_, " f"but found: {q_head_num} % {self.tp_world_size_}"
+        )
+        assert kv_head_num % self.tp_world_size_ == 0, (
+            f"kv_head_num must be divisible by tp_world_size_" f"but found: {kv_head_num} % {self.tp_world_size_}"
+        )
+        q_hidden_size = (q_head_num // self.tp_world_size_) * head_dim
+        kv_hidden_size = (kv_head_num // self.tp_world_size_) * head_dim
+        out_dims = [q_hidden_size, kv_hidden_size, kv_hidden_size]
+        super().__init__(
+            in_dim=in_dim,
+            out_dims=out_dims,
+            weight_names=weight_names,
+            data_type=data_type,
+            bias_names=bias_names,
+            quant_method=quant_method,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
+        )
+        self.param_slicer = get_row_slice_mixin(
+            self.quant_method.method_name,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
+            repeat_times=self.repeat_times,
+        )
+
+
 class ROWBMMWeight(BMMWeightTpl):
     def __init__(
         self,
