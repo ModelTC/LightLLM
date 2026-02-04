@@ -3,14 +3,10 @@ from lightllm.models.deepseek3_2.layer_weights.nsa_indexer_layer_weight import N
 
 
 class Deepseek3_2TransformerLayerWeight(Deepseek2TransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode=[], quant_cfg=None):
+    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
         self.index_topk = network_config["index_topk"]
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         self.indexer_layer_weight = NSAIndexerWeight(
-            layer_num=layer_num,
-            data_type=data_type,
-            network_config=network_config,
-            mode=mode,
-            quant_cfg=quant_cfg
+            layer_num=layer_num, data_type=data_type, network_config=network_config, quant_cfg=quant_cfg
         )
         return
