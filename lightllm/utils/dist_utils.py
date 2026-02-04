@@ -1,3 +1,4 @@
+from lightllm.utils.device_utils import is_metax
 import torch.distributed as dist
 import os
 import torch
@@ -65,6 +66,11 @@ def init_vision_distributed_env(kvargs):
     device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
+
+    # Can't init process group in device twice, we don't init it vision env
+    if is_metax():
+        return
+
     dist.init_process_group(
         "nccl",
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
@@ -99,8 +105,12 @@ def init_distributed_env(kvargs):
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
+    backend = "nccl"
+    # NCCL internal error when using 8 or 16 gpus.
+    if is_metax():
+        backend = "cpu:gloo,cuda:nccl"
     dist.init_process_group(
-        "nccl",
+        backend=backend,
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
