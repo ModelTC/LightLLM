@@ -7,6 +7,7 @@ from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 logger = init_logger(__name__)
 
@@ -155,7 +156,11 @@ class ReqSamplingParamsManager:
         else:
             self.req_to_out_token_id_counter[req.req_idx].fill_(0)
             if req.sampling_param.shm_param.input_penalty and req.need_out_token_id_statistics:
-                prompt_ids = torch.from_numpy(req.shm_req.get_prompt_ids_numpy()).pin_memory().cuda(non_blocking=True)
+                prompt_ids = g_pin_mem_manager.gen_from_list(
+                    key="prompt_ids_for_penalty",
+                    data=req.shm_req.get_prompt_ids_numpy(),
+                    dtype=torch.int32,
+                ).cuda(non_blocking=True)
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
@@ -214,22 +219,13 @@ class ReqSamplingParamsManager:
             cum_sum_len += len(id_to_count)
             p_cumsum_seq_len.append(cum_sum_len)
 
-        from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-
-        p_token_ids_tensor = g_pin_mem_manager.alloc_pin_tensor(
-            key="p_token_ids", size=len(p_token_ids), dtype=torch.int32
+        p_token_ids_tensor = g_pin_mem_manager.gen_from_list(key="p_token_ids", data=p_token_ids, dtype=torch.int32)
+        p_token_counts_tensor = g_pin_mem_manager.gen_from_list(
+            key="p_token_counts", data=p_token_counts, dtype=torch.int32
         )
-        p_token_ids_tensor.numpy()[:] = p_token_ids
-
-        p_token_counts_tensor = g_pin_mem_manager.alloc_pin_tensor(
-            key="p_token_counts", size=len(p_token_counts), dtype=torch.int32
+        p_cumsum_seq_len_tensor = g_pin_mem_manager.gen_from_list(
+            key="p_cumsum_seq_len", data=p_cumsum_seq_len, dtype=torch.int32
         )
-        p_token_counts_tensor.numpy()[:] = p_token_counts
-
-        p_cumsum_seq_len_tensor = g_pin_mem_manager.alloc_pin_tensor(
-            key="p_cumsum_seq_len", size=len(p_cumsum_seq_len), dtype=torch.int32
-        )
-        p_cumsum_seq_len_tensor.numpy()[:] = p_cumsum_seq_len
 
         return (
             p_token_ids_tensor.cuda(non_blocking=True),
