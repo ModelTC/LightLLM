@@ -160,7 +160,6 @@ class InferenceContext:
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
-            req.shm_req.release_shm_arrays()
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         free_token_index = custom_cat(free_token_index)

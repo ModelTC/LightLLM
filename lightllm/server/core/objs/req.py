@@ -227,16 +227,6 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
-    def release_shm_arrays(self):
-        """释放共享内存连接，防止内存泄露（仅 detach，不 unlink）"""
-        if hasattr(self, "shm_prompt_ids") and self.shm_prompt_ids is not None:
-            self.shm_prompt_ids.detach_shm()
-            self.shm_prompt_ids = None
-        if hasattr(self, "shm_logprobs") and self.shm_logprobs is not None:
-            self.shm_logprobs.detach_shm()
-            self.shm_logprobs = None
-        return
-
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
 

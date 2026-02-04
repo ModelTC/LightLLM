@@ -38,8 +38,8 @@ class TreeNode:
         split_parent_node = TreeNode()
         split_parent_node.parent = self.parent
         split_parent_node.parent.children[self.token_id_key[0].item()] = split_parent_node
-        split_parent_node.token_id_key = self.token_id_key[0:prefix_len].clone()
-        split_parent_node.token_mem_index_value = self.token_mem_index_value[0:prefix_len].clone()
+        split_parent_node.token_id_key = self.token_id_key[0:prefix_len]
+        split_parent_node.token_mem_index_value = self.token_mem_index_value[0:prefix_len]
         split_parent_node.children = {}
         split_parent_node.children[self.token_id_key[prefix_len].item()] = self
         split_parent_node.ref_counter = self.ref_counter
@@ -58,8 +58,8 @@ class TreeNode:
 
     def add_and_return_new_child(self, token_id_key, token_mem_index_value):
         child = TreeNode()
-        child.token_id_key = token_id_key.clone()
-        child.token_mem_index_value = token_mem_index_value.clone()
+        child.token_id_key = token_id_key
+        child.token_mem_index_value = token_mem_index_value
         first_token_key = child.token_id_key[0].item()
         assert first_token_key not in self.children.keys()
         self.children[first_token_key] = child
