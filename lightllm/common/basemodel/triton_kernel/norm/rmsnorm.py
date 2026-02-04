@@ -26,32 +26,22 @@ def _rms_norm_fwd_fused(
     X += row * x_stride0
     # Compute variance
     _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    if BLOCK_SIZE >= N:
-        cols = tl.arange(0, BLOCK_SIZE)
+    for off in range(0, N, BLOCK_SIZE):
+        cols = off + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(X + cols * x_stride1, mask=cols < N, other=0.0).to(tl.float32)
+        _var += x * x
+    var = tl.sum(_var, axis=0) / N
+    rstd = 1 / tl.sqrt(var + eps)
+    # Normalize and apply linear transformation
+    for off in range(0, N, BLOCK_SIZE):
+        cols = off + tl.arange(0, BLOCK_SIZE)
         mask = cols < N
-        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
-        _var = x * x
-        var = tl.sum(_var, axis=0) / N
-        rstd = 1 / tl.sqrt(var + eps)
         w = tl.load(W + cols, mask=mask).to(tl.float32)
-        x = x * rstd * w
-        tl.store(Y + cols, x.to(Y.dtype.element_ty), mask=mask)
-    else:
-        for off in range(0, N, BLOCK_SIZE):
-            cols = off + tl.arange(0, BLOCK_SIZE)
-            x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
-            _var += x * x
-        var = tl.sum(_var, axis=0) / N
-        rstd = 1 / tl.sqrt(var + eps)
-        # Normalize and apply linear transformation
-        for off in range(0, N, BLOCK_SIZE):
-            cols = off + tl.arange(0, BLOCK_SIZE)
-            mask = cols < N
-            w = tl.load(W + cols, mask=mask).to(tl.float32)
-            x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
-            x = x * rstd * w
-            # Write output
-            tl.store(Y + cols, x.to(Y.dtype.element_ty), mask=mask)
+        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
+        x_hat = x * rstd
+        y = x_hat * w
+        # Write output
+        tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
 def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
@@ -101,7 +91,7 @@ def _add_rms_norm_fwd_fused(
     y_stride1,
     r_stride0,
     r_stride1,
-    N,  # number of columns in X
+    N: tl.constexpr,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr,
 ):
