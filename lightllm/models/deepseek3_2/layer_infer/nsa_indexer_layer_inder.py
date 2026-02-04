@@ -16,11 +16,10 @@ logger = init_logger(__name__)
 
 
 class NSAIndexerInfer(BaseLayerInfer):
-    def __init__(self, layer_idx, network_config, mode=[]):
+    def __init__(self, layer_idx, network_config):
         super().__init__()
         self.layer_idx_ = layer_idx
         self.network_config_ = network_config
-        self.mode = mode
         self.index_topk = network_config["index_topk"]
         self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
         self.tp_k_head_num_ = 1

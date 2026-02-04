@@ -7,8 +7,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, La
 
 
 class NSAIndexerWeight(TransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, mode, quant_cfg):
-        super().__init__(layer_num, data_type, network_config, mode, quant_cfg)
+    def __init__(self, layer_num, data_type, network_config, quant_cfg):
+        super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
     @override
