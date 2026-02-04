@@ -1,5 +1,6 @@
 # docker pull from https://sw-download.metax-tech.com/docker
-FROM cr.metax-tech.com/public-ai-release/maca/vllm:maca.ai3.1.0.7-torch2.6-py310-ubuntu22.04-amd64
+ARG VLLM_TAG=maca.ai3.1.0.7-torch2.6-py310-ubuntu22.04-amd64
+FROM cr.metax-tech.com/public-ai-release/maca/vllm:${VLLM_TAG}
 
 ENV MACA_PATH=/opt/maca
 ENV PATH=/opt/conda/bin:/opt/conda/condabin:${PATH}
