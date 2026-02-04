@@ -1,8 +1,6 @@
 from sgl_kernel import fast_topk_transform_fused
 import deep_gemm
 import torch
-import torch.nn.functional as F
-
 from lightllm.common.basemodel.layer_infer.base_layer_infer import BaseLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.nsa_indexer_layer_weight import NSAIndexerWeight
 from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
@@ -138,10 +136,7 @@ class NSAIndexerInfer(BaseLayerInfer):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
         k = layer_weight.wk_proj_.mm(hidden_states)
 
-        # TODO
-        k = F.layer_norm(
-            k.float(), (self.index_head_dim,), layer_weight.k_norm_.weight, layer_weight.k_norm_.bias, self.eps
-        ).type_as(k)
+        k = layer_weight.k_norm_(k, eps=self.eps)
 
         # Slice position_cos and position_sin to match actual token length
         actual_seq_len = q.shape[0]
