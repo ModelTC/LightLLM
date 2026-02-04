@@ -14,11 +14,11 @@ from lightllm.common.basemodel.attention.create_utils import get_nsa_prefill_att
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
-    def __init__(self, layer_num, network_config, mode=[]):
+    def __init__(self, layer_num, network_config):
         self.index_topk = network_config["index_topk"]
-        super().__init__(layer_num, network_config, mode)
+        super().__init__(layer_num, network_config)
 
-        self.indexer = NSAIndexerInfer(layer_idx=self.layer_num_, network_config=self.network_config_, mode=mode)
+        self.indexer = NSAIndexerInfer(layer_idx=self.layer_num_, network_config=self.network_config_)
         self.topk_indices = None
 
         # Initialize NSA attention backend (singleton, lazy initialization)
