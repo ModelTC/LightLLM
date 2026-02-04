@@ -1,3 +1,6 @@
+# Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/nsa_backend.py
+# Uses sgl_kernel.flash_mla and sgl_kernel.flash_attn from the sglang kernel library.
+
 import dataclasses
 import torch
 from typing import Tuple, TYPE_CHECKING
@@ -112,8 +115,8 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
         q_nope, q_rope = q
 
         # Extract k_rope and kv_nope from the KV buffer
-        k_rope = kv[:, :, -qk_rope_head_dim:].reshape(-1, 1, 1, qk_rope_head_dim)
-        kv_nope = kv[:, :, :-qk_rope_head_dim].reshape(-1, 1, 1, kv_lora_rank)
+        k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, 1, 1, qk_rope_head_dim)
+        kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, 1, 1, kv_lora_rank)
 
         o_tensor = flash_attn_with_kvcache(
             q=q_rope,
