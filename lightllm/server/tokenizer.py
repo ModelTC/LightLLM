@@ -43,10 +43,12 @@ def get_tokenizer(
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
+    model_type = model_cfg.get("model_type", "")
     """Gets a tokenizer for the given model name via Huggingface."""
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
-    if tokenizer_mode == "deepseek_v32":
+    if model_type == "deepseek_v32":
         from ..models.deepseek3_2.model import DeepSeekV32Tokenizer
 
         hf_tokenizer = AutoTokenizer.from_pretrained(
@@ -86,8 +88,6 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
-    model_type = model_cfg.get("model_type", "")
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
