@@ -4,6 +4,7 @@ import torch
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.models.whisper.whisper_audio import WhisperAudioModel
+from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_audio import Qwen3OmniMoeAudioEncoder
 from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
@@ -19,6 +20,9 @@ class AudioModelRpcServer(rpyc.Service):
 
         weight_dir = kvargs["weight_dir"]
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
+        if model_cfg.get("thinker_config") is not None:
+            model_cfg = model_cfg["thinker_config"]
+
         audio_config = model_cfg["audio_config"]
 
         model_kvargs = {"cache_port": kvargs["cache_port"], "data_type": kvargs["data_type"]}
@@ -26,6 +30,8 @@ class AudioModelRpcServer(rpyc.Service):
             self.model_type = audio_config["model_type"]
             if self.model_type == "clap_audio_model" or self.model_type == "whisper":
                 self.model = WhisperAudioModel(model_kvargs)
+            elif self.model_type == "qwen3_omni_moe_audio_encoder":
+                self.model = Qwen3OmniMoeAudioEncoder(model_kvargs)
             else:
                 raise Exception(f"can not support {self.model_type} now")
 

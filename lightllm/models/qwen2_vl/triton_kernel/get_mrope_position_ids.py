@@ -91,11 +91,14 @@ def get_mrope_position_triton(
     b_ready_cache_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
+    use_image_h: bool = True,
 ) -> torch.Tensor:
 
     batch_size = b_q_seq_len.shape[0]
     assert batch_size == b_image_nums.shape[0]
     grid = (batch_size,)
+    if not use_image_h:  # 也可以放在前面生成的地方改, 看哪里合适
+        b_image_thwd[:, 1] = b_image_thwd[:, 2]
     BLOCK_SIZE = 64
     _get_mrope_position_triton[grid](
         b_image_start_idx=b_image_start_idx,
