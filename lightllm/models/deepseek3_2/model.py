@@ -1,16 +1,25 @@
 import copy
 import json
 import logging
+import os
 
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
-from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
-from lightllm.models.deepseek3_2.mem_manager import Deepseek3_2MemoryManager, Deepseek3_2FP8KVMemoryManager
 
 _logger = logging.getLogger(__name__)
+
+# When ENABLE_NSA is set, use the full V32 NSA (Native Sparse Attention) pipeline
+# including the indexer, custom memory manager, and NSA-aware attention kernels.
+# When not set, fall back to the DeepSeek V3 (Deepseek2) inference path while
+# keeping V32-specific tokenizer/parser support intact.
+_ENABLE_NSA = os.environ.get("ENABLE_NSA", "0").lower() in ("1", "true")
+
+if _ENABLE_NSA:
+    from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
+    from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
+    from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
+    from lightllm.models.deepseek3_2.mem_manager import Deepseek3_2MemoryManager, Deepseek3_2FP8KVMemoryManager
 
 
 class DeepSeekV32Tokenizer:
@@ -105,24 +114,32 @@ class DeepSeekV32Tokenizer:
 
 @ModelRegistry(["deepseek_v32"])
 class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
-    # weight class
-    transformer_weight_class = Deepseek3_2TransformerLayerWeight
-
-    # infer class
-    transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
-
-    # infer state class
-    infer_state_class = Deepseek3_2InferStateInfo
+    # When ENABLE_NSA is set, override with V32-specific NSA classes.
+    # Otherwise, inherit the V3/V2 classes from Deepseek2TpPartModel.
+    if _ENABLE_NSA:
+        transformer_weight_class = Deepseek3_2TransformerLayerWeight
+        transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
+        infer_state_class = Deepseek3_2InferStateInfo
 
     def __init__(self, kvargs):
         super().__init__(kvargs)
-        self.index_topk = self.config["index_topk"]
+        if _ENABLE_NSA:
+            self.index_topk = self.config["index_topk"]
+        else:
+            _logger.info("ENABLE_NSA is not set, using DeepSeek V3 inference path (no NSA indexer).")
         return
 
     def _init_inferstate_cls(self):
-        self.infer_state_class = Deepseek3_2InferStateInfo
+        if _ENABLE_NSA:
+            self.infer_state_class = Deepseek3_2InferStateInfo
+        else:
+            super()._init_inferstate_cls()
 
     def _init_mem_manager(self):
+        if not _ENABLE_NSA:
+            # Fall back to the standard V3/V2 memory manager (no indexer buffer).
+            return super()._init_mem_manager()
+
         manager_class = Deepseek3_2MemoryManager
         if get_env_start_args().llm_kv_type == "fp8kv":
             manager_class = Deepseek3_2FP8KVMemoryManager
