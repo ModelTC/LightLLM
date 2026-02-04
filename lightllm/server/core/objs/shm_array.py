@@ -32,3 +32,9 @@ class ShmArray:
             self.shm.unlink()
             self.shm = None
             self.arr = None
+
+    def detach_shm(self):
+        if self.shm is not None:
+            self.shm.close()
+            self.shm = None
+            self.arr = None
