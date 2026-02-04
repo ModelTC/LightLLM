@@ -1,3 +1,5 @@
+# Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/quantization/fp8_kernel.py
+
 import triton
 import triton.language as tl
 import torch
@@ -6,6 +8,7 @@ from typing import Tuple
 fp8_min = -448.0
 fp8_max = 448.0
 fp8_dtype = torch.float8_e4m3fn
+
 
 @triton.jit
 def _per_token_group_quant_mla_deep_gemm_masked_fp8(
@@ -46,9 +49,7 @@ def _per_token_group_quant_mla_deep_gemm_masked_fp8(
     mask = cols < group_size
 
     for gid in range(NUM_GROUP):
-        y = tl.load(y_ptr + gid * group_size + cols, mask=mask, other=0.0).to(
-            tl.float32
-        )
+        y = tl.load(y_ptr + gid * group_size + cols, mask=mask, other=0.0).to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
         y_s = _absmax / fp8_max
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
