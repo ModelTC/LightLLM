@@ -108,11 +108,12 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     ):
         input = input.view(-1, self.embed_dim_)
 
-        q = layer_weight.q_proj.mm(input)  # [T, Hq*D]
+        qkv = layer_weight.qkv_proj.mm(input)
+        q, cache_kv = qkv.split(
+            [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
+        )
         q_hw = layer_weight.q_hw_proj.mm(input)
         k_hw = layer_weight.k_hw_proj.mm(input)
-
-        cache_kv = layer_weight.kv_proj.mm(input)  # [T, (Hk+Hv)*D]
 
         layer_weight.q_norm_weight_(q, eps=self.eps_)
         layer_weight.q_norm_hw_weight_(q_hw, eps=self.eps_)

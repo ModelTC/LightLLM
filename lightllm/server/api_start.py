@@ -91,7 +91,6 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
 
     _set_envs_and_config(args)
-    set_unique_server_name(args)
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
@@ -290,6 +289,8 @@ def _launch_subprocesses(args: StartArgs):
     # p 节点用来建立torch kv 传输分布组的可用端口范围
     args.pd_p_allowed_port_min = 20000
     args.pd_p_allowed_port_max = 30000
+
+    set_unique_server_name(args)
 
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
