@@ -3,6 +3,7 @@ from typing import List
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -16,7 +17,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         b_mask_eos_reqs,
         is_all_greedy,
     ) = _get_post_sample_tensors(reqs)
-    eos_ids = torch.tensor(eos_id, dtype=torch.int32, device="cpu", pin_memory=True).cuda(non_blocking=True)
+    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
 
@@ -128,12 +129,14 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             is_all_greedy = False
         req_idxes.append(req_obj.req_idx)
 
-    req_idxes_cpu = torch.tensor(req_idxes, dtype=torch.int32, device="cpu", pin_memory=True)
-    temperatures_cpu = torch.tensor(temperatures, dtype=torch.float, device="cpu", pin_memory=True)
-    top_ps_cpu = torch.tensor(top_ps, dtype=torch.float, device="cpu", pin_memory=True)
-    top_ks_cpu = torch.tensor(top_ks, dtype=torch.int32, device="cpu", pin_memory=True)
-    length_penalty_param_cpu = torch.tensor(length_penalty_param, dtype=torch.int32, device="cpu", pin_memory=True)
-    mask_eos_reqs_cpu = torch.tensor(mask_eos_reqs, dtype=torch.bool, device="cpu", pin_memory=True)
+    req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
+    temperatures_cpu = g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
+    top_ps_cpu = g_pin_mem_manager.gen_from_list(key="top_ps", data=top_ps, dtype=torch.float32)
+    top_ks_cpu = g_pin_mem_manager.gen_from_list(key="top_ks", data=top_ks, dtype=torch.int32)
+    length_penalty_param_cpu = g_pin_mem_manager.gen_from_list(
+        key="length_penalty_param", data=length_penalty_param, dtype=torch.int32
+    )
+    mask_eos_reqs_cpu = g_pin_mem_manager.gen_from_list(key="mask_eos_reqs", data=mask_eos_reqs, dtype=torch.bool)
 
     return (
         req_idxes_cpu.cuda(non_blocking=True),

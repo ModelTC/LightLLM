@@ -103,6 +103,10 @@ def get_custom_input_data(data_path, output_len, tokenizer, range_ratio):
 model_name = []
 
 
+# Minimal fix: one retry on transient network errors.
+_DEFAULT_RETRY = 1
+
+
 async def async_post_stream_openai(url, prompt, max_new_tokens, session):
     try:
         text_input, input_len = prompt
@@ -116,21 +120,34 @@ async def async_post_stream_openai(url, prompt, max_new_tokens, session):
             "best_of": 1,
         }
         headers = {"Content-Type": "application/json"}
-        used_time = []
-        start_time = time.time()
-        last_time = start_time
-        async with session.post(url, headers=headers, json=data) as response:
-            if response.status != 200:
-                return []
 
-            async for line in response.content:
-                line = line.strip()
-                if line:
-                    current_time = time.time()
-                    elapsed_time = current_time - last_time
-                    used_time.append(elapsed_time)
-                    last_time = current_time
-            return used_time, input_len
+        for attempt in range(_DEFAULT_RETRY + 1):
+            used_time = []
+            start_time = time.time()
+            last_time = start_time
+            try:
+                async with session.post(url, headers=headers, json=data) as response:
+                    if response.status != 200:
+                        return []
+
+                    try:
+                        async for line in response.content:
+                            line = line.strip()
+                            if line:
+                                current_time = time.time()
+                                elapsed_time = current_time - last_time
+                                used_time.append(elapsed_time)
+                                last_time = current_time
+                    except Exception:
+                        # server may disconnect mid-stream; keep partial timings if any.
+                        pass
+
+                if used_time or attempt >= _DEFAULT_RETRY:
+                    return used_time, input_len
+            except Exception as e:
+                if attempt >= _DEFAULT_RETRY:
+                    print(e)
+                    return []
     except Exception as e:
         print(e)
         pass
@@ -149,21 +166,33 @@ async def async_post_stream_lightllm(url, prompt, max_new_tokens, session):
             },
         }
         headers = {"Content-Type": "application/json"}
-        used_time = []
-        start_time = time.time()
-        last_time = start_time
-        async with session.post(url, headers=headers, json=data) as response:
-            if response.status != 200:
-                return []
 
-            async for line in response.content:
-                if line and line.startswith(b"data:"):
-                    # print(line)
-                    current_time = time.time()
-                    elapsed_time = current_time - last_time
-                    used_time.append(elapsed_time)
-                    last_time = current_time
-        return used_time, input_len
+        for attempt in range(_DEFAULT_RETRY + 1):
+            used_time = []
+            start_time = time.time()
+            last_time = start_time
+            try:
+                async with session.post(url, headers=headers, json=data) as response:
+                    if response.status != 200:
+                        return []
+
+                    try:
+                        async for line in response.content:
+                            if line and line.startswith(b"data:"):
+                                current_time = time.time()
+                                elapsed_time = current_time - last_time
+                                used_time.append(elapsed_time)
+                                last_time = current_time
+                    except Exception:
+                        # server may disconnect mid-stream; keep partial timings if any.
+                        pass
+
+                if used_time or attempt >= _DEFAULT_RETRY:
+                    return used_time, input_len
+            except Exception as e:
+                if attempt >= _DEFAULT_RETRY:
+                    print(e)
+                    return []
     except Exception as e:
         print(e)
         pass
@@ -187,6 +216,7 @@ async def continuous_sender(
     while not stop_send.is_set():
         if not continuous_send and sent_count[0] >= max_count:
             break
+
         prompt = prompts[prompt_index % len(prompts)]
         max_tokens = max_new_tokens[prompt_index % len(max_new_tokens)]
 
@@ -212,18 +242,42 @@ async def response_collector(
     force_terminate,
     pending_tasks,
 ):
+    # 单个请求在 collector 侧的最大等待时间，避免网络异常导致永久卡住
+    task_timeout_s = 600
     try:
         while True:
             try:
                 task = await asyncio.wait_for(request_queue.get(), timeout=1.0)
-                result, input_len = await task
-                request_queue.task_done()
-                assert result is not None
-                if len(result) >= 1 and not stop_send.is_set():
-                    results.append((result, input_len))
+                result = None
+                input_len = 0
+                try:
+                    try:
+                        result_tuple = await asyncio.wait_for(task, timeout=task_timeout_s)
+                    except asyncio.TimeoutError:
+                        print("\nError collecting response: task timeout")
+                        if not task.done():
+                            task.cancel()
+                        result_tuple = None
+
+                    if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                        result, input_len = result_tuple
+                    else:
+                        result = None
+                        input_len = 0
+                except Exception as e:
+                    print(f"\nError collecting response: {e}")
+                finally:
+                    # 确保队列不会因为 continue/exception 而永久积压
+                    request_queue.task_done()
+
+                # 无论成功失败都推进计数，避免等待 remaining responses 时卡死
                 current_count = counter[0] + 1
                 counter[0] = current_count
                 print(f"\rfinished_reqs:{current_count} / target_reqs:{reqs_num} / sent_reqs:{sent_count[0]}", end="")
+
+                if result is not None:
+                    if len(result) >= 1 and not stop_send.is_set():
+                        results.append((result, input_len))
                 if len(results) >= reqs_num and not stop_send.is_set():
                     end_time[0] = time.time()
                     print("\nReached target number of responses")
@@ -245,6 +299,7 @@ async def response_collector(
                 continue
             except Exception as e:
                 print(f"\nError collecting response: {e}")
+                continue
     finally:
         if force_terminate:
             for task in pending_tasks:
@@ -253,7 +308,15 @@ async def response_collector(
 
 
 async def run_continuous_benchmark(
-    async_task, url, prompts, max_new_tokens, reqs_num, num_clients, input_qps, force_terminate, continuous_send
+    async_task,
+    url,
+    prompts,
+    max_new_tokens,
+    reqs_num,
+    num_clients,
+    input_qps,
+    force_terminate,
+    continuous_send,
 ):
     request_queue = asyncio.Queue()
     stop_event = asyncio.Event()
@@ -414,7 +477,6 @@ def main():
         )
     )
     loop.close()
-    print(len(results))
     first_token_time = []
     decode_token_time = []
     request_time = []
