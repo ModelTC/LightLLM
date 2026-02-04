@@ -3,7 +3,7 @@ from typing_extensions import override
 import torch
 
 from lightllm.common.basemodel.layer_weights.transformer_layer_weight import TransformerLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, NormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, LayerNormWeight
 
 
 class NSAIndexerWeight(TransformerLayerWeight):
@@ -14,7 +14,7 @@ class NSAIndexerWeight(TransformerLayerWeight):
     @override
     def _init_weight(self):
         prefix = f"model.layers.{self.layer_num_}.self_attn.indexer"
-        
+
         self.wq_b_proj_ = ROWMMWeight(
             weight_name=f"{prefix}.wq_b.weight",
             data_type=self.data_type_,
@@ -33,15 +33,16 @@ class NSAIndexerWeight(TransformerLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
-        self.k_norm_ = NormWeight(
-            f"{prefix}.k_norm.weight", 
-            torch.float32, 
-            bias_name=f"{prefix}.k_norm.bias"
+        self.k_norm_ = LayerNormWeight(
+            dim=self.network_config_["index_head_dim"],
+            weight_name=f"{prefix}.k_norm.weight",
+            data_type=torch.float32,
+            bias_name=f"{prefix}.k_norm.bias",
         )
         self.weights_proj_ = ROWMMWeight(
             weight_name=f"{prefix}.weights_proj.weight",
             data_type=self.data_type_,
-            quant_cfg=None, 
+            quant_cfg=None,
             layer_num=self.layer_num_,
             name="weights_proj",
             tp_rank=0,

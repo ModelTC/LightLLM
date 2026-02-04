@@ -331,31 +331,38 @@ class SamplingParams(ctypes.Structure):
     _top_p: float = 1.0
     _top_k: int = -1  # -1 is for all
 
+    @staticmethod
+    def _get(kwargs, key, default):
+        """Get value from kwargs, falling back to default when value is None or missing."""
+        val = kwargs.get(key)
+        return val if val is not None else default
+
     def init(self, tokenizer, **kwargs):
         super().__init__()
-        self.best_of = kwargs.get("best_of", 1)
-        self.n = kwargs.get("n", self.best_of)
-        self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
-        self.presence_penalty = kwargs.get("presence_penalty", SamplingParams._presence_penalty)
-        self.frequency_penalty = kwargs.get("frequency_penalty", SamplingParams._frequency_penalty)
-        self.repetition_penalty = kwargs.get("repetition_penalty", SamplingParams._repetition_penalty)
-        self.temperature = kwargs.get("temperature", SamplingParams._temperature)
-        self.top_p = kwargs.get("top_p", SamplingParams._top_p)
-        self.top_k = kwargs.get("top_k", SamplingParams._top_k)
-        self.ignore_eos = kwargs.get("ignore_eos", False)
-        self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        self.max_new_tokens = kwargs.get("max_new_tokens", 16)
-        self.min_new_tokens = kwargs.get("min_new_tokens", 1)
-        self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
-        self.group_request_id = kwargs.get("group_request_id", -1)
-        self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
+        _get = SamplingParams._get
+        self.best_of = _get(kwargs, "best_of", 1)
+        self.n = _get(kwargs, "n", self.best_of)
+        self.do_sample = _get(kwargs, "do_sample", SamplingParams._do_sample)
+        self.presence_penalty = _get(kwargs, "presence_penalty", SamplingParams._presence_penalty)
+        self.frequency_penalty = _get(kwargs, "frequency_penalty", SamplingParams._frequency_penalty)
+        self.repetition_penalty = _get(kwargs, "repetition_penalty", SamplingParams._repetition_penalty)
+        self.temperature = _get(kwargs, "temperature", SamplingParams._temperature)
+        self.top_p = _get(kwargs, "top_p", SamplingParams._top_p)
+        self.top_k = _get(kwargs, "top_k", SamplingParams._top_k)
+        self.ignore_eos = _get(kwargs, "ignore_eos", False)
+        self.image_max_patch_num = _get(kwargs, "image_max_patch_num", -1)
+        self.max_new_tokens = _get(kwargs, "max_new_tokens", 16)
+        self.min_new_tokens = _get(kwargs, "min_new_tokens", 1)
+        self.input_penalty = _get(kwargs, "input_penalty", DEFAULT_INPUT_PENALTY)
+        self.group_request_id = _get(kwargs, "group_request_id", -1)
+        self.suggested_dp_index = _get(kwargs, "suggested_dp_index", -1)
 
-        self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
-        self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
+        self.skip_special_tokens = _get(kwargs, "skip_special_tokens", SKIP_SPECIAL_TOKENS)
+        self.disable_prompt_cache = _get(kwargs, "disable_prompt_cache", False)
 
-        self.add_special_tokens = kwargs.get("add_special_tokens", True)
-        self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
-        self.print_eos_token = kwargs.get("print_eos_token", False)
+        self.add_special_tokens = _get(kwargs, "add_special_tokens", True)
+        self.add_spaces_between_special_tokens = _get(kwargs, "add_spaces_between_special_tokens", True)
+        self.print_eos_token = _get(kwargs, "print_eos_token", False)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
