@@ -241,7 +241,8 @@ class RadixCache:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
             return tree_node, len(value), value
         else:
-            self.dec_node_ref_counter(self.root_node)
+            if update_refs:
+                self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
     def _match_prefix_helper(

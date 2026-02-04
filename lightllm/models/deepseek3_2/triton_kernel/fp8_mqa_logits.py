@@ -1,4 +1,3 @@
-#
 import triton
 import triton.language as tl
 import torch
@@ -35,68 +34,44 @@ def _fp8_paged_mqa_logits_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Compute the range of seq positions this block handles
     start_m = pid_m * BLOCK_SIZE_M
     start_n = pid_n * BLOCK_SIZE_N
 
-    # Offset arrays for this block
     offs_m = start_m + tl.arange(0, BLOCK_SIZE_M)
     offs_n = start_n + tl.arange(0, BLOCK_SIZE_N)
 
-    # Initialize accumulator for logits
     logits = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    # Create masks
     mask_m = offs_m < seq_len
     mask_n = offs_n < seq_len_kv
 
-    # Load mem_indices for the KV positions
     mem_indices = tl.load(MemIndex_ptr + offs_n, mask=mask_n, other=0)
 
-    # Load scales for K
     scales = tl.load(KVScale_ptr + mem_indices, mask=mask_n, other=1.0)
 
-    # Loop over all heads
     for h in range(num_heads):
-        # Load weights for this head
         weights = tl.load(Weights_ptr + offs_m * stride_w_seq + h * stride_w_head, mask=mask_m, other=0.0)
-
-        # Initialize score accumulator for this head
         score = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-        # Loop over head_dim in blocks
         for d_block in range(tl.cdiv(head_dim, BLOCK_SIZE_D)):
             d_start = d_block * BLOCK_SIZE_D
             offs_d = d_start + tl.arange(0, BLOCK_SIZE_D)
             mask_d = offs_d < head_dim
 
-            # Load Q for this head and dimension block
-            # Q shape: (seq_len, num_heads, head_dim)
             q_ptrs = Q_ptr + offs_m[:, None] * stride_q_seq + h * stride_q_head + offs_d[None, :] * stride_q_dim
             mask_q = (offs_m[:, None] < seq_len) & mask_d[None, :]
             q = tl.load(q_ptrs, mask=mask_q, other=0.0).to(tl.float32)
 
-            # Load K for this dimension block
-            # KV shape: (pool_size, head_dim) as FP8 data
             k_ptrs = KV_ptr + mem_indices[:, None] * stride_kv_pool + offs_d[None, :] * stride_kv_dim
             mask_k = mask_n[:, None] & mask_d[None, :]
             k = tl.load(k_ptrs, mask=mask_k, other=0.0).to(tl.float32)
 
-            # Apply scale to K (scale is per-row of K)
             k = k * scales[:, None]
 
-            # Compute partial dot product: q @ k.T
-            # q: (BLOCK_SIZE_M, BLOCK_SIZE_D), k: (BLOCK_SIZE_N, BLOCK_SIZE_D)
-            # score: (BLOCK_SIZE_M, BLOCK_SIZE_N)
             score += tl.dot(q, tl.trans(k))
-
-        # Apply ReLU to score
         score = tl.maximum(score, 0.0)
-
-        # Multiply by weights and accumulate to logits
         logits += score * weights[:, None]
 
-    # Apply mask based on cu_seqlen_ks and cu_seqlen_ke
     mask_ks = tl.load(CuSeqlenKs_ptr + offs_m, mask=mask_m, other=0)
     mask_ke = tl.load(CuSeqlenKe_ptr + offs_m, mask=mask_m, other=seq_len_kv)
 
@@ -104,7 +79,6 @@ def _fp8_paged_mqa_logits_kernel(
     mask_hi = offs_n[None, :] < mask_ke[:, None]
     mask_valid = mask_lo & mask_hi & mask_m[:, None] & mask_n[None, :]
 
-    # Apply mask (-inf for masked positions)
     logits = tl.where(mask_valid, logits, float("-inf"))
 
     # Store output

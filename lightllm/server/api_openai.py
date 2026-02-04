@@ -463,39 +463,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
                 # Additional usage chunk
 
-        # Finalize any pending tool calls (e.g., DSML format last invoke)
-        if request.tool_choice != "none" and request.tools and parser_dict:
-            for _idx, _parser in parser_dict.items():
-                _, finalize_calls = _parser.finalize_stream()
-                history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
-                for call_item in finalize_calls:
-                    if call_item.name:
-                        tool_call_id = _process_tool_call_id(tool_parser, call_item, history_tool_calls_cnt)
-                        function_name = call_item.name
-                    else:
-                        tool_call_id = None
-                        function_name = None
-                    tool_call = ToolCall(
-                        id=tool_call_id,
-                        index=getattr(call_item, "tool_index", None),
-                        function=FunctionResponse(
-                            name=function_name,
-                            arguments=call_item.parameters,
-                        ),
-                    )
-                    choice_data = ChatCompletionStreamResponseChoice(
-                        index=0,
-                        delta=DeltaMessage(role="assistant", tool_calls=[tool_call]),
-                        finish_reason="tool_calls",
-                    )
-                    chunk = ChatCompletionStreamResponse(
-                        id=group_request_id,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=request.model,
-                    )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
-
         if request.stream_options and request.stream_options.include_usage:
             usage = UsageInfo(
                 prompt_tokens=prompt_tokens,

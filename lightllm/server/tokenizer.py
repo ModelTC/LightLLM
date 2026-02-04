@@ -44,6 +44,17 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
+    # a Python-based apply_chat_template that uses encoding_dsv32.py.
+    if tokenizer_mode == "deepseek_v32":
+        from ..models.deepseek3_2.model import DeepSeekV32Tokenizer
+
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs
+        )
+        logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV32Tokenizer(hf_tokenizer)
+
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
