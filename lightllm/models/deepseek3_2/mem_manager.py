@@ -1,4 +1,3 @@
-from typing_extensions import override
 import torch
 
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
@@ -15,16 +14,13 @@ class Deepseek3_2MemoryManager(Deepseek2MemoryManager):
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
         self.indexer_ks_buffer = IndexerKSBuffer(self.size, 1, 132, layer_num)
 
-    @override
     def get_cell_size(self):
         return super().get_cell_size() + 132
 
-    @override
     def _free_buffers(self):
         super()._free_buffers()
         self.indexer_ks_buffer = None
 
-    @override
     def resize_mem(self, new_size):
         super().resize_mem(new_size)
         self.indexer_ks_buffer = IndexerKSBuffer(self.size, 1, 132, self.layer_num)

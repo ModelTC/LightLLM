@@ -1,5 +1,3 @@
-from typing import override
-
 import torch
 
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
@@ -33,7 +31,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             self._nsa_backend = self._nsa_backend_class(model=None)
         return self._nsa_backend
 
-    @override
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -68,7 +65,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return q, cache_kv
 
-    @override
     def _context_attention_kernel(
         self,
         q: torch.Tensor,
@@ -104,7 +100,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return mla_out
 
-    @override
     def _token_attention_kernel(
         self,
         q,

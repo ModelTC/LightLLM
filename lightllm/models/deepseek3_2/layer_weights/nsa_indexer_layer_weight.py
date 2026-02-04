@@ -11,14 +11,12 @@ class NSAIndexerWeight(TransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
-    @override
     def _parse_config(self):
         self.q_lora_rank = self.network_config_["q_lora_rank"]
         self.index_n_heads = self.network_config_["index_n_heads"]
         self.index_head_dim = self.network_config_["index_head_dim"]
         self.hidden_size = self.network_config_["hidden_size"]
 
-    @override
     def _init_weight(self):
         prefix = f"model.layers.{self.layer_num_}.self_attn.indexer"
 
