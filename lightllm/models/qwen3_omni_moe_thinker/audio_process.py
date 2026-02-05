@@ -177,4 +177,4 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)
 
-        return padded_inputs
+        return padded_inputs["input_features"], padded_inputs["attention_mask"]

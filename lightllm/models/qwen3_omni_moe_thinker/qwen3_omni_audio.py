@@ -333,13 +333,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         return hidden_states
 
     def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
-        # 每个元素是一个chunk
-        batch_audios = []
-        batch_audio_lens = []
         uuids = []
         items: List[AudioItem] = []
-        # 记录每个chunk属于哪个audio_items下标
-        chunk_owner_index = []
         for i, item in enumerate(audio_items):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
@@ -349,48 +344,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 audio, _ = librosa.load(audio, sr=16000)
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
+        # 这里后面还要改
+        input_features, feature_attention_mask = self.processor._preprocess(audio)
+        if feature_attention_mask is not None:
+            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+            input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
+        else:
+            audio_feature_lengths = None
 
-            # padding to min audio len
-            MIN_AUDIO_LEN = 480
-
-            if audio.shape[0] < MIN_AUDIO_LEN:
-                audio = np.pad(audio, (0, MIN_AUDIO_LEN - len(audio)), mode="constant", constant_values=0.0)
-
-            if audio.shape[0] > self.max_length:
-                start = 0
-                while start < audio.shape[0]:
-                    end = min(start + self.max_length, audio.shape[0])
-                    chunk = audio[start:end]
-
-                    if chunk.shape[0] < MIN_AUDIO_LEN:
-                        chunk = np.pad(chunk, (0, MIN_AUDIO_LEN - chunk.shape[0]), mode="constant", constant_values=0.0)
-                    batch_audios.append(chunk)
-                    batch_audio_lens.append(min(chunk.shape[0], self.max_length))
-                    chunk_owner_index.append(i)
-
-                    start = end
-            else:
-                batch_audio_lens.append(min(audio.shape[0], self.max_length))
-                batch_audios.append(audio)
-                chunk_owner_index.append(i)
-
-        batch_audio_lens = np.array(batch_audio_lens, dtype=np.int32)
-
-        audios, audio_lens_after_cnn = self.processor._preprocess(
-            batch_audios, sampling_rate=16000, return_tensors="pt"
+        feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+        audio_features = self.forward(
+            input_features,
+            feature_lens=feature_lens,
         )
-        audios = self.forward(audios, audio_lens_after_cnn)
-        audio_lens_after_cnn = np.array(audio_lens_after_cnn, dtype=np.int32)
-        audio_token_num = (audio_lens_after_cnn - 2) // 2 + 1
-
-        num_audios = len(audio_items)
-        per_audio_embeds = [[] for _ in range(num_audios)]
-
-        for chunk_idx, owner in enumerate(chunk_owner_index):
-            token_len = int(audio_token_num[chunk_idx])
-            if token_len <= 0:
-                continue
-            per_audio_embeds[owner].append(audios[chunk_idx][:token_len])
 
         ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
         ids_to_set = []
@@ -401,10 +367,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             uid = uuids[i]
             item = items[i]
 
-            # 拼接该 audio 的所有 chunk embedding
-            cur_embed = torch.cat(per_audio_embeds[i], dim=0)
             cpu_embed_cache_client.copy_to_cache(
-                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
+                embed_tensor=audio_features, start_index_in_cache=item.start_index_in_embed_cache
             )
             ids_to_set.append(uid)
 
