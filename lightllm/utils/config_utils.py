@@ -79,8 +79,15 @@ def get_layer_num(model_path: str) -> int:
 
 
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
+    try:
+        # qwen3-omini special eos_token_id
+        config_json = get_config_json(model_path)
+        assert config_json["architectures"][0] == "Qwen3OmniMoeForConditionalGeneration"
+        return [151645]
+    except:
+        pass
+
     eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
-    return [151645]  # 后面看看怎么改? 直接改config.json?
     if isinstance(eos_token_id, int):
         return [eos_token_id]
     if isinstance(eos_token_id, list):
@@ -103,6 +110,7 @@ def get_model_architectures(model_path: str):
 def get_vocab_size(model_path: str):
     try:
         config_json = get_config_json(model_path)
+        # qwen3-omini special
         if "thinker_config" in config_json:
             config_json = config_json["thinker_config"]
         if "llm_config" in config_json:
