@@ -351,17 +351,22 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
         input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
+        print(f"input_features is {input_features}, input_features.shape is {input_features.shape}")
+        print(f"feature_attention_mask is {feature_attention_mask}, shape is {feature_attention_mask.shape}")
         if feature_attention_mask is not None:
             audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
             input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
         else:
             audio_feature_lengths = None
+        print(f"input_features is {input_features}, input_features.shape is {input_features.shape}")
 
         feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+        print(f"feature_lens is {feature_lens}")
         audio_features = self.forward(
             input_features,
             feature_lens=feature_lens,
         )
+        print(f"audio_features is {audio_features}, shape is {audio_features.shape}")
 
         ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
         ids_to_set = []

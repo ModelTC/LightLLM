@@ -1,5 +1,7 @@
 import os
 import json
+import librosa
+from io import BytesIO
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
@@ -20,10 +22,21 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 
 
+def _get_feat_extract_output_lengths(input_lengths):
+    """
+    Computes the output length of the convolutional layers and the output length of the audio encoder
+    """
+
+    input_lengths_leave = input_lengths % 100
+    feat_lengths = (input_lengths_leave - 1) // 2 + 1
+    output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
+    return output_lengths
+
+
 # <|audio_start|><|audio_pad|><|audio_end|>
 AUDIO_START_TOKEN = "<|audio_start|>"
 AUDIO_END_TOKEN = "<|audio_end|>"
-
+AUDIO_TOKEN_TOKEN = "<|audio_pad|>"
 MIN_AUDIO_LEN = 480
 
 
@@ -45,8 +58,14 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         self.audio_end_tag = AUDIO_END_TOKEN
         self.audio_end_id = tokenizer.convert_tokens_to_ids(self.audio_end_tag)
 
-        self.audio_min_length = MIN_AUDIO_LEN
-        self.audio_max_length = 16000 * 30
+        self.audio_token_tag = AUDIO_TOKEN_TOKEN
+        self.audio_token_id = tokenizer.convert_tokens_to_ids(self.audio_token_tag)
+
+        # 这些太hard了, 后面改一下,可以直接从audio_processor里取?
+        self.sampling_rate = 16000
+        self.chunk_length = 30
+        self.n_samples = self.chunk_length * self.sampling_rate
+        self.hop_length = 160
 
     def init_audioitem_extral_params(
         self, audio: AudioItem, multi_params: MultimodalParams, sampling_params: SamplingParams
@@ -54,37 +73,75 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return
 
     def get_audio_token_length(self, audio: AudioItem):
-        L = audio.audio_length
-        audio_token_num = 0
-        chunk_lens = []
-        if L <= self.audio_max_length:
-            cur_len = L
-            if cur_len < self.audio_min_length:
-                cur_len = self.audio_min_length
-            chunk_lens.append(cur_len)
-        else:
-            start = 0
-            while start < L:
-                end = min(start + self.audio_max_length, L)
-                cur_len = end - start
+        # audio_bytes = audio._preload_data
+        # audio_values, _ = librosa.load(BytesIO(audio_bytes), sr=self.sampling_rate)
+        # length = max(int(audio_values.shape[0]), int(MIN_AUDIO_LEN)) #这个最短还有必要吗?稍等再检查一下
+        # L_eff = min(length, int(self.n_samples))
+        # num_frames = L_eff // int(self.hop_length)
 
-                if cur_len < self.audio_min_length:
-                    cur_len = self.audio_min_length
+        return 290
 
-                chunk_lens.append(cur_len)
-                start = end
-        for chunk_len in chunk_lens:
-            mel_len = chunk_len // 160
-            dilation = 1
-            L_in = mel_len
-            for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
-                L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
-                L_out = 1 + L_out // stride
-                L_in = L_out
-            audio_len_after_cnn = L_out
-            chunk_token_num = (audio_len_after_cnn - 2) // 2 + 1
-            audio_token_num += int(chunk_token_num)
-        return audio_token_num
+    def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
+        origin_ids = self.tokenizer.encode(prompt)
+
+        # <img><image_pad></img> -> <img></img>
+        origin_ids = [token for token in origin_ids if token not in (self.image_token_id, self.audio_token_id)]
+        # <img></img> --> <img>id,id+1...id+num</img>
+        input_ids = []
+        image_id = 0
+        while True:
+            try:
+                start_idx = origin_ids.index(self.image_start_id)
+                if start_idx + 1 >= len(origin_ids):
+                    break
+                if origin_ids[start_idx + 1] == self.image_end_id:
+                    input_ids.extend(origin_ids[: start_idx + 1])
+                    token_id = multimodal_params.images[image_id].token_id
+                    token_num = multimodal_params.images[image_id].token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
+                    input_ids.extend(range(token_id, token_id + token_num))
+                    input_ids.append(self.image_end_id)
+                    origin_ids = origin_ids[start_idx + 2 :]
+                    image_id += 1
+                else:
+                    raise ValueError("image token error")
+            except ValueError:
+                break
+        if multimodal_params:
+            image_cnt = len(multimodal_params.images)
+            if image_cnt != image_id:
+                raise ValueError(image_cnt == image_id, f"invalid image tag num: {image_cnt} vs {image_id}!")
+        input_ids.extend(origin_ids)
+
+        # audio
+        origin_ids = input_ids
+        input_ids = []
+        audio_id = 0
+        start_idx = 0
+        while True:
+            try:
+                start_idx = origin_ids.index(self.audio_start_id)
+                if start_idx + 1 >= len(origin_ids):
+                    break
+                if origin_ids[start_idx + 1] == self.audio_end_id:
+                    input_ids.extend(origin_ids[: start_idx + 1])
+                    token_id = multimodal_params.audios[audio_id].token_id
+                    token_num = multimodal_params.audios[audio_id].token_num
+                    input_ids.extend(range(token_id, token_id + token_num))
+                    input_ids.append(self.audio_end_id)
+                    origin_ids = origin_ids[start_idx + 2 :]
+                    audio_id += 1
+                else:
+                    raise ValueError("audio token error")
+            except ValueError:
+                break
+        if multimodal_params:
+            audio_cnt = len(multimodal_params.audios)
+            if audio_cnt != audio_id:
+                raise ValueError(audio_cnt == audio_id, f"invalid audio tag num: {audio_cnt} vs {audio_id}!")
+        input_ids.extend(origin_ids)
+
+        return input_ids
 
 
 @ModelRegistry(["qwen3_omni_moe"], is_multimodal=True)
