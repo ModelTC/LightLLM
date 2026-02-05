@@ -17,7 +17,6 @@ def _get_mrope_position_triton(
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
     BLOCK_SIZE: tl.constexpr,
-    QWEN3_OMNI_MODE: tl.constexpr = False,
 ) -> torch.Tensor:
     cur_batch = tl.program_id(0)
     cache_len = tl.load(b_ready_cache_len + cur_batch)
@@ -29,16 +28,13 @@ def _get_mrope_position_triton(
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_start_idx = start_loc + local_image_start_idx - cache_len
         image_len = tl.load(b_image_len + image_start_num + i)
-        image_h = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 1)
+        # image_h = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 1)
         image_w = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 2)
-        # qwen3-omini is right, older qwen3-vl is error setting, but must keep compatible
-        if QWEN3_OMNI_MODE:
-            image_h = image_w
         for j in range(0, image_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
             # 目前没考虑视频，所以t 恒为 0
             t_pos = local_image_start_idx + off * 0
-            h_pos = local_image_start_idx + off // image_h
+            h_pos = local_image_start_idx + off // image_w
             w_pos = local_image_start_idx + off % image_w
             tl.store(
                 position_ids + off + image_start_idx,
@@ -95,7 +91,6 @@ def get_mrope_position_triton(
     b_ready_cache_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
-    qwen3_omini_mode: bool = False,
 ) -> torch.Tensor:
 
     batch_size = b_q_seq_len.shape[0]
@@ -115,7 +110,6 @@ def get_mrope_position_triton(
         b_q_seq_len=b_q_seq_len,
         b_start_loc=b_start_loc,
         BLOCK_SIZE=BLOCK_SIZE,
-        QWEN3_OMNI_MODE=qwen3_omini_mode,
     )
 
 
