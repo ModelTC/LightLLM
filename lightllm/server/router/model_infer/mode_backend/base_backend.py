@@ -809,11 +809,12 @@ class ModeBackend:
 
             return self._post_process(logits, b_req_idx, b_mtp_index, b_has_out)
         else:
-            batch_size = logits.shape[0]
-            if self.post_graph.need_capture(batch_size):
-                return self.post_graph.capture_post_process(self._post_process, logits, b_req_idx, b_mtp_index)
-            else:
-                return self.post_graph.replay(logits, b_req_idx, b_mtp_index)
+            # batch_size = logits.shape[0]
+            # if self.post_graph.need_capture(batch_size):
+            #     return self.post_graph.capture_post_process(self._post_process, logits, b_req_idx, b_mtp_index)
+            # else:
+            #     return self.post_graph.replay(logits, b_req_idx, b_mtp_index)
+            return self._post_process(logits, b_req_idx, b_mtp_index)
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
