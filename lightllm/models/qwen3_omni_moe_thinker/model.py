@@ -53,14 +53,6 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
     ):
         return
 
-    def get_image_token_length(self, img: ImageItem):
-        return (
-            self.get_image_patch_func(
-                img.image_w, img.image_h, max_num=img.extra_params["image_patch_max_num"], use_thumbnail=True
-            )
-            * self.image_length
-        )
-
     def get_audio_token_length(self, audio: AudioItem):
         L = audio.audio_length
         audio_token_num = 0
