@@ -34,7 +34,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_sin = model._sin_cached[self.position_ids]
         return
 
-    def get_mrope_position(self, multimodal_params: List[dict]) -> torch.Tensor:
+    def get_mrope_position(self, multimodal_params: List[dict], is_qwen3_omini: bool = False) -> torch.Tensor:
         if len(multimodal_params) == 0:
             return self.position_ids.unsqueeze(0).expand(3, -1)
         b_image_start_idx = []
@@ -79,6 +79,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,
             b_start_loc=self.b_q_start_loc,
-            use_image_h=getattr(self, "use_image_h", True),
+            qwen3_omini_mode=is_qwen3_omini,
         )
         return position_ids
