@@ -2,6 +2,7 @@ import os
 import json
 import math
 import torch
+import rpyc
 import librosa
 import numpy as np
 from io import BytesIO
@@ -206,6 +207,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.proj2 = nn.Linear(d_model, output_dim)
         self.n_window_infer = n_window_infer
         self.conv_chunksize = conv_chunksize
+
+        self.cache_port = kvargs["cache_port"]
+        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self._init_datatype()
 
     def _init_datatype(self):
@@ -271,6 +275,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens=None,
         aftercnn_lens=None,
     ):
+        aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
         chunk_lengths = torch.tensor(
@@ -344,8 +349,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 audio, _ = librosa.load(audio, sr=16000)
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
-        # 这里后面还要改
-        input_features, feature_attention_mask = self.processor._preprocess(audio)
+
+        input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
         if feature_attention_mask is not None:
             audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
             input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)

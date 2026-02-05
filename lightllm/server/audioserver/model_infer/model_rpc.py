@@ -31,7 +31,7 @@ class AudioModelRpcServer(rpyc.Service):
             if self.model_type == "clap_audio_model" or self.model_type == "whisper":
                 self.model = WhisperAudioModel(model_kvargs)
             elif self.model_type == "qwen3_omni_moe_audio_encoder":
-                self.model = Qwen3OmniMoeAudioEncoder(model_kvargs)
+                self.model = Qwen3OmniMoeAudioEncoder(model_kvargs).eval().bfloat16()
             else:
                 raise Exception(f"can not support {self.model_type} now")
 

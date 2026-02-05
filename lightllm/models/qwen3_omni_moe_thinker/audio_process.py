@@ -98,9 +98,9 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_attention_mask: Optional[bool] = None,
-        padding: Optional[str] = "max_length",
+        padding: Optional[str] = "longest",  # max_length代表padding到max_length
         max_length: Optional[int] = None,
-        sampling_rate: Optional[int] = None,
+        sampling_rate: Optional[int] = 16000,
         do_normalize: Optional[bool] = None,
         device: Optional[str] = "cpu",
         return_token_timestamps: Optional[bool] = None,
@@ -176,5 +176,10 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
 
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)
-
-        return padded_inputs["input_features"], padded_inputs["attention_mask"]
+        input_features = torch.from_numpy(np.asarray(padded_inputs["input_features"], dtype=np.float32)).to(
+            device="cuda", dtype=torch.bfloat16
+        )
+        attention_mask = torch.from_numpy(np.asarray(padded_inputs["attention_mask"], dtype=np.float32)).to(
+            device="cuda", dtype=torch.int32
+        )
+        return input_features, attention_mask
