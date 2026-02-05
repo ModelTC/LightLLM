@@ -340,33 +340,37 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
         uuids = []
         items: List[AudioItem] = []
+        per_audio_features: List[torch.Tensor] = []
         for i, item in enumerate(audio_items):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
                 audio_data = read_shm(get_shm_name_data(item.uuid))
                 audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=16000)
+                audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
-        input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
-        print(f"input_features is {input_features}, input_features.shape is {input_features.shape}")
-        print(f"feature_attention_mask is {feature_attention_mask}, shape is {feature_attention_mask.shape}")
-        if feature_attention_mask is not None:
-            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-            input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
-        else:
-            audio_feature_lengths = None
-        print(f"input_features is {input_features}, input_features.shape is {input_features.shape}")
+            input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
+            print(f"input_features is {input_features}, input_features.shape is {input_features.shape}")
+            print(f"feature_attention_mask is {feature_attention_mask}, shape is {feature_attention_mask.shape}")
+            if feature_attention_mask is not None:
+                audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+                input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
+            else:
+                audio_feature_lengths = None
+            print(f"input_features is {input_features}, input_features.shape is {input_features.shape}")
 
-        feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
-        print(f"feature_lens is {feature_lens}")
-        audio_features = self.forward(
-            input_features,
-            feature_lens=feature_lens,
-        )
-        print(f"audio_features is {audio_features}, shape is {audio_features.shape}")
+            feature_lens = (
+                audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+            )
+            print(f"feature_lens is {feature_lens}")
+            audio_features = self.forward(
+                input_features,
+                feature_lens=feature_lens,
+            )
+            per_audio_features.append(audio_features)
+            print(f"audio_features is {audio_features}, shape is {audio_features.shape}")
 
         ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
         ids_to_set = []
@@ -377,8 +381,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             uid = uuids[i]
             item = items[i]
 
+            cur_embed = per_audio_features[i]
             cpu_embed_cache_client.copy_to_cache(
-                embed_tensor=audio_features, start_index_in_cache=item.start_index_in_embed_cache
+                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
             )
             ids_to_set.append(uid)
 

@@ -33,39 +33,32 @@ def _get_feat_extract_output_lengths(input_lengths):
     return output_lengths
 
 
-# <|audio_start|><|audio_pad|><|audio_end|>
-AUDIO_START_TOKEN = "<|audio_start|>"
-AUDIO_END_TOKEN = "<|audio_end|>"
-AUDIO_TOKEN_TOKEN = "<|audio_pad|>"
 MIN_AUDIO_LEN = 480
 
 
 class QWen3OmniTokenizer(QWen3VLTokenizer):
-    def __init__(self, tokenizer=None, image_processor=None, **kwargs):
+    def __init__(self, tokenizer=None, processor=None, **kwargs):
         self.tokenizer = tokenizer
-        self.image_processor = image_processor
+        # image
+        self.image_processor = processor.image_processor
         self.min_pixel = self.image_processor.min_pixels
         self.max_pixel = self.image_processor.max_pixels
         self.patch_size = self.image_processor.patch_size
         self.merge_size = self.image_processor.merge_size
+
+        # audio
+        self.audio_processor = processor.feature_extractor
+        self.sampling_rate = self.audio_processor.sampling_rate
+        self.n_samples = self.audio_processor.n_samples
+        self.hop_length = self.audio_processor.hop_length
+
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]
         self.image_token_id = kwargs["model_cfg"]["image_token_id"]
 
-        self.audio_start_tag = AUDIO_START_TOKEN
-        self.audio_start_id = tokenizer.convert_tokens_to_ids(self.audio_start_tag)
-
-        self.audio_end_tag = AUDIO_END_TOKEN
-        self.audio_end_id = tokenizer.convert_tokens_to_ids(self.audio_end_tag)
-
-        self.audio_token_tag = AUDIO_TOKEN_TOKEN
-        self.audio_token_id = tokenizer.convert_tokens_to_ids(self.audio_token_tag)
-
-        # 这些太hard了, 后面改一下,可以直接从audio_processor里取?
-        self.sampling_rate = 16000
-        self.chunk_length = 30
-        self.n_samples = self.chunk_length * self.sampling_rate
-        self.hop_length = 160
+        self.audio_start_id = kwargs["model_cfg"]["audio_start_token_id"]
+        self.audio_end_id = kwargs["model_cfg"]["audio_end_token_id"]
+        self.audio_token_id = kwargs["model_cfg"]["audio_token_id"]
 
     def init_audioitem_extral_params(
         self, audio: AudioItem, multi_params: MultimodalParams, sampling_params: SamplingParams
@@ -73,13 +66,10 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return
 
     def get_audio_token_length(self, audio: AudioItem):
-        # audio_bytes = audio._preload_data
-        # audio_values, _ = librosa.load(BytesIO(audio_bytes), sr=self.sampling_rate)
-        # length = max(int(audio_values.shape[0]), int(MIN_AUDIO_LEN)) #这个最短还有必要吗?稍等再检查一下
-        # L_eff = min(length, int(self.n_samples))
-        # num_frames = L_eff // int(self.hop_length)
-
-        return 290
+        length = min(audio.audio_length, int(self.n_samples))
+        token_num = length // int(self.hop_length)
+        print(f"token_num is {token_num}")
+        return token_num
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         origin_ids = self.tokenizer.encode(prompt)

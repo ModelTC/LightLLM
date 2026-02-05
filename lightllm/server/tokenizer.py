@@ -106,7 +106,7 @@ def get_tokenizer(
 
         model_cfg = model_cfg["thinker_config"]
         processor = AutoProcessor.from_pretrained(tokenizer_name)
-        tokenizer = QWen3OmniTokenizer(tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg)
+        tokenizer = QWen3OmniTokenizer(tokenizer, processor=processor, model_cfg=model_cfg)
     elif model_type == "internvl_chat":
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
