@@ -1033,6 +1033,7 @@ class TpPartBaseModel:
             "Deepseek3MTPModel" in str(self.__class__)
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)
+            or "Glm4MoeLiteMTPModel" in str(self.__class__)
         )
         if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(

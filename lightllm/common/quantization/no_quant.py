@@ -28,8 +28,8 @@ class NoQuantization(QuantizationMethod):
             device = input_tensor.device
             if use_custom_tensor_mananger:
                 out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
-        else:
-            out = torch.empty(shape, dtype=dtype, device=device)
+            else:
+                out = torch.empty(shape, dtype=dtype, device=device)
         if bias is None:
             return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
