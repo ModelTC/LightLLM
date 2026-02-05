@@ -127,7 +127,7 @@ class VisualModelRpcServer(rpyc.Service):
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 image = images[i]
-                self.cpu_embed_cache_client.copy_to_cache(
+                self.cpu_embed_cache_client.copy_vision_to_cache(
                     embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
                 )
                 ids_to_set.append(uid)
