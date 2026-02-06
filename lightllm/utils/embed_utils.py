@@ -27,12 +27,12 @@ def calcu_embed_cache_meta() -> "EmbedCacheMeta":
     args = get_env_start_args()
     assert args.enable_multimodal
     from lightllm.utils.llm_utils import get_llm_model_class
-    from lightllm.models import Qwen3VLTpPartModel, Qwen3VLMOETpPartModel
+    from lightllm.models import Qwen3VLTpPartModel, Qwen3VLMOETpPartModel, Qwen3OmniMOETpPartModel
 
     model_class = get_llm_model_class()
     model_dir = args.model_dir
 
-    if model_class in [Qwen3VLTpPartModel, Qwen3VLMOETpPartModel]:
+    if model_class in [Qwen3VLTpPartModel, Qwen3VLMOETpPartModel, Qwen3OmniMOETpPartModel]:
         embed_cache_meta_data = EmbedCacheMeta(
             token_num=None,
             layer_num=4,
