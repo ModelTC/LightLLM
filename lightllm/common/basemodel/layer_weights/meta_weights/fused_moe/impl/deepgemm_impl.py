@@ -46,7 +46,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
         )
-        topk_weights.mul_(self.routed_scaling_factor)
+        if self.routed_scaling_factor != 1.0:
+            topk_weights.mul_(self.routed_scaling_factor)
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,

@@ -46,7 +46,7 @@ def fused_topk(
     sgl_ops.topk_softmax(
         topk_weights,
         topk_ids,
-        gating_output.float(),  # TODO(woosuk): Optimize this.
+        gating_output,
         renormalize=renormalize,
     )
     return topk_weights, topk_ids

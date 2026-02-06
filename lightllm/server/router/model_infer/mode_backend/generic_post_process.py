@@ -16,6 +16,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         b_length_penalty_param,
         b_mask_eos_reqs,
         is_all_greedy,
+        is_all_random,
     ) = _get_post_sample_tensors(reqs)
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
@@ -68,6 +69,11 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
+    elif is_all_random:
+        batch_next_token_ids = _random_sample(probs)
+        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
+        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+
     elif get_env_start_args().sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
@@ -104,6 +110,12 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     return probs_sort, probs_idx
 
 
+def _random_sample(probs: torch.Tensor):
+    q = torch.empty_like(probs)
+    q.exponential_()
+    return probs.div_(q).argmax(dim=-1).view(-1)
+
+
 def _get_post_sample_tensors(reqs: List[InferReq]):
     req_idxes: List[int] = []
     temperatures: List[float] = []
@@ -112,6 +124,7 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     length_penalty_param: List[int] = []
     mask_eos_reqs: List[bool] = []
     is_all_greedy = True
+    is_all_random = True
 
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
@@ -127,6 +140,8 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         top_ks.append(top_k_val)
         if top_k_val > 1:
             is_all_greedy = False
+        if top_k_val != -1 or shm_param.top_p != 1.0:
+            is_all_random = False
         req_idxes.append(req_obj.req_idx)
 
     req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
@@ -146,4 +161,5 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         length_penalty_param_cpu.cuda(non_blocking=True),
         mask_eos_reqs_cpu.cuda(non_blocking=True),
         is_all_greedy,
+        is_all_random,
     )
