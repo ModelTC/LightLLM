@@ -424,7 +424,7 @@ class RouterManager:
             req._router_stop_str_matched = False
             req_group.append(req)
 
-            logger.debug(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
+            logger.debug(f"router receive req id {req.request_id} cost time {time.time() - req.start_time} s")
         self.req_queue.extend(req_group)
         self.send_to_detokenization.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return

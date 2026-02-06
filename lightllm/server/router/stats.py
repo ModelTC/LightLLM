@@ -1,11 +1,16 @@
 import time
+import logging
 from lightllm.utils.log_utils import init_system_status_logger
+
+logger = logging.getLogger(__name__)
 
 
 class SystemStatusReporter:
     def __init__(self, args, max_total_token_num, dp_size_in_node):
         self.enabled = not args.disable_log_stats
         self.interval = max(5, args.log_stats_interval)
+        if args.log_stats_interval < 5:
+            logger.warning(f"log_stats_interval={args.log_stats_interval}s is below minimum, using 5s")
         self.max_total_token_num = max_total_token_num
         self.dp_size_in_node = dp_size_in_node
         self.status_logger = init_system_status_logger("router")
@@ -81,19 +86,22 @@ class SystemStatusReporter:
             (self.global_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
         )
 
-        # Avg MTP accepted length (global, 1.0 when MTP is off)
-        decode_steps = self.global_mtp_output_total - self.global_mtp_accepted_total
-        avg_mtp_len = self.global_mtp_output_total / max(decode_steps, 1) if self.global_mtp_output_total > 0 else 1.0
-
         kv_pct = avg_kv_used * 100
         kv_pct_no_cache = avg_kv_used_no_cache * 100
+
+        # Avg MTP accepted length (only shown when MTP is active)
+        mtp_suffix = ""
+        if self.global_mtp_accepted_total > 0:
+            decode_steps = self.global_mtp_output_total - self.global_mtp_accepted_total
+            avg_mtp_len = self.global_mtp_output_total / max(decode_steps, 1)
+            mtp_suffix = f" | MTP {avg_mtp_len:.2f}"
 
         self.status_logger.info(
             f"Throughput {total_tps:>7.1f} tok/s (in {input_tps:.1f}, out {output_tps:.1f}) | "
             f"Reqs {running} run, {queued} wait, {paused_req_num} pause | "
             f"KV Cache {kv_pct:.1f}% (active {kv_pct_no_cache:.1f}%) | "
-            f"Prefix Hit {cache_hit_rate:.1f}% | "
-            f"mtp {avg_mtp_len:.2f}"
+            f"Prefix Hit {cache_hit_rate:.1f}%"
+            f"{mtp_suffix}"
         )
 
         # Reset windowed counters
