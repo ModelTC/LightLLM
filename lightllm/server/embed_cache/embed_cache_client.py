@@ -47,6 +47,19 @@ class CpuEmbedCacheClient(object):
             start_index_in_cache=start_index_in_cache,
         )
 
+    def copy_vision_to_cache(self, embed_tensor: torch.Tensor, start_index_in_cache: int):
+        from .copy_to_cache import offload_embed_tensor_to_cache
+
+        if embed_tensor.ndim == 3:
+            # check for qwen3 vision embed tensor shape, use apply deepstack
+            assert embed_tensor.shape[1] == self.cpu_embed_cache_tensor.shape[1]
+
+        offload_embed_tensor_to_cache(
+            embed_tensor=embed_tensor,
+            cache_tensor=self.cpu_embed_cache_tensor,
+            start_index_in_cache=start_index_in_cache,
+        )
+
     def _create_shm_embed_kv_cache(self):
         shm_ptr = create_shm_kv_cache_ptr(
             key=self.args.multi_modal_cache_shm_id, size=self.embed_cache_tensor_meta.calcu_size()
