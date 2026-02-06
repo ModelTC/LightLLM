@@ -66,10 +66,18 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return
 
     def get_audio_token_length(self, audio: AudioItem):
+        # 这里得处理对应奖语音长度按照 30 进行限制，后续处理中，超过30的会被截断。
         length = min(audio.audio_length, int(self.n_samples))
-        token_num = length // int(self.hop_length)
-        print(f"token_num is {token_num}")
+        token_num = self._caclu_audio_token_num(length)
+        # print(f"token_num is {token_num}  n_samples is {self.n_samples} hop_length is {self.hop_length}")
         return token_num
+
+    def _caclu_audio_token_num(self, input_audio_len: int):
+        _mel_len = input_audio_len // int(self.hop_length)
+        input_lengths_leave = _mel_len % 100
+        feat_lengths = (input_lengths_leave - 1) // 2 + 1
+        output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (_mel_len // 100) * 13
+        return output_lengths
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         origin_ids = self.tokenizer.encode(prompt)
