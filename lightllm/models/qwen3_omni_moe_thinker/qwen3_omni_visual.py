@@ -366,7 +366,7 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
                 deepstack_feature_lists.append(deepstack_feature)
 
         hidden_states = self.merger(hidden_states)
-        print(f"hidden_states is {hidden_states}, deepstack is {deepstack_feature_lists}")
+        # print(f"hidden_states is {hidden_states}, deepstack is {deepstack_feature_lists}")
         return hidden_states, deepstack_feature_lists
 
     def encode(self, images: List[ImageItem]):
