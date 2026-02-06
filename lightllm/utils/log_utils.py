@@ -4,7 +4,6 @@
 import logging
 import sys
 import os
-import time
 from typing import Optional
 
 _FORMAT = "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s"
@@ -102,31 +101,15 @@ def init_system_status_logger(name: str):
     logger = logging.getLogger(f"lightllm.status.{name}")
     if not logger.handlers:
         logger.setLevel(logging.INFO)
+        fmt = logging.Formatter(_STATUS_FORMAT, datefmt=_DATE_FORMAT)
         handler = logging.StreamHandler(sys.stdout)
         handler.flush = sys.stdout.flush
-        fmt = logging.Formatter(_STATUS_FORMAT, datefmt=_DATE_FORMAT)
         handler.setFormatter(fmt)
         logger.addHandler(handler)
+        if _LOG_DIR is not None:
+            file_handler = logging.FileHandler(os.path.join(_LOG_DIR, f"status.{name}.log"))
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(fmt)
+            logger.addHandler(file_handler)
         logger.propagate = False
     return logger
-
-
-_log_time_mark_dict = {}
-
-
-def log_time_ready(mark_name, time_count: int):
-    """
-    time_count 间隔时间超过多少s调用该函数会返回True，否则返回False
-    用于控制一些日志输出的频率
-    """
-    global _log_time_mark_dict
-
-    if mark_name not in _log_time_mark_dict:
-        _log_time_mark_dict[mark_name] = time.time()
-        return False
-    cur_time_mark = time.time()
-    if cur_time_mark - _log_time_mark_dict[mark_name] >= time_count:
-        _log_time_mark_dict[mark_name] = cur_time_mark
-        return True
-    else:
-        return False

@@ -3,15 +3,15 @@ import logging
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_system_status_logger
 
+logger = logging.getLogger(__name__)
+
 
 class SystemStatusReporter:
     def __init__(self, args, max_total_token_num, dp_size_in_node):
         self.enabled = not args.disable_log_stats
         self.interval = max(5, args.log_stats_interval)
         if args.log_stats_interval < 5:
-            logging.getLogger(__name__).warning(
-                f"log_stats_interval={args.log_stats_interval}s is below minimum, using 5s"
-            )
+            logger.warning(f"log_stats_interval={args.log_stats_interval}s is below minimum, using 5s")
         self.max_total_token_num = max_total_token_num
         self.dp_size_in_node = dp_size_in_node
         self.status_logger = init_system_status_logger("router")
