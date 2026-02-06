@@ -9,7 +9,7 @@ from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fuse
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd, rotary_emb_fwd_fused
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from functools import partial
 from lightllm.utils.log_utils import init_logger
@@ -59,6 +59,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         input: torch.Tensor,
         infer_state: LlamaInferStateInfo,
         layer_weight: Qwen3MOETransformerLayerWeight,
+        prefill: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         qkv = layer_weight.qkv_proj.mm(input)
@@ -78,13 +79,24 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             eps=self.eps_,
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-        rotary_emb_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-        )
-        return q, cache_kv
+        if prefill:
+            rotary_emb_fwd(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                cache_kv[:, : self.tp_k_head_num_, :],
+                infer_state.position_cos,
+                infer_state.position_sin,
+            )
+            return q, cache_kv
+        else:
+            rotary_emb_fwd_fused(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                cache_kv[:, : self.tp_k_head_num_, :],
+                infer_state.position_cos,
+                infer_state.position_sin,
+                mem_index=infer_state.mem_index,
+                kv_buffer=infer_state.mem_manager.kv_buffer[self.layer_num_],
+            )
+            return q
 
     def _tpsp_get_qkv(
         self,

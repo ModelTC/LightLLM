@@ -68,7 +68,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight, residual: torch.Tensor = None):
         input1 = self._att_norm(input_embdings, infer_state, layer_weight, residual=residual)
-        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight, prefill=True)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
 
@@ -92,9 +92,9 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight, residual: torch.Tensor = None):
         input1 = self._att_norm(input_embdings, infer_state, layer_weight, residual=residual)
-        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        q = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        # self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
