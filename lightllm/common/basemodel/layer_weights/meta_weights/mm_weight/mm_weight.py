@@ -104,6 +104,16 @@ class MMWeightTpl(BaseWeightTpl):
         )
         return
 
+    def _get_param_slicer(self, sub_child_index: int):
+        """
+        在部分子类场景中，可能需要不同的切片器，比如qkv场景
+        这里提供一个接口，子类可以重写，这样不同的组成部分可以使用不同的切片器
+        例如 QKVROWNMMWeight，它的q和kv使用不同的切片器
+        当然，大部分场景下，都是返回同一个切片器
+        sub_child_index: 用于区分是第几个weight, 方便子类重写时使用
+        """
+        return self.param_slicer
+
     # 执行顺序
     def _load_weight(
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
@@ -113,7 +123,8 @@ class MMWeightTpl(BaseWeightTpl):
         if quanted_param_name in weights:
             param_name = quanted_param_name
         if param_name in weights:
-            weight = self.param_slicer._slice_weight(weights[param_name])
+            slicer = self._get_param_slicer(sub_child_index)
+            weight = slicer._slice_weight(weights[param_name])
             self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
         return
 
@@ -121,7 +132,8 @@ class MMWeightTpl(BaseWeightTpl):
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
     ) -> None:
         if param_name in weights:
-            bias = self.param_slicer._slice_bias(weights[param_name])
+            slicer = self._get_param_slicer(sub_child_index)
+            bias = slicer._slice_bias(weights[param_name])
             self.bias_list[sub_child_index].copy_(bias)
             self.bias_list[sub_child_index].load_ok = True
         return
@@ -130,7 +142,8 @@ class MMWeightTpl(BaseWeightTpl):
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
     ) -> None:
         if param_name in weights:
-            weight_scale = self.param_slicer._slice_weight_scale(weights[param_name])
+            slicer = self._get_param_slicer(sub_child_index)
+            weight_scale = slicer._slice_weight_scale(weights[param_name])
             self.quant_method.load_weight_scale(weight_scale, self.mm_param_list[sub_child_index])
         return
 
@@ -138,7 +151,8 @@ class MMWeightTpl(BaseWeightTpl):
         self, param_name: Union[str, List[str]], weights: Dict[str, torch.Tensor], sub_child_index: int
     ) -> None:
         if param_name in weights:
-            weight_zero_point = self.param_slicer._slice_weight_zero_point(weights[param_name])
+            slicer = self._get_param_slicer(sub_child_index)
+            weight_zero_point = slicer._slice_weight_zero_point(weights[param_name])
             self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param_list[sub_child_index])
         return
 
