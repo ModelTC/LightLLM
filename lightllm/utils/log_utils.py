@@ -10,7 +10,9 @@ from typing import Optional
 _FORMAT = "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-_LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "debug")
+_STATUS_FORMAT = "%(levelname)s [%(asctime)s] %(message)s"
+
+_LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "info")
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL.upper(), 0)
 _LOG_DIR = os.environ.get("LIGHTLLM_LOG_DIR", None)
 
@@ -93,6 +95,19 @@ def init_logger(name: str):
             _root_logger.addHandler(_inference_log_file_handler[pid])
             logger.addHandler(_inference_log_file_handler[pid])
     logger.propagate = False
+    return logger
+
+
+def init_system_status_logger(name: str):
+    logger = logging.getLogger(f"lightllm.status.{name}")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        handler.flush = sys.stdout.flush
+        fmt = logging.Formatter(_STATUS_FORMAT, datefmt=_DATE_FORMAT)
+        handler.setFormatter(fmt)
+        logger.addHandler(handler)
+        logger.propagate = False
     return logger
 
 

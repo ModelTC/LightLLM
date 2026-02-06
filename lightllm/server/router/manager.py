@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
+from .stats import SystemStatusReporter
 from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,
     AbortedReqCmd,
@@ -25,7 +26,7 @@ from lightllm.server.core.objs import ShmReqManager, StartArgs
 from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
-from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
@@ -64,6 +65,7 @@ class RouterManager:
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
+        self.status_reporter = None
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
@@ -192,6 +194,11 @@ class RouterManager:
             )
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
+        self.status_reporter = SystemStatusReporter(
+            args=self.args,
+            max_total_token_num=self.max_total_token_num,
+            dp_size_in_node=self.dp_size_in_node,
+        )
 
         if self.args.run_mode == "prefill":
             # 启动 prefill kv move 管理进程
@@ -237,25 +244,11 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
+                # Count output tokens (each running req produces ~1 token per decode step)
+                self.status_reporter.count_output_tokens(len(self.running_batch.reqs))
                 if counter_count % 100 == 0:
                     for dp_index in range(self.dp_size_in_node):
-                        token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
-                        token_ratio2 = (
-                            self.max_total_token_num
-                            - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
-                        ) / self.max_total_token_num
-                        d_i = dp_index
-                        frozen_token_num = self.shared_token_load.get_frozened_token_count(d_i)
-                        estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)
-                        paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=d_i)
-                        logger.debug(
-                            f"dp_i {d_i} current batch size: {len(self.running_batch.reqs)} \n"
-                            f"dp_i {d_i} paused req num: {paused_req_num} \n"
-                            f"dp_i {d_i} frozen token num: {frozen_token_num} \n"
-                            f"dp_i {d_i} estimated_peak_token_count: {estimated_peak_token_count} \n"
-                            f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
-                            f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
-                        )
+                        paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=dp_index)
                         self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
@@ -275,13 +268,15 @@ class RouterManager:
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
                     self.metric_client.gauge_set("lightllm_queue_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
-                    # 60s print once
-                    if log_time_ready("frozen_info", 60):
-                        for dp_i in range(self.dp_size_in_node):
-                            frozen_token_num = self.shared_token_load.get_frozened_token_count(dp_i)
-                            estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(dp_i)
-                            logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
-                            logger.debug(f"dp_i {dp_i} estimated_peak_token_count: {estimated_peak_token_count} \n")
+
+            self.status_reporter.maybe_print(
+                running_batch=self.running_batch,
+                req_queue=self.req_queue,
+                read_only_statics_mem_manager=self.read_only_statics_mem_manager,
+                paused_req_num=self._get_paused_req_num(),
+                radix_cache_client=self.radix_cache_client,
+                disable_dynamic_prompt_cache=self.args.disable_dynamic_prompt_cache,
+            )
 
             await asyncio.sleep(self._get_schedule_time_interval())
 
@@ -311,6 +306,7 @@ class RouterManager:
 
     async def _add_batch(self, batch: Batch):
         # 添加新请求
+        self.status_reporter.count_prompt_tokens(batch.input_tokens())
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.02)
@@ -347,6 +343,15 @@ class RouterManager:
 
     def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
+            # Capture finished req stats before filtering
+            for req in self.running_batch.reqs:
+                if req.shm_infer_released:
+                    self.status_reporter.on_request_completed(
+                        input_len=req.input_len,
+                        output_len=req.shm_cur_output_len,
+                        cache_len=req.prompt_cache_len,
+                        mtp_accepted=req.mtp_accepted_token_num,
+                    )
             self.running_batch.filter_out_finished_req(self.shm_req_manager)
             if self.running_batch.is_clear():
                 self.running_batch = None
@@ -419,7 +424,7 @@ class RouterManager:
             req._router_stop_str_matched = False
             req_group.append(req)
 
-            logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
+            logger.debug(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
         self.req_queue.extend(req_group)
         self.send_to_detokenization.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
