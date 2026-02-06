@@ -295,6 +295,7 @@ class FusedMoeWeight(BaseWeightTpl):
             device_id=self.device_id_,
             num_experts=self.local_n_routed_experts,
         )
+        self.w1, self.w3 = w13_param_list
         self.w1_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[0])
         self.w3_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[1])
         self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2)
@@ -312,6 +313,8 @@ class FusedMoeWeight(BaseWeightTpl):
         for expert_idx, local_expert_idx in expert_idx_to_local_idx.items():
             with self.lock:
                 self._load_expert(expert_idx, local_expert_idx, weights)
+                # for rl updated weight
+                self._load_merge_weight(weights)
                 self._load_expert_scale(
                     expert_idx,
                     local_expert_idx,
@@ -332,6 +335,7 @@ class FusedMoeWeight(BaseWeightTpl):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.quant_method.weight_suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.quant_method.weight_suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.quant_method.weight_suffix}"
+
         row_slice_func = self.row_slicer._slice_weight
         col_slice_func = self.col_slicer._slice_weight
         if w1_weight in weights:
@@ -340,6 +344,19 @@ class FusedMoeWeight(BaseWeightTpl):
             self.quant_method.load_weight(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
         if w2_weight in weights:
             self.quant_method.load_weight(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
+
+    def _load_merge_weight(self, weights: Dict[str, torch.Tensor]):
+        w1_merge_weight = f"{self.weight_prefix}.{self.w1_weight_name}"
+        w2_merge_weight = f"{self.weight_prefix}.{self.w2_weight_name}"
+        w3_merge_weight = f"{self.weight_prefix}.{self.w3_weight_name}"
+        row_slice_func = self.row_slicer._slice_weight
+        col_slice_func = self.col_slicer._slice_weight
+        if w1_merge_weight in weights:
+            self.quant_method.load_weight(row_slice_func(weights[w1_merge_weight]), self.w1)
+        if w2_merge_weight in weights:
+            self.quant_method.load_weight(col_slice_func(weights[w2_merge_weight]), self.w2)
+        if w3_merge_weight in weights:
+            self.quant_method.load_weight(row_slice_func(weights[w3_merge_weight]), self.w3)
 
     def _load_expert_scale(
         self,

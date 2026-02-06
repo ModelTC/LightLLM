@@ -17,6 +17,7 @@ MAX_STOP_SEQUENCES = int(os.getenv("LIGHTLLM_MAX_STOP_SEQUENCES", 10))
 REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_LENGTH", 2048))
 GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 2048))
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
+INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
 
 
 class StopSequence(ctypes.Structure):
@@ -205,6 +206,25 @@ class AllowedTokenIds(ctypes.Structure):
         return list(self.ids[: self.size])
 
 
+class InvalidTokenIds(ctypes.Structure):
+    _pack_ = 4
+    _fields_ = [
+        ("ids", ctypes.c_int * INVALID_TOKEN_IDS_MAX_LENGTH),
+        ("size", ctypes.c_int),
+    ]
+
+    def initialize(self, ids: List[int]):
+        self.size = len(ids)
+        assert (
+            self.size <= INVALID_TOKEN_IDS_MAX_LENGTH
+        ), f"Too many invalid token IDs {self.size} > {INVALID_TOKEN_IDS_MAX_LENGTH}."
+        self.ids[: self.size] = ids[:]
+        return
+
+    def to_list(self):
+        return list(self.ids[: self.size])
+
+
 class ExponentialDecayLengthPenalty(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -293,6 +313,8 @@ class SamplingParams(ctypes.Structure):
         ("ignore_eos", ctypes.c_bool),
         # the max number of image patches to be used in the internvl model, for the test
         ("image_max_patch_num", ctypes.c_int),
+        ("min_pixels", ctypes.c_int),
+        ("max_pixels", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
@@ -304,6 +326,8 @@ class SamplingParams(ctypes.Structure):
         # processor which only retains scores for the given token ids. Defaults to None.
         # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
         ("allowed_token_ids", AllowedTokenIds),
+        # if provided, the invalid token ids will be ignored during generation
+        ("invalid_token_ids", InvalidTokenIds),
         ("stop_sequences", StopSequenceGroups),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
@@ -343,7 +367,8 @@ class SamplingParams(ctypes.Structure):
         self.top_p = kwargs.get("top_p", SamplingParams._top_p)
         self.top_k = kwargs.get("top_k", SamplingParams._top_k)
         self.ignore_eos = kwargs.get("ignore_eos", False)
-        self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
+        self.min_pixels = kwargs.get("min_pixels", -1)
+        self.max_pixels = kwargs.get("max_pixels", -1)
         self.max_new_tokens = kwargs.get("max_new_tokens", 16)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
@@ -391,6 +416,11 @@ class SamplingParams(ctypes.Structure):
         allowed_token_ids = kwargs.get("allowed_token_ids", [])
         self.allowed_token_ids = AllowedTokenIds()
         self.allowed_token_ids.initialize(allowed_token_ids)
+
+        # Initialize invalid_token_ids
+        invalid_token_ids = map(int, kwargs.get("logit_bias", {}).keys())
+        self.invalid_token_ids = InvalidTokenIds()
+        self.invalid_token_ids.initialize(list[int](invalid_token_ids))
 
         if self.do_sample is False:
             self.temperature = 1.0
@@ -482,6 +512,8 @@ class SamplingParams(ctypes.Structure):
             "image_max_patch_num": self.image_max_patch_num,
             "max_new_tokens": self.max_new_tokens,
             "min_new_tokens": self.min_new_tokens,
+            "min_pixels": self.min_pixels,
+            "max_pixels": self.max_pixels,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
             "best_of": self.best_of,
@@ -490,6 +522,7 @@ class SamplingParams(ctypes.Structure):
             "guided_grammar": self.guided_grammar.to_str(),
             "guided_json": self.guided_json.to_str(),
             "allowed_token_ids": self.allowed_token_ids.to_list(),
+            "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
             "move_kv_to_decode_node": self.move_kv_to_decode_node.to_dict(),
             "skip_special_tokens": self.skip_special_tokens,

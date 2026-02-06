@@ -74,6 +74,8 @@ class LlamaTpPartModel(TpPartBaseModel):
         rope_scaling = self.config.get("rope_scaling", None)
         if rope_scaling is None:
             self._init_to_get_rotary()
+            if "rope_theta_hw" in self.config:
+                self._init_to_get_hw_rotary()
             return
 
         if "rope_type" in rope_scaling:
@@ -96,6 +98,8 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._init_to_get_rotary()
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+        if "rope_theta_hw" in self.config:
+            self._init_to_get_hw_rotary()
         return
 
     def _init_to_get_rotary(self, default_base=10000):
@@ -106,7 +110,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
 
         base = self.config.get("rope_theta", float(default_base))
-
         if "max_sequence_length" in self.config:
             max_seq_len = self.config["max_sequence_length"]
         else:
@@ -137,6 +140,46 @@ class LlamaTpPartModel(TpPartBaseModel):
 
         self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
         self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        return
+
+    def _init_to_get_hw_rotary(self, default_base=10000):
+        partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_ // 2)
+        if self.config.get("rope_scaling", {}) is None:
+            rope_scaling_factor = 1.0
+        else:
+            rope_scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
+
+        base = self.config.get("rope_theta_hw", float(default_base))
+        if "max_sequence_length" in self.config:
+            max_seq_len = self.config["max_sequence_length"]
+        else:
+            max_position_embeddings = self.config.get(
+                "max_position_embeddings_hw", 2048 if base <= 10000.0 + 1e-5 else 16384
+            )
+            max_seq_len = max_position_embeddings * rope_scaling_factor
+
+        # NTK
+        try:
+            ntk_alpha = float(os.environ.get("LIGHTLLM_NTK_ALPHA", 1))
+            assert ntk_alpha >= 1
+            if ntk_alpha > 1:
+                logger.info(f"Note: NTK enabled, alpha set to {ntk_alpha}")
+            max_seq_len *= ntk_alpha
+            base = base * (ntk_alpha ** (partial_head_dim / (partial_head_dim - 2)))  # Base change formula
+        except:
+            pass
+
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
+        )
+        t = (
+            torch.arange(max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32)
+            / rope_scaling_factor
+        )
+        freqs = torch.outer(t, inv_freq)
+
+        self._hw_cos_cached = torch.cos(freqs).to(self.data_type).cuda()
+        self._hw_sin_cached = torch.sin(freqs).to(self.data_type).cuda()
         return
 
     def _init_to_get_dynamic_ntk_rotary(self):

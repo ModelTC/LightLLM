@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 import os
 
-rmsnorm_num_warps = int(os.getenv("RMSNORM_WARPS", "8"))
+rmsnorm_num_warps = int(os.getenv("RMSNORM_WARPS", "4"))
 
 
 @triton.jit
@@ -36,12 +36,12 @@ def _rms_norm_fwd_fused(
     for off in range(0, N, BLOCK_SIZE):
         cols = off + tl.arange(0, BLOCK_SIZE)
         mask = cols < N
-        w = tl.load(W + cols, mask=mask).to(tl.float32)
+        w = tl.load(W + cols, mask=mask)
         x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
-        x_hat = x * rstd
-        y = x_hat * w
+        x_hat = (x * rstd).to(tl.bfloat16)
+        y = x_hat * w.to(tl.bfloat16)
         # Write output
-        tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
+        tl.store(Y + cols * y_stride1, y, mask=mask)
 
 
 def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
@@ -79,22 +79,19 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
     return y
 
 
-def torch_rms_norm(x, weight, eps):
-    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
+# def rmsnorm_forward(hidden_states, weight, eps, out=None):
+#     input_dtype = hidden_states.dtype
+#     hidden_states = hidden_states.to(torch.float32)
+#     variance = hidden_states.pow(2).mean(-1, keepdim=True)
+#     hidden_states = hidden_states * torch.rsqrt(variance + eps)
+#     out = weight * hidden_states.to(input_dtype)
+#     return out
 
 
-def test_rms_norm(M, N, dtype, eps=1e-5, device="cuda"):
-    # create data
-    x_shape = (M, N)
-    w_shape = (x_shape[-1],)
-    weight = torch.rand(w_shape, dtype=dtype, device="cuda")
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device="cuda")
-    # forward pass
-    y_tri = rmsnorm_forward(x, weight, eps)
-    y_ref = torch_rms_norm(x.to(torch.float32), weight.to(torch.float32), eps).to(dtype)
-
-    # compare
-    print("type:", y_tri.dtype, y_ref.dtype)
-    print("max delta:", torch.max(torch.abs(y_tri - y_ref)))
-    assert torch.allclose(y_tri, y_ref, atol=1e-2, rtol=0)
-    return
+def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+    print(f"norm weight dtype:{self.weight.dtype}")
+    return self.weight * hidden_states.to(input_dtype)

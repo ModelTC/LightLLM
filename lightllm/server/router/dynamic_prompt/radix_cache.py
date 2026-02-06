@@ -425,6 +425,30 @@ class RadixCache:
         self.refed_tokens_num.arr[0] = 0
         return
 
+    def flush_cache(self):
+        nodes_to_clear = collections.deque(self.root_node.children.values())
+        self.root_node.children.clear()
+        while nodes_to_clear:
+            node = nodes_to_clear.popleft()
+            nodes_to_clear.extend(node.children.values())
+            node.parent = None
+            node.children.clear()
+
+        self.root_node.token_id_key[:] = 0
+        self.root_node.token_mem_index_value[:] = 0
+        self.root_node.ref_counter = 1  # 保持为1，确保不会被evict
+        self.root_node.time_id = time_gen.generate_time_id()
+        self.root_node.node_value_len = 0
+        self.root_node.node_prefix_total_len = 0
+
+        self.evict_tree_set.clear()
+        self.evict_tree_set.add(self.root_node)
+
+        self.tree_total_tokens_num.arr[0] = 0
+        self.refed_tokens_num.arr[0] = 0
+
+        return
+
     def dec_node_ref_counter(self, node: TreeNode):
         if node is None:
             return

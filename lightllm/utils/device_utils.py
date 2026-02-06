@@ -100,7 +100,8 @@ def get_current_device_name():
         gpu_name = gpu_name.replace(" ", "_")
         return gpu_name
     else:
-        return None
+        return "unknown"  # need fix
+        # raise RuntimeError("No GPU available")
 
 
 @lru_cache(maxsize=None)

@@ -54,6 +54,8 @@ class SamplingParams:
         # processor which only retains scores for the given token ids. Defaults to None.
         # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
         allowed_token_ids: Optional[List[int]] = None,
+        # if provided, the invalid token ids will be ignored during generation
+        invalid_token_ids: Optional[List[int]] = None,
         # p d mode used params
         group_request_id: Optional[int] = None,
         # move kv to deocde node, only used in pd mode
@@ -88,6 +90,7 @@ class SamplingParams:
         self.guided_grammar = guided_grammar
         self.guided_json = guided_json
         self.allowed_token_ids = allowed_token_ids
+        self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.move_kv_to_decode_node = move_kv_to_decode_node
         self.suggested_dp_index = suggested_dp_index
@@ -267,6 +270,7 @@ class SamplingParams:
         ret["guided_grammar"] = self.guided_grammar
         ret["guided_json"] = self.guided_json
         ret["allowed_token_ids"] = self.allowed_token_ids
+        ret["invalid_token_ids"] = self.invalid_token_ids
         ret["move_kv_to_decode_node"] = self.move_kv_to_decode_node
         return ret
 

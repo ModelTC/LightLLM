@@ -6,7 +6,7 @@ import copy
 import json
 import torch
 import torch.nn.functional as F
-from typing import final, List
+from typing import final, List, Optional
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -32,6 +32,10 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.torch_memory_saver_utils import (
+    TorchMemorySaverWrapper,
+    MemoryTag,
+)
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
 
@@ -90,6 +94,7 @@ class TpPartBaseModel:
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.is_mtp_mode = self.args.mtp_mode in [
             "vanilla_with_att",
             "eagle_with_att",
@@ -103,15 +108,17 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
-        self._init_weights()
-        self._init_mem_manager()
-        self._init_kv_move_buffer()
+        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=self.args.enable_weight_cpu_backup):
+            self._init_weights()
+        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            self._init_mem_manager()
+            self._init_kv_move_buffer()
+            self._init_req_manager()
         self._check_mem_size()
-        self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._load_hf_weights()
+        self.load_weights(self.weight_dict)
         # wait必须在init cudagraph 之前，避免错误捕获
         self._wait_other_modules_ready()
 
@@ -176,17 +183,15 @@ class TpPartBaseModel:
         ]
         return
 
-    def _load_hf_weights(self):
+    def load_weights(self, weight_dict: dict):
+        assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
             self.data_type,
-            weight_dir=self.weight_dir_,
+            self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
+            weight_dict=weight_dict,
         )
-        self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
-        return
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
@@ -884,6 +889,7 @@ class TpPartBaseModel:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
+        torch.cuda.empty_cache()
         return
 
     def autotune_layers(self):
@@ -1012,6 +1018,9 @@ class TpPartBaseModel:
         del b_seq_len
         del b_ready_cache_len
         del model_output
+        del b_mtp_index
+        del b_prefill_start_loc
+        del b_q_seq_len
         torch.cuda.empty_cache()
         return
 
@@ -1032,3 +1041,71 @@ class TpPartBaseModel:
             special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input
+
+    def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
+        if tags is None:
+            self.release_all()
+            return
+        if MemoryTag.WEIGHT in tags:
+            self.release_weight()
+        if MemoryTag.KV_CACHE in tags:
+            self.release_kv_cache()
+        if MemoryTag.GRAPH in tags:
+            self.release_graph()
+        return
+
+    def resume_memory_occupation(self, tags: Optional[List[MemoryTag]]):
+        if tags is None:
+            self.resume_all()
+            return
+        if MemoryTag.WEIGHT in tags:
+            self.resume_weight()
+        if MemoryTag.KV_CACHE in tags:
+            self.resume_kv_cache()
+        if MemoryTag.GRAPH in tags:
+            self.resume_graph()
+        return
+
+    def release_weight(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def release_kv_cache(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def release_graph(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def release_all(self):
+        self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
+        self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
+        self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def resume_weight(self):
+        torch.cuda.empty_cache()
+        gc.collect()
+        self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
+
+    def resume_kv_cache(self):
+        torch.cuda.empty_cache()
+        gc.collect()
+        self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
+
+    def resume_graph(self):
+        torch.cuda.empty_cache()
+        gc.collect()
+        self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)
+
+    def resume_all(self):
+        torch.cuda.empty_cache()
+        gc.collect()
+        self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
+        self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
+        self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)

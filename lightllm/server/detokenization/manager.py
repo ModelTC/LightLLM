@@ -6,7 +6,6 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
 import inspect
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from typing import Union, Dict, List
 from .decode import decode_token
@@ -17,6 +16,14 @@ import pickle
 import time
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.io_struct import (
+    BaseReq,
+    GenerateResp,
+    FlushCacheResp,
+    ReleaseMemoryResp,
+    ResumeMemoryResp,
+    GeneralModelToHttpRpcRsp,
+)
 
 logger = init_logger(__name__)
 
@@ -31,9 +38,9 @@ class DeTokenizationManager:
         self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.detokenization_port}")
 
-        self.pub_to_httpserver = context.socket(zmq.PUB)
-        self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
-        logger.info(f"pub_to_httpserver sendhwm {self.pub_to_httpserver.getsockopt(zmq.SNDHWM)}")
+        self.send_to_httpserver = context.socket(zmq.PUSH)
+        self.send_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        logger.info(f"send_to_httpserver sendhwm {self.send_to_httpserver.getsockopt(zmq.SNDHWM)}")
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
         self.all_special_ids = set(self.tokenizer.all_special_ids)
         self.req_id_to_out: Dict[int, DecodeReq] = {}
@@ -46,7 +53,7 @@ class DeTokenizationManager:
         self.token_id_to_token = {token_id: token for token, token_id in self.tokenizer.get_vocab().items()}
         return
 
-    def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
+    def _add_new_group_req_index(self, recv_obj: BaseReq):
         for req_index in recv_obj.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
             req.link_prompt_ids_shm_array()
@@ -74,8 +81,10 @@ class DeTokenizationManager:
                 try:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
-                        recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        assert isinstance(recv_obj, GroupReqIndexes)
+                        recv_obj: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                        if isinstance(recv_obj, GeneralModelToHttpRpcRsp):
+                            self.send_to_httpserver.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
+                            continue
                         self._add_new_group_req_index(recv_obj=recv_obj)
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
@@ -146,7 +155,7 @@ class DeTokenizationManager:
 
         # 通知 httpserver 进程
         if exist_decode:
-            self.pub_to_httpserver.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
+            self.send_to_httpserver.send_pyobj(GenerateResp(), protocol=pickle.HIGHEST_PROTOCOL)
 
         self.remove_finished_reqs()
 
