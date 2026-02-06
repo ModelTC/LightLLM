@@ -34,8 +34,10 @@ def _fwd_kernel(
     stride_req_to_tokens_s,
     kv_group_num,
     b_prompt_cache_len,
+    b_image_token_tag,
     H: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
+    QK_HEAD_DIM: tl.constexpr,
+    V_HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -53,16 +55,19 @@ def _fwd_kernel(
     cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
 
     block_start_loc = BLOCK_M * start_m
+    if block_start_loc >= cur_batch_seq_len:
+        return
 
     offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_d_qk = tl.arange(0, QK_HEAD_DIM)
+    offs_d_v = tl.arange(0, V_HEAD_DIM)
     offs_m = block_start_loc + tl.arange(0, BLOCK_M)
 
     # Q pointers
     off_q = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
         + cur_head * stride_qh
-        + offs_d[None, :] * stride_qd
+        + offs_d_qk[None, :] * stride_qd
     )
 
     q_valid = offs_m < cur_batch_seq_len
@@ -71,24 +76,14 @@ def _fwd_kernel(
     # online softmax state
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
-
-    block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
+    acc = tl.zeros([BLOCK_M, V_HEAD_DIM], dtype=tl.float32)
     block_end_loc = total_len
 
     # absolute q positions in the request
     q_pos = prompt_cache_len + offs_m  # [M]
+    q_image_token_tag = tl.load(b_image_token_tag + cur_batch_in_all_start_index + offs_m, mask=q_valid, other=False)
 
-    # q_gid from packed position_ids (aligned with Q rows)
-    q_gid = tl.load(
-        position_ids + cur_batch_in_all_start_index + offs_m,
-        mask=q_valid,
-        other=-2147483648,
-    ).to(tl.int32)
-
-    BIG = tl.full([BLOCK_N], 1000000000, tl.int32)  # ensure != any normal gid
-
-    for start_n in range(0, block_mask * block_end_loc, BLOCK_N):
+    for start_n in range(0, block_end_loc, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
         k_pos = start_n + offs_n  # [N]
@@ -102,32 +97,13 @@ def _fwd_kernel(
         ).to(tl.int64)
 
         # load K
-        off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
+        off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d_qk[:, None] * stride_kd
         k = tl.load(K + off_k, mask=k_valid[None, :], other=0.0)
-
-        qk = tl.dot(q, k)
-
-        # k_gid:
-        # - for cached keys (k_pos < prompt_cache_len): set to BIG + k_pos so equality is always false
-        # - for new keys (k_pos >= prompt_cache_len): read from packed position_ids by (k_pos - prompt_cache_len)
-        k_in_new = k_pos >= prompt_cache_len
-        k_new_idx = (k_pos - prompt_cache_len).to(tl.int32)  # [N] valid only when k_in_new
-        k_gid_new = tl.load(
-            position_ids + cur_batch_in_all_start_index + k_new_idx,
-            mask=k_valid & k_in_new,
-            other=-2147483647,
-        ).to(tl.int32)
-
-        k_gid = tl.where(
-            k_in_new,
-            k_gid_new,
-            (k_pos.to(tl.int32) + BIG),
-        )
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk += tl.dot(q, k)
 
         # mask: causal OR same gid (only possible inside NEW part)
-        mask = (q_pos[:, None] >= k_pos[None, :]) | (q_gid[:, None] == k_gid[None, :])
-        mask = mask & q_valid[:, None] & k_valid[None, :]
-
+        mask = (q_pos[:, None] >= k_pos[None, :]) | q_image_token_tag[:, None]
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
 
         # online softmax
@@ -141,7 +117,7 @@ def _fwd_kernel(
         acc = acc * alpha[:, None]
 
         # load V
-        off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
+        off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d_v[None, :] * stride_vd
         v = tl.load(V + off_v, mask=k_valid[:, None], other=0.0)
 
         p = p.to(v.dtype)
@@ -154,7 +130,7 @@ def _fwd_kernel(
     off_o = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
         + cur_head * stride_oh
-        + offs_d[None, :] * stride_od
+        + offs_d_v[None, :] * stride_od
     )
     tl.store(Out + off_o, acc, mask=q_valid[:, None])
 
@@ -172,6 +148,7 @@ def context_attention_fwd_neo(
     b_prompt_cache_len,
     max_input_len,
     req_to_token_indexs,
+    b_image_token_tag,
 ):
     # minimal safety: position_ids must cover packed q rows
     assert position_ids.numel() >= q.shape[0], (position_ids.numel(), q.shape[0])
@@ -220,8 +197,10 @@ def context_attention_fwd_neo(
         req_to_token_indexs.stride(1),
         kv_group_num=kv_group_num,
         b_prompt_cache_len=b_prompt_cache_len,
+        b_image_token_tag=b_image_token_tag,
         H=head,
-        BLOCK_DMODEL=Lk,
+        QK_HEAD_DIM=Lk,
+        V_HEAD_DIM=Lk // 2,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         num_warps=num_warps,

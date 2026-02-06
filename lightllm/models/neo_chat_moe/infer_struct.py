@@ -20,6 +20,9 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model: LlamaTpPartModel):
         LlamaInferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
+            self.b_image_token_tag = torch.zeros([self.position_ids.size(0)], dtype=torch.bool, device="cpu").cuda(
+                non_blocking=True
+            )
             self.position_ids = self.get_neo_position(self.multimodal_params)
         else:
             b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
@@ -95,5 +98,6 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             b_ready_cache_len=self.b_ready_cache_len,
             b_q_seq_len=self.b_q_seq_len,
             b_start_loc=self.b_q_start_loc,
+            b_image_token_tag=self.b_image_token_tag,
         )
         return position_ids

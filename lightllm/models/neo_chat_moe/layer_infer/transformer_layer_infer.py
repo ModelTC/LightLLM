@@ -182,6 +182,7 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
             infer_state.b_ready_cache_len,
             infer_state.max_q_seq_len,
             infer_state.req_manager.req_to_token_indexs,
+            infer_state.b_image_token_tag,
         )
         o3 = o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_ * 2)
         o3 = o3[:, :, : self.head_dim_].contiguous()

@@ -16,6 +16,7 @@ def _get_neo_position_triton(
     b_ready_cache_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
+    b_image_token_tag: torch.Tensor,
     BLOCK_SIZE: tl.constexpr,
 ) -> torch.Tensor:
     cur_batch = tl.program_id(0)
@@ -36,6 +37,13 @@ def _get_neo_position_triton(
             t_pos = local_image_start_idx + off * 0
             h_pos = off // image_w
             w_pos = off % image_w
+            tl.store(
+                b_image_token_tag + off + image_start_idx,
+                True,
+                mask=(off < image_len)
+                & (off + local_image_start_idx - cache_len < q_seq_len)
+                & (local_image_start_idx - cache_len + off >= 0),
+            )
             tl.store(
                 position_ids + off + image_start_idx,
                 t_pos,
@@ -87,6 +95,7 @@ def get_neo_position_triton(
     b_ready_cache_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
+    b_image_token_tag: torch.Tensor,
 ) -> torch.Tensor:
 
     batch_size = b_q_seq_len.shape[0]
@@ -105,6 +114,7 @@ def get_neo_position_triton(
         b_ready_cache_len=b_ready_cache_len,
         b_q_seq_len=b_q_seq_len,
         b_start_loc=b_start_loc,
+        b_image_token_tag=b_image_token_tag,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
@@ -121,6 +131,7 @@ def test():
         .expand(3, -1)
         .contiguous()
     )
+    b_image_token_tag = torch.zeros([position_ids.size(1)], dtype=torch.bool, device="cuda")
     position_ids[1:].zero_()
     b_ready_cache_len = torch.tensor([0, 0], dtype=torch.int32, device="cuda")
     b_q_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
@@ -135,8 +146,10 @@ def test():
         b_ready_cache_len,
         b_q_seq_len,
         b_start_loc,
+        b_image_token_tag,
     )
 
+    print(b_image_token_tag)
     print(position_ids)
     # old_value = torch.cat([position_ids[:, 2:7], position_ids[:, 7 + 2 :]], dim=1)
 
@@ -172,3 +185,7 @@ def test():
         [0, 1, 0, 1, 2, 3, 4, 0, 1, 0, 1, 2, 3, 2, 3, 4, 5, 6, 7, 8]],
        device='cuda:0', dtype=torch.int32)
     """
+
+
+if __name__ == "__main__":
+    test()

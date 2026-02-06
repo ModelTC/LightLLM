@@ -136,6 +136,6 @@ def load_image_native(image, patch_size=16, downsample_ratio=0.5, min_pixels=655
     )
     pixel_values, grid_hw = preprocess_pixel_values(transform(new_image).to(torch.float32), patch_size=patch_size)
 
-    print(f"Transfer image_size from ({image.height, image.width}) to ({new_image.height, new_image.width})")
+    # print(f"Transfer image_size from ({image.height, image.width}) to ({new_image.height, new_image.width})")
 
     return pixel_values, grid_hw
