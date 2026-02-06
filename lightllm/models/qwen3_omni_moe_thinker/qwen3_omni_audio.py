@@ -381,6 +381,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             cpu_embed_cache_client.copy_to_cache(
                 embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
             )
+            assert (
+                item.token_num == cur_embed.shape[0]
+            ), f"audio token num not match {item.token_num} vs {cur_embed.shape[0]} "
             ids_to_set.append(uid)
 
         if ids_to_set:
