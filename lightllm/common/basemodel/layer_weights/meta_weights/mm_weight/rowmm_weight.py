@@ -108,15 +108,18 @@ class QKVROWNMMWeight(MMWeightTpl):
     ) -> None:
         self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
         self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
-        self.repeat_times = 1
+        self.q_repeat_times = 1
+        self.kv_repeat_times = 1
         assert q_head_num % self.tp_world_size_ == 0, (
             f"q_head_num must be divisible by tp_world_size_, " f"but found: {q_head_num} % {self.tp_world_size_}"
         )
-        assert kv_head_num % self.tp_world_size_ == 0, (
-            f"kv_head_num must be divisible by tp_world_size_" f"but found: {kv_head_num} % {self.tp_world_size_}"
+        assert kv_head_num % self.tp_world_size_ == 0 or self.tp_world_size_ % kv_head_num == 0, (
+            f"kv_head_num must be divisible by tp_world_size_ or "
+            f"tp_world_size_ must be divisible by kv_head_num, "
+            f"but found: {kv_head_num} % {self.tp_world_size_}"
         )
         q_hidden_size = (q_head_num // self.tp_world_size_) * head_dim
-        kv_hidden_size = (kv_head_num // self.tp_world_size_) * head_dim
+        kv_hidden_size = self._get_tp_padded_head_num(kv_head_num) * head_dim
         out_dims = [q_hidden_size, kv_hidden_size, kv_hidden_size]
         super().__init__(
             in_dim=in_dim,
@@ -128,12 +131,44 @@ class QKVROWNMMWeight(MMWeightTpl):
             tp_rank=self.tp_rank_,
             tp_world_size=self.tp_world_size_,
         )
-        self.param_slicer = get_row_slice_mixin(
+        self.q_param_slicer = get_row_slice_mixin(
             self.quant_method.method_name,
             tp_rank=self.tp_rank_,
             tp_world_size=self.tp_world_size_,
-            repeat_times=self.repeat_times,
+            repeat_times=self.q_repeat_times,
         )
+        self.kv_param_slicer = get_row_slice_mixin(
+            self.quant_method.method_name,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
+            repeat_times=self.kv_repeat_times,
+        )
+
+    def _get_param_slicer(self, sub_child_index: int):
+        """
+        sub_child_index:
+            0 -> q
+            1 -> k
+            2 -> v
+        q 使用 q_param_slicer, k / v 使用 kv_param_slicer.
+        """
+        if sub_child_index == 0:
+            return self.q_param_slicer
+        else:
+            return self.kv_param_slicer
+
+    def _get_tp_padded_head_num(self, head_num: int):
+        if head_num % self.tp_world_size_ == 0:
+            return head_num // self.tp_world_size_
+        elif self.tp_world_size_ % head_num == 0:
+            self.kv_repeat_times = self.tp_world_size_ // head_num
+            return self.kv_repeat_times * head_num // self.tp_world_size_
+        else:
+            raise ValueError(
+                f"head_num must be divisible by tp_world_size_ or "
+                f"tp_world_size_ must be divisible by head_num, "
+                f"but found: {head_num} % {self.tp_world_size_}"
+            )
 
 
 class ROWBMMWeight(BMMWeightTpl):
