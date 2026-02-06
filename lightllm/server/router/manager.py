@@ -247,9 +247,7 @@ class RouterManager:
                 # Count output tokens (each running req produces ~1 token per decode step)
                 self.status_reporter.count_output_tokens(len(self.running_batch.reqs))
                 if counter_count % 100 == 0:
-                    for dp_index in range(self.dp_size_in_node):
-                        paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=dp_index)
-                        self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
+                    self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
