@@ -189,6 +189,8 @@ def all_reduce(
     op: ReduceOp = ReduceOp.SUM,
     async_op: bool = False,
 ) -> None:
+    if get_global_world_size() == 1:
+        return
     if isinstance(group, CustomProcessGroup):
         return group.all_reduce(input_)
     else:
@@ -201,6 +203,9 @@ def all_gather_into_tensor(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op: bool = False,
 ) -> None:
+    if get_global_world_size() == 1:
+        output_.copy_(input_)
+        return
     if isinstance(group, CustomProcessGroup):
         return group.all_gather_into_tensor(output_, input_)
     else:
@@ -213,6 +218,10 @@ def all_gather(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op: bool = False,
 ) -> None:
+    if get_global_world_size() == 1:
+        if len(output_) > 0:
+            output_[0].copy_(input_)
+        return
     # todo 目前还没有定制算子的支持。
     if isinstance(group, CustomProcessGroup):
         return dist.all_gather(output_, input_, group.device_group, async_op)
@@ -227,11 +236,28 @@ def reduce_scatter_tensor(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op=False,
 ):
+    if get_global_world_size() == 1:
+        output.copy_(input)
+        return
     # 目前还没有定制算子实现。
     if isinstance(group, CustomProcessGroup):
         return dist.reduce_scatter_tensor(output, input, op=op, group=group.device_group, async_op=async_op)
     else:
         return dist.reduce_scatter_tensor(output, input, op=op, group=group, async_op=async_op)
+
+
+def broadcast(
+    tensor: torch.Tensor,
+    src: int,
+    group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
+    async_op: bool = False,
+) -> None:
+    if get_global_world_size() == 1:
+        return
+    if isinstance(group, CustomProcessGroup):
+        return dist.broadcast(tensor, src=src, group=group.device_group, async_op=async_op)
+    else:
+        return dist.broadcast(tensor, src=src, group=group, async_op=async_op)
 
 
 dist_group_manager = DistributeGroupManager()
