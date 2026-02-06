@@ -105,6 +105,13 @@ class MMWeightTpl(BaseWeightTpl):
         return
 
     def _get_param_slicer(self, sub_child_index: int):
+        """
+        在部分子类场景中，可能需要不同的切片器，比如qkv场景
+        这里提供一个接口，子类可以重写，这样不同的组成部分可以使用不同的切片器
+        例如 QKVROWNMMWeight，它的q和kv使用不同的切片器
+        当然，大部分场景下，都是返回同一个切片器
+        sub_child_index: 用于区分是第几个weight, 方便子类重写时使用
+        """
         return self.param_slicer
 
     # 执行顺序
