@@ -22,17 +22,6 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 
 
-def _get_feat_extract_output_lengths(input_lengths):
-    """
-    Computes the output length of the convolutional layers and the output length of the audio encoder
-    """
-
-    input_lengths_leave = input_lengths % 100
-    feat_lengths = (input_lengths_leave - 1) // 2 + 1
-    output_lengths = ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
-    return output_lengths
-
-
 MIN_AUDIO_LEN = 480
 
 
@@ -69,7 +58,6 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         # 这里得处理对应奖语音长度按照 30 进行限制，后续处理中，超过30的会被截断。
         length = min(audio.audio_length, int(self.n_samples))
         token_num = self._caclu_audio_token_num(length)
-        # print(f"token_num is {token_num}  n_samples is {self.n_samples} hop_length is {self.hop_length}")
         return token_num
 
     def _caclu_audio_token_num(self, input_audio_len: int):
@@ -162,7 +150,6 @@ class Qwen3OmniMOETpPartModel(Qwen3VLMOETpPartModel):
             all_config = json.load(json_file)
             self.config = all_config["thinker_config"]["text_config"]
         # rename keys
-        print(f"self.config is {self.config}")
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
