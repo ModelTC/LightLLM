@@ -19,6 +19,7 @@ from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrain
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
+from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
@@ -80,6 +81,15 @@ class VisualModelRpcServer(rpyc.Service):
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
                 self.model = Gemma3VisionModel()
+            elif (
+                model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
+                == "qwen3_omni_moe_vision_encoder"
+            ):
+                self.model = (
+                    Qwen3OmniMoeVisionTransformerPretrainedModel(kvargs, **model_cfg["thinker_config"]["vision_config"])
+                    .eval()
+                    .bfloat16()
+                )
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
@@ -117,7 +127,7 @@ class VisualModelRpcServer(rpyc.Service):
                 uid = uuids[i]
                 start, end = valid_ids[i]
                 image = images[i]
-                self.cpu_embed_cache_client.copy_to_cache(
+                self.cpu_embed_cache_client.copy_vision_to_cache(
                     embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
                 )
                 ids_to_set.append(uid)
