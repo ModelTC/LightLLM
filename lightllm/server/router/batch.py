@@ -53,7 +53,7 @@ class Batch:
         unfinished_req_ids = []
         for req in self.reqs:
             if req.shm_infer_released:
-                logger.info(f"router release req id {req.request_id}")
+                logger.debug(f"router release req id {req.request_id}")
                 shm_req_manager.put_back_req_obj(req)
                 req = None
             else:

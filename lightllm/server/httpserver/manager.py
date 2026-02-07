@@ -414,7 +414,7 @@ class HttpServerManager:
         x_session_id = request_headers.get("X-Session-Id", "")
 
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
+        logger.debug(
             f"recieved req X-Request-Id:{x_request_id} "
             f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
             f"lightllm_req_id:{group_request_id} "
@@ -611,7 +611,7 @@ class HttpServerManager:
                             (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
+                        logger.debug(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
@@ -698,8 +698,8 @@ class HttpServerManager:
                     if req_status is None:
                         continue
 
-                    logger.info(
-                        f"left req id {req_status.group_req_objs.group_req_id}"
+                    logger.debug(
+                        f"left req id {req_status.group_req_objs.group_req_id} "
                         f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
                         f"refcount {req_status.group_req_objs.shm_req_objs[0].ref_count}"
                     )

@@ -52,7 +52,7 @@ class DeTokenizationManager:
             req.link_prompt_ids_shm_array()
             req.link_logprobs_shm_array()
 
-            logger.info(
+            logger.debug(
                 f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
             )
 
@@ -160,7 +160,7 @@ class DeTokenizationManager:
 
         for decode_req in finished_reqs:
             decode_req.req.can_released_mark = True
-            logger.info(f"detoken release req id {decode_req.req.request_id}")
+            logger.debug(f"detoken release req id {decode_req.req.request_id}")
             self.shm_req_manager.put_back_req_obj(decode_req.req)
             self.req_id_to_out.pop(decode_req.request_id, None)
         return
