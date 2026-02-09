@@ -2,7 +2,6 @@ import socket
 import subprocess
 import ipaddress
 import random
-import portpicker
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -13,24 +12,36 @@ def alloc_can_use_network_port(num=3, used_nccl_ports=None, from_port_num=10000)
         used_nccl_ports = []
 
     port_list = []
+    locked_sockets = []
+    used_set = set(used_nccl_ports)
+    max_port = 65535
     max_attempts = num * 50  # Allow more attempts to find ports in range
 
     for _ in range(max_attempts):
         if len(port_list) >= num:
             break
 
-        try:
-            port = portpicker.pick_unused_port()
-
-            if port >= from_port_num and port not in used_nccl_ports:
-                port_list.append(port)
-                logger.debug(f"Allocated port: {port}")
-            else:
-                logger.debug(f"Port {port} is out of range or in used_nccl_ports, skipping")
-
-        except Exception as e:
-            logger.warning(f"Failed to allocate port: {e}")
+        # 在 [from_port_num, 65535] 范围内随机选端口，避免多进程同时启动时分配到相同端口
+        port = random.randint(from_port_num, max_port)
+        if port in used_set:
             continue
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", port))
+            port_list.append(port)
+            used_set.add(port)
+            locked_sockets.append(sock)
+            logger.debug(f"Allocated and locked port: {port}")
+
+        except OSError as e:
+            sock.close()
+            logger.warning(f"Failed to bind port: {e}")
+            continue
+
+    for sock in locked_sockets:
+        sock.close()
 
     if len(port_list) < num:
         logger.error(f"Failed to allocate {num} ports, only got {len(port_list)}")
