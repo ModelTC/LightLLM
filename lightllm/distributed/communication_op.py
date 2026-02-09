@@ -189,7 +189,7 @@ def all_reduce(
     op: ReduceOp = ReduceOp.SUM,
     async_op: bool = False,
 ) -> None:
-    if get_global_world_size() == 1:
+    if _is_single_group(group=group):
         return
     if isinstance(group, CustomProcessGroup):
         return group.all_reduce(input_)
@@ -203,7 +203,7 @@ def all_gather_into_tensor(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op: bool = False,
 ) -> None:
-    if get_global_world_size() == 1:
+    if _is_single_group(group=group):
         output_.copy_(input_)
         return
     if isinstance(group, CustomProcessGroup):
@@ -218,7 +218,7 @@ def all_gather(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op: bool = False,
 ) -> None:
-    if get_global_world_size() == 1:
+    if _is_single_group(group=group):
         if len(output_) > 0:
             output_[0].copy_(input_)
         return
@@ -236,7 +236,7 @@ def reduce_scatter_tensor(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op=False,
 ):
-    if get_global_world_size() == 1:
+    if _is_single_group(group=group):
         output.copy_(input)
         return
     # 目前还没有定制算子实现。
@@ -252,12 +252,19 @@ def broadcast(
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
     async_op: bool = False,
 ) -> None:
-    if get_global_world_size() == 1:
+    if _is_single_group(group=group):
         return
     if isinstance(group, CustomProcessGroup):
         return dist.broadcast(tensor, src=src, group=group.device_group, async_op=async_op)
     else:
         return dist.broadcast(tensor, src=src, group=group, async_op=async_op)
+
+
+def _is_single_group(group: Optional[Union[ProcessGroup, CustomProcessGroup]]) -> bool:
+    if isinstance(group, CustomProcessGroup):
+        return group.dp_world_size == 1
+    else:
+        return dist.get_world_size(group=group) == 1
 
 
 dist_group_manager = DistributeGroupManager()
