@@ -74,16 +74,19 @@ class LlamaTpPartModel(TpPartBaseModel):
         rope_scaling = self.config.get("rope_scaling", None)
         if rope_scaling is None:
             self._init_to_get_rotary()
-            if "rope_theta_hw" in self.config:
-                self._init_to_get_hw_rotary()
-            return
-
-        if "rope_type" in rope_scaling:
+        elif "rope_type" in rope_scaling:
             scaling_type = rope_scaling["rope_type"]
+            self._init_rotary_by_scaling_type(scaling_type, rope_scaling)
         elif "type" in rope_scaling:
             scaling_type = rope_scaling["type"]
+            self._init_rotary_by_scaling_type(scaling_type, rope_scaling)
         else:
             raise ValueError(f"Unknown RoPE scaling format {rope_scaling}")
+        if "rope_theta_hw" in self.config:
+            self._init_to_get_hw_rotary()
+        super()._init_custom()
+
+    def _init_rotary_by_scaling_type(self, scaling_type, rope_scaling):
         if scaling_type == "default" or "mrope_section" in rope_scaling:
             self._init_to_get_rotary()
         elif scaling_type == "yarn":
@@ -98,9 +101,6 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._init_to_get_rotary()
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
-        if "rope_theta_hw" in self.config:
-            self._init_to_get_hw_rotary()
-        return
 
     def _init_to_get_rotary(self, default_base=10000):
         partial_head_dim = int(self.config.get("partial_rotary_factor", 1) * self.head_dim_)

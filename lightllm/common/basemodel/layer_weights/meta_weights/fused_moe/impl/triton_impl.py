@@ -3,6 +3,7 @@ from typing import Optional
 from lightllm.common.quantization.no_quant import WeightPack
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from .base_impl import FuseMoeBaseImpl
+from lightllm.common.basemodel import routing_manager as _routing_mgr
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
@@ -124,6 +125,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        moe_layer_index: Optional[int] = None,
+        microbatch_index: int = 0,
     ):
         topk_weights, topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -136,6 +139,10 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
         )
+
+        if _routing_mgr.g_routing_capture_manager is not None and moe_layer_index is not None:
+            _routing_mgr.g_routing_capture_manager.capture(moe_layer_index, topk_ids, microbatch_index)
+
         output = self._fused_experts(
             input_tensor=input_tensor,
             w13=w13,

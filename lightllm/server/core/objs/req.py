@@ -1,6 +1,7 @@
 import os
 import math
 import ctypes
+import base64
 import numpy as np
 import time
 from .sampling_params import SamplingParams
@@ -13,6 +14,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -125,6 +127,8 @@ class Req(ctypes.Structure):
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_page_size", ctypes.c_int),
+        # Number of tokens in routing data SHM, written by model worker, read by HTTP server.
+        ("shm_routing_num_tokens", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -182,6 +186,7 @@ class Req(ctypes.Structure):
         self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
+        self.shm_routing_num_tokens = 0
 
         self.post_init()
 
@@ -229,6 +234,66 @@ class Req(ctypes.Structure):
         self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
         self.shm_logprobs.link_shm()
         return
+
+    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.int8):
+        """Link to a pre-allocated routing SHM and create a numpy view for the actual data shape."""
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+        shape = (num_moe_layers, num_tokens, topk)
+        self.shm_routing_data = ShmArray(name, shape, dtype=np_dtype)
+        self.shm_routing_data.link_shm_partial()
+        self.shm_routing_num_tokens = num_tokens
+        return
+
+    def link_routing_data_shm_array(self, num_moe_layers: int, topk: int, np_dtype=np.int8):
+        """Link to the pre-allocated routing SHM from the reader side (HTTP server)."""
+        if num_moe_layers == 0:
+            return
+        num_tokens = self.shm_routing_num_tokens
+        if num_tokens <= 0:
+            return
+        service_uni_name = get_unique_server_name()
+        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+        shape = (num_moe_layers, num_tokens, topk)
+        self.shm_routing_data = ShmArray(name, shape, dtype=np_dtype)
+        self.shm_routing_data.link_shm_partial()
+        return
+
+    def get_routing_data(self):
+        if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
+            return None
+        return self.shm_routing_data.arr
+
+    def close_routing_data_shm_array(self):
+        """Detach from pre-allocated SHM without unlinking it."""
+        if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
+            self.shm_routing_data.detach_shm()
+            self.shm_routing_data = None
+        self.shm_routing_num_tokens = 0
+        return
+
+    def get_routing_metadata(self, num_moe_layers: int, topk: int, dtype_id: int = 1):
+        if num_moe_layers == 0 or topk == 0:
+            return None
+        if self.shm_routing_num_tokens <= 0:
+            return None
+        try:
+            from lightllm.common.basemodel.routing_manager import routing_dtype_id_to_np
+
+            np_dtype = routing_dtype_id_to_np(dtype_id)
+            if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
+                self.link_routing_data_shm_array(num_moe_layers, topk, np_dtype=np_dtype)
+            routing_data = self.get_routing_data()
+            if routing_data is None:
+                return None
+            return {
+                "shape": list(routing_data.shape),
+                "dtype": str(routing_data.dtype),
+                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to read routing data for req {self.request_id}: {e}")
+            return None
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()

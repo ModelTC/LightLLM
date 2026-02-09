@@ -19,6 +19,7 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.common.basemodel import routing_manager as _routing_mgr
 
 logger = init_logger(__name__)
 
@@ -113,6 +114,16 @@ class InferenceContext:
 
         return req_objs
 
+    def _extract_routing_data(self, req: "InferReq"):
+        if req.shm_req.shm_routing_num_tokens > 0:
+            return
+        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
+        mgr = _routing_mgr.g_routing_capture_manager
+        routing_data = mgr.extract_routing_data(mem_indexes)
+        req.shm_req.create_routing_data_shm_array(mgr.num_moe_layers, req.cur_kv_len, mgr.topk, np_dtype=mgr.np_dtype)
+        req.shm_req.shm_routing_data.arr[:] = routing_data
+        req.shm_req.shm_routing_data.detach_shm()
+
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
@@ -149,12 +160,18 @@ class InferenceContext:
         if len(finished_request_ids) == 0:
             return
 
+        need_routing_data = _routing_mgr.g_routing_capture_manager is not None
+
         free_req_index = []
         free_token_index = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
+
+            if need_routing_data:
+                self._extract_routing_data(req)
+
             self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
@@ -588,6 +605,8 @@ class InferReqUpdatePack:
             shm_req.shm_cur_output_len = self.output_len
 
             if finish_status.is_finished():
+                if _routing_mgr.g_routing_capture_manager is not None:
+                    g_infer_context._extract_routing_data(req_obj)
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
                 shm_req.finish_status = req_obj.finish_status
 

@@ -44,6 +44,7 @@ from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
+from lightllm.common.basemodel import routing_manager as _routing_mgr
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.io_struct import (
@@ -995,6 +996,18 @@ class ModeBackend:
             next_token_ids, next_token_logprobs
         )
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
+
+    def _flush_routing_to_kv_buffer(self, mem_indexes: torch.Tensor, microbatch_index: int = 0) -> None:
+        """Scatter captured routing data from capture buffer to KV-indexed GPU buffer.
+
+        Must be called AFTER model.forward() completes.  mem_indexes should be the
+        original (unpadded) tensor — either CPU or CUDA.
+        """
+        if _routing_mgr.g_routing_capture_manager is not None and mem_indexes is not None:
+            if not mem_indexes.is_cuda:
+                mem_indexes = mem_indexes.cuda(non_blocking=True)
+            num_tokens = mem_indexes.shape[0]
+            _routing_mgr.g_routing_capture_manager.flush_to_routing_buffer(mem_indexes, num_tokens, microbatch_index)
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]

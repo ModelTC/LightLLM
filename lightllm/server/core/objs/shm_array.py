@@ -26,6 +26,19 @@ class ShmArray:
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         return
 
+    def link_shm_partial(self):
+        """Link to an existing SHM that may be larger than the needed shape."""
+        self.shm = create_or_link_shm(self.name, -1, force_mode="link")
+        assert self.shm.size >= self.dest_size, f"SHM {self.name} too small: need {self.dest_size}, got {self.shm.size}"
+        self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
+
+    def detach_shm(self):
+        """Close handle without unlinking (SHM persists for reuse)."""
+        if self.shm is not None:
+            self.shm.close()
+            self.shm = None
+            self.arr = None
+
     def close_shm(self):
         if self.shm is not None:
             self.shm.close()
