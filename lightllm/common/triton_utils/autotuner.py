@@ -215,7 +215,7 @@ class Autotuner:
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
-            logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
+            logger.info(f"Loading cached configs for {self.kernel_name} - {dict(static_key)}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         return True
@@ -353,9 +353,9 @@ class Autotuner:
                             option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
                         )
                     )
-                logger.info(f"Saved configs for {self.kernel_name} - {_static_key}")
+                logger.info(f"Saved configs for {self.kernel_name} - {dict(_static_key)}")
 
-        logger.info(f"rank {rank_id} tuning {self.kernel_name} _static_key {static_key} finished")
+        logger.info(f"rank {rank_id} tuning {self.kernel_name} _static_key {dict(static_key)} finished")
 
     def _mutate_args_clone(self, args, kwargs):
         origin_list = []
