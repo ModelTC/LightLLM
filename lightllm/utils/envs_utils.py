@@ -11,15 +11,18 @@ logger = init_logger(__name__)
 
 def set_unique_server_name(args):
     if args.run_mode == "pd_master":
-        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.port) + "_pd_master"
+        os.environ[f"LIGHTLLM_UNIQUE_SERVICE_NAME_ID_{args.pd_node_id}"] = str(args.port) + "_pd_master"
     else:
-        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port) + "_" + str(args.node_rank)
+        os.environ[f"LIGHTLLM_UNIQUE_SERVICE_NAME_ID_{args.pd_node_id}"] = (
+            str(args.nccl_port) + "_" + str(args.node_rank)
+        )
     return
 
 
 @lru_cache(maxsize=None)
 def get_unique_server_name():
-    service_uni_name = os.getenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID")
+    args = get_env_start_args()
+    service_uni_name = os.getenv(f"LIGHTLLM_UNIQUE_SERVICE_NAME_ID_{args.pd_node_id}")
     return service_uni_name
 
 
@@ -33,7 +36,7 @@ def set_env_start_args(args):
     set_cuda_arch(args)
     if not isinstance(args, dict):
         args = vars(args)
-    os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)
+    os.environ[f"LIGHTLLM_START_ARGS_{args.pd_node_id}"] = json.dumps(args)
     return
 
 
@@ -41,7 +44,8 @@ def set_env_start_args(args):
 def get_env_start_args():
     from lightllm.server.core.objs.start_args_type import StartArgs
 
-    start_args: StartArgs = json.loads(os.environ["LIGHTLLM_START_ARGS"])
+    args = get_env_start_args()
+    start_args: StartArgs = json.loads(os.environ[f"LIGHTLLM_START_ARGS_{args.pd_node_id}"])
     start_args: StartArgs = EasyDict(start_args)
     return start_args
 
