@@ -155,6 +155,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu[:run_reqs_num],
                     mask_func=None,
                 )
+                self._flush_routing_after_sample(model_input.mem_indexes)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -197,6 +198,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=False,
                     mask_func=None,
                 )
+                self._flush_routing_after_sample(model_input.mem_indexes)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -263,6 +265,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                     mask_func=None,
                 )
+                self._flush_routing_after_sample(model_input0.mem_indexes, microbatch_index=0)
+                self._flush_routing_after_sample(model_input1.mem_indexes, microbatch_index=1)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -326,6 +330,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=False,
                     mask_func=None,
                 )
+                self._flush_routing_after_sample(model_input0.mem_indexes, microbatch_index=0)
+                self._flush_routing_after_sample(model_input1.mem_indexes, microbatch_index=1)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -374,6 +380,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                     mask_func=None,
                 )
+                self._flush_routing_after_sample(model_input.mem_indexes)
 
             # mtp kv fill
             draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
@@ -471,6 +478,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     mask=accepted_index == 1,
                 )
+                self._flush_routing_after_sample(model_input.mem_indexes)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
@@ -652,6 +660,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=True,
                     b_prefill_has_output_cpu=b_has_out_cpu,
                 )
+                self._flush_routing_after_sample(model_input0.mem_indexes, microbatch_index=0)
+                self._flush_routing_after_sample(model_input1.mem_indexes, microbatch_index=1)
 
             # spec prefill: MTP
             draft_model_input0, draft_model_input1 = model_input0, model_input1
@@ -789,6 +799,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     mask=accepted_index == 1,
                 )
+                self._flush_routing_after_sample(model_input0.mem_indexes, microbatch_index=0)
+                self._flush_routing_after_sample(model_input1.mem_indexes, microbatch_index=1)
             sync_event = torch.cuda.Event()
             sync_event.record()
 

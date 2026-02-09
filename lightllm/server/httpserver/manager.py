@@ -29,6 +29,7 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.common.basemodel.routing_manager import get_routing_config_shm
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
@@ -114,6 +115,9 @@ class HttpServerManager:
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        # Cache routing config for MoE expert routing data extraction
+        self._routing_shm = get_routing_config_shm() if args.enable_return_routed_experts else None
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
@@ -686,6 +690,11 @@ class HttpServerManager:
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
+                    if hasattr(req, "shm_routing_data") and req.shm_routing_data is not None:
+                        try:
+                            req.close_routing_data_shm_array()
+                        except Exception as e:
+                            logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
@@ -772,6 +781,13 @@ class HttpServerManager:
                                         finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
+
+                                    if self._routing_shm is not None and self._routing_shm.arr[0] > 0:
+                                        routing_meta = req.get_routing_metadata(
+                                            int(self._routing_shm.arr[0]), int(self._routing_shm.arr[1])
+                                        )
+                                        if routing_meta is not None:
+                                            metadata["routed_experts"] = routing_meta
 
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:

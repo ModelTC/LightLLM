@@ -162,3 +162,5 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
+
+    enable_return_routed_experts: bool = field(default=False)

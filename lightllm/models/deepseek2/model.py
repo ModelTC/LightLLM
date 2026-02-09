@@ -6,6 +6,7 @@ from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Dee
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.basemodel.routing_manager import init_routing_capture
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
@@ -49,6 +50,9 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
         dist_group_manager.new_deepep_group(self.config["n_routed_experts"], self.config["hidden_size"])
+        if self.args.enable_return_routed_experts:
+            num_moe_layers = sum(1 for w in self.trans_layers_weight if w.is_moe)
+            init_routing_capture(self, num_moe_layers)
 
     def _verify_params(self):
         return super()._verify_params()

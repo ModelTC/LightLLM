@@ -60,10 +60,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Qwen3MOETransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
-        qkv = layer_weight.qkv_proj.mm(input)
-        q, cache_kv = qkv.split(
-            [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
-        )
+        q = layer_weight.q_proj.mm(input)
+        cache_kv = layer_weight.kv_proj.mm(input)
         layer_weight.q_norm_weight_(q, eps=self.eps_)
         layer_weight.k_norm_weight_(
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
@@ -130,6 +128,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            microbatch_index=infer_state.microbatch_index,
         )
         return hidden_states.view(num_tokens, hidden_dim)
 
@@ -150,6 +149,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
             is_prefill=infer_state.is_prefill,
+            microbatch_index=infer_state.microbatch_index,
         )
 
         ep_output = ep_output.view(token_num, hidden_dim)
