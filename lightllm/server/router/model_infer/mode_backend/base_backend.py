@@ -1007,7 +1007,7 @@ class ModeBackend:
             if not mem_indexes.is_cuda:
                 mem_indexes = mem_indexes.cuda(non_blocking=True)
             num_tokens = mem_indexes.shape[0]
-            _routing_mgr.g_routing_capture_manager.flush_to_kv_buffer(mem_indexes, num_tokens, microbatch_index)
+            _routing_mgr.g_routing_capture_manager.flush_to_routing_buffer(mem_indexes, num_tokens, microbatch_index)
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
