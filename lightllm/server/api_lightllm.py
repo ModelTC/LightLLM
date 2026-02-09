@@ -53,6 +53,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     prompt_token_ids = None
     is_first_metadata = True
     input_usage = None
+    routed_experts_data = None
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
         # when set "--return_all_prompt_logprobs", the first token metadata will contains
         # prompt_logprobs and prompt_token_ids
@@ -78,6 +79,8 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
 
         if finish_status.is_finished():
             finish_reason_dict[sub_req_id] = finish_status
+            if "routed_experts" in metadata:
+                routed_experts_data = metadata["routed_experts"]
     n = sampling_params.n
     sub_ids = list(final_output_dict.keys())[:n]
     final_output_list = ["".join(final_output_dict[sub_id]) for sub_id in sub_ids]
@@ -102,6 +105,8 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
         ret["prompt_logprobs"] = prompt_logprobs
     if input_usage is not None:
         ret["input_usage"] = input_usage
+    if routed_experts_data is not None:
+        ret["routed_experts"] = routed_experts_data
 
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
 

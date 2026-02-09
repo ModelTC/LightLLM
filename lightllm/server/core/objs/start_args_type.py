@@ -184,4 +184,6 @@ class StartArgs:
     enable_torch_fallback: bool = field(default=False)
     enable_triton_fallback: bool = field(default=False)
 
+    enable_return_routed_experts: bool = field(default=False)
+
     weight_version: str = "default"

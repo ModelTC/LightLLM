@@ -40,8 +40,8 @@ class DiversehBackend(ChunkedPrefillBackend):
         )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-
             model_output = self.model.forward(model_input)
+            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             logits = model_output.logits
 
             batch_idx, run_reqs = self._diverse_copy(

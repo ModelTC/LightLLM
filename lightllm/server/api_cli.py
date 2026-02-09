@@ -644,4 +644,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         If the op is not implemented for the platform and the hardware support triton,
         it will use triton implementation.""",
     )
+    parser.add_argument(
+        "--enable_return_routed_experts",
+        action="store_true",
+        default=False,
+        help="Enable returning routed expert indices for MoE models (R3 feature).",
+    )
     return parser
