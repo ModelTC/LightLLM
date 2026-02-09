@@ -113,7 +113,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
 def _random_sample(probs: torch.Tensor):
     q = torch.empty_like(probs)
     q.exponential_()
-    return probs.div_(q).argmax(dim=-1).view(-1)
+    return probs.div(q).argmax(dim=-1).view(-1)
 
 
 def _get_post_sample_tensors(reqs: List[InferReq]):
