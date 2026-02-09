@@ -13,6 +13,7 @@ def set_unique_server_name(args):
     if args.run_mode == "pd_master":
         os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.port) + "_pd_master"
     else:
+        assert str(args.nccl_port) != "None", "nccl_port is not set"
         os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port) + "_" + str(args.node_rank)
     return
 
