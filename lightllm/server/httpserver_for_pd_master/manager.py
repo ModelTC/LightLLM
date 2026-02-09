@@ -137,7 +137,7 @@ class HttpServerManagerForPDMaster:
         x_session_id = request.headers.get("X-Session-Id", "")
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
-            f"recieved req X-Request-Id:{x_request_id} "
+            f"received req X-Request-Id:{x_request_id} "
             f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
             f"lightllm_req_id:{group_request_id} "
         )
