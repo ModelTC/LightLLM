@@ -10,7 +10,7 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_time_out_seconds, get_lightllm_gunicorn_keep_alive
+from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -333,13 +333,11 @@ def normal_or_p_d_start(args):
         ],
     )
 
-    # 启动 gunicorn
+    # 启动 Hypercorn
     command = [
-        "gunicorn",
+        "hypercorn",
         "--workers",
         f"{args.httpserver_workers}",
-        "--worker-class",
-        "uvicorn.workers.UvicornWorker",
         "--bind",
         f"{args.host}:{args.port}",
         "--log-level",
@@ -349,8 +347,6 @@ def normal_or_p_d_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--timeout",
-        f"{get_lightllm_gunicorn_time_out_seconds()}",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]
@@ -403,11 +399,9 @@ def pd_master_start(args):
     )
 
     command = [
-        "gunicorn",
+        "hypercorn",
         "--workers",
         "1",
-        "--worker-class",
-        "uvicorn.workers.UvicornWorker",
         "--bind",
         f"{args.host}:{args.port}",
         "--log-level",
@@ -418,8 +412,6 @@ def pd_master_start(args):
         "-",
         "--preload",
         "lightllm.server.api_http:app",
-        "--timeout",
-        f"{get_lightllm_gunicorn_time_out_seconds()}",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]
@@ -445,11 +437,9 @@ def config_server_start(args):
     set_env_start_args(args)
 
     command = [
-        "gunicorn",
+        "hypercorn",
         "--workers",
         "1",
-        "--worker-class",
-        "uvicorn.workers.UvicornWorker",
         "--bind",
         f"{args.config_server_host}:{args.config_server_port}",
         "--log-level",
@@ -460,8 +450,6 @@ def config_server_start(args):
         "-",
         "--preload",
         "lightllm.server.config_server.api_http:app",
-        "--timeout",
-        f"{get_lightllm_gunicorn_time_out_seconds()}",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]

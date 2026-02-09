@@ -125,10 +125,14 @@ def _find_sibling_processes():
 
     # 查找兄弟进程
     sibling_processes = []
-    for proc in psutil.process_iter(["pid", "name"]):
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
             # 检查是否是兄弟进程（同一父进程且不是当前进程）
             if proc.pid != current_pid and proc.ppid() == parent_process.pid:
+                # 过滤掉 multiprocessing.resource_tracker 进程
+                cmdline = proc.cmdline()
+                if cmdline and "multiprocessing.resource_tracker" in " ".join(cmdline):
+                    continue
                 sibling_processes.append(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
