@@ -35,6 +35,9 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
     return_details = sample_params_dict.pop("return_details", False)
+    return_routed_experts = sample_params_dict.pop(
+        "return_routed_experts", httpserver_manager.args.enable_return_routed_experts
+    )
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()
@@ -105,7 +108,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
         ret["prompt_logprobs"] = prompt_logprobs
     if input_usage is not None:
         ret["input_usage"] = input_usage
-    if routed_experts_data is not None:
+    if return_routed_experts and routed_experts_data is not None:
         ret["routed_experts"] = routed_experts_data
 
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
@@ -117,6 +120,7 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
     _ = sample_params_dict.pop("return_details", False)
+    _ = sample_params_dict.pop("return_routed_experts", None)
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=httpserver_manager.tokenizer, **sample_params_dict)
     sampling_params.verify()

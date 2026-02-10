@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 def routing_dtype_id_to_np(dtype_id: int):
     if dtype_id == 1:
-        return np.int8
+        return np.uint8
     elif dtype_id == 2:
         return np.int16
     return np.int32
@@ -39,8 +39,8 @@ class RoutingCaptureManager:
         self.num_experts = num_experts
         self.kv_cache_size = kv_cache_size
 
-        self.dtype = torch.int8 if num_experts <= 127 else torch.int16
-        dtype_bytes = 1 if self.dtype == torch.int8 else 2
+        self.dtype = torch.uint8 if num_experts <= 255 else torch.int16
+        dtype_bytes = 1 if self.dtype == torch.uint8 else 2
 
         # Shape: (num_moe_layers, kv_cache_size, topk) — on CPU to save GPU memory.
         # Written after forward() via flush_to_routing_buffer(), read on request finish.
@@ -57,7 +57,7 @@ class RoutingCaptureManager:
             torch.zeros((max_capture_tokens, num_moe_layers, topk), dtype=self.dtype, device="cuda") for _ in range(2)
         ]
 
-        dtype_name = "int8" if self.dtype == torch.int8 else "int16"
+        dtype_name = "uint8" if self.dtype == torch.uint8 else "int16"
         logger.info(
             f"RoutingCaptureManager initialized: {num_moe_layers} MoE layers, topk={topk}, "
             f"routing_buffer(cpu)={routing_buffer_size / 1024 / 1024:.2f}MB, "
@@ -66,11 +66,11 @@ class RoutingCaptureManager:
 
     @property
     def np_dtype(self):
-        return np.int8 if self.dtype == torch.int8 else np.int16
+        return np.uint8 if self.dtype == torch.uint8 else np.int16
 
     @property
     def dtype_id(self) -> int:
-        return 1 if self.dtype == torch.int8 else 2
+        return 1 if self.dtype == torch.uint8 else 2
 
     def capture(self, moe_layer_index: int, topk_ids: torch.Tensor, microbatch_index: int = 0) -> None:
         num_tokens = topk_ids.shape[0]
