@@ -614,6 +614,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Directory used to persist disk cache data. Defaults to a temp directory when not set.""",
     )
     parser.add_argument(
+        "--redis_endpoint",
+        type=str,
+        default="",
+        help="""Redis endpoint used by disk cache index service (LightMem).""",
+    )
+    parser.add_argument(
+        "--num_node_in_disk_cache",
+        type=int,
+        default=1,
+        help="""Number of nodes participating in disk cache index sharding.
+        Only used when --redis_endpoint is set. All nodes must use the same value.""",
+    )
+    parser.add_argument(
         "--enable_dp_prompt_cache_fetch",
         action="store_true",
         default=False,
