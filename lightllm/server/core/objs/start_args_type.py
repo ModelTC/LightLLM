@@ -148,6 +148,8 @@ class StartArgs:
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
     disk_cache_dir: Optional[str] = field(default=None)
+    redis_endpoint: str = field(default="")
+    num_node_in_disk_cache: int = field(default=1)
     enable_dp_prompt_cache_fetch: bool = field(default=False)
     # zmp ports
     router_port: int = field(default=None)
