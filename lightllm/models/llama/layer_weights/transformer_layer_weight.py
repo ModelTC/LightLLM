@@ -90,6 +90,8 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
             data_type=self.data_type_,
             bias_names=self._o_bias_name,
             quant_method=self.get_quant_method("o_proj"),
+            tp_rank=0,
+            tp_world_size=1,
         )
 
     def _init_ffn(self):

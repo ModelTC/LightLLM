@@ -1,6 +1,8 @@
 import os
 import torch
 import torch.distributed as dist
+
+from lightllm.distributed.communication_op import all_gather_into_tensor
 from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
 from lightllm.distributed import all_reduce
@@ -77,9 +79,20 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         )
 
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+            o = o.view(-1, self.tp_o_head_num_ * self.head_dim_)
+            gathered = self.alloc_tensor((o.shape[0] * self.tp_world_size_, o.shape[1]), dtype=o.dtype, device=o.device)
+            all_gather_into_tensor(gathered, o, group=infer_state.dist_group, async_op=False)
+            # [world_size, B, local_dim] -> [B, world_size, local_dim] -> [B, total_dim]
+            gather_qkv = (
+                gathered.view(self.tp_world_size_, o.shape[0], o.shape[1])
+                .transpose(0, 1)
+                .contiguous()
+                .view(o.shape[0], -1)
+            )
+        else:
+            gather_qkv = o.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        o = self._get_o(gather_qkv, infer_state, layer_weight)
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight, residual=o.view(-1, self.embed_dim_))
         o = None
@@ -97,9 +110,20 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         # self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+            o = o.view(-1, self.tp_o_head_num_ * self.head_dim_)
+            gathered = self.alloc_tensor((o.shape[0] * self.tp_world_size_, o.shape[1]), dtype=o.dtype, device=o.device)
+            all_gather_into_tensor(gathered, o, group=infer_state.dist_group, async_op=False)
+            # [world_size, B, local_dim] -> [B, world_size, local_dim] -> [B, total_dim]
+            gather_qkv = (
+                gathered.view(self.tp_world_size_, o.shape[0], o.shape[1])
+                .transpose(0, 1)
+                .contiguous()
+                .view(o.shape[0], -1)
+            )
+        else:
+            gather_qkv = o.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        o = self._get_o(gather_qkv, infer_state, layer_weight)
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight, residual=o.view(-1, self.embed_dim_))
         o = None
 

@@ -132,7 +132,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        # input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
