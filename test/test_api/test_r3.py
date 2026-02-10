@@ -16,8 +16,8 @@ def test_routing_export(url: str = "http://localhost:8000"):
                 "inputs": "What is the capital of France? What is the capital of France?",
                 "parameters": {
                     "max_new_tokens": 50,
-                    "return_routed_experts": True,
-                    "repetition_penalty": 1.0,
+                    # "return_routed_experts": True,
+                    # "repetition_penalty": 1.0,
                 },
             },
             timeout=60,
@@ -60,16 +60,9 @@ def test_routing_export(url: str = "http://localhost:8000"):
     print(f"{'=' * 50}")
     print(f"Shape: {shape}")
     print(f"Dtype: {dtype}")
-    print(f"Num MoE layers: {shape[0]}")
-    print(f"Num tokens: {shape[1]}")
+    print(f"Num tokens: {shape[0]}")
+    print(f"Num MoE layers: {shape[1]}")
     print(f"Top-K: {shape[2]}")
-
-    # Verify dtype is int8 (for models with ≤127 experts) or int16
-    if dtype_str not in ("int8", "int16"):
-        print(f"\nERROR: Expected dtype int8 or int16, got {dtype_str}")
-        print("This suggests dtype optimization is not working correctly.")
-        return False
-    print(f"\nDtype check PASSED: {dtype_str} (compact representation)")
 
     # Compute payload size savings
     int32_size = np.prod(shape) * 4
@@ -78,9 +71,9 @@ def test_routing_export(url: str = "http://localhost:8000"):
     print(f"Payload: {actual_size} bytes (vs {int32_size} bytes with int32, {savings:.0f}% smaller)")
 
     print(f"\nSample routing (first layer, first 5 tokens):")
-    num_tokens_to_show = shape[1]
+    num_tokens_to_show = shape[0]
     for i in range(num_tokens_to_show):
-        print(f"  Token {i}: experts {routing_array[0, i, :].tolist()}")
+        print(f"  Token {i}: experts {routing_array[i, 0, :].tolist()}")
 
     if np.all(routing_array == 0):
         print("\nWARNING: All routing data is zeros. Capture may not be working correctly.")

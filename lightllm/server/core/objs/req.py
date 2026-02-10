@@ -236,17 +236,20 @@ class Req(ctypes.Structure):
         return
 
     def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.int8):
-        """Link to a pre-allocated routing SHM and create a numpy view for the actual data shape."""
+        """Create routing SHM at actual size (on-demand, not pre-allocated).
+
+        Uses smart mode: links if same-sized SHM exists, otherwise creates new.
+        """
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-        shape = (num_moe_layers, num_tokens, topk)
+        shape = (num_tokens, num_moe_layers, topk)
         self.shm_routing_data = ShmArray(name, shape, dtype=np_dtype)
-        self.shm_routing_data.link_shm_partial()
+        self.shm_routing_data.create_shm()
         self.shm_routing_num_tokens = num_tokens
         return
 
     def link_routing_data_shm_array(self, num_moe_layers: int, topk: int, np_dtype=np.int8):
-        """Link to the pre-allocated routing SHM from the reader side (HTTP server)."""
+        """Link to routing SHM from the reader side (HTTP server)."""
         if num_moe_layers == 0:
             return
         num_tokens = self.shm_routing_num_tokens
@@ -254,9 +257,9 @@ class Req(ctypes.Structure):
             return
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-        shape = (num_moe_layers, num_tokens, topk)
+        shape = (num_tokens, num_moe_layers, topk)
         self.shm_routing_data = ShmArray(name, shape, dtype=np_dtype)
-        self.shm_routing_data.link_shm_partial()
+        self.shm_routing_data.link_shm()
         return
 
     def get_routing_data(self):
@@ -265,9 +268,9 @@ class Req(ctypes.Structure):
         return self.shm_routing_data.arr
 
     def close_routing_data_shm_array(self):
-        """Detach from pre-allocated SHM without unlinking it."""
+        """Close and unlink routing SHM (on-demand, no longer pooled)."""
         if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
-            self.shm_routing_data.detach_shm()
+            self.shm_routing_data.close_shm()
             self.shm_routing_data = None
         self.shm_routing_num_tokens = 0
         return

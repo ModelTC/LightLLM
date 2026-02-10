@@ -112,13 +112,18 @@ class SamplingParams:
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            def _cfg(key, default):
+                v = generation_cfg.get(key)
+                return v if v is not None else default
+
+            cls._do_sample = _cfg("do_sample", False)
+            cls._presence_penalty = _cfg("presence_penalty", 0.0)
+            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
+            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
+            cls._temperature = _cfg("temperature", 1.0)
+            cls._top_p = _cfg("top_p", 1.0)
+            cls._top_k = _cfg("top_k", -1)
             cls._stop_sequences = generation_cfg.get("stop", None)
         except:
             pass

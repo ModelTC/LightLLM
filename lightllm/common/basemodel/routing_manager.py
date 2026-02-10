@@ -7,7 +7,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_rank_in_dp
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -42,11 +41,11 @@ class RoutingCaptureManager:
         self.dtype = torch.uint8 if num_experts <= 255 else torch.int16
         dtype_bytes = 1 if self.dtype == torch.uint8 else 2
 
-        # Shape: (num_moe_layers, kv_cache_size, topk) — on CPU to save GPU memory.
+        # Shape: (kv_cache_size, num_moe_layers, topk) — on CPU to save GPU memory.
         # Written after forward() via flush_to_routing_buffer(), read on request finish.
         routing_buffer_size = num_moe_layers * kv_cache_size * topk * dtype_bytes
         self.routing_buffer = torch.zeros(
-            (num_moe_layers, kv_cache_size, topk),
+            (kv_cache_size, num_moe_layers, topk),
             dtype=self.dtype,
             device="cpu",
         )
@@ -78,12 +77,11 @@ class RoutingCaptureManager:
 
     def flush_to_routing_buffer(self, mem_indexes: torch.Tensor, num_tokens: int, microbatch_index: int = 0) -> None:
         buf = self._capture_buffer[microbatch_index][:num_tokens]  # (num_tokens, num_moe_layers, topk)
-        buf_t = buf.permute(1, 0, 2).cpu()
-        self.routing_buffer[:, mem_indexes[:num_tokens].cpu(), :] = buf_t
+        self.routing_buffer[mem_indexes[:num_tokens].cpu(), :, :] = buf.cpu()
 
     def extract_routing_data(self, mem_indexes: torch.Tensor) -> np.ndarray:
         cpu_indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
-        return self.routing_buffer[:, cpu_indexes, :].numpy()
+        return self.routing_buffer[cpu_indexes, :, :].numpy()
 
 
 g_routing_capture_manager: Optional[RoutingCaptureManager] = None
@@ -104,27 +102,6 @@ def create_routing_capture_manager(
         num_experts=num_experts,
         kv_cache_size=kv_cache_size,
         max_capture_tokens=max_capture_tokens,
-    )
-
-
-def preallocate_routing_shm_pool(max_req_num: int, num_moe_layers: int, max_tokens: int, topk: int, np_dtype) -> None:
-    """Pre-allocate POSIX SHM segments for all request slots.
-
-    Each segment is sized for the maximum possible routing data so it can be
-    reused across requests without create/destroy overhead.
-    """
-    dtype_bytes = np.dtype(np_dtype).itemsize
-    segment_size = num_moe_layers * max_tokens * topk * dtype_bytes
-    service_name = get_unique_server_name()
-
-    for i in range(max_req_num):
-        name = f"{service_name}_shm_routing_{i}"
-        shm = create_or_link_shm(name, segment_size, auto_cleanup=True)
-        shm.close()  # close handle; SHM persists in /dev/shm
-
-    logger.info(
-        f"Pre-allocated {max_req_num} routing SHM segments, "
-        f"each {segment_size / 1024:.1f} KB (total {max_req_num * segment_size / 1024 / 1024:.1f} MB)"
     )
 
 
@@ -197,7 +174,6 @@ def init_routing_capture(model, num_moe_layers: int) -> None:
     )
 
     mgr = g_routing_capture_manager
-    np_dtype = mgr.np_dtype
     dtype_id = mgr.dtype_id
 
     max_req_total_len = args.max_req_total_len
@@ -212,13 +188,4 @@ def init_routing_capture(model, num_moe_layers: int) -> None:
         f"Shared routing config set: num_moe_layers={num_moe_layers}, topk={topk}, "
         f"dtype_id={dtype_id}, max_tokens={max_req_total_len}"
     )
-
-    preallocate_routing_shm_pool(
-        max_req_num=args.running_max_req_size,
-        num_moe_layers=num_moe_layers,
-        max_tokens=max_req_total_len,
-        topk=topk,
-        np_dtype=np_dtype,
-    )
-
     atexit.register(cleanup_routing_shm_pool)
