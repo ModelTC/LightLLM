@@ -21,6 +21,8 @@ def set_unique_server_name(args):
 @lru_cache(maxsize=None)
 def get_unique_server_name():
     service_uni_name = os.getenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID")
+    assert "None" not in service_uni_name, "service_uni_name is not set"
+
     return service_uni_name
 
 
