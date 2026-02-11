@@ -193,7 +193,9 @@ class BMMWeightTpl(BaseWeightTpl):
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         for weight_name in self.weight_names:
             if weight_name in weights:
-                weight = self.param_slicer._slice_weight(weights[weight_name])
+                tp_start = self.tp_rank_ * self.dim0
+                tp_end = (self.tp_rank_ + 1) * self.dim0
+                weight = weights[weight_name][tp_start:tp_end, :, :]
                 self.weight.copy_(weight)
                 self.weight.load_ok = True
         return
