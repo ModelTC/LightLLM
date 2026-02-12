@@ -5,7 +5,7 @@ from . import (
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
-    NeoMemoryManager,
+    # NeoMemoryManager,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
@@ -26,10 +26,10 @@ def select_mem_manager_class():
         mem_class = Deepseek2MemoryManager
         logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
         return mem_class
-    # 判断是否是 neo 系列的模型
-    elif issubclass(model_class, NeoTpMOEPartModel) or issubclass(model_class, NeoTpPartModel):
-        mem_class = NeoMemoryManager
-        return mem_class
+    # # 判断是否是 neo 系列的模型
+    # elif issubclass(model_class, NeoTpMOEPartModel) or issubclass(model_class, NeoTpPartModel):
+    #     mem_class = NeoMemoryManager
+    #     return mem_class
 
     # case normal
     logger.info(f"mode setting params: {get_env_start_args().llm_kv_type}")

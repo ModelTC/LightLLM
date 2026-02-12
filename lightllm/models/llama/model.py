@@ -129,9 +129,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         except:
             pass
 
-        inv_freq = 1.0 / (
+        full_inv_freq = 1.0 / (
             base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
         )
+        inv_freq = full_inv_freq[::2]  # for neo
         t = (
             torch.arange(max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32)
             / rope_scaling_factor
@@ -169,9 +170,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         except:
             pass
 
-        inv_freq = 1.0 / (
+        full_inv_freq = 1.0 / (
             base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
         )
+        inv_freq = full_inv_freq[::2]
         t = (
             torch.arange(max(max_seq_len + 1024 * 128, self.max_seq_length), device="cpu", dtype=torch.float32)
             / rope_scaling_factor

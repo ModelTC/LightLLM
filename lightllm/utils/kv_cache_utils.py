@@ -24,7 +24,7 @@ from lightllm.common.kv_cache_mem_manager import (
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
-    NeoMemoryManager,
+    # NeoMemoryManager,
 )
 
 from typing import List, Tuple, Optional
