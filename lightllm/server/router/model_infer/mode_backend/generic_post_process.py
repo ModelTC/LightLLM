@@ -73,7 +73,8 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
         next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
         next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
-        return next_token_ids.view(-1), next_token_logprobs.view(-1)
+        top_k_logprobs_val, top_k_logprobs_idx = _get_top_logprobs(probs, k=20)
+        return next_token_ids.view(-1), next_token_logprobs.view(-1), top_k_logprobs_idx, top_k_logprobs_val
 
     elif get_env_start_args().sampling_backend == "sglang_kernel":
         from sgl_kernel import top_k_top_p_sampling_from_probs
@@ -102,6 +103,12 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sort[torch.arange(0, probs.shape[-1], device="cuda").view(1, -1) >= top_ks.view(-1, 1)] = 0.0
 
     return probs_sort, probs_idx
+
+
+def _get_top_logprobs(probs: torch.Tensor, k: int = 20):
+    top_k_logprobs_val, top_k_logprobs_idx = torch.topk(probs, k=k, dim=-1)
+    top_k_logprobs_val = torch.log(top_k_logprobs_val)
+    return top_k_logprobs_val, top_k_logprobs_idx
 
 
 def _get_post_sample_tensors(reqs: List[InferReq]):
