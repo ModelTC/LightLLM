@@ -1,4 +1,21 @@
+import json
+
 tokenizer = None
+
+
+def _convert_tool_calls_arguments(messages):
+    for msg in messages:
+        if "tool_calls" in msg and msg["tool_calls"]:
+            for tc in msg["tool_calls"]:
+                if "function" in tc and "arguments" in tc["function"]:
+                    args = tc["function"]["arguments"]
+                    if isinstance(args, str):
+                        try:
+                            tc["function"]["arguments"] = json.loads(args) if args.strip() else {}
+                        except json.JSONDecodeError:
+                            # Keep as-is if parsing fails
+                            pass
+    return messages
 
 
 def init_tokenizer(args):
@@ -17,6 +34,8 @@ async def build_prompt(request, tools) -> str:
     global tokenizer
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
+    # Convert tool_calls arguments from JSON string to dict for templates that expect dict
+    messages = _convert_tool_calls_arguments(messages)
     kwargs = {"conversation": messages}
     if request.character_settings:
         kwargs["character_settings"] = request.character_settings
