@@ -18,6 +18,14 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
         weights = {k: weights.get_tensor(k) for k in weights.keys()}
     else:
         weights = utils.PetrelHelper.load(os.path.join(weight_dir, file_), map_location="cpu")
+        new_weight = {}
+        for k, v in weights.items():
+            if "language_model." in k:
+                new_weight[k[len("language_model.") :]] = v
+            else:
+                new_weight[k] = v
+        del weights
+        weights = new_weight
 
     if pre_post_layer is not None:
         pre_post_layer.load_hf_weights(weights)

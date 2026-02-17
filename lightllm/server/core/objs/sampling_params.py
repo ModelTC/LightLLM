@@ -333,15 +333,31 @@ class SamplingParams(ctypes.Structure):
 
     def init(self, tokenizer, **kwargs):
         super().__init__()
+        # 移除kwargs中为null的参数，避免覆盖默认值
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
-        self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
-        self.presence_penalty = kwargs.get("presence_penalty", SamplingParams._presence_penalty)
-        self.frequency_penalty = kwargs.get("frequency_penalty", SamplingParams._frequency_penalty)
-        self.repetition_penalty = kwargs.get("repetition_penalty", SamplingParams._repetition_penalty)
-        self.temperature = kwargs.get("temperature", SamplingParams._temperature)
-        self.top_p = kwargs.get("top_p", SamplingParams._top_p)
-        self.top_k = kwargs.get("top_k", SamplingParams._top_k)
+        do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
+        self.do_sample = False if do_sample is None else do_sample
+
+        presence_penalty = kwargs.get("presence_penalty", SamplingParams._presence_penalty)
+        self.presence_penalty = 0.0 if presence_penalty is None else presence_penalty
+
+        frequency_penalty = kwargs.get("frequency_penalty", SamplingParams._frequency_penalty)
+        self.frequency_penalty = 0.0 if frequency_penalty is None else frequency_penalty
+
+        repetition_penalty = kwargs.get("repetition_penalty", SamplingParams._repetition_penalty)
+        self.repetition_penalty = 1.0 if repetition_penalty is None else repetition_penalty
+
+        temperature = kwargs.get("temperature", SamplingParams._temperature)
+        self.temperature = 1.0 if temperature is None else temperature
+
+        top_p = kwargs.get("top_p", SamplingParams._top_p)
+        self.top_p = 1.0 if top_p is None else top_p
+
+        top_k = kwargs.get("top_k", SamplingParams._top_k)
+        self.top_k = -1 if top_k is None else top_k
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
         self.max_new_tokens = kwargs.get("max_new_tokens", 16)
@@ -408,13 +424,35 @@ class SamplingParams(ctypes.Structure):
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            # Some checkpoints store null sampling fields in generation_config.json.
+            # Keep robust numeric defaults instead of propagating None into ctypes fields.
             cls._do_sample = generation_cfg.get("do_sample", False)
+            if cls._do_sample is None:
+                cls._do_sample = False
+
             cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
+            if cls._presence_penalty is None:
+                cls._presence_penalty = 0.0
+
             cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
+            if cls._frequency_penalty is None:
+                cls._frequency_penalty = 0.0
+
             cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
+            if cls._repetition_penalty is None:
+                cls._repetition_penalty = 1.0
+
             cls._temperature = generation_cfg.get("temperature", 1.0)
+            if cls._temperature is None:
+                cls._temperature = 1.0
+
             cls._top_p = generation_cfg.get("top_p", 1.0)
+            if cls._top_p is None:
+                cls._top_p = 1.0
+
             cls._top_k = generation_cfg.get("top_k", -1)
+            if cls._top_k is None:
+                cls._top_k = -1
         except:
             pass
 
