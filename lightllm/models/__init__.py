@@ -7,6 +7,8 @@ from lightllm.models.qwen.model import QWenTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen3.model import Qwen3TpPartModel
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
+from lightllm.models.qwen3next_mtp.model import Qwen3NextMTPModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.stablelm.model import StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel
@@ -38,4 +40,8 @@ from lightllm.models.tarsier2.model import (
 )
 from lightllm.models.gpt_oss.model import GptOssTpPartModel
 from lightllm.models.qwen3_omni_moe_thinker.model import Qwen3OmniMOETpPartModel
+from lightllm.models.qwen3_5.model import (
+    Qwen3_5TpPartModel,
+    Qwen3_5MOETpPartModel,
+)
 from .registry import get_model, get_model_class
