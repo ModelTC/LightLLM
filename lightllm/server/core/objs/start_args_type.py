@@ -31,7 +31,8 @@ class StartArgs:
     batch_max_tokens: Optional[int] = field(default=None)
     eos_id: List[int] = field(default_factory=list)
     tool_call_parser: Optional[str] = field(
-        default=None, metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen"]}
+        default=None,
+        metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen", "qwen3_coder"]},
     )
     reasoning_parser: Optional[str] = field(
         default=None,
@@ -54,7 +55,7 @@ class StartArgs:
         },
     )
     chat_template: Optional[str] = field(default=None)
-    running_max_req_size: int = field(default=1000)
+    running_max_req_size: int = field(default=512)
     tp: int = field(default=1)
     dp: int = field(default=1)
     nnodes: int = field(default=1)
@@ -107,7 +108,7 @@ class StartArgs:
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
     prefll_cudagraph_max_handle_token: int = field(default=512)
-    graph_max_batch_size: int = field(default=256)
+    graph_max_batch_size: int = field(default=512)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
     graph_max_len_in_batch: int = field(default=0)
@@ -134,7 +135,18 @@ class StartArgs:
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     mtp_mode: Optional[str] = field(
-        default=None, metadata={"choices": ["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att"]}
+        default=None,
+        metadata={
+            "choices": [
+                "vanilla_with_att",
+                "eagle_with_att",
+                "vanilla_no_att",
+                "eagle_no_att",
+                "qwen3next_vanilla",
+                "qwen3next_eagle",
+                None,
+            ]
+        },
     )
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
@@ -162,3 +174,7 @@ class StartArgs:
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
+
+    # hybrid attention model (Qwen3Next)
+    mamba_cache_size: int = field(default=800)
+    mamba_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})

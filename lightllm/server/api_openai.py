@@ -176,10 +176,24 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             multimodal_params_dict["images"].append({"type": "base64", "data": data})
                         else:
                             raise ValueError("Unrecognized image input.")
+                    elif img.startswith("file://"):
+                        # Local file path with file:// prefix
+                        file_path = img[7:]  # Remove "file://" prefix
+                        with open(file_path, "rb") as f:
+                            multimodal_params_dict["images"].append(
+                                {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
+                            )
                     else:
-                        raise ValueError(
-                            "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
-                        )
+                        # Treat as local file path
+                        if os.path.isfile(img):
+                            with open(img, "rb") as f:
+                                multimodal_params_dict["images"].append(
+                                    {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
+                                )
+                        else:
+                            raise ValueError(
+                                "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
+                            )
 
     tools = None
     if request.tools and request.tool_choice != "none":

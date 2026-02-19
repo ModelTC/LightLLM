@@ -132,7 +132,8 @@ def normal_or_p_d_start(args):
 
     # mtp params check
     if args.mtp_mode is not None:
-        assert args.mtp_draft_model_dir is not None
+        if args.mtp_draft_model_dir is None:
+            args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
         assert args.mtp_step > 0
     else:
         assert args.mtp_draft_model_dir is None

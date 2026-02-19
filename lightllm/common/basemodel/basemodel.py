@@ -53,6 +53,12 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
+    @classmethod
+    def get_radix_cache_class(cls):
+        from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+
+        return RadixCache
+
     def __init__(self, kvargs):
         self.args = get_env_start_args()
         self.run_mode = kvargs["run_mode"]

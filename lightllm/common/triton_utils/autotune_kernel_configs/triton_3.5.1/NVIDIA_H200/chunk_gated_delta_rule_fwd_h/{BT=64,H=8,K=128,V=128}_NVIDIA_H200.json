@@ -1,0 +1,12 @@
+{
+  "2": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "4": {
+    "BV": 32,
+    "num_stages": 4,
+    "num_warps": 4
+  }
+}
