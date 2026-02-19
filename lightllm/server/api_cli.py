@@ -128,7 +128,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "glm47", "kimi_k2"],
+        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "glm47", "kimi_k2", "qwen3_coder"],
         default=None,
         help="tool call parser type",
     )
@@ -551,7 +551,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att", None],
+        choices=[
+            "vanilla_with_att",
+            "eagle_with_att",
+            "vanilla_no_att",
+            "eagle_no_att",
+            "qwen3next_vanilla",
+            "qwen3next_eagle",
+            None,
+        ],
         default=None,
         help="""Supported MTP modes.
         None: Disables MTP.
@@ -620,6 +628,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+    )
+    parser.add_argument("--mamba_cache_size", type=int, default=3000, help="""The size of linear attn cache. """)
+    parser.add_argument(
+        "--mamba_ssm_data_type",
+        type=str,
+        choices=["bfloat16", "float32"],
+        default="float32",
+        help="the data type of the model weight",
     )
     parser.add_argument(
         "--hardware_platform",

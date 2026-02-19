@@ -1,8 +1,10 @@
 import torch
 import collections
+from lightllm.common.basemodel.triton_kernel.alloc_buffer_kernel import alloc_buffer_for_req_triton
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
+
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
@@ -92,6 +94,18 @@ class ReqManager:
     def free_all(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
+
+    def alloc_buffer_for_req(self, req_index: torch.Tensor):
+        """Allocate buffers for requests. No-op for standard models without linear attention."""
+        pass
+
+    def free_buffer(self, free_buffer_indexes):
+        """Free buffer memory. No-op for standard models without linear attention."""
+        pass
+
+    def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
+        """Copy buffer state between requests. No-op for standard models without linear attention."""
+        pass
 
 
 class ReqSamplingParamsManager:
@@ -232,3 +246,35 @@ class ReqSamplingParamsManager:
             p_token_counts_tensor.cuda(non_blocking=True),
             p_cumsum_seq_len_tensor.cuda(non_blocking=True),
         )
+
+
+class ReqManagerForMamba(ReqManager):
+    def __init__(self, max_request_num, max_sequence_length, mem_manager):
+        from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
+
+        super().__init__(max_request_num, max_sequence_length, mem_manager)
+        self.mtp_step = get_env_start_args().mtp_step
+        self.buffer_mem_manager: MambaCacheManager = self.mem_manager.mamba_cache_mem_manager
+        self.req_to_buffer_index = torch.zeros(
+            (self.max_request_num + 1, self.mtp_step + 1), dtype=torch.int32, device="cuda"
+        )
+        self.req_to_buffer_index[self.HOLD_REQUEST_ID, :] = self.buffer_mem_manager.HOLD_BUFFER_INDEX
+
+    def free_buffer(self, free_buffer_indexes: List[int]):
+        self.buffer_mem_manager.free(free_buffer_indexes)
+        return
+
+    def alloc_buffer_for_req(self, req_index: torch.Tensor):
+        num_reqs = req_index.shape[0]
+        num_buffers_per_req = self.mtp_step + 1
+        buffer_indexes = self.buffer_mem_manager.alloc(num_reqs * num_buffers_per_req)
+        alloc_buffer_for_req_triton(req_index, buffer_indexes, self.req_to_buffer_index, self.mtp_step)
+
+    def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
+        # 获取目标请求的所有 MTP buffer (从 buffer[0] 到 buffer[mtp_step])
+        mtp_range = torch.arange(0, self.mtp_step + 1, dtype=torch.int32, device="cuda")
+        all_mtp_buffers = self.req_to_buffer_index[tgt_req_index[:, None], mtp_range[None, :]]
+
+        # 将 shared buffer 广播到所有 MTP step
+        self.buffer_mem_manager.copy_buffer_broadcast(src_buffer_index, all_mtp_buffers)
+        return
