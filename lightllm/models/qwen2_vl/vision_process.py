@@ -187,7 +187,10 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         if image.mode != "RGB":
             image = image.convert("RGB")
         image_arr = np.asarray(image, dtype=np.uint8)
-        image_data = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous().to(device=device, non_blocking=True)
+        # Copy to ensure writable array (avoids PyTorch warning for read-only NumPy arrays)
+        image_data = (
+            torch.from_numpy(image_arr.copy()).permute(2, 0, 1).contiguous().to(device=device, non_blocking=True)
+        )
 
         grouped_images, grouped_images_index = group_images_by_shape(
             [image_data], disable_grouping=self.disable_grouping

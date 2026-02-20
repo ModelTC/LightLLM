@@ -31,6 +31,12 @@ class TreeNode:
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
+        # Used by hybrid attention models (e.g., Qwen3Next) to track
+        # a per-request buffer_idx alongside the token-level KV cache.
+        # Pure attention models keep buffer_idx as None.
+        self.buffer_idx = None
+        self.buffer_time = time_gen.generate_time_id()
+
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
@@ -78,6 +84,9 @@ class TreeNode:
     def update_time(self):
         self.time_id = time_gen.generate_time_id()
 
+    def update_buffer_time(self):
+        self.buffer_time = time_gen.generate_time_id()
+
     def is_leaf(self):
         return len(self.children) == 0
 
@@ -103,10 +112,10 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
+    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None, kv_cache_mem_manager=None):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        self.mem_manager: MemoryManager = mem_manager
+        self.mem_manager: MemoryManager = kv_cache_mem_manager if kv_cache_mem_manager is not None else mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -359,6 +368,7 @@ class RadixCache:
             or parent_node.ref_counter != 0
             or len(parent_node.children) != 1
             or child_node.ref_counter != 0
+            or parent_node.buffer_idx is not None
         ):
             return None
 
