@@ -6,6 +6,7 @@ import numpy as np
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.common.allocator_utils import TokenAllocator
+from lightllm.common.basemodel.triton_kernel.mamba_buffer_copy import copy_buffer_p2p, copy_buffer_broadcast
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 
@@ -56,67 +57,20 @@ class MambaCacheManager(TokenAllocator):
         return conv_state, ssm_state
 
     def copy_buffer_p2p(self, src_buffer_indexes: torch.Tensor, dst_buffer_indexes: torch.Tensor):
-        """
-        Copy buffers from source indices to destination indices using optimized Triton kernel.
-
-        Args:
-            src_buffer_indexes: Source buffer indices (1D tensor)
-            dst_buffer_indexes: Destination buffer indices (1D tensor)
-        """
-        assert src_buffer_indexes.dim() == 1
-        assert dst_buffer_indexes.dim() == 1
-        assert src_buffer_indexes.shape[0] == dst_buffer_indexes.shape[0]
-
-        # Validate indices are within valid range [0, size] (size+1 is the buffer dim)
-        max_valid_idx = self.size  # HOLD_BUFFER_INDEX = size is valid
-        src_max = src_buffer_indexes.max().item() if src_buffer_indexes.numel() > 0 else -1
-        src_min = src_buffer_indexes.min().item() if src_buffer_indexes.numel() > 0 else -1
-        dst_max = dst_buffer_indexes.max().item() if dst_buffer_indexes.numel() > 0 else -1
-        dst_min = dst_buffer_indexes.min().item() if dst_buffer_indexes.numel() > 0 else -1
-
-        if src_min < 0 or src_max > max_valid_idx or dst_min < 0 or dst_max > max_valid_idx:
-            logger.error(
-                f"Invalid buffer indices: src=[{src_min}, {src_max}], dst=[{dst_min}, {dst_max}], "
-                f"valid range=[0, {max_valid_idx}], conv shape={self.conv_state_cache.buffer.shape}, "
-                f"ssm shape={self.ssm_state_cache.buffer.shape}"
-            )
-            raise ValueError("Invalid buffer indices for copy_buffer_p2p")
-
-        # Use PyTorch advanced indexing for buffer copy (safer than Triton for complex shapes)
-        # The buffer shape is [layer_num, buffer_size, *shape]
-        # We need to copy all layers for the given buffer indices
-        src_idx = src_buffer_indexes.long()
-        dst_idx = dst_buffer_indexes.long()
-
-        # Copy conv_state: [layer_num, buffer_size, d1, d2]
-        self.conv_state_cache.buffer[:, dst_idx, ...] = self.conv_state_cache.buffer[:, src_idx, ...]
-
-        # Copy ssm_state: [layer_num, buffer_size, d1, d2, d3]
-        self.ssm_state_cache.buffer[:, dst_idx, ...] = self.ssm_state_cache.buffer[:, src_idx, ...]
-        return
+        copy_buffer_p2p(
+            self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
+        )
+        copy_buffer_p2p(
+            self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
+        )
 
     def copy_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
-        assert src_buffer_index.dim() == 1
-        assert dst_buffer_indexes.dim() == 2
-        assert src_buffer_index.shape[0] == dst_buffer_indexes.shape[0]
-
-        # Use PyTorch advanced indexing for broadcast copy
-        # src_buffer_index: [num_src]
-        # dst_buffer_indexes: [num_src, num_dst_per_src]
-        src_idx = src_buffer_index.long()
-        dst_idx = dst_buffer_indexes.long()
-
-        # Broadcast each source to all its destinations
-        # For each (src, dst_group), copy buffer[src] to buffer[dst1], buffer[dst2], ...
-        num_src, num_dst_per_src = dst_idx.shape
-        for i in range(num_src):
-            src = src_idx[i : i + 1]  # Keep as 1D tensor with 1 element
-            dsts = dst_idx[i, :]  # 1D tensor with num_dst_per_src elements
-            # Copy conv_state
-            self.conv_state_cache.buffer[:, dsts, ...] = self.conv_state_cache.buffer[:, src, ...]
-            # Copy ssm_state
-            self.ssm_state_cache.buffer[:, dsts, ...] = self.ssm_state_cache.buffer[:, src, ...]
-        return
+        copy_buffer_broadcast(
+            self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_index, dst_buffer_indexes
+        )
+        copy_buffer_broadcast(
+            self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
+        )
 
     def copy_ssm_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         """
@@ -125,22 +79,9 @@ class MambaCacheManager(TokenAllocator):
         This is used for MTP mode where each buffer maintains its own independent conv state,
         but SSM states need to be synchronized.
         """
-        assert src_buffer_index.dim() == 1
-        assert dst_buffer_indexes.dim() == 2
-        assert src_buffer_index.shape[0] == dst_buffer_indexes.shape[0]
-
-        # Use PyTorch advanced indexing for SSM-only broadcast copy
-        src_idx = src_buffer_index.long()
-        dst_idx = dst_buffer_indexes.long()
-
-        # Broadcast each source to all its destinations (SSM only)
-        num_src = dst_idx.shape[0]
-        for i in range(num_src):
-            src = src_idx[i : i + 1]
-            dsts = dst_idx[i, :]
-            # Only copy ssm_state, NOT conv_state
-            self.ssm_state_cache.buffer[:, dsts, ...] = self.ssm_state_cache.buffer[:, src, ...]
-        return
+        copy_buffer_broadcast(
+            self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
+        )
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
         """

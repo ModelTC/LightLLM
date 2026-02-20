@@ -454,6 +454,20 @@ class DPChunkedPrefillBackend(ModeBackend):
                     gpu_tensor=mtp_accept_len,
                 )
 
+                # Copy accepted buffer states back to buffer[0] for MTP
+                # Only copy when accept_len > 1
+                mask = mtp_accept_len > 1
+                if mask.sum() > 0:
+                    actual_req_idxes = b_req_idx[b_req_mtp_start_loc[mask]]
+                    src_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[
+                        actual_req_idxes, mtp_accept_len[mask] - 1
+                    ]
+                    dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
+                    if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_buffer_p2p"):
+                        g_infer_context.req_manager.buffer_mem_manager.copy_buffer_p2p(
+                            src_buffer_indexes, dst_buffer_indexes
+                        )
+
             verify_event = torch.cuda.Event()
             verify_event.record()
 
@@ -766,6 +780,20 @@ class DPChunkedPrefillBackend(ModeBackend):
                     gpu_tensor=mtp_accept_len,
                 )
                 all_next_token_ids.append(next_token_ids)
+
+                # Copy accepted buffer states back to buffer[0] for MTP
+                # Only copy when accept_len > 1
+                mask = mtp_accept_len > 1
+                if mask.sum() > 0:
+                    actual_req_idxes = b_req_idx[b_req_mtp_start_loc[mask]]
+                    src_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[
+                        actual_req_idxes, mtp_accept_len[mask] - 1
+                    ]
+                    dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
+                    if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_buffer_p2p"):
+                        g_infer_context.req_manager.buffer_mem_manager.copy_buffer_p2p(
+                            src_buffer_indexes, dst_buffer_indexes
+                        )
 
             verify_event = torch.cuda.Event()
             verify_event.record()

@@ -45,7 +45,8 @@ class Fa3VitAttBackend(BaseVitAttBackend):
             False,
             window_size[0],
             window_size[1],
-            0.0,
+            0,  # attention_chunk
+            0.0,  # softcap
             is_rotary_interleaved=False,
             scheduler_metadata=None,
             num_splits=1,

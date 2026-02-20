@@ -227,14 +227,14 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     def rot_pos_emb(self, grid_thw):
         pos_ids = []
         s = self.spatial_merge_size
-        for _, h, w in grid_thw:
+        for t, h, w in grid_thw:
             pos_shape = (h // s, s, w // s, s)
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
             wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
             hpos_ids = hpos_ids.reshape(pos_shape).permute(0, 2, 1, 3).flatten()
             wpos_ids = wpos_ids.reshape(pos_shape).permute(0, 2, 1, 3).flatten()
 
-            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1))
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         cos_full, sin_full = self.rotary_pos_emb(max_grid_size)
