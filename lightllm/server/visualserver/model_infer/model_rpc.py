@@ -68,7 +68,7 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = (
                     Qwen2_5_VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
-            elif self.model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+            elif self.model_type in ["qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"]:
                 self.model = (
                     Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
