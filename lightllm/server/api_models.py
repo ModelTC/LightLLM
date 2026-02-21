@@ -115,6 +115,7 @@ class CompletionRequest(BaseModel):
     prompt: Union[str, List[str], List[int], List[List[int]]]
     suffix: Optional[str] = None
     max_tokens: Optional[int] = 8192
+    max_completion_tokens: Optional[int] = None  # OpenAI's newer parameter, alias for max_tokens
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -169,10 +170,17 @@ class CompletionRequest(BaseModel):
     @classmethod
     def apply_loaded_defaults(cls, data: Any):
         """Apply loaded default values if field is not provided."""
-        if isinstance(data, dict) and cls._loaded_defaults:
-            for key, value in cls._loaded_defaults.items():
-                if key not in data:
-                    data[key] = value
+        if isinstance(data, dict):
+            # Map max_completion_tokens to max_tokens if provided
+            # (OpenAI's newer parameter name)
+            if "max_completion_tokens" in data and data["max_completion_tokens"] is not None:
+                if "max_tokens" not in data or data["max_tokens"] is None:
+                    data["max_tokens"] = data["max_completion_tokens"]
+
+            if cls._loaded_defaults:
+                for key, value in cls._loaded_defaults.items():
+                    if key not in data:
+                        data[key] = value
         return data
 
 
@@ -187,6 +195,7 @@ class ChatCompletionRequest(BaseModel):
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
     max_tokens: Optional[int] = 8192
+    max_completion_tokens: Optional[int] = None  # OpenAI's newer parameter, alias for max_tokens
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -246,10 +255,17 @@ class ChatCompletionRequest(BaseModel):
     @classmethod
     def apply_loaded_defaults(cls, data: Any):
         """Apply loaded default values if field is not provided."""
-        if isinstance(data, dict) and cls._loaded_defaults:
-            for key, value in cls._loaded_defaults.items():
-                if key not in data:
-                    data[key] = value
+        if isinstance(data, dict):
+            # Map max_completion_tokens to max_tokens if provided
+            # (OpenAI's newer parameter name)
+            if "max_completion_tokens" in data and data["max_completion_tokens"] is not None:
+                if "max_tokens" not in data or data["max_tokens"] is None:
+                    data["max_tokens"] = data["max_completion_tokens"]
+
+            if cls._loaded_defaults:
+                for key, value in cls._loaded_defaults.items():
+                    if key not in data:
+                        data[key] = value
         return data
 
 
