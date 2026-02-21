@@ -288,6 +288,14 @@ class HttpServerManager:
             if self.pd_mode.is_P_or_NORMAL():
                 await multimodal_params.verify_and_preload(request)
 
+            # Debug logging for multimodal requests
+            if multimodal_params and multimodal_params.images:
+                logger.debug(
+                    f"[MULTIMODAL_DEBUG] req_id={group_request_id}, "
+                    f"num_images={len(multimodal_params.images)}, "
+                    f"max_new_tokens={sampling_params.max_new_tokens}"
+                )
+
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # encode

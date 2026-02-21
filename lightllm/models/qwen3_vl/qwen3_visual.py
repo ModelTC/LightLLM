@@ -29,6 +29,9 @@ from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class Qwen3VLVisionMLP(nn.Module):
@@ -68,6 +71,8 @@ class Qwen3VLPatchEmbed(nn.Module):
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
         )
+        # Use channels_last_3d to enable cuDNN optimized Conv3D path
+        hidden_states = hidden_states.contiguous(memory_format=torch.channels_last_3d)
         hidden_states = self.proj(hidden_states).view(-1, self.embed_dim)
         return hidden_states
 
@@ -374,7 +379,15 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
+                orig_size = image_data.size
                 pixel_values, image_grid_thw = self.processor.preprocess(image_data)
+
+                # Debug logging for image processing
+                logger.debug(
+                    f"[VISUAL_DEBUG] Image {i}: orig_size={orig_size}, "
+                    f"pixel_values.shape={pixel_values.shape}, grid_thw={image_grid_thw}"
+                )
+
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
