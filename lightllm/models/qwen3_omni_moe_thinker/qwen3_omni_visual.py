@@ -68,6 +68,8 @@ class Qwen3OmniMoeVisionPatchEmbed(nn.Module):
         hidden_states = hidden_states.view(
             -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
         )
+        # Use channels_last_3d to enable cuDNN optimized Conv3D path
+        hidden_states = hidden_states.contiguous(memory_format=torch.channels_last_3d)
         hidden_states = self.proj(hidden_states).view(-1, self.embed_dim)
         return hidden_states
 
