@@ -26,18 +26,11 @@ logger = init_logger(__name__)
 
 
 class QWen3_5Tokenizer(QWen3VLTokenizer):
-    """
-    Tokenizer for Qwen3.5 multimodal model.
-
-    Inherits all multimodal tokenization logic from Qwen3VL,
-    including image and video token handling.
-    """
-
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
         super().__init__(tokenizer, image_processor, **kwargs)
 
 
-@ModelRegistry(["qwen3_5"], is_multimodal=True)
+@ModelRegistry(["qwen3_5_moe"], is_multimodal=True)
 class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     """
     Qwen3.5 Multimodal Model (Dense Variant)
@@ -64,17 +57,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     infer_state_class = Qwen35InferStateInfo
 
     def __init__(self, kvargs):
-        """
-        Initialize Qwen3.5 model.
-
-        Args:
-            kvargs: Dictionary containing:
-                - weight_dir: Path to model weights
-                - max_total_token_num: Maximum total tokens
-                - Additional model configuration
-        """
         super().__init__(kvargs)
-        logger.info("Initialized Qwen3.5 multimodal model")
 
     def _init_config(self):
         """
@@ -94,11 +77,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
 
         with open(config_path, "r") as json_file:
             all_config = json.load(json_file)
-
-            # Extract text config for language model
             self.config = all_config["text_config"]
-
-            # Store vision config for multimodal components
             self.vision_config = all_config.get("vision_config", None)
 
             if self.vision_config is None:
@@ -176,15 +155,6 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         ]
 
     def _init_infer_layer(self):
-        """
-        Initialize inference layers for Qwen3.5 multimodal model.
-
-        Uses mrope-enabled transformer layers to properly handle image/video
-        tokens with 3D position encoding (temporal, height, width).
-
-        This overrides the parent class to use Qwen35* layer classes instead
-        of Qwen3Next* layer classes.
-        """
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         num_full_attention_layers = self.config["full_attention_interval"]
@@ -197,33 +167,3 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
             )
             for i in range(self.config["n_layer"])
         ]
-
-
-@ModelRegistry(["qwen3_5_moe"], is_multimodal=True)
-class Qwen3_5MOETpPartModel(Qwen3_5TpPartModel):
-    """
-    Qwen3.5-MoE Multimodal Model (Mixture of Experts Variant)
-
-    Extends Qwen3.5 with sparse expert routing:
-    - Same hybrid attention architecture as Qwen3.5
-    - MoE layers replace dense MLP layers
-    - Expert routing handled by Qwen3NextSparseMoeBlock (inherited)
-
-    The MoE variant is automatically configured by inheriting from
-    Qwen3NextTpPartModel, which inherits from Qwen3MOEModel.
-
-    No additional configuration needed - MoE support is built-in.
-    """
-
-    def __init__(self, kvargs):
-        """
-        Initialize Qwen3.5-MoE model.
-
-        Args:
-            kvargs: Dictionary containing:
-                - weight_dir: Path to model weights
-                - max_total_token_num: Maximum total tokens
-                - Additional model configuration
-        """
-        super().__init__(kvargs)
-        logger.info("Initialized Qwen3.5-MoE multimodal model with expert routing")

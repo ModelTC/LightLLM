@@ -6,7 +6,6 @@ Provides Qwen3.5 multimodal models with hybrid attention and vision-language sup
 
 from .model import (
     Qwen3_5TpPartModel,
-    Qwen3_5MOETpPartModel,
     QWen3_5Tokenizer,
 )
 
