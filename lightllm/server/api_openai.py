@@ -276,6 +276,14 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             text = "".join(final_output_dict[sub_req_id])
             full_text = text
 
+            # Debug logging for empty responses
+            if not text or len(text.strip()) == 0:
+                logger.warning(
+                    f"[EMPTY_RESPONSE_DEBUG] sub_req_id={sub_req_id}, "
+                    f"completion_tokens={completion_tokens}, finish_reason={finish_reason}, "
+                    f"prompt_tokens={prompt_tokens}, output_chunks={len(final_output_dict[sub_req_id])}"
+                )
+
             # Handle reasoning content
             reasoning_text = None
             reasoning_parser = get_env_start_args().reasoning_parser
