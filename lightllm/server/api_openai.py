@@ -29,7 +29,10 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
-from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_lightllm_websocket_max_message_size,
+)
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -181,14 +184,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         file_path = img[7:]  # Remove "file://" prefix
                         with open(file_path, "rb") as f:
                             multimodal_params_dict["images"].append(
-                                {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
+                                {
+                                    "type": "base64",
+                                    "data": base64.b64encode(f.read()).decode("utf-8"),
+                                }
                             )
                     else:
                         # Treat as local file path
                         if os.path.isfile(img):
                             with open(img, "rb") as f:
                                 multimodal_params_dict["images"].append(
-                                    {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
+                                    {
+                                        "type": "base64",
+                                        "data": base64.b64encode(f.read()).decode("utf-8"),
+                                    }
                                 )
                         else:
                             raise ValueError(
@@ -223,6 +232,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "best_of": request.n,
         "add_special_tokens": False,
     }
+    if get_env_start_args().reasoning_parser and request.separate_reasoning and _get_reasoning_from_request(request):
+        # Reasoning parsing depends on structural tokens such as <think>...</think>.
+        # Do not allow env-level SKIP_SPECIAL_TOKENS to strip them for this request.
+        sampling_params_dict["skip_special_tokens"] = False
 
     # Structured output handling
     if request.response_format:
@@ -251,7 +264,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         finish_reason_dict = {}
         prompt_tokens_dict = {}
         completion_tokens = 0
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+        async for (
+            sub_req_id,
+            request_output,
+            metadata,
+            finish_status,
+        ) in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -296,6 +314,14 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         force_reasoning=request_enable_reasoning,
                     )
                     reasoning_text, text = parser.parse_non_stream(text)
+                    # if reasoning_text and (not text or len(text.strip()) == 0):
+                    #     # If parser leaves content empty (e.g., truncated or tag-stripped reasoning),
+                    #     # fallback to reasoning text for clients that only read `content`.
+                    #     text = reasoning_text
+                    #     logger.warning(
+                    #         f"[REASONING_FALLBACK] sub_req_id={sub_req_id}, "
+                    #         f"completion_tokens={completion_tokens}, finish_reason={finish_reason}"
+                    #     )
                 except Exception as e:
                     logger.error(f"Reasoning parsing error: {e}")
                     return create_error_response(
@@ -336,9 +362,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 text = ""
             chat_message = ChatMessage(
                 role="assistant",
-                content=text if text else "",
+                content=text if text else None,
                 tool_calls=tool_calls,
-                reasoning_content=reasoning_text if reasoning_text else "",
+                reasoning_content=reasoning_text if reasoning_text else None,
             )
             choice = ChatCompletionResponseChoice(
                 index=i,
@@ -347,7 +373,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             )
             choices.append(choice)
         resp = ChatCompletionResponse(
-            id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
+            id=group_request_id,
+            created=created_time,
+            model=request.model,
+            choices=choices,
+            usage=usage,
         )
         return resp
 
@@ -364,7 +394,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
         prompt_tokens = 0
         completion_tokens = 0
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+        async for (
+            sub_req_id,
+            request_output,
+            metadata,
+            finish_status,
+        ) in results_generator:
             prompt_tokens = metadata["prompt_tokens"]
             completion_tokens += 1
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -578,7 +613,13 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
     multimodal_params = MultimodalParams()
 
     return await _process_prompts_completion(
-        prompts, sampling_params, sampling_params_dict, multimodal_params, raw_request, request, created_time
+        prompts,
+        sampling_params,
+        sampling_params_dict,
+        multimodal_params,
+        raw_request,
+        request,
+        created_time,
     )
 
 
@@ -605,7 +646,12 @@ async def _process_prompts_completion(
             return create_error_response(HTTPStatus.BAD_REQUEST, "stream api only support n = 1")
 
         return await _handle_streaming_completion(
-            prompts[0], sampling_params, multimodal_params, raw_request, request, created_time
+            prompts[0],
+            sampling_params,
+            multimodal_params,
+            raw_request,
+            request,
+            created_time,
         )
 
     async def process_single_prompt(prompt: Union[str, List[int]], prompt_index: int):
@@ -655,7 +701,12 @@ async def _handle_streaming_completion(
         prompt_tokens = 0
         completion_tokens = 0
 
-        async for sub_req_id, request_output, metadata, finish_status in results_generator:
+        async for (
+            sub_req_id,
+            request_output,
+            metadata,
+            finish_status,
+        ) in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             prompt_tokens = metadata["prompt_tokens"]
             completion_tokens += 1
@@ -706,7 +757,11 @@ async def _handle_streaming_completion(
 
 
 async def _collect_generation_results(
-    generator, request: CompletionRequest, prompt: str, prompt_index: int, sampling_params: SamplingParams
+    generator,
+    request: CompletionRequest,
+    prompt: str,
+    prompt_index: int,
+    sampling_params: SamplingParams,
 ):
     final_output = []
     count_output_tokens = 0
@@ -799,7 +854,11 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
         group_request_id = f"cmpl-{uuid.uuid4().hex[:8]}"
 
     return CompletionResponse(
-        id=group_request_id, created=created_time, model=request.model, choices=choices, usage=usage
+        id=group_request_id,
+        created=created_time,
+        model=request.model,
+        choices=choices,
+        usage=usage,
     )
 
 

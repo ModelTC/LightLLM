@@ -379,14 +379,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 uuids.append(img.uuid)
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
-                orig_size = image_data.size
                 pixel_values, image_grid_thw = self.processor.preprocess(image_data)
-
-                # Debug logging for image processing
-                logger.debug(
-                    f"[VISUAL_DEBUG] Image {i}: orig_size={orig_size}, "
-                    f"pixel_values.shape={pixel_values.shape}, grid_thw={image_grid_thw}"
-                )
 
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)

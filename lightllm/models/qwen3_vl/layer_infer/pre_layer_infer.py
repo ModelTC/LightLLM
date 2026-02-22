@@ -3,8 +3,13 @@ import torch.distributed as dist
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
-from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
+from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import (
+    LlamaMultimodalPreLayerInfer,
+)
+from lightllm.utils.log_utils import init_logger
 from ..layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
+
+logger = init_logger(__name__)
 
 
 class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
@@ -13,7 +18,10 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         return
 
     def context_forward(
-        self, input_ids, infer_state: Qwen3VLInferStateInfo, layer_weight: Qwen3VLPreAndPostLayerWeight
+        self,
+        input_ids,
+        infer_state: Qwen3VLInferStateInfo,
+        layer_weight: Qwen3VLPreAndPostLayerWeight,
     ):
         img_start_token_ids = []
         img_token_lens = []
