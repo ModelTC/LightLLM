@@ -29,6 +29,7 @@ def _per_token_group_quant_fp8(
     xs_n,
     xs_row_major: tl.constexpr,
     BLOCK: tl.constexpr,
+    NEED_MASK: tl.constexpr,
 ):
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
@@ -41,7 +42,11 @@ def _per_token_group_quant_fp8(
         y_s_ptr += col_id * xs_m + row_id  # col major
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
-    mask = cols < N
+    
+    if NEED_MASK:
+        mask = cols < N
+    else:
+        mask = None
 
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
@@ -99,6 +104,7 @@ def lightllm_per_token_group_quant_fp8(
         xs_n=xs_n,
         xs_row_major=xs_row_major,
         BLOCK=BLOCK,
+        NEED_MASK=BLOCK != group_size,
         num_warps=num_warps,
         num_stages=num_stages,
     )
