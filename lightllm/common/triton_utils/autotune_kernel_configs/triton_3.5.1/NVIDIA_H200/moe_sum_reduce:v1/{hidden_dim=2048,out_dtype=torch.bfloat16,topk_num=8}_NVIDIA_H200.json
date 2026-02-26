@@ -29,6 +29,18 @@
     "NUM_STAGE": 1,
     "num_warps": 2
   },
+  "16384": {
+    "BLOCK_DIM": 1024,
+    "BLOCK_M": 1,
+    "NUM_STAGE": 4,
+    "num_warps": 2
+  },
+  "2048": {
+    "BLOCK_DIM": 1024,
+    "BLOCK_M": 1,
+    "NUM_STAGE": 1,
+    "num_warps": 8
+  },
   "256": {
     "BLOCK_DIM": 1024,
     "BLOCK_M": 1,
@@ -39,6 +51,12 @@
     "BLOCK_DIM": 128,
     "BLOCK_M": 1,
     "NUM_STAGE": 4,
+    "num_warps": 4
+  },
+  "4096": {
+    "BLOCK_DIM": 512,
+    "BLOCK_M": 1,
+    "NUM_STAGE": 1,
     "num_warps": 4
   },
   "64": {
