@@ -629,7 +629,22 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
-    parser.add_argument("--mamba_cache_size", type=int, default=3000, help="""The size of linear attn cache. """)
+    parser.add_argument(
+        "--mamba_cache_size",
+        type=int,
+        default=None,
+        help="""The size of linear attn cache. If not specified, will be calculated
+        automatically based on mamba_cache_ratio or max_total_token_num.""",
+    )
+    parser.add_argument(
+        "--mamba_cache_ratio",
+        type=float,
+        default=0.5,
+        help="""Ratio of available memory to allocate for mamba cache (after model
+        weights and dynamic memory reservation). Only effective when both
+        mamba_cache_size and max_total_token_num are not set. Default is 0.5
+        (50%% of available memory for mamba cache, rest for KV cache).""",
+    )
     parser.add_argument(
         "--mamba_ssm_data_type",
         type=str,
