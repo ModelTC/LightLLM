@@ -2,6 +2,7 @@ import yaml
 import collections
 from .registry import QUANTMETHODS
 from .w8a8 import *
+from .w8a8gx import *
 from .deepgemm import *
 from .awq import *
 from .no_quant import *
