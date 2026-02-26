@@ -42,13 +42,15 @@ def _per_token_group_quant_fp8(
         y_s_ptr += col_id * xs_m + row_id  # col major
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
-    
+
     if NEED_MASK:
         mask = cols < N
+        other = 0.0
     else:
         mask = None
+        other = None
 
-    y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    y = tl.load(y_ptr + cols, mask=mask, other=other).to(tl.float32)
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     y_s = _absmax / fp8_max
