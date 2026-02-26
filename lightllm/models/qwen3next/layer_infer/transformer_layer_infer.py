@@ -143,14 +143,19 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
 
     def _standard_ffn(self, input, infer_state, layer_weight):
         """Standard FFN using shared expert weights (non-MoE layers)."""
+        # For dense models without shared experts, return zeros (no FFN computation)
+        if not hasattr(layer_weight, "shared_expert_gate_up_proj") or layer_weight.shared_expert_gate_up_proj is None:
+            return torch.zeros_like(input)
         ffn2_out, _ = self._ffn_core(input, layer_weight, is_decode=not infer_state.is_prefill)
         return ffn2_out
 
     def _compute_shared_expert(self, input, layer_weight, is_decode=False):
         """Compute shared expert FFN output with gating."""
         ffn2_out, input_view = self._ffn_core(input, layer_weight, is_decode=is_decode)
-        gate = layer_weight.shared_expert_gate.mm(input_view).sigmoid_()
-        ffn2_out.mul_(gate)
+        # Dense models don't have shared_expert_gate
+        if layer_weight.shared_expert_gate is not None:
+            gate = layer_weight.shared_expert_gate.mm(input_view).sigmoid_()
+            ffn2_out.mul_(gate)
         return ffn2_out, input_view
 
     def _ffn_with_shared_expert_tp(self, input, infer_state, layer_weight):
@@ -488,14 +493,19 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
 
     def _standard_ffn(self, input, infer_state, layer_weight):
         """Standard FFN using shared expert weights (non-MoE layers)."""
+        # For dense models without shared experts, return zeros (no FFN computation)
+        if not hasattr(layer_weight, "shared_expert_gate_up_proj") or layer_weight.shared_expert_gate_up_proj is None:
+            return torch.zeros_like(input)
         ffn2_out, _ = self._ffn_core(input, layer_weight, is_decode=not infer_state.is_prefill)
         return ffn2_out
 
     def _compute_shared_expert(self, input, layer_weight, is_decode=False):
         """Compute shared expert FFN output with gating."""
         ffn2_out, input_view = self._ffn_core(input, layer_weight, is_decode=is_decode)
-        gate = layer_weight.shared_expert_gate.mm(input_view).sigmoid_()
-        ffn2_out.mul_(gate)
+        # Dense models don't have shared_expert_gate
+        if layer_weight.shared_expert_gate is not None:
+            gate = layer_weight.shared_expert_gate.mm(input_view).sigmoid_()
+            ffn2_out.mul_(gate)
         return ffn2_out, input_view
 
     def _ffn_with_shared_expert_tp(self, input, infer_state, layer_weight):
