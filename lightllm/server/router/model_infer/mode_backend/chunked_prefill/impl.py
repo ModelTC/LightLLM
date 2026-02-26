@@ -118,6 +118,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
             )
+            self._flush_routing_after_sample(model_input.mem_indexes)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -156,6 +157,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 is_prefill=False,
                 mask_func=self.decode_mask_func,
             )
+            self._flush_routing_after_sample(model_input.mem_indexes)
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -195,6 +197,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
             )
+            self._flush_routing_after_sample(model_input.mem_indexes)
             # mtp kv fill
             self._draft_prefill_forward(
                 model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
@@ -279,6 +282,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 next_token_ids=next_token_ids,
                 mask=accepted_index == 1,
             )
+            self._flush_routing_after_sample(model_input.mem_indexes)
             sync_event = torch.cuda.Event()
             sync_event.record()
 

@@ -33,6 +33,7 @@ class FusedMoeWeight(BaseWeightTpl):
         num_fused_shared_experts: int = 0,
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
+        moe_layer_index: int = 0,
     ) -> None:
         super().__init__(data_type=data_type)
         self.w1_weight_name = gate_proj_name
@@ -50,6 +51,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
+        self.moe_layer_index = moe_layer_index
         self._init_config(network_config)
         self._init_redundancy_expert_params()
         self._init_parallel_params()
@@ -130,6 +132,7 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        microbatch_index: int = 0,
     ) -> torch.Tensor:
         """Backward compatible method that routes to platform-specific implementation."""
         return self.fuse_moe_impl(
@@ -145,6 +148,8 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
+            moe_layer_index=self.moe_layer_index,
+            microbatch_index=microbatch_index,
         )
 
     def low_latency_dispatch(
