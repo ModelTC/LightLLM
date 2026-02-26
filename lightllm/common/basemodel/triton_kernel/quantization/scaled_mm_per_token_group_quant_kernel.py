@@ -26,16 +26,16 @@ def grouped_launch(pid, m_block_num, n_block_num, group_m: tl.constexpr):
 
 @triton.jit
 def _scaled_mm_act_per_group_w_perchannel_kernel(
-    A, # [m, k]
+    A,  # [m, k]
     A_desc: "tl.core.tensor_descriptor",
-    B, # [k, n]
+    B,  # [k, n]
     B_desc: "tl.core.tensor_descriptor",
-    out, # [m, n]
+    out,  # [m, n]
     out_desc: "tl.core.tensor_descriptor",
-    Ascale, # [m, k // 128]
+    Ascale,  # [m, k // 128]
     a_scale_stride_m,
     a_scale_stride_k,
-    Bscale, # [n,]
+    Bscale,  # [n,]
     M,
     N,
     K,
@@ -100,7 +100,7 @@ def _scaled_mm_act_per_group_w_perchannel_kernel(
         else:
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
-        
+
         acc += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
         if not USE_TMA:
             a_ptrs += BLOCK_K * stride_ak
@@ -177,7 +177,7 @@ def scaled_mm_act_per_group_w_perchannel(
         A: Matrix A with shape of [M, K].
         B: Matrix B with shape of [K, N].
         Ascale: per-token per-group Quantization scale for A: [M, K // 128]
-        Bscale: per-channel Quantization scale for B: [N] or [1, N].
+        Bscale: per-channel Quantization scale for B: [N] or [N, 1].
         out: The output matrix with the shape of [M, N].
     Returns:
         torch.Tensor: out.
@@ -189,13 +189,13 @@ def scaled_mm_act_per_group_w_perchannel(
     _, N = B.shape
     if not run_config:
         run_config = {
-                "BLOCK_M": 64,
-                "BLOCK_N": 64,
-                "BLOCK_K": 64,
-                "GROUP_M": 8,
-                "num_warps": 4,
-                "num_stages": 3,
-            }
+            "BLOCK_M": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
     NEED_N_MASK = N % run_config["BLOCK_N"] != 0
     NEED_K_MASK = K % run_config["BLOCK_K"] != 0
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
@@ -238,8 +238,8 @@ def scaled_mm_act_per_group_w_perchannel(
         A_desc = None
         B_desc = None
         out_desc = None
-    
-    assert BLOCK_M <= act_quant_group_size, "Currently we require BLOCK_M <= act_quant_group_size for simplicity, which means each block will not contain more than 1 group. We can remove this constraint in the future by loading multiple scales within a block."
+
+    assert BLOCK_M <= act_quant_group_size, "Currently we require BLOCK_M <= act_quant_group_size"
     ACC_DTYPE = tl.int32 if A.dtype == torch.int8 else tl.float32
 
     _scaled_mm_act_per_group_w_perchannel_kernel[grid](
@@ -272,7 +272,6 @@ def scaled_mm_act_per_group_w_perchannel(
     )
 
     return out
-
 
 
 if __name__ == "__main__":
@@ -320,18 +319,15 @@ if __name__ == "__main__":
     print(f"\n[Verification] Testing with M={M_verify}")
 
     # 计算ground truth
-    d_A = A_verify.view(-1, K // act_quant_group_size, act_quant_group_size).to(output_dtype) * Ascale_verify.view(-1, K // act_quant_group_size, 1).to(output_dtype)
+    d_A = A_verify.view(-1, K // act_quant_group_size, act_quant_group_size).to(output_dtype) * Ascale_verify.view(
+        -1, K // act_quant_group_size, 1
+    ).to(output_dtype)
     d_A = d_A.view(-1, K)
     d_B = B.to(output_dtype) * Bscale.to(output_dtype)
     gt_C = d_A.mm(d_B)
 
     # 运行kernel验证正确性
-    scaled_mm_act_per_group_w_perchannel(A_verify,
-                                         B, 
-                                         Ascale_verify,
-                                         Bscale,
-                                         act_quant_group_size,
-                                         out_verify)
+    scaled_mm_act_per_group_w_perchannel(A_verify, B, Ascale_verify, Bscale, act_quant_group_size, out_verify)
 
     # 计算cosine similarity
     cosine_sim = F.cosine_similarity(out_verify.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
@@ -384,14 +380,16 @@ if __name__ == "__main__":
 
         # 验证正确性
         print(f"[M={M}] Verifying correctness...")
-        d_A = A.view(-1, K // act_quant_group_size, act_quant_group_size).to(output_dtype) * Ascale.view(-1, K // act_quant_group_size, 1).to(output_dtype)
+        d_A = A.view(-1, K // act_quant_group_size, act_quant_group_size).to(output_dtype) * Ascale.view(
+            -1, K // act_quant_group_size, 1
+        ).to(output_dtype)
         d_A = d_A.view(-1, K)
         d_B = B.to(output_dtype) * Bscale.to(output_dtype)
         gt_C = d_A.mm(d_B)
 
         # 运行一次确保结果正确
         scaled_mm_act_per_group_w_perchannel(A, B, Ascale, Bscale, act_quant_group_size, out)
-        sgl_res = fp8_scaled_mm(A, B, Ascale[:,0].contiguous(), Bscale, output_dtype)
+        sgl_res = fp8_scaled_mm(A, B, Ascale[:, 0].contiguous(), Bscale, output_dtype)
 
         cosine_sim = F.cosine_similarity(out.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
         sgl_cosine_sim = F.cosine_similarity(sgl_res.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)

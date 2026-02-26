@@ -376,6 +376,8 @@ Quantization Parameters
     * ``vllm-fp8w8a8-b128``
     * ``deepgemm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
+    * ``triton-fp8w8a8g128``: weight per-channel quant and activation per-group 128 quant
+    * ``triton-fp8w8a8g64``: weight per-channel quantization with group size 64
     * ``awq``
     * ``awq_marlin``
     * ``none`` (default)
