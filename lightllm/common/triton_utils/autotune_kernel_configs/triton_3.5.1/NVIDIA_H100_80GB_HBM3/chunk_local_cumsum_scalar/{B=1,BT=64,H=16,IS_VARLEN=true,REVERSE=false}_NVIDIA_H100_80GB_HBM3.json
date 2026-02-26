@@ -1,0 +1,38 @@
+{
+  "1": {
+    "num_warps": 8
+  },
+  "100": {
+    "num_warps": 8
+  },
+  "1024": {
+    "num_warps": 2
+  },
+  "128": {
+    "num_warps": 8
+  },
+  "16": {
+    "num_warps": 8
+  },
+  "16384": {
+    "num_warps": 2
+  },
+  "2048": {
+    "num_warps": 2
+  },
+  "256": {
+    "num_warps": 2
+  },
+  "32": {
+    "num_warps": 8
+  },
+  "4096": {
+    "num_warps": 2
+  },
+  "64": {
+    "num_warps": 2
+  },
+  "8": {
+    "num_warps": 8
+  }
+}

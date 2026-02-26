@@ -1,0 +1,7 @@
+{
+  "5120": {
+    "BLOCK_SIZE": 32768,
+    "num_stages": 1,
+    "num_warps": 8
+  }
+}
