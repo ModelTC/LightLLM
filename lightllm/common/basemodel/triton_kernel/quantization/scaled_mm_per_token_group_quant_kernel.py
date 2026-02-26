@@ -25,15 +25,17 @@ def grouped_launch(pid, m_block_num, n_block_num, group_m: tl.constexpr):
 
 
 @triton.jit
-def _scaled_mm_per_token(
-    A,
+def _scaled_mm_act_per_group_w_perchannel_kernel(
+    A,  # [m, k]
     A_desc: "tl.core.tensor_descriptor",
-    B,
+    B,  # [k, n]
     B_desc: "tl.core.tensor_descriptor",
-    out,
+    out,  # [m, n]
     out_desc: "tl.core.tensor_descriptor",
-    Ascale,
-    Bscale,
+    Ascale,  # [m, k // 128]
+    a_scale_stride_m,
+    a_scale_stride_k,
+    Bscale,  # [n,]
     M,
     N,
     K,
@@ -43,6 +45,7 @@ def _scaled_mm_per_token(
     stride_bn,
     stride_cm,
     stride_cn,
+    act_quant_group_size,
     USE_TMA: tl.constexpr,
     B_IS_TRANS: tl.constexpr,
     NEED_N_MASK: tl.constexpr,
@@ -76,14 +79,14 @@ def _scaled_mm_per_token(
         a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
         b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    Ascale_ptrs = Ascale + offs_am
+    Ascale_ptrs = Ascale + offs_am * a_scale_stride_m
     Bscale_ptrs = Bscale + offs_bn
-    a_s = tl.load(Ascale_ptrs)
     b_s = tl.load(Bscale_ptrs)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
 
     for k in range(0, tl.cdiv(K, BLOCK_K)):
+        a_s = tl.load(Ascale_ptrs + (((k * BLOCK_K) // act_quant_group_size) * a_scale_stride_k))
         if USE_TMA:
             a = A_desc.load([start_m, k * BLOCK_K])
             if not B_IS_TRANS:
@@ -97,14 +100,13 @@ def _scaled_mm_per_token(
         else:
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
-        acc = tl.dot(a, b, acc)
+
+        acc += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
         if not USE_TMA:
             a_ptrs += BLOCK_K * stride_ak
             b_ptrs += BLOCK_K * stride_bk
 
     acc = acc.to(tl.float32)
-    acc = acc * a_s[:, None] * b_s[None, :]
-
     acc = acc.to(out.dtype.element_ty)
 
     if not USE_TMA:
@@ -125,7 +127,7 @@ def get_test_configs():
 
     for BLOCK_M in [8, 16, 32, 64]:
         for BLOCK_N in [64, 128, 256]:
-            for BLOCK_K in [32, 64, 128, 256]:
+            for BLOCK_K in [32, 64, 128]:
                 if BLOCK_K * BLOCK_M * BLOCK_N >= 256 * 256 * 128:
                     continue
                 for num_warps in [2, 4, 8]:
@@ -143,29 +145,29 @@ def get_test_configs():
     return fp8_gemm_configs
 
 
-def _get_static_key(A, B, out_dtype):
+def _get_static_key(A, B, act_quant_group_size):
     M, K = A.shape
     _, N = B.shape
     return {
         "N": N,
         "K": K,
-        "out_dtype": str(out_dtype),
+        "act_quant_group_size": act_quant_group_size,
     }
 
 
 @autotune(
-    kernel_name="scaled_mm_per_token:v1",
+    kernel_name="scaled_mm_act_per_group_w_perchannel:v1",
     configs_gen_func=get_test_configs,
     static_key_func=_get_static_key,
     run_key_func=lambda A: A.shape[0],
     mutates_args=["out"],
 )
-def scaled_mm_per_token(
+def scaled_mm_act_per_group_w_perchannel(
     A: torch.Tensor,
     B: torch.Tensor,
     Ascale: torch.Tensor,
     Bscale: torch.Tensor,
-    out_dtype: torch.dtype,
+    act_quant_group_size: int,
     out: torch.Tensor,
     run_config=None,
 ) -> torch.Tensor:
@@ -174,9 +176,8 @@ def scaled_mm_per_token(
     Args:
         A: Matrix A with shape of [M, K].
         B: Matrix B with shape of [K, N].
-        Ascale: per-token Quantization scale for A: [M] or [M, 1].
-        Bscale: per-channel Quantization scale for B: [N] or [1, N].
-        out_dtype: The data type of out.
+        Ascale: per-token per-group Quantization scale for A: [M, K // 128]
+        Bscale: per-channel Quantization scale for B: [N] or [N, 1].
         out: The output matrix with the shape of [M, N].
     Returns:
         torch.Tensor: out.
@@ -238,9 +239,10 @@ def scaled_mm_per_token(
         B_desc = None
         out_desc = None
 
+    assert BLOCK_M <= act_quant_group_size, "Currently we require BLOCK_M <= act_quant_group_size"
     ACC_DTYPE = tl.int32 if A.dtype == torch.int8 else tl.float32
 
-    _scaled_mm_per_token[grid](
+    _scaled_mm_act_per_group_w_perchannel_kernel[grid](
         A=A,
         A_desc=A_desc,
         B=B,
@@ -248,6 +250,8 @@ def scaled_mm_per_token(
         out=out,
         out_desc=out_desc,
         Ascale=Ascale,
+        a_scale_stride_m=Ascale.stride(0),
+        a_scale_stride_k=Ascale.stride(1),
         Bscale=Bscale,
         M=M,
         N=N,
@@ -258,6 +262,7 @@ def scaled_mm_per_token(
         stride_bn=B.stride(1),
         stride_cm=out.stride(0),
         stride_cn=out.stride(1),
+        act_quant_group_size=act_quant_group_size,
         USE_TMA=support_tma,
         B_IS_TRANS=B_is_trans,
         NEED_N_MASK=NEED_N_MASK,
@@ -269,10 +274,6 @@ def scaled_mm_per_token(
     return out
 
 
-fp8_scaled_mm_per_token = scaled_mm_per_token
-int8_scaled_mm_per_token = scaled_mm_per_token
-
-
 if __name__ == "__main__":
     import time
     import os
@@ -281,6 +282,7 @@ if __name__ == "__main__":
 
     output_dtype = torch.bfloat16
     N, K = 4096, 5120
+    act_quant_group_size = 128
 
     # 测试多个不同的 M 值
     M_list = [1, 2, 4, 8, 16, 32, 48]
@@ -299,7 +301,7 @@ if __name__ == "__main__":
     test_data = {}
     for M in M_list:
         A = torch.randn((M, K), dtype=output_dtype).cuda().to(torch.float8_e4m3fn)
-        Ascale = torch.randn((M, 1)).cuda()
+        Ascale = torch.randn((M, K // act_quant_group_size)).cuda().fill_(1.0)
         out = torch.zeros((M, N), dtype=output_dtype).cuda()
         test_data[M] = {"A": A, "Ascale": Ascale, "out": out}
 
@@ -317,12 +319,15 @@ if __name__ == "__main__":
     print(f"\n[Verification] Testing with M={M_verify}")
 
     # 计算ground truth
-    d_A = A_verify.to(output_dtype) * Ascale_verify.to(output_dtype)
+    d_A = A_verify.view(-1, K // act_quant_group_size, act_quant_group_size).to(output_dtype) * Ascale_verify.view(
+        -1, K // act_quant_group_size, 1
+    ).to(output_dtype)
+    d_A = d_A.view(-1, K)
     d_B = B.to(output_dtype) * Bscale.to(output_dtype)
     gt_C = d_A.mm(d_B)
 
     # 运行kernel验证正确性
-    scaled_mm_per_token(A_verify, B, Ascale_verify, Bscale, output_dtype, out_verify)
+    scaled_mm_act_per_group_w_perchannel(A_verify, B, Ascale_verify, Bscale, act_quant_group_size, out_verify)
 
     # 计算cosine similarity
     cosine_sim = F.cosine_similarity(out_verify.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
@@ -352,7 +357,7 @@ if __name__ == "__main__":
         A = test_data[M]["A"]
         Ascale = test_data[M]["Ascale"]
         out = test_data[M]["out"]
-        scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
+        scaled_mm_act_per_group_w_perchannel(A, B, Ascale, Bscale, act_quant_group_size, out)
         print(f"[M={M}] Autotune completed!")
 
     Autotuner.end_autotune_warmup()
@@ -375,13 +380,16 @@ if __name__ == "__main__":
 
         # 验证正确性
         print(f"[M={M}] Verifying correctness...")
-        d_A = A.to(output_dtype) * Ascale.to(output_dtype)
+        d_A = A.view(-1, K // act_quant_group_size, act_quant_group_size).to(output_dtype) * Ascale.view(
+            -1, K // act_quant_group_size, 1
+        ).to(output_dtype)
+        d_A = d_A.view(-1, K)
         d_B = B.to(output_dtype) * Bscale.to(output_dtype)
         gt_C = d_A.mm(d_B)
 
         # 运行一次确保结果正确
-        scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
-        sgl_res = fp8_scaled_mm(A, B, Ascale, Bscale, output_dtype)
+        scaled_mm_act_per_group_w_perchannel(A, B, Ascale, Bscale, act_quant_group_size, out)
+        sgl_res = fp8_scaled_mm(A, B, Ascale[:, 0].contiguous(), Bscale, output_dtype)
 
         cosine_sim = F.cosine_similarity(out.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
         sgl_cosine_sim = F.cosine_similarity(sgl_res.flatten().unsqueeze(0), gt_C.flatten().unsqueeze(0), dim=1)
@@ -395,11 +403,11 @@ if __name__ == "__main__":
         ms_bf16 = triton.testing.do_bench(fn_bf16, warmup=25, rep=100)
 
         # SGL kernel
-        fn_sgl = lambda: fp8_scaled_mm(A, B, Ascale, Bscale, output_dtype)
+        fn_sgl = lambda: fp8_scaled_mm(A, B, Ascale[:, 0].contiguous(), Bscale, output_dtype)
         ms_sgl = triton.testing.do_bench(fn_sgl, warmup=25, rep=100)
 
         # Our kernel
-        fn_ours = lambda: scaled_mm_per_token(A, B, Ascale, Bscale, output_dtype, out)
+        fn_ours = lambda: scaled_mm_act_per_group_w_perchannel(A, B, Ascale, Bscale, act_quant_group_size, out)
         ms_ours = triton.testing.do_bench_cudagraph(fn_ours, rep=100)
 
         print(f"[M={M}] BF16:       {ms_bf16:.3f} ms")
