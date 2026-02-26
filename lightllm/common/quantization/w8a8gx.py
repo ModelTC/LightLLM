@@ -6,7 +6,7 @@ from .registry import QUANTMETHODS
 from .quantize_method import WeightPack
 
 
-class BaseQuantizationMethod(QuantizationMethod):
+class _BaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -38,7 +38,7 @@ class BaseQuantizationMethod(QuantizationMethod):
 
 
 @QUANTMETHODS.register(["triton-fp8w8a8g128", "fp8w8a8g128"], platform="cuda")
-class FP8w8a8g128QuantizationMethod(BaseQuantizationMethod):
+class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.has_weight_scale = True
