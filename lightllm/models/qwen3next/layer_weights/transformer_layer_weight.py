@@ -47,6 +47,11 @@ class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         self._init_gate_shared_expert_weight()
         return
 
+    def _init_ffn(self):
+        # Qwen3Next architecture uses _init_gate_shared_expert_weight() for FFN-like component
+        # No standard MLP FFN weights needed for this architecture
+        pass
+
     def load_hf_weights(self, weights):
         self._split_q_with_gate(weights)
         super().load_hf_weights(weights)
@@ -62,41 +67,65 @@ class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
             weights[self._o_gate_weight_name] = _gate_proj
 
     def _init_gate_shared_expert_weight(self):
-        prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
         hidden_size = self.network_config_["hidden_size"]
-        shared_inter = self.network_config_["shared_expert_intermediate_size"]
-        self.shared_expert_gate_up_proj = ROWMMWeight(
-            in_dim=hidden_size,
-            out_dims=[shared_inter, shared_inter],
-            weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
-        )
-        self.shared_expert_down_proj = COLMMWeight(
-            in_dim=shared_inter,
-            out_dims=[hidden_size],
-            weight_names=f"{prefix}.down_proj.weight",
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_expert_down_proj"),
-        )
-        self.shared_expert_gate = ROWMMWeight(
-            in_dim=hidden_size,
-            out_dims=[1],
-            weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
-        )
+
+        # Check if this is a MoE model with shared_expert or a dense model
+        if "shared_expert_intermediate_size" in self.network_config_:
+            # MoE model with shared expert
+            prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
+            inter_size = self.network_config_["shared_expert_intermediate_size"]
+            self.shared_expert_gate_up_proj = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=[inter_size, inter_size],
+                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
+            )
+            self.shared_expert_down_proj = COLMMWeight(
+                in_dim=inter_size,
+                out_dims=[hidden_size],
+                weight_names=f"{prefix}.down_proj.weight",
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_down_proj"),
+            )
+            self.shared_expert_gate = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=[1],
+                weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
+                data_type=self.data_type_,
+                bias_names=None,
+                quant_method=None,
+                tp_rank=0,
+                tp_world_size=1,
+            )
+        else:
+            # Dense model with standard MLP
+            prefix = f"model.layers.{self.layer_num_}.mlp"
+            inter_size = self.network_config_["intermediate_size"]
+            self.shared_expert_gate_up_proj = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=[inter_size, inter_size],
+                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
+            )
+            self.shared_expert_down_proj = COLMMWeight(
+                in_dim=inter_size,
+                out_dims=[hidden_size],
+                weight_names=f"{prefix}.down_proj.weight",
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_down_proj"),
+            )
+            # No shared_expert_gate for dense models
+            self.shared_expert_gate = None
 
 
 class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
         self.is_moe = (
-            network_config["num_experts"] > 0
-            and layer_num not in network_config["mlp_only_layers"]
-            and (layer_num + 1) % network_config["decoder_sparse_step"] == 0
+            network_config.get("num_experts", 0) > 0
+            and layer_num not in network_config.get("mlp_only_layers", [])
+            and (layer_num + 1) % network_config.get("decoder_sparse_step", 1) == 0
         )
         super().__init__(layer_num, data_type, network_config, quant_cfg)
 
@@ -125,6 +154,11 @@ class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         else:
             self._init_ffn()
         self._init_gate_shared_expert_weight()
+
+    def _init_ffn(self):
+        # GatedDeltaNet architecture uses _init_gate_shared_expert_weight() for FFN-like component
+        # No standard MLP FFN weights needed for this architecture
+        pass
 
     def _init_gdn_weight(self):
         prefix = f"model.layers.{self.layer_num_}.linear_attn"
@@ -284,30 +318,54 @@ class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         return new_weight
 
     def _init_gate_shared_expert_weight(self):
-        prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
         hidden_size = self.network_config_["hidden_size"]
-        shared_inter = self.network_config_["shared_expert_intermediate_size"]
-        self.shared_expert_gate_up_proj = ROWMMWeight(
-            in_dim=hidden_size,
-            out_dims=[shared_inter, shared_inter],
-            weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
-        )
-        self.shared_expert_down_proj = COLMMWeight(
-            in_dim=shared_inter,
-            out_dims=[hidden_size],
-            weight_names=f"{prefix}.down_proj.weight",
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_expert_down_proj"),
-        )
-        self.shared_expert_gate = ROWMMWeight(
-            in_dim=hidden_size,
-            out_dims=[1],
-            weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
-        )
+
+        # Check if this is a MoE model with shared_expert or a dense model
+        if "shared_expert_intermediate_size" in self.network_config_:
+            # MoE model with shared expert
+            prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
+            inter_size = self.network_config_["shared_expert_intermediate_size"]
+            self.shared_expert_gate_up_proj = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=[inter_size, inter_size],
+                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
+            )
+            self.shared_expert_down_proj = COLMMWeight(
+                in_dim=inter_size,
+                out_dims=[hidden_size],
+                weight_names=f"{prefix}.down_proj.weight",
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_down_proj"),
+            )
+            self.shared_expert_gate = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=[1],
+                weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
+                data_type=self.data_type_,
+                bias_names=None,
+                quant_method=None,
+                tp_rank=0,
+                tp_world_size=1,
+            )
+        else:
+            # Dense model with standard MLP
+            prefix = f"model.layers.{self.layer_num_}.mlp"
+            inter_size = self.network_config_["intermediate_size"]
+            self.shared_expert_gate_up_proj = ROWMMWeight(
+                in_dim=hidden_size,
+                out_dims=[inter_size, inter_size],
+                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
+            )
+            self.shared_expert_down_proj = COLMMWeight(
+                in_dim=inter_size,
+                out_dims=[hidden_size],
+                weight_names=f"{prefix}.down_proj.weight",
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("shared_expert_down_proj"),
+            )
+            # No shared_expert_gate for dense models
+            self.shared_expert_gate = None
