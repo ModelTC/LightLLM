@@ -73,10 +73,12 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
             input_tensor.shape[-1] % self.act_quant_group_size == 0
         ), "Input feature dimension must be divisible by act_quant_group_size"
         if use_custom_tensor_mananger:
-            x_q = self.cache_manager.alloc_tensor(input_tensor.shape, dtype=qweight.dtype, device=input_tensor.device)
+            x_q = self.cache_manager.alloc_tensor(
+                input_tensor.shape, data_type=qweight.dtype, device=input_tensor.device
+            )
             x_scale = self.cache_manager.alloc_tensor(
                 input_tensor.shape[:-1] + (input_tensor.shape[-1] // self.act_quant_group_size,),
-                dtype=torch.float32,
+                data_type=torch.float32,
                 device=input_tensor.device,
             )
         else:
