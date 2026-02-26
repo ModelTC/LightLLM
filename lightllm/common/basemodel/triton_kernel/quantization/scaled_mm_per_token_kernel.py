@@ -1,63 +1,9 @@
 import torch
 import triton
 import triton.language as tl
-
-from lightllm.common.kernel_config import KernelConfigs
-from frozendict import frozendict
-from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
-from triton import Config
+from typing import Optional
 from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.device_utils import triton_support_tensor_descriptor, is_5090_gpu
-
-
-class ScaledMMKernelConfig(KernelConfigs):
-    kernel_name: str = "scaled_mm_per_token"
-
-    @classmethod
-    @lru_cache(maxsize=200)
-    def try_to_get_best_config(
-        cls,
-        M: int,
-        N: int,
-        K: int,
-        out_dtype: str,
-    ) -> dict:
-        key_params = {
-            "N": N,
-            "K": K,
-            "out_dtype": str(out_dtype),
-        }
-        key_params = frozendict(key_params)
-
-        finded_config = cls.get_the_config(key_params)
-
-        if finded_config:
-            # find by M
-            config: dict = finded_config[min(finded_config.keys(), key=lambda x: abs(int(x) - M))]
-            return config
-        else:
-            config = {
-                "BLOCK_M": 64,
-                "BLOCK_N": 64,
-                "BLOCK_K": 64,
-                "GROUP_M": 8,
-                "num_warps": 4,
-                "num_stages": 3,
-            }
-        return config
-
-    @classmethod
-    def save_config(cls, N: int, K: int, out_dtype: str, config_json: Dict[int, Dict[int, Dict]]):
-
-        key_params = {
-            "N": N,
-            "K": K,
-            "out_dtype": str(out_dtype),
-        }
-        key_params = frozendict(key_params)
-
-        return cls.store_config(key_params, config_json)
 
 
 @triton.jit
@@ -241,7 +187,14 @@ def scaled_mm_per_token(
     M, K = A.shape
     _, N = B.shape
     if not run_config:
-        run_config = ScaledMMKernelConfig.try_to_get_best_config(M=M, N=N, K=K, out_dtype=out_dtype)
+        run_config = {
+            "BLOCK_M": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 8,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
     NEED_N_MASK = N % run_config["BLOCK_N"] != 0
     NEED_K_MASK = K % run_config["BLOCK_K"] != 0
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
