@@ -10,9 +10,14 @@ from .flashinfer.fp8 import Fp8FlashInferAttBackend
 from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
 
+# NSA backend
+from .nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
+
 from .create_utils import (
     get_prefill_att_backend_class,
     get_decode_att_backend_class,
     get_mla_prefill_att_backend_class,
     get_mla_decode_att_backend_class,
+    get_nsa_prefill_att_backend_class,
+    get_nsa_decode_att_backend_class,
 )

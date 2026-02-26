@@ -92,9 +92,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--tokenizer_mode",
         type=str,
         default="fast",
-        help="""tokenizer load mode, can be slow, fast or auto, slow mode load fast but run slow,
-          slow mode is good for debug and test, fast mode get best performance, auto mode will
-          try to use fast mode, if failed will use slow mode""",
+        help="""tokenizer load mode, can be slow, fast, auto, or deepseek_v32.
+          slow mode load fast but run slow, good for debug and test.
+          fast mode get best performance.
+          auto mode will try to use fast mode, if failed will use slow mode.
+          deepseek_v32 mode wraps the tokenizer with Python-based DSML chat
+          template encoding for DeepSeek-V3.2 models (no --chat_template needed).""",
     )
     parser.add_argument(
         "--load_way",
@@ -128,7 +131,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "glm47", "kimi_k2"],
+        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "deepseekv32", "glm47", "kimi_k2"],
         default=None,
         help="tool call parser type",
     )

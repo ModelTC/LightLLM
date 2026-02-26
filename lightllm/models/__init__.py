@@ -18,6 +18,7 @@ from lightllm.models.qwen_vl.model import QWenVLTpPartModel
 from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
 from lightllm.models.internvl.model import (
     InternVLLlamaTpPartModel,

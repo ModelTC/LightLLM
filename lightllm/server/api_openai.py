@@ -338,6 +338,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         finish_reason = None
+        has_emitted_tool_calls = False
         from .req_id_generator import convert_sub_id_to_group_id
 
         prompt_tokens = 0
@@ -358,7 +359,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if reasoning_text:
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=0,
-                        delta=DeltaMessage(reasoning_content=reasoning_text),
+                        delta=DeltaMessage(role="assistant", reasoning_content=reasoning_text),
                         finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
@@ -367,7 +368,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
             if request.tool_choice != "none" and request.tools:
                 if index not in parser_dict:
@@ -386,8 +387,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if normal_text:
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=0,
-                        delta=DeltaMessage(content=normal_text),
-                        finish_reason=finish_reason if finish_reason else None,
+                        delta=DeltaMessage(role="assistant", content=normal_text),
+                        finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
                         id=group_request_id,
@@ -395,11 +396,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                 for call_item in calls:
+                    has_emitted_tool_calls = True
                     # transform call_item -> FunctionResponse + ToolCall
                     if finish_reason == "stop":
                         latest_delta_len = 0
@@ -436,7 +438,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=0,
                         delta=DeltaMessage(role="assistant", tool_calls=[tool_call]),
-                        finish_reason="tool_calls",
+                        finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
                         id=group_request_id,
@@ -444,24 +446,36 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
             else:
-                group_request_id = convert_sub_id_to_group_id(sub_req_id)
-
                 delta_message = DeltaMessage(role="assistant", content=delta)
-                if finish_status.is_finished():
-                    finish_reason = finish_status.get_finish_reason()
-                stream_choice = ChatCompletionStreamResponseChoice(
-                    index=0, delta=delta_message, finish_reason=finish_reason
-                )
+                stream_choice = ChatCompletionStreamResponseChoice(index=0, delta=delta_message, finish_reason=None)
                 stream_resp = ChatCompletionStreamResponse(
                     id=group_request_id,
                     created=created_time,
                     model=request.model,
                     choices=[stream_choice],
                 )
-                yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
-                # Additional usage chunk
+                yield f"data: {stream_resp.model_dump_json(exclude_none=True)}\n\n"
+
+        # Determine final finish_reason: override to "tool_calls" if tool calls were emitted
+        if has_emitted_tool_calls and finish_reason == "stop":
+            finish_reason = "tool_calls"
+
+        # Final empty chunk containing only finish_reason (and role)
+        if finish_reason is not None:
+            final_choice = ChatCompletionStreamResponseChoice(
+                index=0,
+                delta=DeltaMessage(),
+                finish_reason=finish_reason,
+            )
+            final_chunk = ChatCompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                model=request.model,
+                choices=[final_choice],
+            )
+            yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
         if request.stream_options and request.stream_options.include_usage:
             usage = UsageInfo(
@@ -476,7 +490,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 model=request.model,
                 usage=usage,
             )
-            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
@@ -677,7 +691,7 @@ async def _handle_streaming_completion(
                 model=request.model,
                 usage=usage,
             )
-            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
