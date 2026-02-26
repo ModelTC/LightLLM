@@ -54,6 +54,75 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def autotune_layers(self):
         return self.config["full_attention_interval"]
 
+    def _calculate_mamba_cache_size(self, start_args: StartArgs) -> int:
+        """Calculate mamba cache size based on available memory and mamba_cache_ratio."""
+        from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
+        import torch.distributed as dist
+
+        use_ratio = self.max_total_token_num is None and start_args.mamba_cache_size is None
+
+        world_size = dist.get_world_size()
+        total_memory = get_total_gpu_memory()
+        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - self.mem_fraction)
+
+        conv_kernel_size = self.config["linear_conv_kernel_dim"]
+        conv_dim = (
+            self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
+        ) // self.tp_world_size_
+
+        num_linear_layers = self.config["n_layer"] - (self.config["n_layer"] // self.config["full_attention_interval"])
+
+        conv_cell_size = (
+            num_linear_layers * conv_dim * (conv_kernel_size - 1) * torch._utils._element_size(self.data_type)
+        )
+
+        ssm_dtype = torch.bfloat16 if start_args.mamba_ssm_data_type == "bfloat16" else torch.float32
+        ssm_cell_size = (
+            num_linear_layers
+            * (self.num_linear_v_heads // self.tp_world_size_)
+            * self.head_linear_k_dim
+            * self.head_linear_v_dim
+            * torch._utils._element_size(ssm_dtype)
+        )
+
+        total_cell_size = conv_cell_size + ssm_cell_size
+
+        if use_ratio:
+            mamba_cache_ratio = start_args.mamba_cache_ratio if start_args.mamba_cache_ratio is not None else 0.5
+            mamba_memory_gb = available_memory * mamba_cache_ratio / (1 + mamba_cache_ratio)
+        else:
+            mamba_memory_gb = available_memory
+            mamba_cache_ratio = None
+
+        mamba_cache_size = int(mamba_memory_gb * 1024 ** 3 / total_cell_size)
+
+        if mamba_cache_size < start_args.running_max_req_size:
+            ratio = mamba_cache_ratio if mamba_cache_ratio is not None else 0.5
+            raise ValueError(
+                f"Insufficient memory for mamba cache allocation!\n\n"
+                f"Calculated mamba_cache_size ({mamba_cache_size}) < "
+                f"running_max_req_size ({start_args.running_max_req_size})\n\n"
+                f"Memory budget:\n"
+                f"  Available for mamba cache: {mamba_memory_gb:.2f} GB\n"
+                f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
+                f"  Calculated buffers: {mamba_cache_size}\n"
+                f"  Required buffers: {start_args.running_max_req_size}\n\n"
+                f"Solutions:\n"
+                f"  1. Reduce --running_max_req_size to {mamba_cache_size} or lower\n"
+                f"  2. Increase --mamba_cache_ratio from {ratio} to "
+                f"{start_args.running_max_req_size * (1 + ratio) / mamba_cache_size - 1:.3f} or higher\n"
+                f"  3. Increase --mem_fraction to leave more memory for caches\n"
+            )
+
+        logger.info(
+            f"Mamba cache allocation:\n"
+            f"  Available memory: {mamba_memory_gb:.2f} GB\n"
+            f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
+            f"  Calculated mamba_cache_size: {mamba_cache_size}"
+        )
+
+        return mamba_cache_size
+
     def _init_config(self):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
@@ -69,15 +138,21 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
         start_args: StartArgs = get_env_start_args()
         mamba_cache_size = start_args.mamba_cache_size
-        if mamba_cache_size is not None:
-            assert (
-                mamba_cache_size >= start_args.running_max_req_size
-            ), "mamba_cache_size must be greater than running_max_req_size"
 
         self.num_linear_k_heads = self.config["linear_num_key_heads"]
         self.num_linear_v_heads = self.config["linear_num_value_heads"]
         self.head_linear_k_dim = self.config["linear_key_head_dim"]
         self.head_linear_v_dim = self.config["linear_value_head_dim"]
+
+        if mamba_cache_size is None:
+            mamba_cache_size = self._calculate_mamba_cache_size(start_args)
+        else:
+            if mamba_cache_size < start_args.running_max_req_size:
+                raise ValueError(
+                    f"Explicitly set mamba_cache_size ({mamba_cache_size}) < "
+                    f"running_max_req_size ({start_args.running_max_req_size})\n"
+                    f"Please increase mamba_cache_size to at least {start_args.running_max_req_size}"
+                )
 
         conv_kernel_size = self.config["linear_conv_kernel_dim"]
         conv_dim = (
