@@ -21,14 +21,14 @@ logger = init_logger(__name__)
 
 class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
-        self.n_routed_experts = network_config["num_experts"]
+        self.n_routed_experts = network_config.get("num_experts", 0)
         self.is_moe = (
-            network_config["num_experts"] > 0
-            and layer_num not in network_config["mlp_only_layers"]
-            and (layer_num + 1) % network_config["decoder_sparse_step"] == 0
+            network_config.get("num_experts", 0) > 0
+            and layer_num not in network_config.get("mlp_only_layers", [])
+            and (layer_num + 1) % network_config.get("decoder_sparse_step", 1) == 0
         )
-        self.num_experts_per_tok = network_config["num_experts_per_tok"]
-        self.norm_topk_prob = network_config["norm_topk_prob"]
+        self.num_experts_per_tok = network_config.get("num_experts_per_tok", 0)
+        self.norm_topk_prob = network_config.get("norm_topk_prob", True)
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         self.tp_k_head_num_ = max(self.tp_k_head_num_, 1)
