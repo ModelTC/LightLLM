@@ -88,8 +88,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         total_cell_size = conv_cell_size + ssm_cell_size
 
         if use_ratio:
+            # mamba_cache_ratio = mamba_memory / total_cache_memory
             mamba_cache_ratio = start_args.mamba_cache_ratio if start_args.mamba_cache_ratio is not None else 0.5
-            mamba_memory_gb = available_memory * mamba_cache_ratio / (1 + mamba_cache_ratio)
+            mamba_memory_gb = available_memory * mamba_cache_ratio
         else:
             mamba_memory_gb = available_memory
             mamba_cache_ratio = None
@@ -110,7 +111,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 f"Solutions:\n"
                 f"  1. Reduce --running_max_req_size to {mamba_cache_size} or lower\n"
                 f"  2. Increase --mamba_cache_ratio from {ratio} to "
-                f"{start_args.running_max_req_size * (1 + ratio) / mamba_cache_size - 1:.3f} or higher\n"
+                f"{start_args.running_max_req_size / mamba_cache_size * ratio:.3f} or higher\n"
                 f"  3. Increase --mem_fraction to leave more memory for caches\n"
             )
 
