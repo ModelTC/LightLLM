@@ -640,10 +640,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--mamba_cache_ratio",
         type=float,
         default=0.5,
-        help="""Ratio of available memory to allocate for mamba cache (after model
-        weights and dynamic memory reservation). Only effective when both
-        mamba_cache_size and max_total_token_num are not set. Default is 0.5
-        (50%% of available memory for mamba cache, rest for KV cache).""",
+        help="""Ratio of mamba cache to total cache memory (mamba + KV).
+        Only effective when both mamba_cache_size and max_total_token_num are not set.
+        Default is 0.5 (50%% mamba cache, 50%% KV cache).
+        Example: 0.3 -> 30%% mamba, 70%% KV; 0.7 -> 70%% mamba, 30%% KV.""",
     )
     parser.add_argument(
         "--mamba_ssm_data_type",
