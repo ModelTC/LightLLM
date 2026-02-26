@@ -105,7 +105,8 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
     messages = getattr(request, "messages", [])
     idx = 0
     for msg in messages:
-        if msg.role == "assistant":
+        role = getattr(msg, "role", None)
+        if role == "assistant":
             tool_calls = getattr(msg, "tool_calls", None)
             idx += len(list(tool_calls)) if tool_calls is not None else 0  # noqa
     return idx

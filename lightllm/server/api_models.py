@@ -1,7 +1,7 @@
 import time
 import uuid
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
 from transformers import GenerationConfig
 
@@ -19,6 +19,14 @@ class MessageContent(BaseModel):
 class Message(BaseModel):
     role: str
     content: Union[str, List[MessageContent]]
+
+
+class CharacterMessage(BaseModel):
+    """Message format for character-based chat, where role is inferred from name."""
+
+    name: str
+    content: Union[str, List[MessageContent]]
+    role: Optional[str] = None  # Optional, can be inferred from role_setting
 
 
 class Function(BaseModel):
@@ -106,7 +114,7 @@ class ChatCompletionMessageGenericParam(BaseModel):
         raise ValueError("'role' must be a string")
 
 
-ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
+ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message, CharacterMessage]
 
 
 class CompletionRequest(BaseModel):
@@ -177,6 +185,8 @@ class CompletionRequest(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     model: str
     messages: List[ChatCompletionMessageParam]
     function_call: Optional[str] = "none"
@@ -217,8 +227,9 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    role_settings: Optional[Dict[str, str]] = None
+    role_settings: Optional[Dict[str, str]] = Field(default=None, alias="role_setting")
     character_settings: Optional[List[Dict[str, str]]] = None
+    system_instruction: Optional[str] = None
 
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
