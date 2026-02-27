@@ -7,6 +7,16 @@ from lightllm.common.basemodel.triton_kernel.norm.qk_norm import (
 )
 
 
+def torch_qk_rmsnorm(q, w_q, eps=1e-6):
+    input_dtype = q.dtype
+    head_dim = w_q.shape[0]
+    q_fp32 = q.to(torch.float32)
+    q_fp32 = q_fp32.view(-1, head_dim)
+    variance = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+    q_fp32 = q_fp32 * torch.rsqrt(variance + eps)
+    return (q_fp32 * w_q.to(input_dtype)).view_as(q)
+
+
 def test_qk_rmsnorm_fused_matches_reference():
     """Compare fused QK RMSNorm with separate reference RMSNorm kernels."""
     if not torch.cuda.is_available():
@@ -36,6 +46,8 @@ def test_qk_rmsnorm_fused_matches_reference():
     # reference: 分别对 Q / K 做 RMSNorm
     q_ref_out = qk_rmsnorm_forward(q_ref, w_q, eps=1e-6)
     k_ref_out = qk_rmsnorm_forward(k_ref, w_k, eps=1e-6)
+    # q_ref_out = torch_qk_rmsnorm(q_ref, w_q, eps=1e-6)
+    # k_ref_out = torch_qk_rmsnorm(k_ref, w_k, eps=1e-6)
 
     # fused 是 in-place 的，返回的 q_out/k_out 应该与 q/k 引用一致
     assert q_out.data_ptr() == q.data_ptr()

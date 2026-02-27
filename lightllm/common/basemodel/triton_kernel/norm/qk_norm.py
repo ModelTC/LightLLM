@@ -110,12 +110,13 @@ def _qk_rms_norm_fused_kernel(
         rstd = 1 / tl.sqrt(var + eps)
 
         # 加载 Q 的权重 (假设所有 Head 共享同一组 dim=head_dim 的权重)
-        w = tl.load(WQ_ptr + offs).to(tl.float32)
+        w = tl.load(WQ_ptr + offs)
 
-        y = x * rstd * w
+        x *= rstd
+        y = x.to(w.dtype) * w
 
         # 写回 Q
-        tl.store(Q_ptr + q_ptr_offset, y.to(Q_ptr.dtype.element_ty))
+        tl.store(Q_ptr + q_ptr_offset, y)
 
     else:
         # ------------------ 处理 K ------------------
@@ -133,12 +134,13 @@ def _qk_rms_norm_fused_kernel(
         rstd = 1 / tl.sqrt(var + eps)
 
         # 加载 K 的权重
-        w = tl.load(WK_ptr + offs).to(tl.float32)
+        w = tl.load(WK_ptr + offs)
+        x *= rstd
 
-        y = x * rstd * w
+        y = x.to(w.dtype) * w
 
         # 写回 K
-        tl.store(K_ptr + k_ptr_offset, y.to(K_ptr.dtype.element_ty))
+        tl.store(K_ptr + k_ptr_offset, y)
 
 
 def qk_rmsnorm_fused_forward(q: torch.Tensor, k: torch.Tensor, w_q: torch.Tensor, w_k: torch.Tensor, eps: float = 1e-6):
