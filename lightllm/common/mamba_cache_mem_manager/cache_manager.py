@@ -6,7 +6,7 @@ import numpy as np
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 from lightllm.common.allocator_utils import TokenAllocator
-from lightllm.common.basemodel.triton_kernel.mamba_buffer_copy import copy_buffer_p2p, copy_buffer_broadcast
+from lightllm.common.basemodel.triton_kernel.mamba_buffer_copy import copy_mamba_buffer, fork_mamba_buffer
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 
@@ -57,29 +57,29 @@ class MambaCacheManager(TokenAllocator):
         return conv_state, ssm_state
 
     def copy_buffer_p2p(self, src_buffer_indexes: torch.Tensor, dst_buffer_indexes: torch.Tensor):
-        copy_buffer_p2p(
+        copy_mamba_buffer(
             self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
         )
-        copy_buffer_p2p(
+        copy_mamba_buffer(
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
         )
 
     def copy_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
-        copy_buffer_broadcast(
+        fork_mamba_buffer(
             self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
-        copy_buffer_broadcast(
+        fork_mamba_buffer(
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
 
     def copy_ssm_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         """
-        Broadcast ONLY SSM states (not conv states) from source indices to destination indices.
+        Fork ONLY SSM states (not conv states) from source indices to destination indices.
 
         This is used for MTP mode where each buffer maintains its own independent conv state,
         but SSM states need to be synchronized.
         """
-        copy_buffer_broadcast(
+        fork_mamba_buffer(
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
 
