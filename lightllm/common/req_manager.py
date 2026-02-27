@@ -267,7 +267,8 @@ class ReqManagerForMamba(ReqManager):
         num_reqs = req_index.shape[0]
         num_buffers_per_req = self.mtp_step + 1
         buffer_indexes = self.buffer_mem_manager.alloc(num_reqs * num_buffers_per_req)
-        # Pure PyTorch: indexed assignment is already a fused GPU kernel
+        if not buffer_indexes.is_cuda:
+            buffer_indexes = buffer_indexes.cuda()
         self.req_to_buffer_index[req_index] = buffer_indexes.view(num_reqs, num_buffers_per_req)
 
     def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
