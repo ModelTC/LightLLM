@@ -384,6 +384,8 @@ PD 分离模式参数
     * ``vllm-fp8w8a8-b128``
     * ``deepgemm-fp8w8a8-b128``
     * ``triton-fp8w8a8-block128``
+    * ``triton-fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化
+    * ``triton-fp8w8a8g64``: 权重 per-channel 量化, group size 64
     * ``awq``
     * ``awq_marlin``
     * ``none`` (默认)

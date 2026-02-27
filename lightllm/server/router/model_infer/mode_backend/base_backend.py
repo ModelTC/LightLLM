@@ -31,7 +31,12 @@ from lightllm.utils.envs_utils import (
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
 )
-from lightllm.distributed import dist_group_manager
+from lightllm.distributed.communication_op import (
+    dist_group_manager,
+    all_gather_into_tensor,
+    all_reduce,
+    broadcast,
+)
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
@@ -368,7 +373,7 @@ class ModeBackend:
                 self.node_broadcast_tensor.fill_(0)
 
         src_rank_id = self.args.node_rank * self.node_world_size
-        dist.broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
+        broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
@@ -382,7 +387,7 @@ class ModeBackend:
                     self.node_broadcast_tensor.fill_(0)
 
             src_rank_id = self.args.node_rank * self.node_world_size
-            dist.broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
+            broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
             new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
             if new_buffer_is_ready:
                 self._read_nixl_trans_io_buffer_and_update_req_status()
@@ -396,7 +401,7 @@ class ModeBackend:
             self.multinode_tp_gather_item_tensor.fill_(1)
         else:
             self.multinode_tp_gather_item_tensor.fill_(0)
-        dist.all_gather_into_tensor(
+        all_gather_into_tensor(
             self.multinode_tp_all_gather_tensor,
             self.multinode_tp_gather_item_tensor,
             group=self.multinode_tp_nccl_group,
@@ -806,12 +811,12 @@ class ModeBackend:
         """
         current_dp_prefill_num = len(prefill_reqs)
         self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
-        dist.all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
+        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
         dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
 
         current_dp_decode_num = len(decode_reqs)
         self.dp_gather_item_tensor.fill_(current_dp_decode_num)
-        dist.all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
+        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
         dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
 
         return dp_prefill_req_nums, dp_decode_req_nums
@@ -822,7 +827,7 @@ class ModeBackend:
         """
         current_dp_decode_num = len(decode_reqs)
         self.dp_reduce_tensor.fill_(current_dp_decode_num)
-        dist.all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
+        all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
         max_decode_num = self.dp_reduce_tensor.item()
         return max_decode_num
 
