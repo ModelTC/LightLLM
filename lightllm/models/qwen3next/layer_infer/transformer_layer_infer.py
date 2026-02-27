@@ -28,7 +28,6 @@ from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3next.triton_kernel.gemma_rmsnorm import gemma_rmsnorm_forward
 from lightllm.models.qwen3next.triton_kernel.fused_add_gemma_rmsnorm import fused_add_gemma_rmsnorm
-from lightllm.models.qwen3next.triton_kernel.fused_split_copy import fused_split_copy_qkvzba, fused_split_copy_qkv
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from functools import partial
 
@@ -74,25 +73,11 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
             "head_dim", network_config["hidden_size"] // network_config["num_attention_heads"]
         )
 
-        # Pre-allocated decode buffers (mirrors GDN layer pattern)
-        start_args = get_env_start_args()
-        self._decode_buffers = {}
-        self._graph_max_batch_size = start_args.graph_max_batch_size
-
-        # Pre-compute dims for decode buffer pre-allocation
         self.shared_inter_size = network_config.get("shared_expert_intermediate_size", 0)
-        self.tp_gate_up_dim = 2 * self.shared_inter_size // self.tp_world_size_ if self.shared_inter_size > 0 else 0
         self.tp_q_gate_dim = (self.tp_q_head_num_ + self.tp_o_head_num_) * self.head_dim_
         self.tp_kv_dim = (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_
 
         return
-
-    def _get_decode_buffer(self, name, max_shape, dtype, device):
-        """Get or create a pre-allocated buffer for the decode path."""
-        key = (name, dtype, device if isinstance(device, str) else str(device))
-        if key not in self._decode_buffers:
-            self._decode_buffers[key] = torch.empty(max_shape, dtype=dtype, device=device)
-        return self._decode_buffers[key]
 
     def _bind_func(self):
         super()._bind_func()
@@ -117,26 +102,12 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
             self._ffn = partial(Qwen3NextFullAttentionBaseLayerInfer._standard_ffn, self)
         return
 
-    def _ffn_core(self, input, layer_weight, is_decode=False):
+    def _ffn_core(self, input, layer_weight):
         """Core FFN computation: gate_up -> silu_and_mul -> down."""
         input = input.view(-1, self.embed_dim_)
-        if is_decode and self.tp_gate_up_dim > 0:
-            up_gate_buf = self._get_decode_buffer(
-                "up_gate_out",
-                (self._graph_max_batch_size, self.tp_gate_up_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input, out=up_gate_buf)
-        else:
-            up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input)
+        up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input)
         inter_dim = up_gate_out.size(1) // 2
-        if is_decode:
-            ffn1_out = self._get_decode_buffer(
-                "ffn1_out", (self._graph_max_batch_size, inter_dim), input.dtype, input.device
-            )[: input.size(0)]
-        else:
-            ffn1_out = self.alloc_tensor((input.size(0), inter_dim), input.dtype)
+        ffn1_out = self.alloc_tensor((input.size(0), inter_dim), input.dtype)
         silu_and_mul_fwd(up_gate_out, ffn1_out)
         ffn2_out = layer_weight.shared_expert_down_proj.mm(ffn1_out)
         return ffn2_out, input
@@ -146,12 +117,12 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
         # For dense models without shared experts, return zeros (no FFN computation)
         if not hasattr(layer_weight, "shared_expert_gate_up_proj") or layer_weight.shared_expert_gate_up_proj is None:
             return torch.zeros_like(input)
-        ffn2_out, _ = self._ffn_core(input, layer_weight, is_decode=not infer_state.is_prefill)
+        ffn2_out, _ = self._ffn_core(input, layer_weight)
         return ffn2_out
 
-    def _compute_shared_expert(self, input, layer_weight, is_decode=False):
+    def _compute_shared_expert(self, input, layer_weight):
         """Compute shared expert FFN output with gating."""
-        ffn2_out, input_view = self._ffn_core(input, layer_weight, is_decode=is_decode)
+        ffn2_out, input_view = self._ffn_core(input, layer_weight)
         # Dense models don't have shared_expert_gate
         if layer_weight.shared_expert_gate is not None:
             gate = layer_weight.shared_expert_gate.mm(input_view).sigmoid_()
@@ -160,18 +131,14 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
 
     def _ffn_with_shared_expert_tp(self, input, infer_state, layer_weight):
         """FFN with shared expert + MoE (tensor parallelism mode)."""
-        shared_expert_out, input = self._compute_shared_expert(
-            input, layer_weight, is_decode=not infer_state.is_prefill
-        )
+        shared_expert_out, input = self._compute_shared_expert(input, layer_weight)
         moe_out = self._moe_ffn(input, infer_state, layer_weight)
         moe_out.add_(shared_expert_out)
         return moe_out
 
     def _ffn_with_shared_expert_ep(self, input, infer_state, layer_weight):
         """FFN with shared expert + MoE (expert parallelism mode)."""
-        shared_expert_out, input = self._compute_shared_expert(
-            input, layer_weight, is_decode=not infer_state.is_prefill
-        )
+        shared_expert_out, input = self._compute_shared_expert(input, layer_weight)
         moe_out = self._moe_ffn_edp(input, infer_state, layer_weight)
         moe_out.add_(shared_expert_out)
         return moe_out
@@ -180,16 +147,7 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
         """MoE FFN with tensor parallelism."""
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
-        if not infer_state.is_prefill:
-            router_buf = self._get_decode_buffer(
-                "router_logits",
-                (self._graph_max_batch_size, self.n_routed_experts),
-                hidden_states.dtype,
-                hidden_states.device,
-            )[:num_tokens]
-            router_logits = layer_weight.moe_gate.mm(hidden_states, out=router_buf)
-        else:
-            router_logits = layer_weight.moe_gate.mm(hidden_states)
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -246,24 +204,8 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
         """
         input = input.view(-1, self.embed_dim_)
         # Single fused GEMM for both Q and output gate projections
-        if not infer_state.is_prefill:
-            q_gate_buf = self._get_decode_buffer(
-                "q_gate_out",
-                (self._graph_max_batch_size, self.tp_q_gate_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            q_gate = layer_weight.q_gate_proj.mm(input, out=q_gate_buf)
-            kv_buf = self._get_decode_buffer(
-                "kv_out",
-                (self._graph_max_batch_size, self.tp_kv_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            kv_out = layer_weight.kv_proj.mm(input, out=kv_buf)
-        else:
-            q_gate = layer_weight.q_gate_proj.mm(input)
-            kv_out = layer_weight.kv_proj.mm(input)
+        q_gate = layer_weight.q_gate_proj.mm(input)
+        kv_out = layer_weight.kv_proj.mm(input)
         q_dim = self.tp_q_head_num_ * self.head_dim_
         q = q_gate[:, :q_dim].contiguous()
         # In-place sigmoid saves one allocation (gate_value is consumed once in _get_o)
@@ -280,16 +222,7 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
 
         # K normalization
         k_input = cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1])
-        if not infer_state.is_prefill:
-            k_normed = self._get_decode_buffer(
-                "k_norm_out",
-                (self._graph_max_batch_size * self.tp_k_head_num_, cache_kv.shape[-1]),
-                k_input.dtype,
-                k_input.device,
-            )[: k_input.shape[0]]
-            gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_, out=k_normed)
-        else:
-            k_normed = gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_)
+        k_normed = gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_)
         cache_kv[:, : self.tp_k_head_num_, :] = k_normed.view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
 
         # Rotary embedding with partial rotation support
@@ -316,19 +249,15 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
         return o_tensor
 
     def token_forward(self, input_embdings, infer_state, layer_weight):
-        """Override token_forward to use pre-allocated decode buffers and fused kernels."""
-        max_tokens = self._graph_max_batch_size
-        input1 = self._get_decode_buffer(
-            "att_norm_out", (max_tokens, self.embed_dim_), input_embdings.dtype, input_embdings.device
-        )[: input_embdings.shape[0]]
+        """Override token_forward to use fused kernels."""
+        input1 = self.alloc_tensor(input_embdings.shape, input_embdings.dtype)
         gemma_rmsnorm_forward(input_embdings, layer_weight.att_norm_weight_.weight, self.eps_, out=input1)
 
         o = self.token_attention_forward(input1, infer_state, layer_weight)
+        input1 = None
 
         # Fused residual add + FFN norm: saves 1 kernel launch + 1 read of input_embdings
-        input1 = self._get_decode_buffer(
-            "att_norm_out", (max_tokens, self.embed_dim_), input_embdings.dtype, input_embdings.device
-        )[: input_embdings.shape[0]]
+        input1 = self.alloc_tensor(input_embdings.shape, input_embdings.dtype)
         fused_add_gemma_rmsnorm(
             input_embdings,
             o.view(-1, self.embed_dim_),
@@ -421,27 +350,8 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
         # Conversion needed only if SSM state uses different dtype
         self.needs_ssm_dtype_conversion = get_llm_data_type() != self.ssm_state_dtype
 
-        # Pre-allocated decode buffers to avoid repeated allocation during CUDA graph replay.
-        # Buffers are lazily allocated on first decode call, sized to graph_max_batch_size.
-        self._decode_buffers = {}
-        self._graph_max_batch_size = start_args.graph_max_batch_size
-
-        # Pre-compute FFN dims for decode buffer pre-allocation
-        self.tp_gate_up_dim = 2 * self.shared_inter_size // self.tp_world_size_ if self.shared_inter_size > 0 else 0
-
         self._bind_func()
         return
-
-    def _get_decode_buffer(self, name, max_shape, dtype, device):
-        """Get or create a pre-allocated buffer for the decode path.
-
-        On first call, allocates a buffer at max_shape. On subsequent calls,
-        returns the same buffer (caller should slice to actual batch size).
-        """
-        key = (name, dtype, device if isinstance(device, str) else str(device))
-        if key not in self._decode_buffers:
-            self._decode_buffers[key] = torch.empty(max_shape, dtype=dtype, device=device)
-        return self._decode_buffers[key]
 
     def _bind_func(self):
         """Bind layer-specific implementations"""
@@ -467,26 +377,12 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
             self._ffn = partial(Qwen3NextGatedDeltaNetTransformerLayerInfer._standard_ffn, self)
         return
 
-    def _ffn_core(self, input, layer_weight, is_decode=False):
+    def _ffn_core(self, input, layer_weight):
         """Core FFN computation: gate_up -> silu_and_mul -> down."""
         input = input.view(-1, self.embed_dim_)
-        if is_decode and self.tp_gate_up_dim > 0:
-            up_gate_buf = self._get_decode_buffer(
-                "up_gate_out",
-                (self._graph_max_batch_size * self.mtp_size, self.tp_gate_up_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input, out=up_gate_buf)
-        else:
-            up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input)
+        up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input)
         inter_dim = up_gate_out.size(1) // 2
-        if is_decode:
-            ffn1_out = self._get_decode_buffer(
-                "ffn1_out", (self._graph_max_batch_size, inter_dim), input.dtype, input.device
-            )[: input.size(0)]
-        else:
-            ffn1_out = self.alloc_tensor((input.size(0), inter_dim), input.dtype)
+        ffn1_out = self.alloc_tensor((input.size(0), inter_dim), input.dtype)
         silu_and_mul_fwd(up_gate_out, ffn1_out)
         ffn2_out = layer_weight.shared_expert_down_proj.mm(ffn1_out)
         return ffn2_out, input
@@ -496,12 +392,12 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
         # For dense models without shared experts, return zeros (no FFN computation)
         if not hasattr(layer_weight, "shared_expert_gate_up_proj") or layer_weight.shared_expert_gate_up_proj is None:
             return torch.zeros_like(input)
-        ffn2_out, _ = self._ffn_core(input, layer_weight, is_decode=not infer_state.is_prefill)
+        ffn2_out, _ = self._ffn_core(input, layer_weight)
         return ffn2_out
 
-    def _compute_shared_expert(self, input, layer_weight, is_decode=False):
+    def _compute_shared_expert(self, input, layer_weight):
         """Compute shared expert FFN output with gating."""
-        ffn2_out, input_view = self._ffn_core(input, layer_weight, is_decode=is_decode)
+        ffn2_out, input_view = self._ffn_core(input, layer_weight)
         # Dense models don't have shared_expert_gate
         if layer_weight.shared_expert_gate is not None:
             gate = layer_weight.shared_expert_gate.mm(input_view).sigmoid_()
@@ -510,18 +406,14 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
 
     def _ffn_with_shared_expert_tp(self, input, infer_state, layer_weight):
         """FFN with shared expert + MoE (tensor parallelism mode)."""
-        shared_expert_out, input = self._compute_shared_expert(
-            input, layer_weight, is_decode=not infer_state.is_prefill
-        )
+        shared_expert_out, input = self._compute_shared_expert(input, layer_weight)
         moe_out = self._moe_ffn(input, infer_state, layer_weight)
         moe_out.add_(shared_expert_out)
         return moe_out
 
     def _ffn_with_shared_expert_ep(self, input, infer_state, layer_weight):
         """FFN with shared expert + MoE (expert parallelism mode)."""
-        shared_expert_out, input = self._compute_shared_expert(
-            input, layer_weight, is_decode=not infer_state.is_prefill
-        )
+        shared_expert_out, input = self._compute_shared_expert(input, layer_weight)
         moe_out = self._moe_ffn_edp(input, infer_state, layer_weight)
         moe_out.add_(shared_expert_out)
         return moe_out
@@ -530,16 +422,7 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
         """MoE FFN with tensor parallelism."""
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
-        if not infer_state.is_prefill:
-            router_buf = self._get_decode_buffer(
-                "router_logits",
-                (self._graph_max_batch_size * self.mtp_size, self.n_routed_experts),
-                hidden_states.dtype,
-                hidden_states.device,
-            )[:num_tokens]
-            router_logits = layer_weight.moe_gate.mm(hidden_states, out=router_buf)
-        else:
-            router_logits = layer_weight.moe_gate.mm(hidden_states)
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -662,11 +545,7 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
         if is_prefill:
             input1 = self._att_norm(input_embdings, infer_state, layer_weight)
         else:
-            # Decode: use pre-allocated buffer to avoid alloc_tensor overhead
-            max_tokens = self._graph_max_batch_size * self.mtp_size
-            input1 = self._get_decode_buffer(
-                "att_norm_out", (max_tokens, self.embed_dim_), input_embdings.dtype, input_embdings.device
-            )[: input_embdings.shape[0]]
+            input1 = self.alloc_tensor(input_embdings.shape, input_embdings.dtype)
             gemma_rmsnorm_forward(input_embdings, layer_weight.att_norm_weight_.weight, self.eps_, out=input1)
 
         gdn_out = self.gdn_forward(input1, infer_state, layer_weight, is_prefill=is_prefill)
@@ -679,10 +558,8 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
             gdn_out = None
             input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         else:
-            # Decode: fused residual add + FFN norm saves 1 kernel + 1 read of input_embdings
-            input1 = self._get_decode_buffer(
-                "att_norm_out", (max_tokens, self.embed_dim_), input_embdings.dtype, input_embdings.device
-            )[: input_embdings.shape[0]]
+            input1 = None
+            input1 = self.alloc_tensor(input_embdings.shape, input_embdings.dtype)
             fused_add_gemma_rmsnorm(
                 input_embdings,
                 gdn_out.view(-1, self.embed_dim_),
@@ -1013,18 +890,7 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
         input = input.view(-1, self.embed_dim_)
         conv_states, ssm_states = infer_state.mem_manager.get_mamba_cache(self.layer_num_)
 
-        if not is_prefill:
-            # Decode: pre-allocate GEMM output to avoid cache tensor manager overhead
-            in_proj_out_dim = self.tp_qkvz_dim + self.tp_ba_dim
-            in_proj_out = self._get_decode_buffer(
-                "in_proj_out",
-                (self._graph_max_batch_size * self.mtp_size, in_proj_out_dim),
-                input.dtype,
-                input.device,
-            )[: input.shape[0]]
-            mixed_qkvzba = layer_weight.linear_in_proj.mm(input, out=in_proj_out)
-        else:
-            mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
+        mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
         # mixed_qkv is now returned pre-concatenated (no torch.cat needed)
         mixed_qkv, z, b, a = self._fix_query_key_value_ba_ordering(mixed_qkvzba, is_decode=not is_prefill)
 
@@ -1049,18 +915,7 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(GemmaRMSNormMixin, Transformer
         num_tokens = z.shape[0]  # batch (decode) or total_tokens (prefill/MTP)
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
-        if not is_prefill:
-            # Decode: use pre-allocated buffer for norm output to avoid alloc_tensor
-            max_decode_tokens = self._graph_max_batch_size * self.mtp_size
-            flat_size = max_decode_tokens * self.tp_num_v_heads
-            norm_out = self._get_decode_buffer(
-                "gdn_norm_out",
-                (flat_size, self.head_v_dim),
-                core_attn_out.dtype,
-                core_attn_out.device,
-            )[: core_attn_out.shape[0]]
-        else:
-            norm_out = self.alloc_tensor(core_attn_out.shape, core_attn_out.dtype, device=core_attn_out.device)
+        norm_out = self.alloc_tensor(core_attn_out.shape, core_attn_out.dtype, device=core_attn_out.device)
         gated_rmsnorm_forward(
             core_attn_out,
             layer_weight.linear_norm.weight,

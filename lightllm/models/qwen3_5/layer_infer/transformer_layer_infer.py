@@ -34,25 +34,8 @@ class Qwen35FullAttentionTransformerLayerInfer(Qwen3NextFullAttentionTransformer
         input = input.view(-1, self.embed_dim_)
 
         # Q and gate projection
-        if not infer_state.is_prefill:
-            q_gate_buf = self._get_decode_buffer(
-                "q_gate_out",
-                (self._graph_max_batch_size, self.tp_q_gate_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            q_gate = layer_weight.q_gate_proj.mm(input, out=q_gate_buf)
-            kv_buf = self._get_decode_buffer(
-                "kv_out",
-                (self._graph_max_batch_size, self.tp_kv_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            kv_out = layer_weight.kv_proj.mm(input, out=kv_buf)
-        else:
-            q_gate = layer_weight.q_gate_proj.mm(input)
-            kv_out = layer_weight.kv_proj.mm(input)
-
+        q_gate = layer_weight.q_gate_proj.mm(input)
+        kv_out = layer_weight.kv_proj.mm(input)
         q_dim = self.tp_q_head_num_ * self.head_dim_
         q = q_gate[:, :q_dim].contiguous()
         # In-place sigmoid for gate
@@ -70,16 +53,7 @@ class Qwen35FullAttentionTransformerLayerInfer(Qwen3NextFullAttentionTransformer
         )
 
         k_input = cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1])
-        if not infer_state.is_prefill:
-            k_normed = self._get_decode_buffer(
-                "k_norm_out",
-                (self._graph_max_batch_size * self.tp_k_head_num_, cache_kv.shape[-1]),
-                k_input.dtype,
-                k_input.device,
-            )[: k_input.shape[0]]
-            gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_, out=k_normed)
-        else:
-            k_normed = gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_)
+        k_normed = gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_)
         cache_kv[:, : self.tp_k_head_num_, :] = k_normed.view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
 
         if hasattr(infer_state, "position_cos") and infer_state.position_cos is not None:
