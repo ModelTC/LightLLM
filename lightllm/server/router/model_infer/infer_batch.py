@@ -364,6 +364,12 @@ class InferReq:
             self.decode_need_token_num = self._normal_decode_need_token_num
 
         self._init_all_state()
+
+        self.generator = None
+        if getattr(self.sampling_param.shm_param, "seed", -1) != -1:
+            self.generator = torch.Generator(device="cuda")
+            self.generator.manual_seed(self.sampling_param.shm_param.seed)
+
         if init_prefix_cache:
             self._match_radix_cache()
         return

@@ -71,7 +71,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     elif skip_top_k and skip_top_p:
-        batch_next_token_ids = _random_sample(probs)
+        batch_next_token_ids = _random_sample(probs, reqs)
         batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
@@ -111,9 +111,12 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     return probs_sort, probs_idx
 
 
-def _random_sample(probs: torch.Tensor):
+def _random_sample(probs: torch.Tensor, reqs: List[InferReq]):
     q = torch.empty_like(probs)
     q.exponential_()
+    for i, req in enumerate(reqs):
+        if req.generator is not None:
+            q[i].exponential_(generator=req.generator)
     return probs.div(q).argmax(dim=-1).view(-1)
 
 
