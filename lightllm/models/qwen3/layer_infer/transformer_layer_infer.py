@@ -24,11 +24,8 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input)
-        layer_weight.q_norm_weight_(
+        layer_weight.qk_norm_weight_(
             q,
-            eps=self.eps_,
-        )
-        layer_weight.k_norm_weight_(
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             eps=self.eps_,
         )

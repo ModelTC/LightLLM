@@ -4,7 +4,7 @@ from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
-from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from .platform_op import PlatformAwareOp
 
 
@@ -195,47 +195,84 @@ class NoTpGEMMANormWeight(RMSNormWeight):
             self.weight += 1
 
 
-class QKRMSNORMWeight(RMSNormWeight):
-    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
-        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
+class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
+    def __init__(self, dim: int, q_weight_name: str, k_weight_name: str, data_type: torch.dtype):
+        super().__init__(tp_rank=0, tp_world_size=1)
+        self.dim = dim
+        self.q_weight_name = q_weight_name
+        self.k_weight_name = k_weight_name
+        self.data_type_ = data_type
+        self._create_weight()
+
+    def _create_weight(self):
+        self.q_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.k_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.q_weight.load_ok = False
+        self.k_weight.load_ok = False
+
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.q_weight_name in weights:
+            self.q_weight.copy_(weights[self.q_weight_name])
+            self.q_weight.load_ok = True
+        if self.k_weight_name in weights:
+            self.k_weight.copy_(weights[self.k_weight_name])
+            self.k_weight.load_ok = True
+
+    def verify_load(self):
+        return self.q_weight.load_ok and self.k_weight.load_ok
 
     def _native_forward(
         self,
-        input: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
         eps: float,
     ) -> None:
-        assert input.ndim == 2 and self.weight.ndim == 1
-        assert input.shape[-1] == self.dim, f"Expected hidden_size to be {self.dim}, but found: {input.shape[-1]}"
-        head_dim = self.weight.shape[0]
-        x = input.to(torch.float32)
-        x = x.view(-1, head_dim)
-        x_var = x
-        variance = x_var.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + eps)
-        x = (x * self.weight).to(self.data_type_)
-        x = x.view(-1, input.shape[-1])
-        input.copy_(x)
+        assert q.ndim == 2 and self.q_weight.ndim == 1
+        assert k.ndim == 2 and self.k_weight.ndim == 1
+        assert (
+            q.shape[-1] % self.dim == 0
+        ), f"Expected hidden_size to be multiple of {self.dim}, but found: {q.shape[-1]}"
+        assert (
+            k.shape[-1] % self.dim == 0
+        ), f"Expected hidden_size to be multiple of {self.dim}, but found: {k.shape[-1]}"
+
+        head_dim = self.q_weight.shape[0]
+
+        def _norm_inplace(t: torch.Tensor, weight: torch.Tensor):
+            t_fp32 = t.to(torch.float32)
+            t_fp32 = t_fp32.view(-1, head_dim)
+            variance = t_fp32.pow(2).mean(dim=-1, keepdim=True)
+            t_fp32 = t_fp32 * torch.rsqrt(variance + eps)
+            t_fp32 = (t_fp32 * weight).to(self.data_type_)
+            t_fp32 = t_fp32.view(-1, t.shape[-1])
+            t.copy_(t_fp32)
+
+        _norm_inplace(q, self.q_weight)
+        _norm_inplace(k, self.k_weight)
         return
 
-    def _triton_forward(self, input: torch.Tensor, eps: float) -> torch.Tensor:
-        assert input.ndim == 2 and self.weight.ndim == 1
-        return qk_rmsnorm_forward(x=input, weight=self.weight, eps=eps)
+    def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
+        assert q.ndim == 2 and self.q_weight.ndim == 1
+        assert k.ndim == 2 and self.k_weight.ndim == 1
+        return qk_rmsnorm_fused_forward(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps)
 
     def _cuda_forward(
         self,
-        input: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
         eps: float,
     ) -> None:
-        self._triton_forward(input=input, eps=eps)
+        self._triton_forward(q=q, k=k, eps=eps)
         return
 
-    def _musa_forward(self, input: torch.Tensor, eps: float) -> torch.Tensor:
+    def _musa_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
         # musa implementation is supported by musa triton on musa platform
-        return self._triton_forward(input=input, eps=eps)
+        return self._triton_forward(q=q, k=k, eps=eps)
 
     def __call__(
         self,
-        input: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
         eps: float,
     ) -> None:
-        return self._forward(input=input, eps=eps)
+        return self._forward(q=q, k=k, eps=eps)
