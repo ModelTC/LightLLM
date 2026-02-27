@@ -1,9 +1,5 @@
 import os
 import json
-import time
-import gc
-from safetensors import safe_open
-from tqdm import tqdm
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
@@ -11,8 +7,12 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35NextGatedDeltaNetTransformerLayerWeight,
 )
 from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
-from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
-from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
+from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import (
+    Qwen3VLMultimodalPreLayerInfer,
+)
+from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import (
+    Qwen3VLPreAndPostLayerWeight,
+)
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35FullAttentionTransformerLayerInfer,
     Qwen35GatedDeltaNetTransformerLayerInfer,
@@ -20,7 +20,6 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
 from lightllm.models.qwen3_5.infer_struct import Qwen35InferStateInfo
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
-import lightllm.utils.petrel_helper as utils
 
 logger = init_logger(__name__)
 

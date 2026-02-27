@@ -32,12 +32,7 @@ class SharedExpertFFNMixin:
         """Core FFN computation: gate_up -> silu_and_mul -> down."""
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.shared_expert_gate_up_proj.mm(input)
-
-        if hasattr(self, "buffer_pool") and self.buffer_pool:
-            ffn1_out = self.buffer_pool.get_buffer((input.size(0), up_gate_out.size(1) // 2), input.dtype, input.device)
-        else:
-            ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-
+        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
         silu_and_mul_fwd(up_gate_out, ffn1_out)
         ffn2_out = layer_weight.shared_expert_down_proj.mm(ffn1_out)
         return ffn2_out, input

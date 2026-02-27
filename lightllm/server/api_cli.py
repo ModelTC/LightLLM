@@ -638,7 +638,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mamba_cache_ratio",
-        type=float,
+        type=lambda v: float(v)
+        if 0.0 <= (_ := float(v)) <= 1.0
+        else (_ for _ in ()).throw(
+            argparse.ArgumentTypeError(f"--mamba_cache_ratio must be between 0.0 and 1.0, got {v}")
+        ),
         default=0.5,
         help="""Ratio of mamba cache to total cache memory (mamba + KV).
         Only effective when both mamba_cache_size and max_total_token_num are not set.
