@@ -196,33 +196,3 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
             )
             for i in range(self.config["n_layer"])
         ]
-
-
-@ModelRegistry(["qwen3_5_moe"], is_multimodal=True)
-class Qwen3_5MOETpPartModel(Qwen3_5TpPartModel):
-    """
-    Qwen3.5-MoE Multimodal Model (Mixture of Experts Variant)
-
-    Extends Qwen3.5 with sparse expert routing:
-    - Same hybrid attention architecture as Qwen3.5
-    - MoE layers replace dense MLP layers
-    - Expert routing handled by Qwen3NextSparseMoeBlock (inherited)
-
-    The MoE variant is automatically configured by inheriting from
-    Qwen3NextTpPartModel, which inherits from Qwen3MOEModel.
-
-    No additional configuration needed - MoE support is built-in.
-    """
-
-    def __init__(self, kvargs):
-        """
-        Initialize Qwen3.5-MoE model.
-
-        Args:
-            kvargs: Dictionary containing:
-                - weight_dir: Path to model weights
-                - max_total_token_num: Maximum total tokens
-                - Additional model configuration
-        """
-        super().__init__(kvargs)
-        logger.info("Initialized Qwen3.5-MoE multimodal model with expert routing")
