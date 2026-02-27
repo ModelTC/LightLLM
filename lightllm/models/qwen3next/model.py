@@ -20,6 +20,7 @@ from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 
 logger = init_logger(__name__)
 
@@ -33,11 +34,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     is_hybrid_attention = True  # Indicates model uses hybrid (full + linear) attention
     use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states
 
-    @classmethod
-    def get_radix_cache_class(cls):
-        from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
-
-        return HybridRadixCache
+    radix_cache_class = HybridRadixCache
 
     def __init__(self, kvargs) -> None:
         self.mem_manager: Qwen3NextHybridMemManager = None

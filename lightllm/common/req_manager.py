@@ -1,6 +1,5 @@
 import torch
 import collections
-from lightllm.common.basemodel.triton_kernel.alloc_buffer_kernel import alloc_buffer_for_req_triton
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
@@ -268,7 +267,8 @@ class ReqManagerForMamba(ReqManager):
         num_reqs = req_index.shape[0]
         num_buffers_per_req = self.mtp_step + 1
         buffer_indexes = self.buffer_mem_manager.alloc(num_reqs * num_buffers_per_req)
-        alloc_buffer_for_req_triton(req_index, buffer_indexes, self.req_to_buffer_index, self.mtp_step)
+        # Pure PyTorch: indexed assignment is already a fused GPU kernel
+        self.req_to_buffer_index[req_index] = buffer_indexes.view(num_reqs, num_buffers_per_req)
 
     def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
         # 获取目标请求的所有 MTP buffer (从 buffer[0] 到 buffer[mtp_step])

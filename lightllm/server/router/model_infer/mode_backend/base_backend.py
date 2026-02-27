@@ -175,7 +175,7 @@ class ModeBackend:
 
         self.use_buffer_manager = getattr(self.model, "use_buffer_manager", False)
 
-        radix_cache_class = self.model.get_radix_cache_class()
+        radix_cache_class = self.model.radix_cache_class
         self.radix_cache = (
             radix_cache_class(
                 get_unique_server_name(),
