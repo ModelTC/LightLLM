@@ -184,16 +184,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
                             )
                     else:
-                        # Treat as local file path
-                        if os.path.isfile(img):
-                            with open(img, "rb") as f:
-                                multimodal_params_dict["images"].append(
-                                    {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
-                                )
-                        else:
-                            raise ValueError(
-                                "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
-                            )
+                        raise ValueError(
+                            "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
+                        )
 
     tools = None
     if request.tools and request.tool_choice != "none":
@@ -275,14 +268,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
             full_text = text
-
-            # Debug logging for empty responses
-            if not text or len(text.strip()) == 0:
-                logger.warning(
-                    f"[EMPTY_RESPONSE_DEBUG] sub_req_id={sub_req_id}, "
-                    f"completion_tokens={completion_tokens}, finish_reason={finish_reason}, "
-                    f"prompt_tokens={prompt_tokens}, output_chunks={len(final_output_dict[sub_req_id])}"
-                )
 
             # Handle reasoning content
             reasoning_text = None
