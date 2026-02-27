@@ -3,36 +3,38 @@ import triton
 import triton.language as tl
 from lightllm.common.triton_utils.autotuner import autotune
 
+_MAX_GRID_DIM = 65535
+
 
 @triton.jit
-def _copy_buffer_p2p_1d_kernel(
+def _copy_mamba_buffer_1d_kernel(
     src_buffer_ptr,
     dst_buffer_ptr,
     src_indexes_ptr,
     dst_indexes_ptr,
-    pair_idx_offset,
+    chunk_offset,
     layer_idx_offset,
     stride_layer,
-    stride_index,
+    stride_slot,
     stride_d,
     d_size,
     BLOCK_D: tl.constexpr,
 ):
     """
-    Optimized kernel for 1D buffer copy.
+    Indexed 1:1 copy kernel for Mamba recurrent state buffers.
 
     Grid: (num_pairs, layer_num, num_blocks_d)
     Each program copies one block of dimension d for one (pair, layer) combination.
     """
-    pair_idx = tl.program_id(0) + pair_idx_offset
+    pair_idx = tl.program_id(0) + chunk_offset
     layer_idx = tl.program_id(1) + layer_idx_offset
     block_d_idx = tl.program_id(2)
 
     # Cast strides to int64 to prevent overflow in pointer arithmetic
     stride_layer = stride_layer.to(tl.int64)
-    stride_index = stride_index.to(tl.int64)
+    stride_slot = stride_slot.to(tl.int64)
 
-    # Load source and destination indices for this pair
+    # Load source and destination slot indices for this pair
     src_idx = tl.load(src_indexes_ptr + pair_idx).to(tl.int64)
     dst_idx = tl.load(dst_indexes_ptr + pair_idx).to(tl.int64)
 
@@ -44,8 +46,8 @@ def _copy_buffer_p2p_1d_kernel(
     mask = d_offsets < d_size
 
     # Calculate source and destination pointers for this layer and pair
-    base_src = src_buffer_ptr + layer_idx * stride_layer + src_idx * stride_index
-    base_dst = dst_buffer_ptr + layer_idx * stride_layer + dst_idx * stride_index
+    base_src = src_buffer_ptr + layer_idx * stride_layer + src_idx * stride_slot
+    base_dst = dst_buffer_ptr + layer_idx * stride_layer + dst_idx * stride_slot
 
     src_ptr = base_src + d_offsets * stride_d
     dst_ptr = base_dst + d_offsets * stride_d
@@ -56,54 +58,53 @@ def _copy_buffer_p2p_1d_kernel(
 
 
 @triton.jit
-def _copy_buffer_broadcast_1d_kernel(
+def _fork_mamba_buffer_1d_kernel(
     src_buffer_ptr,
     dst_buffer_ptr,
     src_indexes_ptr,
     dst_indexes_ptr,
-    copy_idx_offset,
+    chunk_offset,
     layer_idx_offset,
     stride_layer,
-    stride_index,
+    stride_slot,
     stride_d,
     d_size,
     num_dst_per_src,
     BLOCK_D: tl.constexpr,
 ):
     """
-    Broadcast kernel for 1D buffer copy (one source to multiple destinations).
+    Fork kernel for Mamba recurrent state buffers: one source slot → N destination slots.
 
+    Used for MTP speculation where one parent state is copied to multiple child slots.
     Grid: (num_src, layer_num, num_blocks_d)
     """
-    src_idx_in_batch = tl.program_id(0) + copy_idx_offset
+    src_chunk_idx = tl.program_id(0) + chunk_offset
     layer_idx = tl.program_id(1) + layer_idx_offset
     block_d_idx = tl.program_id(2)
 
     # Cast strides to int64 to prevent overflow in pointer arithmetic
     stride_layer = stride_layer.to(tl.int64)
-    stride_index = stride_index.to(tl.int64)
+    stride_slot = stride_slot.to(tl.int64)
 
-    # Load source index
-    src_idx = tl.load(src_indexes_ptr + src_idx_in_batch).to(tl.int64)
+    # Load source slot index
+    src_idx = tl.load(src_indexes_ptr + src_chunk_idx).to(tl.int64)
 
     # Calculate offsets for this block
     d_start = block_d_idx * BLOCK_D
     d_offsets = d_start + tl.arange(0, BLOCK_D)
     mask = d_offsets < d_size
 
-    # Calculate source pointer
-    base_src = src_buffer_ptr + layer_idx * stride_layer + src_idx * stride_index
+    # Calculate source pointer and load data once
+    base_src = src_buffer_ptr + layer_idx * stride_layer + src_idx * stride_slot
     src_ptr = base_src + d_offsets * stride_d
-
-    # Load data once
     data = tl.load(src_ptr, mask=mask, other=0.0)
 
-    # Broadcast to all destinations for this source
+    # Write to each destination slot for this source
     for dst_offset in range(num_dst_per_src):
-        dst_idx_in_batch = src_idx_in_batch * num_dst_per_src + dst_offset
+        dst_idx_in_batch = src_chunk_idx * num_dst_per_src + dst_offset
         dst_idx = tl.load(dst_indexes_ptr + dst_idx_in_batch).to(tl.int64)
 
-        base_dst = dst_buffer_ptr + layer_idx * stride_layer + dst_idx * stride_index
+        base_dst = dst_buffer_ptr + layer_idx * stride_layer + dst_idx * stride_slot
         dst_ptr = base_dst + d_offsets * stride_d
 
         tl.store(dst_ptr, data, mask=mask)
@@ -151,20 +152,20 @@ def _get_buffer_copy_run_key(src_indexes: torch.Tensor):
 
 
 @autotune(
-    kernel_name="mamba_buffer_copy_p2p_1d:v1",
+    kernel_name="mamba_buffer_copy_1d:v1",
     configs_gen_func=_get_buffer_copy_1d_configs,
     static_key_func=_get_buffer_copy_static_key,
     run_key_func=_get_buffer_copy_run_key,
     mutates_args=["dst_buffer"],
 )
-def _copy_buffer_p2p_1d_autotuned(
+def _copy_mamba_buffer_1d_autotuned(
     src_buffer: torch.Tensor,
     dst_buffer: torch.Tensor,
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
     run_config: dict = None,
 ):
-    """Auto-tuned 1D buffer copy."""
+    """Auto-tuned indexed 1:1 copy of Mamba recurrent state buffer slots."""
     num_pairs = src_indexes.shape[0]
     layer_num = src_buffer.shape[0]
     d_size = src_buffer.shape[2]
@@ -180,19 +181,17 @@ def _copy_buffer_p2p_1d_autotuned(
 
     num_blocks_d = triton.cdiv(d_size, BLOCK_D)
 
-    MAX_GRID_SIZE = 65535
-
-    for pair_chunk_start in range(0, num_pairs, MAX_GRID_SIZE):
-        pair_chunk_end = min(pair_chunk_start + MAX_GRID_SIZE, num_pairs)
+    for pair_chunk_start in range(0, num_pairs, _MAX_GRID_DIM):
+        pair_chunk_end = min(pair_chunk_start + _MAX_GRID_DIM, num_pairs)
         pair_chunk_size = pair_chunk_end - pair_chunk_start
 
-        for layer_chunk_start in range(0, layer_num, MAX_GRID_SIZE):
-            layer_chunk_end = min(layer_chunk_start + MAX_GRID_SIZE, layer_num)
+        for layer_chunk_start in range(0, layer_num, _MAX_GRID_DIM):
+            layer_chunk_end = min(layer_chunk_start + _MAX_GRID_DIM, layer_num)
             layer_chunk_size = layer_chunk_end - layer_chunk_start
 
             grid = (pair_chunk_size, layer_chunk_size, num_blocks_d)
 
-            _copy_buffer_p2p_1d_kernel[grid](
+            _copy_mamba_buffer_1d_kernel[grid](
                 src_buffer,
                 dst_buffer,
                 src_indexes,
@@ -210,23 +209,26 @@ def _copy_buffer_p2p_1d_autotuned(
 
 
 @autotune(
-    kernel_name="mamba_buffer_broadcast_1d:v1",
+    kernel_name="mamba_buffer_fork_1d:v1",
     configs_gen_func=_get_buffer_copy_1d_configs,
     static_key_func=_get_buffer_copy_static_key,
     run_key_func=_get_buffer_copy_run_key,
     mutates_args=["dst_buffer"],
 )
-def _copy_buffer_broadcast_1d_autotuned(
+def _fork_mamba_buffer_1d_autotuned(
     src_buffer: torch.Tensor,
     dst_buffer: torch.Tensor,
     src_indexes: torch.Tensor,
-    dst_indexes: torch.Tensor,
+    dst_indexes: torch.Tensor,  # flat 1D: [num_src * num_dst_per_src]
     run_config: dict = None,
 ):
-    """Auto-tuned 1D buffer broadcast (one src to multiple dst)."""
+    """Auto-tuned fork: copy each source Mamba slot to N destination slots."""
     num_src = src_indexes.shape[0]
     layer_num = src_buffer.shape[0]
     d_size = src_buffer.shape[2]
+    assert (
+        dst_indexes.shape[0] % num_src == 0
+    ), f"dst_indexes length {dst_indexes.shape[0]} must be divisible by num_src {num_src}"
     num_dst_per_src = dst_indexes.shape[0] // num_src
 
     if run_config is None:
@@ -240,19 +242,17 @@ def _copy_buffer_broadcast_1d_autotuned(
 
     num_blocks_d = triton.cdiv(d_size, BLOCK_D)
 
-    MAX_GRID_SIZE = 65535
-
-    for src_chunk_start in range(0, num_src, MAX_GRID_SIZE):
-        src_chunk_end = min(src_chunk_start + MAX_GRID_SIZE, num_src)
+    for src_chunk_start in range(0, num_src, _MAX_GRID_DIM):
+        src_chunk_end = min(src_chunk_start + _MAX_GRID_DIM, num_src)
         src_chunk_size = src_chunk_end - src_chunk_start
 
-        for layer_chunk_start in range(0, layer_num, MAX_GRID_SIZE):
-            layer_chunk_end = min(layer_chunk_start + MAX_GRID_SIZE, layer_num)
+        for layer_chunk_start in range(0, layer_num, _MAX_GRID_DIM):
+            layer_chunk_end = min(layer_chunk_start + _MAX_GRID_DIM, layer_num)
             layer_chunk_size = layer_chunk_end - layer_chunk_start
 
             grid = (src_chunk_size, layer_chunk_size, num_blocks_d)
 
-            _copy_buffer_broadcast_1d_kernel[grid](
+            _fork_mamba_buffer_1d_kernel[grid](
                 src_buffer,
                 dst_buffer,
                 src_indexes,
@@ -285,23 +285,23 @@ def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
     return buffer.view(L, B, -1)
 
 
-def copy_buffer_p2p(
+def copy_mamba_buffer(
     src_buffer: torch.Tensor,
     dst_buffer: torch.Tensor,
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
 ):
     """
-    Copy buffers from source indices to destination indices with auto-tuning.
+    Indexed 1:1 copy of Mamba recurrent state buffer slots.
 
-    Supports any buffer shape [layer_num, buffer_size, ...] as long as the
-    trailing dimensions are contiguous (which is the default for torch.zeros).
+    Copies slot src_indexes[i] → dst_indexes[i] for all layers simultaneously.
+    Used for cache eviction/restore and normal token state management.
 
     Args:
-        src_buffer: Source buffer tensor [layer_num, buffer_size, ...]
-        dst_buffer: Destination buffer tensor [layer_num, buffer_size, ...]
-        src_indexes: Source buffer indices [num_pairs]
-        dst_indexes: Destination buffer indices [num_pairs]
+        src_buffer: [layer_num, num_slots, ...]
+        dst_buffer: [layer_num, num_slots, ...]
+        src_indexes: source slot indices [num_pairs]
+        dst_indexes: destination slot indices [num_pairs]
     """
     assert src_buffer.shape == dst_buffer.shape
     assert src_indexes.shape == dst_indexes.shape
@@ -309,36 +309,39 @@ def copy_buffer_p2p(
 
     src_flat = _flatten_trailing_dims(src_buffer)
     dst_flat = _flatten_trailing_dims(dst_buffer)
-    _copy_buffer_p2p_1d_autotuned(src_flat, dst_flat, src_indexes, dst_indexes)
+    _copy_mamba_buffer_1d_autotuned(src_flat, dst_flat, src_indexes, dst_indexes)
 
 
-def copy_buffer_broadcast(
+def fork_mamba_buffer(
     src_buffer: torch.Tensor,
     dst_buffer: torch.Tensor,
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
 ):
     """
-    Broadcast buffers from source indices to multiple destination indices (MTP use case).
+    Fork Mamba recurrent state slots: copy one source slot to N destination slots.
 
-    Each source buffer is copied to multiple destination buffers.
+    Used for MTP (Multi-Token Prediction) speculation, where a parent token's
+    recurrent state must be replicated into each speculative child slot.
 
     Args:
-        src_buffer: Source buffer tensor [layer_num, buffer_size, ...]
-        dst_buffer: Destination buffer tensor [layer_num, buffer_size, ...]
-        src_indexes: Source buffer indices [num_src]
-        dst_indexes: Destination buffer indices [num_src, num_dst_per_src] (2D tensor)
+        src_buffer: [layer_num, num_slots, ...]
+        dst_buffer: [layer_num, num_slots, ...]
+        src_indexes: source slot indices [num_src]
+        dst_indexes: destination slot indices [num_src, num_dst_per_src]
     """
     assert src_buffer.shape == dst_buffer.shape
     assert len(src_indexes.shape) == 1
-    assert len(dst_indexes.shape) == 2, f"dst_indexes must be 2D, got shape {dst_indexes.shape}"
+    assert len(dst_indexes.shape) == 2, f"dst_indexes must be 2D [num_src, num_dst_per_src], got {dst_indexes.shape}"
 
     num_src = src_indexes.shape[0]
-    assert num_src == dst_indexes.shape[0], f"Mismatch: src_indexes {num_src} vs dst_indexes {dst_indexes.shape[0]}"
+    assert (
+        num_src == dst_indexes.shape[0]
+    ), f"Mismatch: src_indexes {num_src} vs dst_indexes rows {dst_indexes.shape[0]}"
 
-    # Flatten dst_indexes for kernel
+    # Flatten dst_indexes to 1D for kernel; kernel reconstructs the 2D layout via num_dst_per_src
     dst_indexes_flat = dst_indexes.reshape(-1).contiguous()
 
     src_flat = _flatten_trailing_dims(src_buffer)
     dst_flat = _flatten_trailing_dims(dst_buffer)
-    _copy_buffer_broadcast_1d_autotuned(src_flat, dst_flat, src_indexes, dst_indexes_flat)
+    _fork_mamba_buffer_1d_autotuned(src_flat, dst_flat, src_indexes, dst_indexes_flat)
