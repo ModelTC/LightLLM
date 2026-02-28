@@ -61,8 +61,8 @@ sortedcontainers==2.4.0
 toolz==0.12.0
 torch==2.8.0
 tqdm==4.65.0
-transformers==4.53.3
-tokenizers==0.21.1
+transformers==4.57.1
+tokenizers==0.22.1
 urllib3==1.26.16
 uvicorn==0.19.0
 uvloop==0.17.0
@@ -79,9 +79,9 @@ ujson==5.10.0
 frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
-gunicorn==23.0.0
+hypercorn==0.18.0
 flashinfer-python==0.2.4
-sgl-kernel==0.3.7.post1
+sgl-kernel==0.3.21
 httpx==0.28.1
 librosa==0.11.0
 cuda_bindings==12.9.0

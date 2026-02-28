@@ -127,7 +127,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "glm47", "kimi_k2"],
+        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "glm47", "kimi_k2", "qwen3_coder"],
         default=None,
         help="tool call parser type",
     )
@@ -475,7 +475,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default="none",
         help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin""",
+                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin |
+                        | triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
+                        triton-fp8w8a8g64 (weight perchannel quantization with group size 64)""",
     )
     parser.add_argument(
         "--quant_cfg",
@@ -548,7 +550,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att", None],
+        choices=[
+            "vanilla_with_att",
+            "eagle_with_att",
+            "vanilla_no_att",
+            "eagle_no_att",
+            "qwen3next_vanilla",
+            "qwen3next_eagle",
+            None,
+        ],
         default=None,
         help="""Supported MTP modes.
         None: Disables MTP.
@@ -623,6 +633,33 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
+    )
+    parser.add_argument(
+        "--mamba_cache_size",
+        type=int,
+        default=None,
+        help="""The size of linear attn cache. If not specified, will be calculated
+        automatically based on mamba_cache_ratio or max_total_token_num.""",
+    )
+    parser.add_argument(
+        "--mamba_cache_ratio",
+        type=lambda v: float(v)
+        if 0.0 <= (_ := float(v)) <= 1.0
+        else (_ for _ in ()).throw(
+            argparse.ArgumentTypeError(f"--mamba_cache_ratio must be between 0.0 and 1.0, got {v}")
+        ),
+        default=0.5,
+        help="""Ratio of mamba cache to total cache memory (mamba + KV).
+        Only effective when both mamba_cache_size and max_total_token_num are not set.
+        Default is 0.5 (50%% mamba cache, 50%% KV cache).
+        Example: 0.3 -> 30%% mamba, 70%% KV; 0.7 -> 70%% mamba, 30%% KV.""",
+    )
+    parser.add_argument(
+        "--mamba_ssm_data_type",
+        type=str,
+        choices=["bfloat16", "float32"],
+        default="float32",
+        help="the data type of the model weight",
     )
     parser.add_argument(
         "--hardware_platform",

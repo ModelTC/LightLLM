@@ -160,6 +160,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         if LIGHTLLM_USE_TRITON_FP8_SCALED_MM:
             out = fp8_scaled_mm_per_token(x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out)
+            assert bias is None, "Bias addition is not supported in fp8w8a8 quantization method for now"
         else:
             cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
         return out
@@ -197,7 +198,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-        from lightllm.common.quantization.triton_quant.fp8.fp8w8a8_block_quant_kernel import weight_quant
+        from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
         weight, scale = weight_quant(weight.cuda(device), self.block_size)
@@ -236,6 +237,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
                 (self.block_size, self.block_size),
                 dtype=input_tensor.dtype,
             )
+            assert bias is None, "Bias addition is not supported in fp8w8a8-b128 quantization method for now"
         else:
             input_scale = input_scale.t().contiguous().t()
             cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)

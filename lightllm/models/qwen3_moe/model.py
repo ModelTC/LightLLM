@@ -26,7 +26,9 @@ class Qwen3MOEModel(Qwen3TpPartModel):
 
     def _init_custom(self):
         super()._init_custom()
-        dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
+        # Only initialize DeepEP group for MoE models with num_experts
+        if "num_experts" in self.config and self.config["num_experts"] > 0:
+            dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
         if self.args.enable_return_routed_experts:
             num_moe_layers = sum(1 for w in self.trans_layers_weight if w.is_moe)
             init_routing_capture(self, num_moe_layers)

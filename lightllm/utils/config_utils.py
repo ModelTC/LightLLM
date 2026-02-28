@@ -25,6 +25,8 @@ def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
                 value = config_json["llm_config"][key]
             except:
                 value = config_json.get("text_config", {}).get(key)
+        if config_json.get("thinker_config") is not None:
+            value = config_json.get("thinker_config", {}).get("text_config").get(key)
         if value is not None:
             return value
 
@@ -77,6 +79,30 @@ def get_layer_num(model_path: str) -> int:
 
 
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
+    try:
+        # qwen3-omini special eos_token_id
+        config_json = get_config_json(model_path)
+        assert config_json["architectures"][0] == "Qwen3OmniMoeForConditionalGeneration"
+        return [151645]
+    except:
+        pass
+
+    # Qwen3.5 checkpoints can have an eos_token_id in config that differs from
+    # tokenizer.eos_token_id. In practice tokenizer.eos_token_id is the reliable
+    # stop id (<|im_end|>) for detokenization/stop behavior.
+    try:
+        config_json = get_config_json(model_path)
+        model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
+        if model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
+            if tokenizer.eos_token_id is not None:
+                return [int(tokenizer.eos_token_id)]
+    except Exception:
+        # Fall back to config-based lookup below.
+        pass
+
     eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
     if isinstance(eos_token_id, int):
         return [eos_token_id]
@@ -100,6 +126,9 @@ def get_model_architectures(model_path: str):
 def get_vocab_size(model_path: str):
     try:
         config_json = get_config_json(model_path)
+        # qwen3-omini special
+        if "thinker_config" in config_json:
+            config_json = config_json["thinker_config"]
         if "llm_config" in config_json:
             vocab_size = int(config_json["llm_config"]["vocab_size"])
             return vocab_size

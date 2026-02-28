@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
@@ -56,6 +57,9 @@ class TpPartBaseModel:
 
     # infer state class
     infer_state_class = InferStateInfo
+
+    # radix cache class
+    radix_cache_class = RadixCache
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()

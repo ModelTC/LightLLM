@@ -335,6 +335,14 @@ class HttpServerManager:
             if self.pd_mode.is_P_or_NORMAL():
                 await multimodal_params.verify_and_preload(request)
 
+            # Debug logging for multimodal requests
+            if multimodal_params and multimodal_params.images:
+                logger.debug(
+                    f"[MULTIMODAL_DEBUG] req_id={group_request_id}, "
+                    f"num_images={len(multimodal_params.images)}, "
+                    f"max_new_tokens={sampling_params.max_new_tokens}"
+                )
+
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
 
@@ -471,7 +479,7 @@ class HttpServerManager:
 
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
-            f"recieved req X-Request-Id:{x_request_id} "
+            f"received req X-Request-Id:{x_request_id} "
             f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
             f"lightllm_req_id:{group_request_id} "
         )

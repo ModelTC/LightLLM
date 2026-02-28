@@ -74,10 +74,6 @@ def get_deepep_num_max_dispatch_tokens_per_rank():
     return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK", 256))
 
 
-def get_lightllm_gunicorn_time_out_seconds():
-    return int(os.getenv("LIGHTLMM_GUNICORN_TIME_OUT", 180))
-
-
 def get_lightllm_gunicorn_keep_alive():
     return int(os.getenv("LIGHTLMM_GUNICORN_KEEP_ALIVE", 10))
 

@@ -374,6 +374,7 @@ class SamplingParams(ctypes.Structure):
         self.ignore_eos = _get("ignore_eos", False)
         self.min_pixels = _get("min_pixels", -1)
         self.max_pixels = _get("max_pixels", -1)
+        self.image_max_patch_num = _get("image_max_patch_num", -1)
         self.max_new_tokens = _get("max_new_tokens", 16)
         self.min_new_tokens = _get("min_new_tokens", 1)
         self.input_penalty = _get("input_penalty", DEFAULT_INPUT_PENALTY)

@@ -32,6 +32,7 @@ from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.neo_chat_moe.model import NeoChatTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
+from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
@@ -101,6 +102,20 @@ def get_tokenizer(
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
+    elif model_type in ["qwen3_5", "qwen3_5_moe"] and "vision_config" in model_cfg:
+        from transformers import AutoProcessor
+        from ..models.qwen3_5.model import QWen3_5Tokenizer
+
+        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        tokenizer = QWen3_5Tokenizer(
+            tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
+        )
+    elif model_cfg.get("thinker_config") is not None:
+        from transformers import AutoProcessor
+
+        model_cfg = model_cfg["thinker_config"]
+        processor = AutoProcessor.from_pretrained(tokenizer_name)
+        tokenizer = QWen3OmniTokenizer(tokenizer, processor=processor, model_cfg=model_cfg)
     elif model_type == "internvl_chat":
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
