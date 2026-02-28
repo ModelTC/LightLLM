@@ -25,7 +25,9 @@ from filelock import FileLock
 
 logger = init_logger(__name__)
 
-KVCACHE_TOKEN_CAN_USE_NUM_SHM_NAME = f"{get_unique_server_name()}_kv_cache_token_can_use_num"
+
+def _get_kvcache_shm_name():
+    return f"{get_unique_server_name()}_kv_cache_token_can_use_num"
 
 
 class MemoryManager(TokenAllocator):
@@ -39,7 +41,7 @@ class MemoryManager(TokenAllocator):
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
-        super().__init__(self.size, f"{KVCACHE_TOKEN_CAN_USE_NUM_SHM_NAME}_{get_current_rank_in_node()}")
+        super().__init__(self.size, f"{_get_kvcache_shm_name()}_{get_current_rank_in_node()}")
 
         self._init_buffers(
             self.size,
@@ -440,7 +442,7 @@ class ReadOnlyStaticsMemoryManager:
         # 兼容多机 dp size=1 纯 tp 模式的情况
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.shared_tp_can_use_token_nums = [
-            SharedInt(f"{KVCACHE_TOKEN_CAN_USE_NUM_SHM_NAME}_{rank_in_node}")
+            SharedInt(f"{_get_kvcache_shm_name()}_{rank_in_node}")
             for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
         ]
 

@@ -12,7 +12,9 @@ from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 
 logger = init_logger(__name__)
 
-MAMBA_CACHE_CAN_USE_NUM_SHM_NAME = f"{get_unique_server_name()}_mamba_cache_can_use_num"
+
+def _get_mamba_cache_shm_name():
+    return f"{get_unique_server_name()}_mamba_cache_can_use_num"
 
 
 class LayerCache:
@@ -38,7 +40,7 @@ class MambaCacheManager(TokenAllocator):
         ssm_state_dtype: torch.dtype,
         ssm_state_shape: Tuple[int, ...],
     ):
-        super().__init__(size, f"{MAMBA_CACHE_CAN_USE_NUM_SHM_NAME}_{get_current_rank_in_node()}")
+        super().__init__(size, f"{_get_mamba_cache_shm_name()}_{get_current_rank_in_node()}")
         self.conv_state_cache = LayerCache(size, conv_state_dtype, conv_state_shape, layer_num)
         self.ssm_state_cache = LayerCache(size, ssm_state_dtype, ssm_state_shape, layer_num)
         self.HOLD_BUFFER_INDEX = size
@@ -119,7 +121,7 @@ class ReadOnlyStaticsMambaCacheManager:
         # 兼容多机 dp size=1 纯 tp 模式的情况
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.shared_tp_can_use_token_nums = [
-            SharedInt(f"{MAMBA_CACHE_CAN_USE_NUM_SHM_NAME}_{rank_in_node}")
+            SharedInt(f"{_get_mamba_cache_shm_name()}_{rank_in_node}")
             for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
         ]
 
