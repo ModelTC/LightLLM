@@ -7,282 +7,262 @@ _MAX_GRID_DIM = 65535
 
 
 @triton.jit
-def _copy_mamba_buffer_1d_kernel(
-    src_buffer_ptr,
-    dst_buffer_ptr,
-    src_indexes_ptr,
-    dst_indexes_ptr,
-    chunk_offset,
-    layer_idx_offset,
+def _copy_buffer_kernel(
+    src_ptr,
+    dst_ptr,
+    src_idx_ptr,
+    dst_idx_ptr,
     stride_layer,
     stride_slot,
-    stride_d,
     d_size,
     BLOCK_D: tl.constexpr,
 ):
-    """
-    Indexed 1:1 copy kernel for Mamba recurrent state buffers.
+    pair_idx = tl.program_id(0)
+    layer_idx = tl.program_id(1)
+    block_d = tl.program_id(2)
 
-    Grid: (num_pairs, layer_num, num_blocks_d)
-    Each program copies one block of dimension d for one (pair, layer) combination.
-    """
-    pair_idx = tl.program_id(0) + chunk_offset
-    layer_idx = tl.program_id(1) + layer_idx_offset
-    block_d_idx = tl.program_id(2)
-
-    # Cast strides to int64 to prevent overflow in pointer arithmetic
     stride_layer = stride_layer.to(tl.int64)
     stride_slot = stride_slot.to(tl.int64)
 
-    # Load source and destination slot indices for this pair
-    src_idx = tl.load(src_indexes_ptr + pair_idx).to(tl.int64)
-    dst_idx = tl.load(dst_indexes_ptr + pair_idx).to(tl.int64)
+    src_slot = tl.load(src_idx_ptr + pair_idx).to(tl.int64)
+    dst_slot = tl.load(dst_idx_ptr + pair_idx).to(tl.int64)
 
-    # Calculate offsets for this block
-    d_start = block_d_idx * BLOCK_D
-    d_offsets = d_start + tl.arange(0, BLOCK_D)
+    offs = block_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask = offs < d_size
 
-    # Create mask for valid indices
-    mask = d_offsets < d_size
-
-    # Calculate source and destination pointers for this layer and pair
-    base_src = src_buffer_ptr + layer_idx * stride_layer + src_idx * stride_slot
-    base_dst = dst_buffer_ptr + layer_idx * stride_layer + dst_idx * stride_slot
-
-    src_ptr = base_src + d_offsets * stride_d
-    dst_ptr = base_dst + d_offsets * stride_d
-
-    # Load and store
-    data = tl.load(src_ptr, mask=mask, other=0.0)
-    tl.store(dst_ptr, data, mask=mask)
+    base = layer_idx * stride_layer
+    tl.store(
+        dst_ptr + base + dst_slot * stride_slot + offs,
+        tl.load(src_ptr + base + src_slot * stride_slot + offs, mask=mask),
+        mask=mask,
+    )
 
 
 @triton.jit
-def _fork_mamba_buffer_1d_kernel(
-    src_buffer_ptr,
-    dst_buffer_ptr,
-    src_indexes_ptr,
-    dst_indexes_ptr,
-    chunk_offset,
-    layer_idx_offset,
+def _fork_buffer_kernel(
+    src_ptr,
+    dst_ptr,
+    src_idx_ptr,
+    dst_idx_ptr,
     stride_layer,
     stride_slot,
-    stride_d,
     d_size,
     num_dst_per_src,
     BLOCK_D: tl.constexpr,
 ):
-    """
-    Fork kernel for Mamba recurrent state buffers: one source slot → N destination slots.
+    flat_pair = tl.program_id(0)
+    layer_idx = tl.program_id(1)
+    block_d = tl.program_id(2)
 
-    Used for MTP speculation where one parent state is copied to multiple child slots.
-    Grid: (num_src, layer_num, num_blocks_d)
-    """
-    src_chunk_idx = tl.program_id(0) + chunk_offset
-    layer_idx = tl.program_id(1) + layer_idx_offset
-    block_d_idx = tl.program_id(2)
+    src_chunk = flat_pair // num_dst_per_src
 
-    # Cast strides to int64 to prevent overflow in pointer arithmetic
     stride_layer = stride_layer.to(tl.int64)
     stride_slot = stride_slot.to(tl.int64)
 
-    # Load source slot index
-    src_idx = tl.load(src_indexes_ptr + src_chunk_idx).to(tl.int64)
+    src_slot = tl.load(src_idx_ptr + src_chunk).to(tl.int64)
+    dst_slot = tl.load(dst_idx_ptr + flat_pair).to(tl.int64)
 
-    # Calculate offsets for this block
-    d_start = block_d_idx * BLOCK_D
-    d_offsets = d_start + tl.arange(0, BLOCK_D)
-    mask = d_offsets < d_size
+    offs = block_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    mask = offs < d_size
 
-    # Calculate source pointer and load data once
-    base_src = src_buffer_ptr + layer_idx * stride_layer + src_idx * stride_slot
-    src_ptr = base_src + d_offsets * stride_d
-    data = tl.load(src_ptr, mask=mask, other=0.0)
-
-    # Write to each destination slot for this source
-    for dst_offset in range(num_dst_per_src):
-        dst_idx_in_batch = src_chunk_idx * num_dst_per_src + dst_offset
-        dst_idx = tl.load(dst_indexes_ptr + dst_idx_in_batch).to(tl.int64)
-
-        base_dst = dst_buffer_ptr + layer_idx * stride_layer + dst_idx * stride_slot
-        dst_ptr = base_dst + d_offsets * stride_d
-
-        tl.store(dst_ptr, data, mask=mask)
+    base = layer_idx * stride_layer
+    tl.store(
+        dst_ptr + base + dst_slot * stride_slot + offs,
+        tl.load(src_ptr + base + src_slot * stride_slot + offs, mask=mask),
+        mask=mask,
+    )
 
 
-# ==================== Config Generation Functions ====================
-
-
-def _get_buffer_copy_1d_configs():
-    """Generate candidate configurations for 1D buffer copy."""
+def _get_buffer_copy_configs():
     configs = []
-    for block_d in [32, 64, 128, 256, 512, 1024]:
-        for num_warps in [2, 4, 8]:
-            for num_stages in [2, 3, 4]:
-                configs.append(
-                    {
-                        "BLOCK_D": block_d,
-                        "num_warps": num_warps,
-                        "num_stages": num_stages,
-                    }
-                )
+    for block_d in [128, 256, 512, 1024, 2048, 4096]:
+        for num_warps in [1, 2, 4, 8]:
+            for num_stages in [1, 2]:
+                configs.append({"BLOCK_D": block_d, "num_warps": num_warps, "num_stages": num_stages})
     return configs
 
 
-# ==================== Static and Run Key Functions ====================
+def _get_copy_static_key(
+    src_buffer: torch.Tensor,
+    dst_buffer: torch.Tensor,
+    src_indexes: torch.Tensor,
+    dst_indexes: torch.Tensor,
+):
+    """Static key for copy kernel cache: dtype, d_size, layer_num.
 
-
-def _get_buffer_copy_static_key(src_buffer: torch.Tensor):
-    """Static key based on buffer shape and dtype."""
-    shape = src_buffer.shape
+    Different models (35B vs 397B) have different optimal configs, so each
+    should get its own cache file.
+    """
+    d_size = (
+        src_buffer.shape[2]
+        if src_buffer.ndim == 3
+        else src_buffer.numel() // (src_buffer.shape[0] * src_buffer.shape[1])
+    )
     return {
-        "ndim": len(shape),
-        "layer_num": shape[0],
-        "d_sizes": str(shape[2:]),
         "dtype": str(src_buffer.dtype),
+        "d_size": d_size,
+        "layer_num": src_buffer.shape[0],
+        "ndim": src_buffer.ndim,
     }
 
 
-def _get_buffer_copy_run_key(src_indexes: torch.Tensor):
-    """Run key based on number of copy pairs."""
-    return src_indexes.shape[0]
+def _get_copy_run_key(
+    src_buffer: torch.Tensor,
+    dst_buffer: torch.Tensor,
+    src_indexes: torch.Tensor,
+    dst_indexes: torch.Tensor,
+):
+    """Run key: constant since static_key already uniquely identifies config."""
+    return 0
 
 
-# ==================== Auto-tuned Buffer Copy Functions ====================
+def _get_fork_static_key(
+    src_buffer: torch.Tensor,
+    dst_buffer: torch.Tensor,
+    src_indexes: torch.Tensor,
+    dst_indexes_flat: torch.Tensor,
+    num_dst_per_src: int,
+):
+    """Static key for fork kernel cache: dtype, d_size, layer_num."""
+    d_size = (
+        src_buffer.shape[2]
+        if src_buffer.ndim == 3
+        else src_buffer.numel() // (src_buffer.shape[0] * src_buffer.shape[1])
+    )
+    return {
+        "dtype": str(src_buffer.dtype),
+        "d_size": d_size,
+        "layer_num": src_buffer.shape[0],
+        "ndim": src_buffer.ndim,
+    }
+
+
+def _get_fork_run_key(
+    src_buffer: torch.Tensor,
+    dst_buffer: torch.Tensor,
+    src_indexes: torch.Tensor,
+    dst_indexes_flat: torch.Tensor,
+    num_dst_per_src: int,
+):
+    """Run key: constant since static_key already uniquely identifies config."""
+    return 0
+
+
+# ─── Helper functions ─────────────────────────────────────────────────────────
+
+
+def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
+    """Flatten dims after [layer_num, buffer_size] into one. Zero-copy for contiguous tensors."""
+    if buffer.ndim == 3:
+        return buffer
+    L, B = buffer.shape[:2]
+    return buffer.view(L, B, -1)
+
+
+# ─── Autotuned implementations ────────────────────────────────────────────────
 
 
 @autotune(
     kernel_name="mamba_buffer_copy_1d:v1",
-    configs_gen_func=_get_buffer_copy_1d_configs,
-    static_key_func=_get_buffer_copy_static_key,
-    run_key_func=_get_buffer_copy_run_key,
+    configs_gen_func=_get_buffer_copy_configs,
+    static_key_func=_get_copy_static_key,
+    run_key_func=_get_copy_run_key,
     mutates_args=["dst_buffer"],
 )
-def _copy_mamba_buffer_1d_autotuned(
+def _copy_mamba_buffer_autotuned(
     src_buffer: torch.Tensor,
     dst_buffer: torch.Tensor,
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
     run_config: dict = None,
 ):
-    """Auto-tuned indexed 1:1 copy of Mamba recurrent state buffer slots."""
+    """Autotuned indexed copy implementation."""
+    # Default heuristic when autotune is disabled or no config cached
+    if not run_config:
+        d_size = src_buffer.shape[2]
+        # For memory-bound copy, larger BLOCK_D is better (reduces grid size)
+        BLOCK_D = min(4096, triton.next_power_of_2(d_size))
+        num_warps = 4 if BLOCK_D >= 1024 else 2
+        run_config = {"BLOCK_D": BLOCK_D, "num_warps": num_warps, "num_stages": 1}
+
+    config = run_config
+    BLOCK_D = config["BLOCK_D"]
     num_pairs = src_indexes.shape[0]
     layer_num = src_buffer.shape[0]
     d_size = src_buffer.shape[2]
 
-    if run_config is None:
-        BLOCK_D = triton.next_power_of_2(min(d_size, 256))
-        num_warps = 4 if BLOCK_D > 256 else 2
-        num_stages = 2
-    else:
-        BLOCK_D = run_config["BLOCK_D"]
-        num_warps = run_config["num_warps"]
-        num_stages = run_config["num_stages"]
-
     num_blocks_d = triton.cdiv(d_size, BLOCK_D)
 
-    for pair_chunk_start in range(0, num_pairs, _MAX_GRID_DIM):
-        pair_chunk_end = min(pair_chunk_start + _MAX_GRID_DIM, num_pairs)
-        pair_chunk_size = pair_chunk_end - pair_chunk_start
+    assert num_pairs <= _MAX_GRID_DIM, f"num_pairs={num_pairs} exceeds grid limit {_MAX_GRID_DIM}"
+    assert layer_num <= _MAX_GRID_DIM, f"layer_num={layer_num} exceeds grid limit {_MAX_GRID_DIM}"
 
-        for layer_chunk_start in range(0, layer_num, _MAX_GRID_DIM):
-            layer_chunk_end = min(layer_chunk_start + _MAX_GRID_DIM, layer_num)
-            layer_chunk_size = layer_chunk_end - layer_chunk_start
-
-            grid = (pair_chunk_size, layer_chunk_size, num_blocks_d)
-
-            _copy_mamba_buffer_1d_kernel[grid](
-                src_buffer,
-                dst_buffer,
-                src_indexes,
-                dst_indexes,
-                pair_chunk_start,
-                layer_chunk_start,
-                src_buffer.stride(0),
-                src_buffer.stride(1),
-                src_buffer.stride(2),
-                d_size,
-                BLOCK_D=BLOCK_D,
-                num_warps=num_warps,
-                num_stages=num_stages,
-            )
+    grid = (num_pairs, layer_num, num_blocks_d)
+    _copy_buffer_kernel[grid](
+        src_buffer,
+        dst_buffer,
+        src_indexes,
+        dst_indexes,
+        src_buffer.stride(0),
+        src_buffer.stride(1),
+        d_size,
+        BLOCK_D=BLOCK_D,
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+    )
 
 
 @autotune(
     kernel_name="mamba_buffer_fork_1d:v1",
-    configs_gen_func=_get_buffer_copy_1d_configs,
-    static_key_func=_get_buffer_copy_static_key,
-    run_key_func=_get_buffer_copy_run_key,
+    configs_gen_func=_get_buffer_copy_configs,
+    static_key_func=_get_fork_static_key,
+    run_key_func=_get_fork_run_key,
     mutates_args=["dst_buffer"],
 )
-def _fork_mamba_buffer_1d_autotuned(
+def _fork_mamba_buffer_autotuned(
     src_buffer: torch.Tensor,
     dst_buffer: torch.Tensor,
     src_indexes: torch.Tensor,
-    dst_indexes: torch.Tensor,  # flat 1D: [num_src * num_dst_per_src]
+    dst_indexes_flat: torch.Tensor,
+    num_dst_per_src: int,
     run_config: dict = None,
 ):
-    """Auto-tuned fork: copy each source Mamba slot to N destination slots."""
+    """Autotuned fork implementation."""
+    # Default heuristic when autotune is disabled or no config cached
+    if not run_config:
+        d_size = src_buffer.shape[2]
+        BLOCK_D = min(4096, triton.next_power_of_2(d_size))
+        num_warps = 4 if BLOCK_D >= 1024 else 2
+        run_config = {"BLOCK_D": BLOCK_D, "num_warps": num_warps, "num_stages": 1}
+
+    config = run_config
+    BLOCK_D = config["BLOCK_D"]
     num_src = src_indexes.shape[0]
     layer_num = src_buffer.shape[0]
     d_size = src_buffer.shape[2]
-    assert (
-        dst_indexes.shape[0] % num_src == 0
-    ), f"dst_indexes length {dst_indexes.shape[0]} must be divisible by num_src {num_src}"
-    num_dst_per_src = dst_indexes.shape[0] // num_src
-
-    if run_config is None:
-        BLOCK_D = triton.next_power_of_2(min(d_size, 256))
-        num_warps = 4 if BLOCK_D > 256 else 2
-        num_stages = 2
-    else:
-        BLOCK_D = run_config["BLOCK_D"]
-        num_warps = run_config["num_warps"]
-        num_stages = run_config["num_stages"]
 
     num_blocks_d = triton.cdiv(d_size, BLOCK_D)
+    total_pairs = num_src * num_dst_per_src
 
-    for src_chunk_start in range(0, num_src, _MAX_GRID_DIM):
-        src_chunk_end = min(src_chunk_start + _MAX_GRID_DIM, num_src)
-        src_chunk_size = src_chunk_end - src_chunk_start
+    assert total_pairs <= _MAX_GRID_DIM, f"total_pairs={total_pairs} exceeds grid limit {_MAX_GRID_DIM}"
+    assert layer_num <= _MAX_GRID_DIM, f"layer_num={layer_num} exceeds grid limit {_MAX_GRID_DIM}"
 
-        for layer_chunk_start in range(0, layer_num, _MAX_GRID_DIM):
-            layer_chunk_end = min(layer_chunk_start + _MAX_GRID_DIM, layer_num)
-            layer_chunk_size = layer_chunk_end - layer_chunk_start
-
-            grid = (src_chunk_size, layer_chunk_size, num_blocks_d)
-
-            _fork_mamba_buffer_1d_kernel[grid](
-                src_buffer,
-                dst_buffer,
-                src_indexes,
-                dst_indexes,
-                src_chunk_start,
-                layer_chunk_start,
-                src_buffer.stride(0),
-                src_buffer.stride(1),
-                src_buffer.stride(2),
-                d_size,
-                num_dst_per_src,
-                BLOCK_D=BLOCK_D,
-                num_warps=num_warps,
-                num_stages=num_stages,
-            )
+    grid = (total_pairs, layer_num, num_blocks_d)
+    _fork_buffer_kernel[grid](
+        src_buffer,
+        dst_buffer,
+        src_indexes,
+        dst_indexes_flat,
+        src_buffer.stride(0),
+        src_buffer.stride(1),
+        d_size,
+        num_dst_per_src,
+        BLOCK_D=BLOCK_D,
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+    )
 
 
-# ==================== Unified Interface ====================
-
-
-def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
-    """Flatten all dimensions after [layer_num, buffer_size] into one.
-
-    For a contiguous buffer of shape [L, B, d1, d2, ...], returns a view
-    of shape [L, B, d1*d2*...]. This is a zero-copy operation.
-    """
-    if buffer.ndim == 3:
-        return buffer
-    L, B = buffer.shape[:2]
-    return buffer.view(L, B, -1)
+# ─── Public API ───────────────────────────────────────────────────────────────
 
 
 def copy_mamba_buffer(
@@ -294,8 +274,7 @@ def copy_mamba_buffer(
     """
     Indexed 1:1 copy of Mamba recurrent state buffer slots.
 
-    Copies slot src_indexes[i] → dst_indexes[i] for all layers simultaneously.
-    Used for cache eviction/restore and normal token state management.
+    Copies slot src_indexes[i] -> dst_indexes[i] for all layers simultaneously.
 
     Args:
         src_buffer: [layer_num, num_slots, ...]
@@ -304,12 +283,11 @@ def copy_mamba_buffer(
         dst_indexes: destination slot indices [num_pairs]
     """
     assert src_buffer.shape == dst_buffer.shape
-    assert src_indexes.shape == dst_indexes.shape
-    assert len(src_indexes.shape) == 1
+    assert src_indexes.shape == dst_indexes.shape and src_indexes.ndim == 1
 
     src_flat = _flatten_trailing_dims(src_buffer)
     dst_flat = _flatten_trailing_dims(dst_buffer)
-    _copy_mamba_buffer_1d_autotuned(src_flat, dst_flat, src_indexes, dst_indexes)
+    _copy_mamba_buffer_autotuned(src_flat, dst_flat, src_indexes, dst_indexes)
 
 
 def fork_mamba_buffer(
@@ -319,10 +297,9 @@ def fork_mamba_buffer(
     dst_indexes: torch.Tensor,
 ):
     """
-    Fork Mamba recurrent state slots: copy one source slot to N destination slots.
+    Fork Mamba recurrent state slots: one source -> N destinations.
 
-    Used for MTP (Multi-Token Prediction) speculation, where a parent token's
-    recurrent state must be replicated into each speculative child slot.
+    Used for MTP speculation where parent state is replicated to child slots.
 
     Args:
         src_buffer: [layer_num, num_slots, ...]
@@ -331,17 +308,15 @@ def fork_mamba_buffer(
         dst_indexes: destination slot indices [num_src, num_dst_per_src]
     """
     assert src_buffer.shape == dst_buffer.shape
-    assert len(src_indexes.shape) == 1
-    assert len(dst_indexes.shape) == 2, f"dst_indexes must be 2D [num_src, num_dst_per_src], got {dst_indexes.shape}"
-
-    num_src = src_indexes.shape[0]
+    assert src_indexes.ndim == 1
+    assert dst_indexes.ndim == 2, f"dst_indexes must be 2D [num_src, num_dst_per_src], got {dst_indexes.shape}"
     assert (
-        num_src == dst_indexes.shape[0]
-    ), f"Mismatch: src_indexes {num_src} vs dst_indexes rows {dst_indexes.shape[0]}"
+        dst_indexes.shape[0] == src_indexes.shape[0]
+    ), f"Mismatch: src_indexes {src_indexes.shape[0]} vs dst_indexes rows {dst_indexes.shape[0]}"
 
-    # Flatten dst_indexes to 1D for kernel; kernel reconstructs the 2D layout via num_dst_per_src
+    num_dst_per_src = dst_indexes.shape[1]
     dst_indexes_flat = dst_indexes.reshape(-1).contiguous()
 
     src_flat = _flatten_trailing_dims(src_buffer)
     dst_flat = _flatten_trailing_dims(dst_buffer)
-    _fork_mamba_buffer_1d_autotuned(src_flat, dst_flat, src_indexes, dst_indexes_flat)
+    _fork_mamba_buffer_autotuned(src_flat, dst_flat, src_indexes, dst_indexes_flat, num_dst_per_src)
