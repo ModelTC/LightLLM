@@ -12,6 +12,7 @@ from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VL
 from .vision_process import smart_resize
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 import os
+from typing import Union, List
 
 # Warp of the origal tokenizer
 class QWen2VLTokenizer(BaseMultiModalTokenizer):
@@ -52,9 +53,13 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
     def get_audio_token_length(self, audio: AudioItem):
         raise NotImplementedError
 
-    def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
-
-        origin_ids = self.tokenizer.encode(prompt)
+    def encode(self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams = None, **kwargs):
+        if isinstance(prompt, str):
+            origin_ids = self.tokenizer.encode(prompt)
+        elif isinstance(prompt, List[int]):
+            origin_ids = prompt
+        else:
+            raise ValueError(f"Unsupported prompt type: {type(prompt)}")
 
         # <img><image_pad></img> -> <img></img>
         origin_ids = [token for token in origin_ids if token != self.image_token_id]
