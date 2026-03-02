@@ -13,8 +13,6 @@ logger = init_logger(__name__)
 def split_fused_expert_weights(weights, layer_num, moe_intermediate_size):
     layer_prefix = f"model.layers.{layer_num}."
     keys = list(weights.keys())
-    gate_up_count = 0
-    down_count = 0
     num_experts = 0
 
     for k in keys:
@@ -34,8 +32,6 @@ def split_fused_expert_weights(weights, layer_num, moe_intermediate_size):
                 weights[f"{prefix}.{expert_idx}.gate_proj.weight"] = gate_weight[expert_idx]
                 weights[f"{prefix}.{expert_idx}.up_proj.weight"] = up_weight[expert_idx]
 
-            gate_up_count += 1
-
         elif "mlp.experts.down_proj" in k:
             down_weight = weights.pop(k)  # [num_experts, hidden_size, inter_size]
             num_experts = down_weight.shape[0]
@@ -44,8 +40,6 @@ def split_fused_expert_weights(weights, layer_num, moe_intermediate_size):
 
             for expert_idx in range(num_experts):
                 weights[f"{prefix}.{expert_idx}.down_proj.weight"] = down_weight[expert_idx]
-
-            down_count += 1
 
 
 class Qwen35NextFullAttentionTransformerLayerWeight(Qwen3NextFullAttentionTransformerLayerWeight):
