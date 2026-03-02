@@ -18,6 +18,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         is_all_greedy,
         skip_top_k,
         skip_top_p,
+        exist_req_use_random_seed,
     ) = _get_post_sample_tensors(reqs)
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
@@ -71,12 +72,15 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     elif skip_top_k and skip_top_p:
-        batch_next_token_ids = _random_sample(probs, reqs)
+        # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
+        batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
         batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     else:
-        batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(probs, b_top_ps, b_top_ks)
+        batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(
+            reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+        )
         return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
 
 
@@ -92,11 +96,18 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
 
 
 def _top_p_top_k_sample(
-    probs: torch.Tensor, b_top_ps: torch.Tensor, b_top_ks: torch.Tensor
+    reqs: List[InferReq],
+    probs: torch.Tensor,
+    b_top_ps: torch.Tensor,
+    b_top_ks: torch.Tensor,
+    exist_req_use_random_seed: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if get_env_start_args().sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
-        sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
+        if not exist_req_use_random_seed:
+            sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
+        else:
+            sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
         next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
         next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)
@@ -119,12 +130,13 @@ def _top_p_top_k_sample(
         assert False, "Unsupported sampling backend for top_p_top_k_sample"
 
 
-def _random_sample(probs: torch.Tensor, reqs: List[InferReq]):
+def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_random_seed: bool):
     q = torch.empty_like(probs)
     q.exponential_()
-    for i, req in enumerate(reqs):
-        if req.generator is not None:
-            q[i].exponential_(generator=req.generator)
+    if exist_req_use_random_seed:
+        for i, req in enumerate(reqs):
+            if req.generator is not None:
+                q[i].exponential_(generator=req.generator)
     return probs.div(q).argmax(dim=-1).view(-1)
 
 
@@ -138,6 +150,7 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     is_all_greedy = True
     skip_top_k = True
     skip_top_p = True
+    exist_req_use_random_seed = False
 
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
@@ -157,6 +170,8 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             skip_top_k = False
         if shm_param.top_p != 1.0:
             skip_top_p = False
+        if req_obj.generator is not None:
+            exist_req_use_random_seed = True
         req_idxes.append(req_obj.req_idx)
 
     req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
@@ -178,4 +193,5 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         is_all_greedy,
         skip_top_k,
         skip_top_p,
+        exist_req_use_random_seed,
     )

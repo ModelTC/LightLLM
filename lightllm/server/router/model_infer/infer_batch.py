@@ -366,7 +366,7 @@ class InferReq:
         self._init_all_state()
 
         self.generator = None
-        if getattr(self.sampling_param.shm_param, "seed", -1) != -1:
+        if self.sampling_param.shm_param.seed != -1:
             self.generator = torch.Generator(device="cuda")
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
