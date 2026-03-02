@@ -27,11 +27,8 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         q, cache_kv = qkv.split(
             [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
-        layer_weight.q_norm_weight_(
+        layer_weight.qk_norm_weight_(
             q,
-            eps=self.eps_,
-        )
-        layer_weight.k_norm_weight_(
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             eps=self.eps_,
         )

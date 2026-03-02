@@ -60,6 +60,7 @@ class SamplingParams:
         move_kv_to_decode_node: Optional[dict] = None,
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
+        seed: Optional[int] = -1,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -91,6 +92,7 @@ class SamplingParams:
         self.group_request_id = group_request_id
         self.move_kv_to_decode_node = move_kv_to_decode_node
         self.suggested_dp_index = suggested_dp_index
+        self.seed = seed
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -268,6 +270,7 @@ class SamplingParams:
         ret["guided_json"] = self.guided_json
         ret["allowed_token_ids"] = self.allowed_token_ids
         ret["move_kv_to_decode_node"] = self.move_kv_to_decode_node
+        ret["seed"] = self.seed
         return ret
 
     def to_origin_dict(self):
