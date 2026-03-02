@@ -193,18 +193,12 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
-        # Check if the model uses Mamba (linear attention) layers
-        from lightllm.common.req_manager import ReqManagerForMamba
-
-        use_mamba_model = isinstance(self.model.req_manager, ReqManagerForMamba)
-
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
-            use_mamba_model=use_mamba_model,
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到

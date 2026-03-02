@@ -7,7 +7,7 @@ import pickle
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
-from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.common.req_manager import ReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -38,7 +38,9 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
-    use_mamba_model: bool = False
+    @property
+    def has_recurrent_state(self):
+        return self.req_manager is not None and self.req_manager.has_recurrent_state
 
     def register(
         self,
@@ -47,7 +49,6 @@ class InferenceContext:
         radix_cache: RadixCache,
         shm_req_manager: ShmReqManager,
         vocab_size: int,
-        use_mamba_model: bool = False,
     ):
         self.args = get_env_start_args()
         from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -63,12 +64,10 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.use_mamba_model = use_mamba_model
-        if self.use_mamba_model:
+        if self.has_recurrent_state:
             assert self.radix_cache is None or isinstance(
                 self.radix_cache, HybridRadixCache
-            ), "Mamba model only support HybridRadixCache"
-            assert isinstance(self.req_manager, ReqManagerForMamba), "Mamba model only support ReqManagerForMamba"
+            ), "Recurrent state models only support HybridRadixCache"
             self.mtp_step = get_env_start_args().mtp_step
         return
 
@@ -205,7 +204,7 @@ class InferenceContext:
 
     def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
         """释放请求的 KV cache 和 buffer 内存"""
-        if self.use_mamba_model:
+        if self.has_recurrent_state:
             need_free_base_buffer = self.free_a_req_mem_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
             if need_free_base_buffer:
@@ -251,7 +250,7 @@ class InferenceContext:
             free_token_index = custom_cat(free_token_index)
             self.req_manager.free(free_req_index, free_token_index)
 
-        if self.use_mamba_model and len(free_buffer_index) != 0:
+        if len(free_buffer_index) != 0:
             self.req_manager.free_buffer(free_buffer_index)
 
         finished_req_ids_set = set(finished_request_ids)
@@ -301,7 +300,7 @@ class InferenceContext:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
 
-            if self.use_mamba_model and len(free_buffer_index) != 0:
+            if len(free_buffer_index) != 0:
                 self.req_manager.free_buffer(free_buffer_index)
 
             g_infer_state_lock.release()
@@ -513,7 +512,7 @@ class InferReq:
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
-                if g_infer_context.use_mamba_model:
+                if g_infer_context.has_recurrent_state:
                     MAMBA_PREFILL_BLOCK_SIZE = 128
                     MAMBA_MIN_INSERT_LEN = 1024
                     miss_prefix_len = miss_prefix_len - miss_prefix_len % MAMBA_PREFILL_BLOCK_SIZE

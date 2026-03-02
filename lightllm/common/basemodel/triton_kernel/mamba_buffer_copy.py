@@ -3,8 +3,6 @@ import triton
 import triton.language as tl
 from lightllm.common.triton_utils.autotuner import autotune
 
-_MAX_GRID_DIM = 65535
-
 
 @triton.jit
 def _copy_buffer_kernel(
@@ -84,15 +82,7 @@ def _get_buffer_copy_configs():
 
 def _get_copy_static_key(
     src_buffer: torch.Tensor,
-    dst_buffer: torch.Tensor,
-    src_indexes: torch.Tensor,
-    dst_indexes: torch.Tensor,
 ):
-    """Static key for copy kernel cache: dtype, d_size, layer_num.
-
-    Different models (35B vs 397B) have different optimal configs, so each
-    should get its own cache file.
-    """
     d_size = (
         src_buffer.shape[2]
         if src_buffer.ndim == 3
@@ -106,22 +96,11 @@ def _get_copy_static_key(
     }
 
 
-def _get_copy_run_key(
-    src_buffer: torch.Tensor,
-    dst_buffer: torch.Tensor,
-    src_indexes: torch.Tensor,
-    dst_indexes: torch.Tensor,
-):
+def _get_copy_run_key(src_buffer: torch.Tensor):
     return 0
 
 
-def _get_fork_static_key(
-    src_buffer: torch.Tensor,
-    dst_buffer: torch.Tensor,
-    src_indexes: torch.Tensor,
-    dst_indexes_flat: torch.Tensor,
-    num_dst_per_src: int,
-):
+def _get_fork_static_key(src_buffer: torch.Tensor):
     d_size = (
         src_buffer.shape[2]
         if src_buffer.ndim == 3
@@ -135,18 +114,11 @@ def _get_fork_static_key(
     }
 
 
-def _get_fork_run_key(
-    src_buffer: torch.Tensor,
-    dst_buffer: torch.Tensor,
-    src_indexes: torch.Tensor,
-    dst_indexes_flat: torch.Tensor,
-    num_dst_per_src: int,
-):
+def _get_fork_run_key(src_buffer: torch.Tensor):
     return 0
 
 
 def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
-    """Flatten dims after [layer_num, buffer_size] into one. Zero-copy for contiguous tensors."""
     if buffer.ndim == 3:
         return buffer
     L, B = buffer.shape[:2]
@@ -158,7 +130,6 @@ def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
     configs_gen_func=_get_buffer_copy_configs,
     static_key_func=_get_copy_static_key,
     run_key_func=_get_copy_run_key,
-    mutates_args=["dst_buffer"],
 )
 def _copy_mamba_buffer_autotuned(
     src_buffer: torch.Tensor,
@@ -169,7 +140,6 @@ def _copy_mamba_buffer_autotuned(
 ):
     if not run_config:
         d_size = src_buffer.shape[2]
-        # For memory-bound copy, larger BLOCK_D is better (reduces grid size)
         BLOCK_D = min(4096, triton.next_power_of_2(d_size))
         num_warps = 4 if BLOCK_D >= 1024 else 2
         run_config = {"BLOCK_D": BLOCK_D, "num_warps": num_warps, "num_stages": 1}
@@ -181,9 +151,6 @@ def _copy_mamba_buffer_autotuned(
     d_size = src_buffer.shape[2]
 
     num_blocks_d = triton.cdiv(d_size, BLOCK_D)
-
-    assert num_pairs <= _MAX_GRID_DIM, f"num_pairs={num_pairs} exceeds grid limit {_MAX_GRID_DIM}"
-    assert layer_num <= _MAX_GRID_DIM, f"layer_num={layer_num} exceeds grid limit {_MAX_GRID_DIM}"
 
     grid = (num_pairs, layer_num, num_blocks_d)
     _copy_buffer_kernel[grid](
@@ -205,7 +172,6 @@ def _copy_mamba_buffer_autotuned(
     configs_gen_func=_get_buffer_copy_configs,
     static_key_func=_get_fork_static_key,
     run_key_func=_get_fork_run_key,
-    mutates_args=["dst_buffer"],
 )
 def _fork_mamba_buffer_autotuned(
     src_buffer: torch.Tensor,
@@ -215,8 +181,6 @@ def _fork_mamba_buffer_autotuned(
     num_dst_per_src: int,
     run_config: dict = None,
 ):
-    """Autotuned fork implementation."""
-    # Default heuristic when autotune is disabled or no config cached
     if not run_config:
         d_size = src_buffer.shape[2]
         BLOCK_D = min(4096, triton.next_power_of_2(d_size))
@@ -232,9 +196,6 @@ def _fork_mamba_buffer_autotuned(
     num_blocks_d = triton.cdiv(d_size, BLOCK_D)
     total_pairs = num_src * num_dst_per_src
 
-    assert total_pairs <= _MAX_GRID_DIM, f"total_pairs={total_pairs} exceeds grid limit {_MAX_GRID_DIM}"
-    assert layer_num <= _MAX_GRID_DIM, f"layer_num={layer_num} exceeds grid limit {_MAX_GRID_DIM}"
-
     grid = (total_pairs, layer_num, num_blocks_d)
     _fork_buffer_kernel[grid](
         src_buffer,
@@ -249,9 +210,6 @@ def _fork_mamba_buffer_autotuned(
         num_warps=config["num_warps"],
         num_stages=config["num_stages"],
     )
-
-
-# ─── Public API ───────────────────────────────────────────────────────────────
 
 
 def copy_mamba_buffer(

@@ -68,6 +68,7 @@ class ReqManager:
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+        self.req_to_buffer_index = None
 
     def alloc(self):
         return self.req_list.alloc()
@@ -93,6 +94,11 @@ class ReqManager:
     def free_all(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
+
+    @property
+    def has_recurrent_state(self):
+        """Whether this model uses per-request recurrent state buffers (e.g. Mamba/linear attention)."""
+        return self.req_to_buffer_index is not None
 
     def alloc_buffer_for_req(self, req_index: torch.Tensor):
         """Allocate buffers for requests. No-op for standard models without linear attention."""
