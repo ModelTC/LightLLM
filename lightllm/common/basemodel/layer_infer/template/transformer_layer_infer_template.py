@@ -81,14 +81,29 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
+        # if self.layer_num_ == 0:
+        #     input_embdings.fill_(0)
         input1 = None
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
+    def energy_10_percentile(self, input: torch.Tensor):
+        input = input.view(-1)
+        value = (-input.view(-1).float().abs()).kthvalue(k=int(input.numel() * 0.1), dim=-1)[0].item()
+        tmp_input = input.masked_fill(input.abs() < (-value), 0)
+        return torch.norm(tmp_input, dim=-1).item()
+
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        need_wandb = not torch.cuda.is_current_stream_capturing() and not infer_state.is_prefill
+        if need_wandb:
+            att_input_norm = torch.norm(input_embdings.view(-1), dim=-1).float().detach().cpu().numpy().item()
+            att_input_norm_10_percentile_energy = self.energy_10_percentile(input_embdings)
+
         input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        if need_wandb:
+            att_rmsnorm_out_norm = torch.norm(input1.view(-1), dim=-1).float().detach().cpu().numpy().item()
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
@@ -97,15 +112,65 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+
+        if need_wandb:
+            att_delta_norm = torch.norm(o.view(-1), dim=-1).float().detach().cpu().numpy().item()
+
         input_embdings.add_(o.view(-1, self.embed_dim_))
+
+        if need_wandb:
+            att_out_norm = torch.norm(input_embdings.view(-1), dim=-1).float().detach().cpu().numpy().item()
+
         o = None
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        if need_wandb:
+            ffn_rmsnorm_out_norm = torch.norm(input1.view(-1), dim=-1).float().detach().cpu().numpy().item()
+            ffn_rmsnorm_out_norm_10_percentile_energy = self.energy_10_percentile(input1)
+
         ffn_out = self._ffn(input1, infer_state, layer_weight)
+
+        if need_wandb:
+            ffn_delta_norm = torch.norm(ffn_out.view(-1), dim=-1).float().detach().cpu().numpy().item()
+
         input1 = None
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+
+        if need_wandb:
+            ffn_out_norm = torch.norm(input_embdings.view(-1), dim=-1).float().detach().cpu().numpy().item()
+
+            import wandb
+
+            if not hasattr(infer_state, "resnet_table"):
+                infer_state.resnet_table = wandb.Table(
+                    columns=[
+                        "layer_index",
+                        "att_input_norm",
+                        "att_input_norm_10_percentile_energy",
+                        "att_rmsnorm_out_norm",
+                        "att_delta_norm",
+                        "att_out_norm",
+                        "ffn_rmsnorm_out_norm",
+                        "ffn_rmsnorm_out_norm_10_percentile_energy",
+                        "ffn_delta_norm",
+                        "ffn_out_norm",
+                    ]
+                )
+
+            infer_state.resnet_table.add_data(
+                int(self.layer_num_),
+                float(att_input_norm),
+                float(att_input_norm_10_percentile_energy),
+                float(att_rmsnorm_out_norm),
+                float(att_delta_norm),
+                float(att_out_norm),
+                float(ffn_rmsnorm_out_norm),
+                float(ffn_rmsnorm_out_norm_10_percentile_energy),
+                float(ffn_delta_norm),
+                float(ffn_out_norm),
+            )
         return input_embdings
 
     def tpsp_context_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):

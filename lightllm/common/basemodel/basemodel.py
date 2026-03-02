@@ -282,9 +282,11 @@ class TpPartBaseModel:
         assert model_input.mem_indexes.is_cuda
 
         if model_input.is_prefill:
-            return self._prefill(model_input)
+            ans = self._prefill(model_input)
         else:
-            return self._decode(model_input)
+            ans = self._decode(model_input)
+
+        return ans
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -533,6 +535,9 @@ class TpPartBaseModel:
                 model_output, origin_batch_size=model_input.batch_size
             )
         else:
+            from lightllm.utils.wandb_utils import get_wandb_run
+
+            run = get_wandb_run()
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -543,6 +548,24 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
+
+        if not torch.cuda.is_current_stream_capturing() and not model_input.is_prefill:
+            from lightllm.utils.wandb_utils import get_wandb_run
+            import numpy as np
+
+            run = get_wandb_run()
+            if hasattr(infer_state, "resnet_table"):
+                run.log(
+                    {
+                        "ffn_act_table": infer_state.ffn_act_table,
+                        "ffn_weight_table": infer_state.ffn_weight_table,
+                        "resnet_table": infer_state.resnet_table,
+                        "ffn_rms_norm_table": infer_state.ffn_rms_norm_table,
+                        "ffn_up_gate_energy_table": infer_state.ffn_up_gate_energy_table,
+                        "ffn2_out_energy_table": infer_state.ffn2_out_energy_table,
+                    },
+                    commit=True,
+                )
 
         return model_output
 
