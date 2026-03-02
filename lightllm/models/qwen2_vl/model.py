@@ -56,7 +56,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
     def encode(self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams = None, **kwargs):
         if isinstance(prompt, str):
             origin_ids = self.tokenizer.encode(prompt)
-        elif isinstance(prompt, List[int]):
+        elif isinstance(prompt, list):
             origin_ids = prompt
         else:
             raise ValueError(f"Unsupported prompt type: {type(prompt)}")
