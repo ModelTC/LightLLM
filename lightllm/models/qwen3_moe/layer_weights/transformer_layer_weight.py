@@ -1,4 +1,3 @@
-import os
 from lightllm.models.qwen3.layer_weights.transformer_layer_weight import Qwen3TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, FusedMoeWeight, QKVROWNMMWeight
 
@@ -52,6 +51,11 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
+        mlp_only = set(self.network_config_.get("mlp_only_layers", []))
+        step = self.network_config_.get("decoder_sparse_step", 1)
+        moe_layer_index = sum(
+            1 for i in range(self.layer_num_) if self.n_routed_experts > 0 and i not in mlp_only and (i + 1) % step == 0
+        )
         self.experts = FusedMoeWeight(
             gate_proj_name="gate_proj",
             down_proj_name="down_proj",
@@ -65,6 +69,7 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
             quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
             layer_num=self.layer_num_,
             network_config=self.network_config_,
+            moe_layer_index=moe_layer_index,
         )
 
     def _init_qkv(self):
