@@ -56,7 +56,7 @@ class MambaCacheManager(TokenAllocator):
         ssm_state = self.ssm_state_cache.buffer[layer_idx]
         return conv_state, ssm_state
 
-    def copy_buffer_p2p(self, src_buffer_indexes: torch.Tensor, dst_buffer_indexes: torch.Tensor):
+    def copy_state_buffers(self, src_buffer_indexes: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         copy_mamba_buffer(
             self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
         )
@@ -64,7 +64,7 @@ class MambaCacheManager(TokenAllocator):
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
         )
 
-    def copy_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
+    def fork_state_buffers(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         fork_mamba_buffer(
             self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
@@ -72,7 +72,7 @@ class MambaCacheManager(TokenAllocator):
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
 
-    def copy_ssm_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
+    def fork_ssm_buffers(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         """
         Fork ONLY SSM states (not conv states) from source indices to destination indices.
 

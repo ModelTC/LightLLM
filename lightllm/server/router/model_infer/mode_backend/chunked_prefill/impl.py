@@ -285,8 +285,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 # Destination: buffer[0] for each request
                 dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
                 # P2P copy both conv_states and ssm_states
-                if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_buffer_p2p"):
-                    g_infer_context.req_manager.buffer_mem_manager.copy_buffer_p2p(
+                if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_state_buffers"):
+                    g_infer_context.req_manager.buffer_mem_manager.copy_state_buffers(
                         src_buffer_indexes, dst_buffer_indexes
                     )
 

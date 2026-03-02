@@ -277,5 +277,5 @@ class ReqManagerForMamba(ReqManager):
         all_mtp_buffers = self.req_to_buffer_index[tgt_req_index[:, None], mtp_range[None, :]]
 
         # 将 shared buffer 广播到所有 MTP step
-        self.buffer_mem_manager.copy_buffer_broadcast(src_buffer_index, all_mtp_buffers)
+        self.buffer_mem_manager.fork_state_buffers(src_buffer_index, all_mtp_buffers)
         return

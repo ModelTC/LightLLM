@@ -463,8 +463,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                         actual_req_idxes, mtp_accept_len[mask] - 1
                     ]
                     dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
-                    if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_buffer_p2p"):
-                        g_infer_context.req_manager.buffer_mem_manager.copy_buffer_p2p(
+                    if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_state_buffers"):
+                        g_infer_context.req_manager.buffer_mem_manager.copy_state_buffers(
                             src_buffer_indexes, dst_buffer_indexes
                         )
 
@@ -790,8 +790,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                         actual_req_idxes, mtp_accept_len[mask] - 1
                     ]
                     dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
-                    if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_buffer_p2p"):
-                        g_infer_context.req_manager.buffer_mem_manager.copy_buffer_p2p(
+                    if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_state_buffers"):
+                        g_infer_context.req_manager.buffer_mem_manager.copy_state_buffers(
                             src_buffer_indexes, dst_buffer_indexes
                         )
 

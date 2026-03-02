@@ -77,7 +77,7 @@ class HybridRadixCache(RadixCache):
         # Move to CUDA and convert to int64, ensure contiguous
         new_buffer_indexes_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
 
-        self.buffer_mem_manager.copy_buffer_p2p(cur_buffer_indexes, new_buffer_indexes_cuda)
+        self.buffer_mem_manager.copy_state_buffers(cur_buffer_indexes, new_buffer_indexes_cuda)
 
         for i, req in enumerate(reqs_to_insert):
             input_token_ids = req.get_input_token_ids()

@@ -112,7 +112,6 @@ def _get_copy_run_key(
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
 ):
-    """Run key: constant since static_key already uniquely identifies config."""
     return 0
 
 
@@ -123,7 +122,6 @@ def _get_fork_static_key(
     dst_indexes_flat: torch.Tensor,
     num_dst_per_src: int,
 ):
-    """Static key for fork kernel cache: dtype, d_size, layer_num."""
     d_size = (
         src_buffer.shape[2]
         if src_buffer.ndim == 3
@@ -144,11 +142,7 @@ def _get_fork_run_key(
     dst_indexes_flat: torch.Tensor,
     num_dst_per_src: int,
 ):
-    """Run key: constant since static_key already uniquely identifies config."""
     return 0
-
-
-# ─── Helper functions ─────────────────────────────────────────────────────────
 
 
 def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
@@ -157,9 +151,6 @@ def _flatten_trailing_dims(buffer: torch.Tensor) -> torch.Tensor:
         return buffer
     L, B = buffer.shape[:2]
     return buffer.view(L, B, -1)
-
-
-# ─── Autotuned implementations ────────────────────────────────────────────────
 
 
 @autotune(
@@ -176,8 +167,6 @@ def _copy_mamba_buffer_autotuned(
     dst_indexes: torch.Tensor,
     run_config: dict = None,
 ):
-    """Autotuned indexed copy implementation."""
-    # Default heuristic when autotune is disabled or no config cached
     if not run_config:
         d_size = src_buffer.shape[2]
         # For memory-bound copy, larger BLOCK_D is better (reduces grid size)
@@ -271,17 +260,6 @@ def copy_mamba_buffer(
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
 ):
-    """
-    Indexed 1:1 copy of Mamba recurrent state buffer slots.
-
-    Copies slot src_indexes[i] -> dst_indexes[i] for all layers simultaneously.
-
-    Args:
-        src_buffer: [layer_num, num_slots, ...]
-        dst_buffer: [layer_num, num_slots, ...]
-        src_indexes: source slot indices [num_pairs]
-        dst_indexes: destination slot indices [num_pairs]
-    """
     assert src_buffer.shape == dst_buffer.shape
     assert src_indexes.shape == dst_indexes.shape and src_indexes.ndim == 1
 
@@ -296,17 +274,6 @@ def fork_mamba_buffer(
     src_indexes: torch.Tensor,
     dst_indexes: torch.Tensor,
 ):
-    """
-    Fork Mamba recurrent state slots: one source -> N destinations.
-
-    Used for MTP speculation where parent state is replicated to child slots.
-
-    Args:
-        src_buffer: [layer_num, num_slots, ...]
-        dst_buffer: [layer_num, num_slots, ...]
-        src_indexes: source slot indices [num_src]
-        dst_indexes: destination slot indices [num_src, num_dst_per_src]
-    """
     assert src_buffer.shape == dst_buffer.shape
     assert src_indexes.ndim == 1
     assert dst_indexes.ndim == 2, f"dst_indexes must be 2D [num_src, num_dst_per_src], got {dst_indexes.shape}"
