@@ -3,12 +3,11 @@ import torch
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_infer.nsa_indexer_layer_inder import NSAIndexerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
+from lightllm.models.deepseek3_2._del_infer_struct import Deepseek3_2InferStateInfo
 from lightllm.models.deepseek3_2.triton_kernel.token_group_quant import per_token_group_quant_mla_deep_gemm_masked_fp8
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.create_utils import get_nsa_prefill_att_backend_class
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -18,18 +17,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         self.indexer = NSAIndexerInfer(layer_idx=self.layer_num_, network_config=self.network_config_)
         self.topk_indices = None
-
-        # Initialize NSA attention backend (singleton, lazy initialization)
-        self._nsa_backend_class = get_nsa_prefill_att_backend_class()
-        self._nsa_backend = None
         return
-
-    def _get_nsa_backend(self):
-        """Get or create the NSA backend (lazy initialization)."""
-        if self._nsa_backend is None:
-            # NSA backend doesn't require model reference for basic operations
-            self._nsa_backend = self._nsa_backend_class(model=None)
-        return self._nsa_backend
 
     def _get_qkv(
         self,
@@ -88,11 +76,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
-        # Create prefill state and execute attention
-        nsa_backend = self._get_nsa_backend()
-        prefill_state = nsa_backend.create_att_prefill_state(infer_state)
-        prefill_state.init_state()
-        mla_out = prefill_state.prefill_att(
+        mla_out = infer_state.prefill_att_state.prefill_att(
             q=q_all,
             k=infer_state.mem_manager.kv_buffer[self.layer_num_],
             v=None,
