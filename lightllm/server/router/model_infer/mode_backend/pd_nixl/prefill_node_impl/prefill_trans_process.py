@@ -211,7 +211,7 @@ class _PrefillTransModule:
                 for _, _notify_list in notifies_dict.items():
                     for notify in _notify_list:
                         try:
-                            notify_obj = json.loads(notify)
+                            notify_obj = json.loads(notify.decode())
                         except:
                             notify_obj = None
 
