@@ -19,21 +19,28 @@ def _fwd_kernel_extract_indexer_ks(
     stride_req_to_token_n,
     b_seq_len,
     b_req_idx,
-    b_cu_kv_seq_len,
     O_fp8,
     stride_o_fp8_bs,
     stride_o_fp8_d,
     O_scale,
     stride_o_scale_bs,
     stride_o_scale_d,
+    mtp_step,
     BLOCK_DMODEL: tl.constexpr,
+    BLOCK_SEQ_LEN: tl.constexpr,
 ):
-    cur_req_index = tl.program_id(0)
+    origin_cur_req_index = tl.program_id(0)
+    cur_req_index = (origin_cur_req_index + 1) * (mtp_step + 1) - 1
     token_start_index = tl.program_id(1)
     cur_req_idx = tl.load(b_req_idx + cur_req_index)
     cur_seq_len = tl.load(b_seq_len + cur_req_index)
     offs_d = tl.arange(0, BLOCK_DMODEL)
-    store_start_index = tl.load(b_cu_kv_seq_len + cur_req_index)
+    b_seq_len = tl.load(
+        b_seq_len + (tl.arange(0, BLOCK_SEQ_LEN) + 1) * (mtp_step + 1) - 1,
+        mask=tl.arange(0, BLOCK_SEQ_LEN) < origin_cur_req_index,
+        other=0,
+    )
+    store_start_index = tl.sum(b_seq_len)
 
     for i in range(token_start_index, cur_seq_len, tl.num_programs(1)):
         mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n)
@@ -58,10 +65,10 @@ def extract_indexer_ks(
     I_buffer: torch.Tensor,
     b_seq_len: torch.Tensor,
     b_req_idx: torch.Tensor,
-    b_cu_kv_seq_len: torch.Tensor,
     req_to_token_indexs: torch.Tensor,
     out_token_num: int,
     max_kv_seq_len: int,
+    mtp_step: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     head_dim = 128
 
@@ -71,10 +78,11 @@ def extract_indexer_ks(
     in_fp8_scale = I_buffer[:, :, 128:132].view(dtype=torch.float32)
 
     # Allocate output tensors
-    O_fp8 = torch.empty((out_token_num, head_dim), dtype=torch.float8_e4m3fn, device=I_buffer.device)
-    O_scale = torch.empty((out_token_num,), dtype=torch.float32, device=I_buffer.device)
+    O_fp8 = torch.empty((out_token_num // (mtp_step + 1), head_dim), dtype=torch.float8_e4m3fn, device=I_buffer.device)
+    O_scale = torch.empty((out_token_num // (mtp_step + 1),), dtype=torch.float32, device=I_buffer.device)
 
-    grid = (b_seq_len.shape[0], min(256, max_kv_seq_len))
+    assert b_seq_len.shape[0] % (mtp_step + 1) == 0
+    grid = (b_seq_len.shape[0] // (mtp_step + 1), min(256, max_kv_seq_len))
     num_warps = 1
 
     _fwd_kernel_extract_indexer_ks[grid](
@@ -91,14 +99,15 @@ def extract_indexer_ks(
         stride_req_to_token_n=req_to_token_indexs.stride(1),
         b_seq_len=b_seq_len,
         b_req_idx=b_req_idx,
-        b_cu_kv_seq_len=b_cu_kv_seq_len,
         O_fp8=O_fp8,
         stride_o_fp8_bs=O_fp8.stride(0),
         stride_o_fp8_d=O_fp8.stride(1),
         O_scale=O_scale,
         stride_o_scale_bs=O_scale.stride(0),
         stride_o_scale_d=O_scale.stride(1),
+        mtp_step=mtp_step,
         BLOCK_DMODEL=head_dim,
+        BLOCK_SEQ_LEN=triton.next_power_of_2(b_seq_len.shape[0] // (mtp_step + 1)),
         num_warps=num_warps,
         num_stages=1,
     )
