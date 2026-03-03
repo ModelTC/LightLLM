@@ -5,7 +5,7 @@ import threading
 import torch.multiprocessing as mp
 import collections
 import queue
-import pickle
+import ujson as json
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
@@ -211,7 +211,7 @@ class _PrefillTransModule:
                 for _, _notify_list in notifies_dict.items():
                     for notify in _notify_list:
                         try:
-                            notify_obj = pickle.loads(notify)
+                            notify_obj = json.loads(notify)
                         except:
                             notify_obj = None
 
