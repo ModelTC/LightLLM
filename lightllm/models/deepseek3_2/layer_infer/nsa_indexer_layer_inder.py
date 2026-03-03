@@ -3,7 +3,7 @@ import deep_gemm
 import torch
 from lightllm.common.basemodel.layer_infer.base_layer_infer import BaseLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.nsa_indexer_layer_weight import NSAIndexerWeight
-from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
+from lightllm.models.deepseek3_2._del_infer_struct import Deepseek3_2InferStateInfo
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
