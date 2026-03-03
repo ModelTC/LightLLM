@@ -94,10 +94,10 @@ class NSAIndexerInfer(BaseLayerInfer):
             I_buffer=infer_state.mem_manager.indexer_ks_buffer.kv_buffer[self.layer_idx_],
             b_seq_len=infer_state.b_seq_len,
             b_req_idx=infer_state.b_req_idx,
-            b_cu_kv_seq_len=infer_state.b1_cu_kv_seq_len,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
             out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
             max_kv_seq_len=infer_state.max_kv_seq_len,
+            mtp_step=0,
         )
 
         # Get actual sequence length from q (which comes from q_lora)
