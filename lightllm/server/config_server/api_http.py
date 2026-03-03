@@ -54,7 +54,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_ip, client_port = websocket.client
     logger.info(f"ws connected from IP: {client_ip}, Port: {client_port}")
-    registered_pd_master_obj: PD_Master_Obj = json.loads(await websocket.receive_bytes().decode())
+    registered_pd_master_obj: PD_Master_Obj = json.loads((await websocket.receive_bytes()).decode())
     logger.info(f"received registered_pd_master_obj {registered_pd_master_obj}")
     with registered_pd_master_obj_lock:
         registered_pd_master_objs[registered_pd_master_obj.node_id] = registered_pd_master_obj
