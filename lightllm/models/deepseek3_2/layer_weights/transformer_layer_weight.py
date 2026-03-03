@@ -1,5 +1,4 @@
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
-from lightllm.models.deepseek3_2.layer_weights.nsa_indexer_layer_weight import NSAIndexerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, LayerNormWeight
 
 
