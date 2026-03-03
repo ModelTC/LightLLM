@@ -1,10 +1,8 @@
 """Attention backend selection utilities."""
-
-import os
-import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
+from typing import Dict
 from .base_att import BaseAttBackend
 from .triton.fp import TritonAttBackend
 from .triton.int4kv import Int4kvTritonAttBackend
@@ -56,14 +54,16 @@ nsa_data_type_to_backend = {
 
 
 def _auto_select_backend(
-    llm_dtype: str, is_mla: bool = False, priority_list: list = ["fa3", "flashinfer", "triton"]
+    llm_dtype: str,
+    kv_type_to_backend: Dict[str, Dict[str, BaseAttBackend]],
+    priority_list: list = ["fa3", "flashinfer", "triton"],
 ) -> type:
     """Auto-select the best available backend with validation.
 
     Priority: FA3 > FlashInfer > Triton
     Each backend is validated in a subprocess with ground truth checks.
     """
-    backend_map = mla_data_type_to_backend if is_mla else data_type_to_backend
+    backend_map = kv_type_to_backend
 
     for backend_name in priority_list:
         if validate(backend_name):
@@ -82,7 +82,7 @@ def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashi
     if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=False, priority_list=priority_list)
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
 
 def get_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
@@ -92,7 +92,7 @@ def get_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashin
     if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=False, priority_list=priority_list)
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
 
 def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
@@ -102,7 +102,7 @@ def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "fl
     if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=True, priority_list=priority_list)
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 
 def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
@@ -112,20 +112,24 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "fla
     if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, is_mla=True, priority_list=priority_list)
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 
-def get_nsa_prefill_att_backend_class(backend_str: str = "flashmla_sparse") -> BaseAttBackend:
-    llm_dtype = "None"
-    if backend_str not in nsa_data_type_to_backend[llm_dtype]:
-        logger.warning(f"NSA backend '{backend_str}' not found, falling back to flashmla_sparse")
-        backend_str = "flashmla_sparse"
-    return nsa_data_type_to_backend[llm_dtype][backend_str]
+def get_nsa_prefill_att_backend_class(index=0, priority_list: list = ["flashmla_sparse"]) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_prefill_att_backend[index]
+    if backend_str != "auto":
+        return nsa_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
 
 
-def get_nsa_decode_att_backend_class(backend_str: str = "flashmla_sparse") -> BaseAttBackend:
-    llm_dtype = "None"
-    if backend_str not in nsa_data_type_to_backend[llm_dtype]:
-        logger.warning(f"NSA backend '{backend_str}' not found, falling back to flashmla_sparse")
-        backend_str = "flashmla_sparse"
-    return nsa_data_type_to_backend[llm_dtype][backend_str]
+def get_nsa_decode_att_backend_class(index=0, priority_list: list = ["flashmla_sparse"]) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_decode_att_backend[index]
+    if backend_str != "auto":
+        return nsa_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
