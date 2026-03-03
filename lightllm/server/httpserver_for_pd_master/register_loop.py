@@ -1,7 +1,7 @@
 import asyncio
-import pickle
 import websockets
 import socket
+import ujson as json
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -31,7 +31,7 @@ async def register_loop(manager: HttpServerManagerForPDMaster):
                     node_id=manager.args.pd_node_id, host_ip_port=f"{manager.host_ip}:{manager.args.port}"
                 )
 
-                await websocket.send(pickle.dumps(pd_master_obj))
+                await websocket.send(json.dumps(pd_master_obj).encode())
                 logger.info(f"Sent registration pd_master obj: {pd_master_obj}")
 
                 while True:
