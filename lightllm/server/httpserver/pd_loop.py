@@ -183,7 +183,7 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
             response = await client.get(uri)
             if response.status_code == 200:
                 base64data = response.json()["data"]
-                id_to_pd_master_obj = json.loads(base64.b64decode(base64data.decode()))
+                id_to_pd_master_obj = json.loads(base64.b64decode(base64data).decode())
                 return id_to_pd_master_obj
             else:
                 logger.error(f"get pd_master_objs error {response.status_code}")
