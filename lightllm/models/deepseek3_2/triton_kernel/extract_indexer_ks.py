@@ -6,74 +6,98 @@ import triton.language as tl
 
 @triton.jit
 def _fwd_kernel_extract_indexer_ks(
-    I_buffer,  # Input buffer [large_size, 1, 132] uint8
-    SrcLoc,  # Source indices [req_size] int32/int64
-    O_fp8,  # Output FP8 [req_size, 128] float8_e4m3fn
-    O_scale,  # Output scale [req_size] float32
-    stride_i_bs,
-    stride_i_h,
-    stride_i_d,
+    in_fp8,
+    stride_in_fp8_bs,
+    stride_in_fp8_h,
+    stride_in_fp8_d,
+    in_fp8_scale,
+    stride_in_scale_bs,
+    stride_in_scale_h,
+    stride_in_scale_d,
+    req_to_token_indexs,
+    stride_req_to_token_m,
+    stride_req_to_token_n,
+    b_seq_len,
+    b_req_idx,
+    b_cu_kv_seq_len,
+    O_fp8,
     stride_o_fp8_bs,
     stride_o_fp8_d,
+    O_scale,
     stride_o_scale_bs,
+    stride_o_scale_d,
     BLOCK_DMODEL: tl.constexpr,
 ):
-    cur_index = tl.program_id(0)
+    cur_req_index = tl.program_id(0)
+    token_start_index = tl.program_id(1)
+    cur_req_idx = tl.load(b_req_idx + cur_req_index)
+    cur_seq_len = tl.load(b_seq_len + cur_req_index)
     offs_d = tl.arange(0, BLOCK_DMODEL)
+    store_start_index = tl.load(b_cu_kv_seq_len + cur_req_index)
 
-    src_index = tl.load(SrcLoc + cur_index).to(tl.int64)
+    for i in range(token_start_index, cur_seq_len, tl.num_programs(1)):
+        mem_index = tl.load(req_to_token_indexs + cur_req_idx * stride_req_to_token_m + i * stride_req_to_token_n)
 
-    i_k_ptrs = I_buffer + src_index * stride_i_bs + stride_i_d * offs_d
-    k_fp8_as_uint8 = tl.load(i_k_ptrs)
+        in_fp8_ptrs = in_fp8 + mem_index * stride_in_fp8_bs + 0 * stride_in_fp8_h + stride_in_fp8_d * offs_d
+        kv_fp8 = tl.load(in_fp8_ptrs)
 
-    k_fp8 = k_fp8_as_uint8.to(tl.float8e4nv, bitcast=True)
+        in_scale_ptrs = in_fp8_scale + mem_index * stride_in_scale_bs + 0 * stride_in_scale_h + 0 * stride_in_scale_d
+        kv_scale = tl.load(in_scale_ptrs)
 
-    o_k_ptrs = O_fp8 + cur_index * stride_o_fp8_bs + stride_o_fp8_d * offs_d
-    tl.store(o_k_ptrs, k_fp8)
+        o_fp8_ptrs = O_fp8 + (store_start_index + i) * stride_o_fp8_bs + stride_o_fp8_d * offs_d
+        tl.store(o_fp8_ptrs, kv_fp8)
 
-    i_scale_base_ptr = I_buffer + src_index * stride_i_bs + BLOCK_DMODEL * stride_i_d
-
-    byte0 = tl.load(i_scale_base_ptr + 0 * stride_i_d).to(tl.uint32)
-    byte1 = tl.load(i_scale_base_ptr + 1 * stride_i_d).to(tl.uint32)
-    byte2 = tl.load(i_scale_base_ptr + 2 * stride_i_d).to(tl.uint32)
-    byte3 = tl.load(i_scale_base_ptr + 3 * stride_i_d).to(tl.uint32)
-
-    scale_as_uint32 = byte0 | (byte1 << 8) | (byte2 << 16) | (byte3 << 24)
-
-    k_scale = scale_as_uint32.to(tl.float32, bitcast=True)
-
-    o_scale_ptr = O_scale + cur_index * stride_o_scale_bs
-    tl.store(o_scale_ptr, k_scale)
+        o_scale_ptr = O_scale + (store_start_index + i) * stride_o_scale_bs
+        tl.store(o_scale_ptr, kv_scale)
 
     return
 
 
 @torch.no_grad()
-def extract_indexer_ks(I_buffer: torch.Tensor, SrcLoc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    req_size = SrcLoc.shape[0]
+def extract_indexer_ks(
+    I_buffer: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_cu_kv_seq_len: torch.Tensor,
+    req_to_token_indexs: torch.Tensor,
+    out_token_num: int,
+    max_kv_seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     head_dim = 128
 
     assert I_buffer.dtype == torch.uint8, f"Expected I_buffer dtype=uint8, got {I_buffer.dtype}"
     assert I_buffer.shape[2] == 132, f"Expected I_buffer last dim=132, got {I_buffer.shape[2]}"
+    in_fp8 = I_buffer[:, :, 0:128].view(dtype=torch.float8_e4m3fn)
+    in_fp8_scale = I_buffer[:, :, 128:132].view(dtype=torch.float32)
 
     # Allocate output tensors
-    O_fp8 = torch.empty((req_size, head_dim), dtype=torch.float8_e4m3fn, device=I_buffer.device)
-    O_scale = torch.empty((req_size,), dtype=torch.float32, device=I_buffer.device)
+    O_fp8 = torch.empty((out_token_num, head_dim), dtype=torch.float8_e4m3fn, device=I_buffer.device)
+    O_scale = torch.empty((out_token_num,), dtype=torch.float32, device=I_buffer.device)
 
-    grid = (req_size,)
+    grid = (b_seq_len.shape[0], min(256, max_kv_seq_len))
     num_warps = 1
 
     _fwd_kernel_extract_indexer_ks[grid](
-        I_buffer,
-        SrcLoc,
-        O_fp8,
-        O_scale,
-        I_buffer.stride(0),
-        I_buffer.stride(1),
-        I_buffer.stride(2),
-        O_fp8.stride(0),
-        O_fp8.stride(1),
-        O_scale.stride(0),
+        in_fp8,
+        stride_in_fp8_bs=in_fp8.stride(0),
+        stride_in_fp8_h=in_fp8.stride(1),
+        stride_in_fp8_d=in_fp8.stride(2),
+        in_fp8_scale=in_fp8_scale,
+        stride_in_scale_bs=in_fp8_scale.stride(0),
+        stride_in_scale_h=in_fp8_scale.stride(1),
+        stride_in_scale_d=in_fp8_scale.stride(2),
+        req_to_token_indexs=req_to_token_indexs,
+        stride_req_to_token_m=req_to_token_indexs.stride(0),
+        stride_req_to_token_n=req_to_token_indexs.stride(1),
+        b_seq_len=b_seq_len,
+        b_req_idx=b_req_idx,
+        b_cu_kv_seq_len=b_cu_kv_seq_len,
+        O_fp8=O_fp8,
+        stride_o_fp8_bs=O_fp8.stride(0),
+        stride_o_fp8_d=O_fp8.stride(1),
+        O_scale=O_scale,
+        stride_o_scale_bs=O_scale.stride(0),
+        stride_o_scale_d=O_scale.stride(1),
         BLOCK_DMODEL=head_dim,
         num_warps=num_warps,
         num_stages=1,
