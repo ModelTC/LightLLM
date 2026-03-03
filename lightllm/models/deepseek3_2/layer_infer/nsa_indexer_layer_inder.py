@@ -1,4 +1,3 @@
-from sgl_kernel import fast_topk_transform_fused
 import deep_gemm
 import torch
 from lightllm.common.basemodel.layer_infer.base_layer_infer import BaseLayerInfer
@@ -114,6 +113,8 @@ class NSAIndexerInfer(BaseLayerInfer):
             weights = weights[:actual_seq_len]
 
         logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke)
+
+        from sgl_kernel import fast_topk_transform_fused
 
         return fast_topk_transform_fused(
             score=logits,
