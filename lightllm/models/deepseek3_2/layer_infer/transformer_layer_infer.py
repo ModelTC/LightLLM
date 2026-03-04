@@ -1,10 +1,12 @@
 import torch
+from typing import Union
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.nsa import NsaFlashMlaSparsePrefillAttState, NsaFlashMlaSparseDecodeAttState
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
@@ -142,6 +144,7 @@ class NsaInfer:
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
         infer_state: Deepseek2InferStateInfo,
+        att_state: Union[NsaFlashMlaSparsePrefillAttState, NsaFlashMlaSparseDecodeAttState],
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
 
@@ -156,9 +159,9 @@ class NsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        ks = infer_state.ks
-        ke = infer_state.ke
-        lengths = infer_state.lengths
+        ks = att_state.ks
+        ke = att_state.ke
+        lengths = att_state.lengths
 
         if infer_state.is_prefill:
             mtp_step = 0
@@ -175,18 +178,6 @@ class NsaInfer:
             mtp_step=mtp_step,
         )
 
-        # Get actual sequence length from q (which comes from q_lora)
-        # This may differ from ks.shape[0] during certain operations
-        actual_seq_len = q.shape[0]
-
-        # ks, ke, lengths, and weights should all match actual_seq_len
-        # Slice them if they don't match
-        if ks.shape[0] != actual_seq_len:
-            ks = ks[:actual_seq_len]
-            ke = ke[:actual_seq_len]
-            lengths = lengths[:actual_seq_len]
-            weights = weights[:actual_seq_len]
-
         import deep_gemm
 
         logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke)
@@ -197,9 +188,16 @@ class NsaInfer:
             score=logits,
             lengths=lengths,
             topk=self.index_topk,
-            row_starts=ke,
+            row_starts=ks,
         )
         # 将 topk index 转化为 mem index
+
+        from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
+
+        b_topk_index = trans_topk_index_to_mem_index(
+            topk_index=b_topk_index,
+            ragged_mem_index=att_state.ragged_mem_index,
+        )
 
         return b_topk_index
 
