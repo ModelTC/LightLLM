@@ -26,9 +26,7 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-    def __init__(
-        self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9, is_sub_mem_manager=False
-    ):
+    def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         self.size = size
         self.head_num = head_num
         self.head_dim = head_dim
@@ -50,16 +48,15 @@ class MemoryManager:
 
         self.can_use_mem_size = self.size
 
-        if not is_sub_mem_manager:
-            # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-            from lightllm.utils.envs_utils import get_unique_server_name
+        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
+        from lightllm.utils.envs_utils import get_unique_server_name
 
-            rank_in_node = get_current_rank_in_node()
-            self.shared_can_use_token_num = SharedInt(
-                f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
-            )
+        rank_in_node = get_current_rank_in_node()
+        self.shared_can_use_token_num = SharedInt(
+            f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
+        )
 
-            self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(
             self.size,
             dtype,
@@ -95,17 +92,6 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
-
-        # Ensure size is at least a minimum positive value to avoid torch.arange errors
-        MIN_SIZE = 1024  # Minimum 1024 tokens
-        if self.size < MIN_SIZE:
-            logger.warning(
-                f"Insufficient memory for KV cache. Available: {available_memory:.2f} GB, "
-                f"but calculated size is {self.size} tokens. Using minimum size {MIN_SIZE} tokens instead. "
-                f"Consider reducing model size, using fewer GPUs, or increasing mem_fraction."
-            )
-            self.size = MIN_SIZE
-
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
