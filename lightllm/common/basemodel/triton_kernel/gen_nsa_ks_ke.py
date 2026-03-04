@@ -132,6 +132,14 @@ def _gen_same_req_mark(b_req_idx, b_same_req_mark, BLOCK_SIZE: tl.constexpr):
 
 @torch.no_grad()
 def gen_same_req_mark(b_req_idx: torch.Tensor):
+    """
+    b_req_idx: torch.Tensor
+    out: torch.Tensor
+
+    demo:
+    b_req_idx = [1, 1, 2, 3, 3, 3]
+    out = [0, 2, 1, 0, 0, 3]
+    """
     batch_size = b_req_idx.shape[0]
     b_same_req_mark = torch.empty((batch_size,), dtype=torch.int32, device=b_req_idx.device)
     b_same_req_mark.fill_(0)
