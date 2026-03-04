@@ -160,7 +160,6 @@ class NsaInfer:
         ks = infer_state.ks
         ke = infer_state.ke
         lengths = infer_state.lengths
-        page_table_1 = infer_state.page_table_size_1
 
         if infer_state.is_prefill:
             mtp_step = 0
@@ -193,15 +192,17 @@ class NsaInfer:
 
         logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke)
 
-        from sgl_kernel import fast_topk_transform_fused
+        from sgl_kernel import fast_topk_v2
 
-        return fast_topk_transform_fused(
+        b_topk_index = fast_topk_v2(
             score=logits,
             lengths=lengths,
-            page_table_size_1=page_table_1,
-            cu_seqlens_q=infer_state.b1_cu_q_seq_len,
             topk=self.index_topk,
+            row_starts=ke,
         )
+        # 将 topk index 转化为 mem index
+
+        return b_topk_index
 
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
