@@ -6,12 +6,6 @@ from lightllm.common.kv_cache_mem_manager.deepseek2_mem_manager import Deepseek2
 
 
 class IndexerKSBuffer:
-    """Lightweight buffer holder for NSA indexer keys+scales.
-
-    Shares token indices with the parent MemoryManager — does NOT have its
-    own allocator.  Only stores the per-layer kv_buffer tensor.
-    """
-
     def __init__(self, size: int, head_num: int, head_dim: int, layer_num: int, dtype=torch.uint8):
         self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
 

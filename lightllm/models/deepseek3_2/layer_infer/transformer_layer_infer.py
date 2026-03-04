@@ -5,7 +5,7 @@ import torch
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_infer.nsa_indexer_layer_inder import NSAIndexerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
+from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
 from lightllm.models.deepseek3_2.triton_kernel.token_group_quant import per_token_group_quant_mla_deep_gemm_masked_fp8
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -37,7 +37,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
     def _get_qkv(
         self,
         input: torch.Tensor,
-        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        infer_state: Deepseek3_2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
@@ -47,9 +47,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
 
-        # Process all tokens for indexer
-        # Note: Prefix cache slicing optimization is disabled due to batch structure
-        # mismatch issues with fast_topk_transform_fused kernel
         self.topk_indices = self.indexer.get_indices(input, q, infer_state, layer_weight.indexer_layer_weight)
 
         q = layer_weight.q_b_proj_.mm(q)
@@ -76,7 +73,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         self,
         q: torch.Tensor,
         kv,
-        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        infer_state: Deepseek3_2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
@@ -111,7 +108,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
     def _token_attention_kernel(
         self,
         q,
-        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        infer_state: Deepseek3_2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ):
