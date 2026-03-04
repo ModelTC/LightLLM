@@ -9,6 +9,7 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -161,6 +162,10 @@ class NsaInfer:
         lengths = infer_state.lengths
         page_table_1 = infer_state.page_table_size_1
 
+        if infer_state.is_prefill:
+            mtp_step = 0
+        else:
+            mtp_step = get_env_start_args().mtp_step
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
             I_buffer=infer_state.mem_manager.indexer_ks_buffer.kv_buffer[self.layer_idx_],
@@ -169,7 +174,7 @@ class NsaInfer:
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
             out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
             max_kv_seq_len=infer_state.max_kv_seq_len,
-            mtp_step=0,
+            mtp_step=mtp_step,
         )
 
         # Get actual sequence length from q (which comes from q_lora)
