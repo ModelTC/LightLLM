@@ -6,6 +6,21 @@ from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deep
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
 
 
+@ModelRegistry(["deepseek_v32"])
+class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
+
+    # weight class
+    transformer_weight_class = Deepseek3_2TransformerLayerWeight
+
+    # infer class
+    transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
+
+    def _init_att_backend(self):
+        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
+        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)
+        return
+
+
 class DeepSeekV32Tokenizer:
     """Tokenizer wrapper for DeepSeek-V3.2 that uses the Python-based
     encoding_dsv32 module instead of Jinja chat templates.
@@ -93,18 +108,3 @@ class DeepSeekV32Tokenizer:
         if tokenize:
             return self.tokenizer.encode(prompt, add_special_tokens=False)
         return prompt
-
-
-@ModelRegistry(["deepseek_v32"])
-class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
-
-    # weight class
-    transformer_weight_class = Deepseek3_2TransformerLayerWeight
-
-    # infer class
-    transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
-
-    def _init_att_backend(self):
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)
-        return
