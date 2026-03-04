@@ -1,4 +1,3 @@
-from functools import partial
 from typing import override
 
 import torch
@@ -8,7 +7,7 @@ from lightllm.models.deepseek3_2.layer_infer.nsa_indexer_layer_inder import NSAI
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
 from lightllm.models.deepseek3_2.triton_kernel.token_group_quant import per_token_group_quant_mla_deep_gemm_masked_fp8
-from lightllm.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.attention.create_utils import get_nsa_prefill_att_backend_class
@@ -73,17 +72,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         return q, cache_kv
 
     @override
-    def _bind_attention(self):
-        if "triton_fp8kv" in self.mode:
-            self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_fp8, self)
-        else:
-            self._copy_kv_to_mem_cache = partial(Deepseek2TransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
-
-        self._context_attention_kernel = partial(Deepseek3_2TransformerLayerInfer._nsa_context_attention_kernel, self)
-        self._token_attention_kernel = partial(Deepseek3_2TransformerLayerInfer._nsa_token_attention_kernel, self)
-        pass
-
-    def _nsa_context_attention_kernel(
+    def _context_attention_kernel(
         self,
         q: torch.Tensor,
         kv,
@@ -118,7 +107,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return mla_out
 
-    def _nsa_token_attention_kernel(
+    @override
+    def _token_attention_kernel(
         self,
         q,
         infer_state: Deepseek3_2FlashAttentionStateInfo,

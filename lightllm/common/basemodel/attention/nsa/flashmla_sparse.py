@@ -1,9 +1,3 @@
-"""NSA FlashMLA-sparse attention backend implementation.
-
-This backend uses sgl_kernel's flash_mla_sparse_fwd for prefill
-and flash_attn_with_kvcache for decode with sparse indices.
-"""
-
 import dataclasses
 import torch
 from typing import Tuple, TYPE_CHECKING
@@ -16,8 +10,6 @@ if TYPE_CHECKING:
 
 
 class NsaFlashMlaSparseAttBackend(BaseAttBackend):
-    """NSA backend using FlashMLA sparse kernels from sgl_kernel."""
-
     def __init__(self, model):
         super().__init__(model=model)
 
@@ -47,20 +39,6 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        """Execute NSA prefill attention.
-
-        Args:
-            q: Query tensor [total_tokens, num_heads, head_dim] - already projected with k_b_proj
-            k: KV buffer tensor from memory manager
-            v: Not used for NSA (pass None)
-            att_control: Must have nsa_prefill=True and nsa_prefill_dict with:
-                - topk_indices: Sparse attention indices [total_tokens, topk]
-                - softmax_scale: Attention softmax scale
-                - kv_lora_rank: d_v dimension for MLA
-
-        Returns:
-            Output tensor [total_tokens, num_heads, kv_lora_rank]
-        """
         assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
         assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
 
@@ -79,7 +57,6 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
 
-        # flash_mla_sparse_fwd expects indices with shape [total_tokens, 1, topk]
         if topk_indices.ndim == 2:
             topk_indices = topk_indices.unsqueeze(1)
 
@@ -95,7 +72,6 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
-    """Decode attention state for NSA using flash_attn_with_kvcache."""
 
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
@@ -112,23 +88,6 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        """Execute NSA decode attention.
-
-        Args:
-            q: Tuple of (q_nope, q_rope) tensors
-            k: KV buffer tensor from memory manager
-            v: Not used for NSA (pass None)
-            att_control: Must have nsa_decode=True and nsa_decode_dict with:
-                - topk_indices: Page table for sparse attention [batch, topk]
-                - nsa_cache_seqlens: Cache sequence lengths for NSA
-                - nsa_cu_seqlens_k: Cumulative sequence lengths for NSA
-                - softmax_scale: Attention softmax scale
-                - kv_lora_rank: d_v dimension for MLA
-                - qk_rope_head_dim: Rope head dimension
-
-        Returns:
-            Output tensor
-        """
         assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
         assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
 

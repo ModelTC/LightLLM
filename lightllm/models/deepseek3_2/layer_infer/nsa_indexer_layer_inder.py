@@ -8,10 +8,8 @@ from lightllm.models.deepseek3_2.layer_weights.nsa_indexer_layer_weight import N
 from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
-from lightllm.models.deepseek3_2.mem_manager import Deepseek3_2MemoryManager
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
-from lightllm.models.bloom.triton_kernel.layernorm import layernorm_forward
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -84,7 +82,7 @@ class NSAIndexerInfer(BaseLayerInfer):
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
         destindex_copy_indexer_ks(
-            k_fp8, k_scale, infer_state.mem_index, infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_]
+            k_fp8, k_scale, infer_state.mem_index, infer_state.indexer_ks_buffer.kv_buffer[self.layer_idx_]
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -97,7 +95,7 @@ class NSAIndexerInfer(BaseLayerInfer):
 
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
-            infer_state.indexer_ks_mem_manager.kv_buffer[self.layer_idx_], infer_state.req_all_mem_index
+            infer_state.indexer_ks_buffer.kv_buffer[self.layer_idx_], infer_state.req_all_mem_index
         )
 
         # Get actual sequence length from q (which comes from q_lora)

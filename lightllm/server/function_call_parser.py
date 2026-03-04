@@ -29,7 +29,15 @@ from .api_models import Tool
 
 logger = logging.getLogger(__name__)
 
-TOOLS_TAG_LIST = ["<|plugin|>", "<function=", "<tool_call>", "<|python_tag|>", "[TOOL_CALLS]", "<｜tool▁calls▁begin｜>"]
+TOOLS_TAG_LIST = [
+    "<|plugin|>",
+    "<function=",
+    "<tool_call>",
+    "<|python_tag|>",
+    "[TOOL_CALLS]",
+    "<｜tool▁calls▁begin｜>",
+    "<｜DSML｜function_calls>",
+]
 
 
 class ToolCallItem(BaseModel):
@@ -1443,6 +1451,482 @@ class Glm47Detector(BaseFormatDetector):
             return StreamingParseResult(normal_text="", calls=calls)
 
 
+class DeepSeekV32Detector(BaseFormatDetector):
+    """
+    Detector for DeepSeek V3.2 model function call format (DSML).
+
+    DeepSeek V3.2 uses a new DSML (DeepSeek Markup Language) format for tool calls,
+    which is XML-like rather than JSON-based.
+
+    Format Structure:
+    ```
+    <｜DSML｜function_calls>
+    <｜DSML｜invoke name="get_weather">
+    <｜DSML｜parameter name="location" string="true">杭州
+    <｜DSML｜parameter name="date" string="true">2024-01-16
+    <｜DSML｜invoke name="get_weather">
+    <｜DSML｜parameter name="location" string="true">北京
+    <｜DSML｜parameter name="date" string="true">2024-01-16
+    ```
+
+    Key Components:
+    - Tool Calls Section: Starts with `<｜DSML｜function_calls>`
+    - Individual Invoke: `<｜DSML｜invoke name="function_name">`
+    - Parameters: `<｜DSML｜parameter name="param_name" string="true">value`
+    - Parameter types are inferred from the tool schema for proper JSON serialization
+
+    Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.dsml_token = "｜DSML｜"
+        self.bot_token = "<｜DSML｜function_calls>"
+        self.eot_token = ""  # DSML format has no explicit end token
+        self.invoke_prefix = '<｜DSML｜invoke name="'
+        self.parameter_prefix = '<｜DSML｜parameter name="'
+
+        # Regex for complete parsing
+        self.invoke_regex = re.compile(
+            r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)(?=<｜DSML｜invoke|$)',
+            re.DOTALL,
+        )
+        # Captures: (param_name, is_string, value)
+        self.parameter_regex = re.compile(
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)(?=<｜DSML｜parameter|<｜DSML｜invoke|$)',
+            re.DOTALL,
+        )
+
+        # Streaming state
+        self._last_arguments = ""
+        self._current_invoke_text = ""
+        self._invoke_count = 0
+        self._param_count_in_invoke = 0
+        self._accumulated_params: Dict[str, str] = {}
+        self._json_started = False
+        self._tools_schema: Optional[Dict[str, Dict]] = None
+        self._tool_indices: Optional[Dict[str, int]] = None
+        self._current_func_name: Optional[str] = None
+        self._in_tool_call_sequence = False  # Set True once bot_token seen
+
+    def has_tool_call(self, text: str) -> bool:
+        """Check if the text contains a DeepSeek V3.2 DSML format tool call."""
+        return self.bot_token in text
+
+    def _get_param_type(self, func_name: str, param_name: str, tools: List[Tool]) -> str:
+        """Get the JSON Schema type of a parameter from the tool definition."""
+        if self._tools_schema is None:
+            self._tools_schema = {}
+            for tool in tools:
+                if tool.function.name and tool.function.parameters:
+                    props = tool.function.parameters.get("properties", {})
+                    self._tools_schema[tool.function.name] = props
+
+        func_schema = self._tools_schema.get(func_name, {})
+        param_schema = func_schema.get(param_name, {})
+        return param_schema.get("type", "string")
+
+    def _convert_param_value(self, value: str, is_string_attr: str, param_type: str) -> Any:
+        """Convert a raw parameter value string to the appropriate Python type.
+
+        Args:
+            value: The raw string value from the DSML parameter tag.
+            is_string_attr: The "string" attribute from DSML ("true" or "false").
+                If "true", the value is treated as a raw string.
+                If "false", the value is parsed based on param_type or JSON.
+            param_type: The JSON Schema type from the tool definition (fallback).
+        """
+        value = value.strip()
+        if value.lower() == "null":
+            return None
+
+        # Use DSML string attribute as primary signal
+        if is_string_attr == "true":
+            return value
+
+        # string="false" - parse based on schema type or attempt JSON
+        param_type = param_type.lower()
+        if param_type in ("integer", "int"):
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return value
+        elif param_type in ("number", "float"):
+            try:
+                val = float(value)
+                # Only coerce to int if it's actually an integer string
+                if "." not in value and "e" not in value.lower():
+                    return int(value)
+                return val
+            except (ValueError, TypeError, OverflowError):
+                return value
+        elif param_type in ("boolean", "bool"):
+            lower = value.lower()
+            if lower in ("true", "1"):
+                return True
+            elif lower in ("false", "0"):
+                return False
+            else:
+                logger.warning(f"Unexpected boolean value: {value!r}, treating as string")
+                return value
+        elif param_type in ("object", "array"):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        else:
+            # Unknown type with string="false" - try JSON parse, fallback to string
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+    def _parse_invoke_params(self, invoke_content: str, func_name: str, tools: List[Tool]) -> Dict:
+        """Parse all parameters from an invoke block content."""
+        params = {}
+        for param_name, is_string_attr, param_value in self.parameter_regex.findall(invoke_content):
+            param_name = param_name.strip()
+            param_value = param_value.strip()
+            param_type = self._get_param_type(func_name, param_name, tools)
+            params[param_name] = self._convert_param_value(param_value, is_string_attr, param_type)
+        return params
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        """
+        One-time parsing: Detects and parses DSML tool calls in the provided text.
+        """
+        if self.bot_token not in text:
+            return StreamingParseResult(normal_text=text, calls=[])
+
+        idx = text.find(self.bot_token)
+        normal_text = text[:idx].strip() if idx > 0 else ""
+        tool_section = text[idx:]
+
+        tool_indices = self._get_tool_indices(tools)
+        calls = []
+
+        try:
+            for func_name, invoke_content in self.invoke_regex.findall(tool_section):
+                func_name = func_name.strip()
+                if func_name not in tool_indices:
+                    logger.warning(f"Model attempted to call undefined function: {func_name}")
+                    continue
+
+                params = self._parse_invoke_params(invoke_content, func_name, tools)
+                calls.append(
+                    ToolCallItem(
+                        tool_index=tool_indices[func_name],
+                        name=func_name,
+                        parameters=json.dumps(params, ensure_ascii=False),
+                    )
+                )
+            return StreamingParseResult(normal_text=normal_text, calls=calls)
+        except Exception as e:
+            logger.error(f"Error in DeepSeekV32 detect_and_parse: {e}")
+            return StreamingParseResult(normal_text=text)
+
+    def finalize_streaming(self, tools: List[Tool]) -> StreamingParseResult:
+        """Finalize the last pending tool call when generation ends (EOS).
+
+        The DSML format has no explicit end token, so the last invoke's last
+        parameter may remain unconfirmed. This method should be called when
+        the stream ends to close any open JSON and emit remaining parameters.
+        """
+        if not self.current_tool_name_sent or self.current_tool_id < 0:
+            return StreamingParseResult()
+
+        calls: List[ToolCallItem] = []
+        current_text = self._buffer
+
+        try:
+            # Find current invoke text
+            invoke_positions = []
+            search_start = 0
+            while True:
+                pos = current_text.find(self.invoke_prefix, search_start)
+                if pos == -1:
+                    break
+                invoke_positions.append(pos)
+                search_start = pos + len(self.invoke_prefix)
+
+            if self._invoke_count < len(invoke_positions):
+                invoke_start = invoke_positions[self._invoke_count]
+                invoke_text = current_text[invoke_start:]
+
+                name_content_start = len(self.invoke_prefix)
+                name_end = invoke_text.find('">', name_content_start)
+                if name_end != -1:
+                    func_name = invoke_text[name_content_start:name_end].strip()
+                    invoke_body = invoke_text[name_end + 2 :]
+
+                    # Parse all remaining params (including the last unconfirmed one)
+                    param_matches = list(self.parameter_regex.finditer(invoke_body))
+                    for i in range(self._param_count_in_invoke, len(param_matches)):
+                        match = param_matches[i]
+                        param_name = match.group(1).strip()
+                        is_string_attr = match.group(2)
+                        param_value = match.group(3).strip()
+
+                        param_type = self._get_param_type(func_name, param_name, tools)
+                        converted_value = self._convert_param_value(param_value, is_string_attr, param_type)
+                        serialized_value = json.dumps(converted_value, ensure_ascii=False)
+
+                        if not self._json_started:
+                            json_fragment = "{" + f'"{param_name}": {serialized_value}'
+                            self._json_started = True
+                        else:
+                            json_fragment = f', "{param_name}": {serialized_value}'
+
+                        self._accumulated_params[param_name] = converted_value
+                        calls.append(
+                            ToolCallItem(
+                                tool_index=self.current_tool_id,
+                                name=None,
+                                parameters=json_fragment,
+                            )
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] += json_fragment
+
+            # Close the JSON object
+            if self._json_started:
+                calls.append(
+                    ToolCallItem(
+                        tool_index=self.current_tool_id,
+                        name=None,
+                        parameters="}",
+                    )
+                )
+                self.streamed_args_for_tool[self.current_tool_id] += "}"
+            elif self.current_tool_name_sent:
+                calls.append(
+                    ToolCallItem(
+                        tool_index=self.current_tool_id,
+                        name=None,
+                        parameters="{}",
+                    )
+                )
+                self.streamed_args_for_tool[self.current_tool_id] = "{}"
+
+            # Update prev_tool_call_arr
+            if self.current_tool_id < len(self.prev_tool_call_arr):
+                self.prev_tool_call_arr[self.current_tool_id]["arguments"] = self._accumulated_params
+
+            # Reset state
+            self._invoke_count += 1
+            self.current_tool_id += 1
+            self.current_tool_name_sent = False
+            self._json_started = False
+            self._accumulated_params = {}
+            self._buffer = ""
+
+            return StreamingParseResult(normal_text="", calls=calls)
+        except Exception as e:
+            logger.error(f"Error in DeepSeekV32 finalize_streaming: {e}")
+            return StreamingParseResult(normal_text="", calls=calls)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        """
+        Streaming incremental parsing for DeepSeek V3.2 DSML tool calls.
+
+        The DSML format streams line-by-line with invoke/parameter tokens.
+        We accumulate parameters and only emit JSON fragments when a parameter's
+        value is confirmed complete (by seeing the next parameter/invoke boundary).
+        """
+        self._buffer += new_text
+        current_text = self._buffer
+
+        # Check if we have any DSML content
+        if not self._in_tool_call_sequence:
+            if not self.has_tool_call(current_text):
+                # Check for partial start token
+                if self._ends_with_partial_token(current_text, self.bot_token):
+                    return StreamingParseResult()
+                self._buffer = ""
+                return StreamingParseResult(normal_text=new_text)
+            self._in_tool_call_sequence = True
+
+        if self._tool_indices is None:
+            self._tool_indices = self._get_tool_indices(tools)
+
+        calls: List[ToolCallItem] = []
+
+        try:
+            # Find all invoke starts in current buffer
+            invoke_positions = []
+            search_start = 0
+            while True:
+                pos = current_text.find(self.invoke_prefix, search_start)
+                if pos == -1:
+                    break
+                invoke_positions.append(pos)
+                search_start = pos + len(self.invoke_prefix)
+
+            if not invoke_positions:
+                # Have bot_token but no invoke yet - keep buffering
+                return StreamingParseResult()
+
+            # Process only the current (latest) invoke block
+            current_invoke_idx = self._invoke_count
+            if current_invoke_idx >= len(invoke_positions):
+                # All invokes already processed, keep buffering for new ones
+                return StreamingParseResult()
+
+            invoke_start = invoke_positions[current_invoke_idx]
+            # Whether the current invoke is bounded by a next invoke
+            invoke_is_bounded = current_invoke_idx + 1 < len(invoke_positions)
+            if invoke_is_bounded:
+                invoke_end = invoke_positions[current_invoke_idx + 1]
+            else:
+                invoke_end = len(current_text)
+
+            invoke_text = current_text[invoke_start:invoke_end]
+
+            # Extract function name
+            name_start = invoke_text.find(self.invoke_prefix)
+            if name_start == -1:
+                return StreamingParseResult()
+
+            name_content_start = name_start + len(self.invoke_prefix)
+            name_end = invoke_text.find('">', name_content_start)
+            if name_end == -1:
+                # Function name not complete yet
+                return StreamingParseResult()
+
+            func_name = invoke_text[name_content_start:name_end].strip()
+
+            # Initialize state for this tool call
+            if self.current_tool_id == -1:
+                self.current_tool_id = 0
+                self.prev_tool_call_arr = []
+                self.streamed_args_for_tool = [""]
+
+            while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                self.prev_tool_call_arr.append({})
+            while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                self.streamed_args_for_tool.append("")
+
+            # Send tool name if not sent yet
+            if not self.current_tool_name_sent:
+                if func_name and func_name in self._tool_indices:
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=func_name,
+                            parameters="",
+                        )
+                    )
+                    self.current_tool_name_sent = True
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": func_name,
+                        "arguments": {},
+                    }
+                    self._current_func_name = func_name
+                    self._accumulated_params = {}
+                    self._param_count_in_invoke = 0
+                    self._json_started = False
+                    return StreamingParseResult(calls=calls)
+                return StreamingParseResult()
+
+            # Parse parameters from the invoke block content
+            invoke_body = invoke_text[name_end + 2 :]  # after '">'
+
+            # Find all parameter starts within this invoke body
+            param_positions = []
+            ps = 0
+            while True:
+                pp = invoke_body.find(self.parameter_prefix, ps)
+                if pp == -1:
+                    break
+                param_positions.append(pp)
+                ps = pp + len(self.parameter_prefix)
+
+            # A parameter is "confirmed" when the next parameter/invoke boundary is visible,
+            # meaning the parameter's value won't grow further.
+            # For the last parameter in the invoke body, it's only confirmed if
+            # the invoke itself is bounded by a next invoke.
+            confirmed_count = 0
+            for pi in range(len(param_positions)):
+                if pi + 1 < len(param_positions):
+                    confirmed_count += 1
+                elif invoke_is_bounded:
+                    confirmed_count += 1
+
+            # Only emit newly confirmed parameters
+            if confirmed_count > self._param_count_in_invoke:
+                param_matches = list(self.parameter_regex.finditer(invoke_body))
+                for i in range(self._param_count_in_invoke, min(confirmed_count, len(param_matches))):
+                    match = param_matches[i]
+                    param_name = match.group(1).strip()
+                    is_string_attr = match.group(2)
+                    param_value = match.group(3).strip()
+
+                    param_type = self._get_param_type(func_name, param_name, tools)
+                    converted_value = self._convert_param_value(param_value, is_string_attr, param_type)
+                    serialized_value = json.dumps(converted_value, ensure_ascii=False)
+
+                    if not self._json_started:
+                        json_fragment = "{" + f'"{param_name}": {serialized_value}'
+                        self._json_started = True
+                    else:
+                        json_fragment = f', "{param_name}": {serialized_value}'
+
+                    self._accumulated_params[param_name] = converted_value
+
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=None,
+                            parameters=json_fragment,
+                        )
+                    )
+                    self.streamed_args_for_tool[self.current_tool_id] += json_fragment
+
+                self._param_count_in_invoke = confirmed_count
+
+            # Check if next invoke has started (meaning current one is complete)
+            if invoke_is_bounded:
+                # Current invoke is complete, close JSON and advance
+                if self._json_started:
+                    close_fragment = "}"
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=None,
+                            parameters=close_fragment,
+                        )
+                    )
+                    self.streamed_args_for_tool[self.current_tool_id] += close_fragment
+                else:
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=None,
+                            parameters="{}",
+                        )
+                    )
+                    self.streamed_args_for_tool[self.current_tool_id] = "{}"
+
+                # Update prev_tool_call_arr
+                self.prev_tool_call_arr[self.current_tool_id]["arguments"] = self._accumulated_params
+
+                # Advance to next invoke, prune consumed buffer content
+                # Reset _invoke_count to 0 since buffer positions are now relative
+                self._buffer = current_text[invoke_end:]
+                self._invoke_count = 0
+                self.current_tool_id += 1
+                self.current_tool_name_sent = False
+                self._last_arguments = ""
+                self._accumulated_params = {}
+                self._param_count_in_invoke = 0
+                self._json_started = False
+
+            return StreamingParseResult(normal_text="", calls=calls)
+
+        except Exception as e:
+            logger.error(f"Error in DeepSeekV32 parse_streaming_increment: {e}")
+            return StreamingParseResult(normal_text="", calls=calls)
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -1455,6 +1939,7 @@ class FunctionCallParser:
     ToolCallParserEnum: Dict[str, Type[BaseFormatDetector]] = {
         "deepseekv3": DeepSeekV3Detector,
         "deepseekv31": DeepSeekV31Detector,
+        "deepseekv32": DeepSeekV32Detector,
         "glm47": Glm47Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,
@@ -1535,3 +2020,19 @@ class FunctionCallParser:
             final_normal_text = sp_result.normal_text
 
         return final_normal_text, final_calls
+
+    def finalize_stream(self) -> Tuple[str, list[ToolCallItem]]:
+        """Finalize streaming when generation ends.
+
+        For detectors that lack an explicit end-of-tool-call token (like DSML),
+        this closes any pending tool call JSON. For other detectors, this is a no-op.
+
+        Returns:
+            A tuple of (normal_text, calls) like parse_stream_chunk.
+        """
+        if not self.tools:
+            return "", []
+        if hasattr(self.detector, "finalize_streaming"):
+            sp_result = self.detector.finalize_streaming(self.tools)
+            return sp_result.normal_text, sp_result.calls
+        return "", []
