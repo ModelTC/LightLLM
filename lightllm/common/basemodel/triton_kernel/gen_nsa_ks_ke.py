@@ -22,15 +22,16 @@ def _gen_nsa_ks_ke(
     BLOCK_SEQ_SPLIT: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
-    # 不处于边界mark的最后一个req不进行处理。
+    # 只处理最后一个同样req_idx的req进行处理，代表seq_len最长的那个。
+    # req_mark 为 0，表示不是最后一个。
     req_mark = tl.load(b_same_req_mark + cur_index)
     if req_mark == 0:
         return
 
     off = tl.arange(0, BLOCK_REQ)
     b_same_req_mark = tl.load(b_same_req_mark + off, off < cur_index, other=0)
-    b_seq_len_data = tl.load(b_seq_len + off, (off < cur_index) & (b_same_req_mark != 0), other=0)
-    pre_sum_seq_len = tl.sum(b_seq_len_data)
+    pre_b_seq_len_data = tl.load(b_seq_len + off, (off < cur_index) & (b_same_req_mark != 0), other=0)
+    pre_sum_seq_len = tl.sum(pre_b_seq_len_data)
 
     # 兼容 prefill 和 decode 的情况， decode 可能存在 mtp 的情况，各个请求会共享一个req对象，其处理比较特殊
     q_seq_len = tl.load(b_q_seq_len + cur_index) + req_mark - 1
@@ -43,23 +44,25 @@ def _gen_nsa_ks_ke(
     for block_index in range(tl.cdiv(q_seq_len, BLOCK_SEQ_SPLIT)):
         block_start = block_index * BLOCK_SEQ_SPLIT
         block_end = min(q_seq_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
+        block_off = block_start + tl.arange(0, BLOCK_SEQ_SPLIT)
+        mask = block_off < block_end
         ks_data = tl.zeros((BLOCK_SEQ_SPLIT,), dtype=tl.int32)
         ke_data = (cur_total_len - q_seq_len) + tl.arange(0, BLOCK_SEQ_SPLIT)
 
         tl.store(
-            ks + store_start_index + block_start + tl.arange(0, BLOCK_SEQ_SPLIT),
+            ks + store_start_index + block_off,
             ks_data + pre_sum_seq_len,
-            mask=block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end,
+            mask=mask,
         )
         tl.store(
-            ke + store_start_index + block_start + tl.arange(0, BLOCK_SEQ_SPLIT),
+            ke + store_start_index + block_off,
             ke_data + pre_sum_seq_len,
-            mask=block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end,
+            mask=mask,
         )
         tl.store(
-            lengths + store_start_index + block_start + tl.arange(0, BLOCK_SEQ_SPLIT),
+            lengths + store_start_index + block_off,
             ke_data - ks_data + 1,
-            mask=block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end,
+            mask=mask,
         )
 
     for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
