@@ -1,8 +1,7 @@
 import torch
-
+from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
-from lightllm.models.deepseek3_2._del_infer_struct import Deepseek3_2InferStateInfo
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
@@ -23,7 +22,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
     def _get_qkv(
         self,
         input: torch.Tensor,
-        infer_state: Deepseek3_2InferStateInfo,
+        infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
@@ -58,7 +57,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         self,
         q: torch.Tensor,
         kv,
-        infer_state: Deepseek3_2InferStateInfo,
+        infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
@@ -90,7 +89,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
     def _token_attention_kernel(
         self,
         q,
-        infer_state: Deepseek3_2InferStateInfo,
+        infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
     ):
@@ -142,7 +141,7 @@ class NsaInfer:
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        infer_state: Deepseek3_2InferStateInfo,
+        infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
 
@@ -217,7 +216,7 @@ class NsaInfer:
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        infer_state: Deepseek3_2InferStateInfo,
+        infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
