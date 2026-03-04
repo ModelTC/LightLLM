@@ -15,13 +15,10 @@ if TYPE_CHECKING:
 class NsaFlashMlaSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
+        device = get_current_device_id()
         self.ragged_mem_buffers = [
-            torch.empty(
-                model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=get_current_device_id()
-            ),
+            torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
+            for _ in range(2)
         ]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
@@ -101,7 +98,6 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
 @dataclasses.dataclass
 class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
 
-    cu_seqlens_q: torch.Tensor = None
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     length: torch.Tensor = None
@@ -110,8 +106,6 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
     nsa_cu_seqlens_k_new: torch.Tensor = None
 
     def init_state(self):
-        self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-
         self.backend: NsaFlashMlaSparseAttBackend = self.backend
         model = self.backend.model
         use_cuda_graph = (
