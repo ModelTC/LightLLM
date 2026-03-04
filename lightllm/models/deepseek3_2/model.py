@@ -12,8 +12,7 @@ class DeepSeekV32Tokenizer:
 
     DeepSeek-V3.2's tokenizer_config.json does not ship with a Jinja chat
     template, so ``apply_chat_template`` would fail without either a manually
-    supplied ``--chat_template`` file or this wrapper.  Activate it with
-    ``--tokenizer_mode deepseek_v32``.
+    supplied ``--chat_template`` file or this wrapper.
     """
 
     def __init__(self, tokenizer):
