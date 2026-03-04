@@ -3,7 +3,7 @@ import deep_gemm
 import torch
 from lightllm.common.basemodel.layer_infer.base_layer_infer import BaseLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.nsa_indexer_layer_weight import NSAIndexerWeight
-from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2FlashAttentionStateInfo
+from lightllm.models.deepseek3_2.infer_struct import Deepseek3_2InferStateInfo
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
@@ -70,7 +70,7 @@ class NSAIndexerInfer(BaseLayerInfer):
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        infer_state: Deepseek3_2InferStateInfo,
         layer_weight: NSAIndexerWeight,
     ) -> torch.Tensor:
 
@@ -113,7 +113,7 @@ class NSAIndexerInfer(BaseLayerInfer):
             score=logits,
             lengths=lengths,
             page_table_size_1=page_table_1,
-            cu_seqlens_q=infer_state.cu_seqlens_q,
+            cu_seqlens_q=infer_state.b1_cu_q_seq_len,
             topk=self.index_topk,
         )
 
@@ -130,7 +130,7 @@ class NSAIndexerInfer(BaseLayerInfer):
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        infer_state: Deepseek3_2FlashAttentionStateInfo,
+        infer_state: Deepseek3_2InferStateInfo,
         layer_weight: NSAIndexerWeight,
     ):
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
