@@ -57,12 +57,13 @@ def _gen_nsa_ks_ke(
 def gen_nsa_ks_ke(
     b_seq_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
-    b_same_req_mark: torch.Tensor,
+    b_req_idx: torch.Tensor,
     q_token_num: int,
 ):
     batch_size = b_seq_len.shape[0]
     ks = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     ke = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
+    b_same_req_mark = gen_same_req_mark(b_req_idx)
 
     _gen_nsa_ks_ke[(batch_size,)](
         b_seq_len=b_seq_len,
@@ -74,3 +75,31 @@ def gen_nsa_ks_ke(
         BLOCK_SEQ_SPLIT=256,
     )
     return ks, ke
+
+
+@triton.jit
+def _gen_same_req_mark(b_req_idx, b_same_req_mark, BLOCK_SIZE: tl.constexpr):
+    cur_index = tl.program_id(0)
+    cur_req_idx = tl.load(b_req_idx + cur_index)
+    off = tl.arange(0, BLOCK_SIZE)
+    pre_req_idxs = tl.load(b_req_idx + off, (off < cur_index) & (off < tl.num_programs(0)), other=-1)
+    after_req_idxs = tl.load(b_req_idx + off, (off > cur_index) & (off < tl.num_programs(0)), other=-1)
+
+    pre_idx_count = tl.sum(pre_req_idxs == cur_req_idx)
+    after_idx_count = tl.sum(after_req_idxs == cur_req_idx)
+
+    has_mark = tl.where(after_idx_count == 0, 1, 0)
+    for _ in range(has_mark):
+        tl.store(b_same_req_mark + cur_index, pre_idx_count + 1)
+    return
+
+
+@torch.no_grad()
+def gen_same_req_mark(b_req_idx: torch.Tensor):
+    batch_size = b_req_idx.shape[0]
+    b_same_req_mark = torch.empty((batch_size,), dtype=torch.int32, device=b_req_idx.device)
+    b_same_req_mark.fill_(0)
+    _gen_same_req_mark[(batch_size,)](
+        b_req_idx=b_req_idx, b_same_req_mark=b_same_req_mark, BLOCK_SIZE=triton.next_power_of_2(batch_size)
+    )
+    return b_same_req_mark
