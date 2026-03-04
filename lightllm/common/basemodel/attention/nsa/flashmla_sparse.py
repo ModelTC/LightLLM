@@ -15,6 +15,14 @@ if TYPE_CHECKING:
 class NsaFlashMlaSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
+        self.ragged_mem_buffers = [
+            torch.empty(
+                model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=get_current_device_id()
+            ),
+            torch.empty(
+                model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=get_current_device_id()
+            ),
+        ]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
         return NsaFlashMlaSparsePrefillAttState(backend=self, infer_state=infer_state)
@@ -27,12 +35,29 @@ class NsaFlashMlaSparseAttBackend(BaseAttBackend):
 class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
     """Prefill attention state for NSA using flash_mla_sparse_fwd."""
 
-    cu_seqlens_q: torch.Tensor = None
-    cu_seqlens_k: torch.Tensor = None
+    ks: torch.Tensor = None
+    ke: torch.Tensor = None
+    lengths: torch.Tensor = None
+    ragged_mem_index: torch.Tensor = None
 
     def init_state(self):
-        self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-        self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
+        self.backend: NsaFlashMlaSparseAttBackend = self.backend
+        self.ragged_mem_index = torch.empty(
+            self.infer_state.total_token_num,
+            dtype=torch.int32,
+            device=get_current_device_id(),
+        )
+        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
+
+        self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
+            b_seq_len=self.infer_state.b_seq_len,
+            b_q_seq_len=self.infer_state.b_q_seq_len,
+            b_req_idx=self.infer_state.b_req_idx,
+            req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
+            q_token_num=self.infer_state.total_token_num - self.infer_state.prefix_total_token_num,
+            ragged_mem_index=self.ragged_mem_index,
+        )
+        return
 
     def prefill_att(
         self,
@@ -77,11 +102,49 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
 class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
 
     cu_seqlens_q: torch.Tensor = None
-    cu_seqlens_k: torch.Tensor = None
+    ks: torch.Tensor = None
+    ke: torch.Tensor = None
+    length: torch.Tensor = None
+    ragged_mem_index: torch.Tensor = None
+    nsa_cache_seqlens: torch.Tensor = None
+    nsa_cu_seqlens_k_new: torch.Tensor = None
 
     def init_state(self):
         self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-        self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
+
+        self.backend: NsaFlashMlaSparseAttBackend = self.backend
+        model = self.backend.model
+        use_cuda_graph = (
+            self.infer_state.batch_size <= model.graph_max_batch_size
+            and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
+        )
+
+        if use_cuda_graph:
+            self.ragged_mem_index = self.backend.ragged_mem_buffers[self.infer_state.microbatch_index]
+        else:
+            self.ragged_mem_index = torch.empty(
+                self.infer_state.total_token_num,
+                dtype=torch.int32,
+                device=get_current_device_id(),
+            )
+
+        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
+
+        self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
+            b_seq_len=self.infer_state.b_seq_len,
+            b_q_seq_len=self.infer_state.b_q_seq_len,
+            b_req_idx=self.infer_state.b_req_idx,
+            req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
+            q_token_num=self.infer_state.b_seq_len.shape[0],
+            ragged_mem_index=self.ragged_mem_index,
+        )
+        self.nsa_cache_seqlens = torch.minimum(
+            torch.full(size=(self.infer_state.batch_size,), value=2048), self.infer_state.b_seq_len
+        )
+        padded_seq_lens = torch.zeros(size=(self.nsa_cache_seqlens.shape[0] + 1,), dtype=torch.int32, device="cuda")
+        # 进行 cumsum 操作
+        padded_seq_lens[1:].copy_(self.nsa_cache_seqlens, non_blocking=True)
+        self.nsa_cu_seqlens_k_new = padded_seq_lens.cumsum(dim=0, dtype=torch.int32)
 
     def decode_att(
         self,
@@ -106,8 +169,6 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
 
         nsa_dict = att_control.nsa_decode_dict
         topk_indices = nsa_dict["topk_indices"]
-        nsa_cache_seqlens = nsa_dict["nsa_cache_seqlens"]
-        nsa_cu_seqlens_k = nsa_dict["nsa_cu_seqlens_k"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
         qk_rope_head_dim = nsa_dict["qk_rope_head_dim"]
@@ -124,9 +185,9 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
             v_cache=kv_nope,
             qv=q_nope,
             page_table=topk_indices,
-            cache_seqlens=nsa_cache_seqlens,
-            cu_seqlens_q=self.cu_seqlens_q,
-            cu_seqlens_k_new=nsa_cu_seqlens_k,
+            cache_seqlens=self.nsa_cache_seqlens,
+            cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
+            cu_seqlens_k_new=self.nsa_cu_seqlens_k_new,
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=softmax_scale,
             causal=True,
