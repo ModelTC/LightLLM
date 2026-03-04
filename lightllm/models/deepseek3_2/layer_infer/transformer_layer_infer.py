@@ -104,8 +104,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             nsa_decode=True,
             nsa_decode_dict={
                 "topk_indices": infer_state.topk_indices,
-                "nsa_cache_seqlens": infer_state.nsa_cache_seqlens,
-                "nsa_cu_seqlens_k": infer_state.nsa_cu_seqlens_k,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
                 "qk_rope_head_dim": self.qk_rope_head_dim,
