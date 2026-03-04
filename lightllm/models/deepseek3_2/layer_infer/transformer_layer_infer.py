@@ -32,7 +32,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
 
-        infer_state.topk_indices = self.indexer.get_indices(input, q, infer_state, layer_weight.indexer_layer_weight)
+        infer_state.topk_indices = self.indexer.get_indices(input, q, infer_state, layer_weight)
 
         q = layer_weight.q_b_proj_.mm(q)
         cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
