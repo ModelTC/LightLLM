@@ -17,7 +17,6 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         super().__init__(layer_num, network_config)
 
         self.indexer = NsaInfer(layer_idx=self.layer_num_, network_config=self.network_config_)
-        self.topk_indices = None
         return
 
     def _get_qkv(
@@ -33,7 +32,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
 
-        self.topk_indices = self.indexer.get_indices(input, q, infer_state, layer_weight.indexer_layer_weight)
+        infer_state.topk_indices = self.indexer.get_indices(input, q, infer_state, layer_weight.indexer_layer_weight)
 
         q = layer_weight.q_b_proj_.mm(q)
         cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
@@ -71,11 +70,13 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         att_control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
-                "topk_indices": self.topk_indices,
+                "topk_indices": infer_state.topk_indices,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
             },
         )
+
+        del infer_state.topk_indices
 
         mla_out = infer_state.prefill_att_state.prefill_att(
             q=q_all,
@@ -100,7 +101,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         att_control = AttControl(
             nsa_decode=True,
             nsa_decode_dict={
-                "topk_indices": self.topk_indices,
+                "topk_indices": infer_state.topk_indices,
                 "nsa_cache_seqlens": infer_state.nsa_cache_seqlens,
                 "nsa_cu_seqlens_k": infer_state.nsa_cu_seqlens_k,
                 "softmax_scale": self.softmax_scale,
@@ -109,11 +110,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
-        # Create decode state and execute attention
-        nsa_backend = self._get_nsa_backend()
-        decode_state = nsa_backend.create_att_decode_state(infer_state)
-        decode_state.init_state()
-        o_tensor = decode_state.decode_att(
+        del infer_state.topk_indices
+
+        o_tensor = infer_state.decode_att_state.decode_att(
             q=(q_nope, q_rope),
             k=infer_state.mem_manager.kv_buffer[self.layer_num_],
             v=None,
