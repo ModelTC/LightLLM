@@ -29,10 +29,20 @@ def test_gen_nsa_ks_ke_basic():
     )
     q_token_num = b_q_seq_len.sum().item()
 
-    ks, ke = gen_nsa_ks_ke(b_seq_len, b_q_seq_len, b_req_idx, q_token_num)
+    req_to_token_index = torch.arange(0, 1000).cuda().view(100, -1)
+    ragged_mem_index = torch.empty_like(req_to_token_index.view(-1))
+
+    ks, ke, lengths = gen_nsa_ks_ke(
+        b_seq_len, b_q_seq_len, b_req_idx, req_to_token_index, q_token_num, ragged_mem_index
+    )
 
     assert torch.equal(ks, torch.tensor([0, 0, 0, 0, 0], dtype=torch.int32, device="cuda"))
     assert torch.equal(ke, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int32, device="cuda"))
+    assert torch.equal(lengths, ke - ks + 1)
+    assert torch.equal(
+        ragged_mem_index[0:10], torch.tensor([10, 11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=torch.int32, device="cuda")
+    )
+    return
 
 
 def test_gen_nsa_ks_ke_batch():
@@ -41,7 +51,12 @@ def test_gen_nsa_ks_ke_batch():
     b_req_idx = torch.tensor([1, 1], dtype=torch.int32, device="cuda")
     q_token_num = b_q_seq_len.sum().item()
 
-    ks, ke = gen_nsa_ks_ke(b_seq_len, b_q_seq_len, b_req_idx, q_token_num)
+    req_to_token_index = torch.arange(0, 1000).cuda().view(10, -1)
+    ragged_mem_index = torch.empty_like(req_to_token_index.view(-1))
+
+    ks, ke, lengths = gen_nsa_ks_ke(
+        b_seq_len, b_q_seq_len, b_req_idx, req_to_token_index, q_token_num, ragged_mem_index
+    )
 
     assert torch.equal(
         ks,
@@ -55,6 +70,8 @@ def test_gen_nsa_ks_ke_batch():
         ),
     )
     assert torch.equal(ke, torch.tensor([9, 10], dtype=torch.int32, device="cuda"))
+    assert torch.equal(lengths, ke - ks + 1)
+    assert torch.equal(ragged_mem_index[0:11], torch.arange(100, 100 + 11).cuda())
 
 
 def test_gen_same_req_mark():

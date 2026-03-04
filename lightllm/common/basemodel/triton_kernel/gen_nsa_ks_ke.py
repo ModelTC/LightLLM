@@ -8,10 +8,16 @@ from typing import Optional
 @triton.jit
 def _gen_nsa_ks_ke(
     b_seq_len,
+    b_req_idx,
     b_q_seq_len,
     b_same_req_mark,
     ks,
     ke,
+    lengths,
+    req_to_token_index,
+    strided_req_to_token_index_b,
+    strided_req_to_token_index_s,
+    ragged_mem_index,
     BLOCK_REQ: tl.constexpr,
     BLOCK_SEQ_SPLIT: tl.constexpr,
 ):
@@ -29,6 +35,7 @@ def _gen_nsa_ks_ke(
     # 兼容 prefill 和 decode 的情况， decode 可能存在 mtp 的情况，各个请求会共享一个req对象，其处理比较特殊
     q_seq_len = tl.load(b_q_seq_len + cur_index) + req_mark - 1
     cur_total_len = tl.load(b_seq_len + cur_index)
+    cur_req_idx = tl.load(b_req_idx + cur_index)
 
     b_q_seq_len_data = tl.load(b_q_seq_len + off, (off < (cur_index - req_mark + 1)), other=0)
     store_start_index = tl.sum(b_q_seq_len_data)
@@ -49,7 +56,27 @@ def _gen_nsa_ks_ke(
             ke_data + pre_sum_seq_len,
             mask=block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end,
         )
+        tl.store(
+            lengths + store_start_index + block_start + tl.arange(0, BLOCK_SEQ_SPLIT),
+            ke_data - ks_data + 1,
+            mask=block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end,
+        )
 
+    for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
+        block_start = block_index * BLOCK_SEQ_SPLIT
+        block_end = min(cur_total_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
+        mask = block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end
+
+        src_mem_index_ptr = (
+            req_to_token_index
+            + strided_req_to_token_index_b * cur_req_idx
+            + block_start
+            + tl.arange(0, BLOCK_SEQ_SPLIT)
+        )
+        src_mem_index = tl.load(src_mem_index_ptr, mask=mask, other=-1)
+        tl.store(
+            ragged_mem_index + pre_sum_seq_len + block_start + tl.arange(0, BLOCK_SEQ_SPLIT), src_mem_index, mask=mask
+        )
     return
 
 
@@ -58,23 +85,32 @@ def gen_nsa_ks_ke(
     b_seq_len: torch.Tensor,
     b_q_seq_len: torch.Tensor,
     b_req_idx: torch.Tensor,
+    req_to_token_index: torch.Tensor,
     q_token_num: int,
+    ragged_mem_index: torch.Tensor,
 ):
     batch_size = b_seq_len.shape[0]
     ks = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     ke = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
+    lengths = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     b_same_req_mark = gen_same_req_mark(b_req_idx)
 
     _gen_nsa_ks_ke[(batch_size,)](
         b_seq_len=b_seq_len,
+        b_req_idx=b_req_idx,
         b_q_seq_len=b_q_seq_len,
         b_same_req_mark=b_same_req_mark,
         ks=ks,
         ke=ke,
+        lengths=lengths,
+        req_to_token_index=req_to_token_index,
+        strided_req_to_token_index_b=req_to_token_index.stride(0),
+        strided_req_to_token_index_s=req_to_token_index.stride(1),
+        ragged_mem_index=ragged_mem_index,
         BLOCK_REQ=triton.next_power_of_2(batch_size),
         BLOCK_SEQ_SPLIT=256,
     )
-    return ks, ke
+    return ks, ke, lengths
 
 
 @triton.jit
