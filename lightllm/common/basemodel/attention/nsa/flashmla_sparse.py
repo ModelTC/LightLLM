@@ -133,7 +133,7 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
             ragged_mem_index=self.ragged_mem_index,
         )
         self.nsa_cache_seqlens = torch.minimum(
-            torch.full(size=(self.infer_state.batch_size,), value=2048), self.infer_state.b_seq_len
+            torch.full(size=(self.infer_state.batch_size,), fill_value=2048, device="cuda"), self.infer_state.b_seq_len
         )
         padded_seq_lens = torch.zeros(size=(self.nsa_cache_seqlens.shape[0] + 1,), dtype=torch.int32, device="cuda")
         # 进行 cumsum 操作
