@@ -1,7 +1,7 @@
 import time
 import asyncio
 import base64
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads, safe_pickle_dumps
 import setproctitle
 import multiprocessing as mp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query
@@ -53,7 +53,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_ip, client_port = websocket.client
     logger.info(f"ws connected from IP: {client_ip}, Port: {client_port}")
-    registered_pd_master_obj: PD_Master_Obj = pickle.loads(await websocket.receive_bytes())
+    registered_pd_master_obj: PD_Master_Obj = safe_pickle_loads(await websocket.receive_bytes())
     logger.info(f"received registered_pd_master_obj {registered_pd_master_obj}")
     with registered_pd_master_obj_lock:
         registered_pd_master_objs[registered_pd_master_obj.node_id] = registered_pd_master_obj
@@ -75,7 +75,7 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/registered_objects")
 async def get_registered_objects():
     with registered_pd_master_obj_lock:
-        serialized_data = pickle.dumps(registered_pd_master_objs)
+        serialized_data = safe_pickle_dumps(registered_pd_master_objs)
         base64_encoded = base64.b64encode(serialized_data).decode("utf-8")
         return {"data": base64_encoded}
 

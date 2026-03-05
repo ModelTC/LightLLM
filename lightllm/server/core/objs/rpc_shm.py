@@ -1,5 +1,5 @@
 import os
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads, safe_pickle_dumps
 import numpy as np
 from multiprocessing import shared_memory
 from typing import List
@@ -24,14 +24,14 @@ class RpcShmParams:
         return
 
     def write_func_params(self, func_name, args):
-        objs_bytes = pickle.dumps((func_name, args))
+        objs_bytes = safe_pickle_dumps((func_name, args))
         self.shm.buf.cast("i")[0] = len(objs_bytes)
         self.shm.buf[4 : 4 + len(objs_bytes)] = objs_bytes
         return
 
     def read_func_params(self):
         bytes_len = self.shm.buf.cast("i")[0]
-        func_name, args = pickle.loads(self.shm.buf[4 : 4 + bytes_len])
+        func_name, args = safe_pickle_loads(self.shm.buf[4 : 4 + bytes_len])
         return func_name, args
 
 
@@ -45,13 +45,13 @@ class RpcShmResults:
         return
 
     def write_func_result(self, func_name, ret):
-        objs_bytes = pickle.dumps((func_name, ret))
+        objs_bytes = safe_pickle_dumps((func_name, ret))
         self.shm.buf.cast("i")[0] = len(objs_bytes)
         self.shm.buf[4 : 4 + len(objs_bytes)] = objs_bytes
 
     def read_func_result(self):
         bytes_len = self.shm.buf.cast("i")[0]
-        func_name, ret = pickle.loads(self.shm.buf[4 : 4 + bytes_len])
+        func_name, ret = safe_pickle_loads(self.shm.buf[4 : 4 + bytes_len])
         return func_name, ret
 
 
