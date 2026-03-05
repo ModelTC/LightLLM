@@ -42,11 +42,7 @@ class RestrictedUnpickler(pickle.Unpickler):
         # Only allow specific modules or classes
         if module in self.ALLOWED_MODULES or (module, name) in self.ALLOWED_CLASSES:
             return super().find_class(module, name)
-        
-        # Also allow classes starting with lightllm
-        if module.startswith("lightllm."):
-             return super().find_class(module, name)
-             
+
         raise pickle.UnpicklingError(f"Global '{module}.{name}' is forbidden")
 
 def safe_pickle_loads(data):
