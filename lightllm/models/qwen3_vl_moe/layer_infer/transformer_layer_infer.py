@@ -43,8 +43,8 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         )
         return q, cache_kv
 
-    def context_forward(self, input_embdings, infer_state: Qwen3VLInferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+    def context_forward(self, input_embdings, infer_state: Qwen3VLInferStateInfo, layer_weight, residual: torch.Tensor = None):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight, residual=residual)
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
@@ -53,18 +53,19 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
+        # input_embdings.add_(o.view(-1, self.embed_dim_))
+        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight, residual=o.view(-1, self.embed_dim_))
         o = None
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        # input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        # input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         apply_deepstack_features(
             input_embeddings=input_embdings,
             infer_state=infer_state,
             layer_num=self.layer_num_,
         )
-        return input_embdings
+        return input_embdings, ffn_out.view(-1, self.embed_dim_)

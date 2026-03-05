@@ -661,12 +661,12 @@ def _get_grouped_matmul_configs():
             "num_stages": ns,
             "NEED_TRANS": need_trans,
         }
-        for ns in [2, 3, 4, 5]
-        for gm in [1, 16, 32, 64]
-        for nw in [4, 8]
-        for bm in [16, 32, 64, 128]
-        for bn in [16, 32, 64, 128]
-        for bk in [32, 64, 128]
+        for ns in [2, 3, 4]             
+        for gm in [1]                   
+        for nw in [4, 8]                
+        for bm in [16]                  
+        for bn in [32, 64, 128, 256]    
+        for bk in [32, 64, 128]         
         for need_trans in [True, False]
     ]
 
