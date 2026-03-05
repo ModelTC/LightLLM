@@ -79,7 +79,7 @@ def extract_indexer_ks(
 
     # Allocate output tensors
     O_fp8 = torch.empty((out_token_num // (mtp_step + 1), head_dim), dtype=torch.float8_e4m3fn, device=I_buffer.device)
-    O_scale = torch.empty((out_token_num // (mtp_step + 1),), dtype=torch.float32, device=I_buffer.device)
+    O_scale = torch.empty((out_token_num // (mtp_step + 1), 1), dtype=torch.float32, device=I_buffer.device)
 
     assert b_seq_len.shape[0] % (mtp_step + 1) == 0
     grid = (b_seq_len.shape[0] // (mtp_step + 1), min(256, max_kv_seq_len))
