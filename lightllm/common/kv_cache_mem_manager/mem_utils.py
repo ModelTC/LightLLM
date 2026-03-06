@@ -33,9 +33,12 @@ def select_mem_manager_class():
     elif get_env_start_args().llm_kv_type == "int4kv":
         memory_manager_class = PPLINT4KVMemoryManager
     elif get_env_start_args().llm_kv_type == "fp8kv":
-        memory_manager_class = ExportCalibrationMemoryManager
+        memory_manager_class = CalibrationFP8KVMemoryManager
     elif get_env_start_args().llm_kv_type == "None":
         memory_manager_class = MemoryManager
+
+    if get_env_start_args().export_fp8kv_calibration:
+        memory_manager_class = ExportCalibrationMemoryManager
 
     logger.info(f"Model kv cache using mem_manager class: {memory_manager_class}")
     return memory_manager_class
@@ -44,4 +47,4 @@ def select_mem_manager_class():
 @lru_cache(maxsize=None)
 def used_mem_manager_has_scale() -> bool:
     mem_class = select_mem_manager_class()
-    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager]
+    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager, CalibrationFP8KVMemoryManager]
