@@ -3,6 +3,7 @@ import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.common.basemodel.infer_lock import g_router_lock
+from lightllm.utils.envs_utils import get_page_size
 
 
 class ChunkedPrefillQueue(BaseQueue):
@@ -33,9 +34,11 @@ class ChunkedPrefillQueue(BaseQueue):
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
         with g_router_lock.obj:
+            page_size = get_page_size()
+            page_remaining = (len(self.cache_len_list) - 1) * page_size if page_size > 1 else 0
             ok_token_num = (
                 need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
-                < self.max_total_tokens
+                < self.max_total_tokens - page_remaining
             )
 
             ok_req_num = len(self.cache_len_list) <= self.running_max_req_size

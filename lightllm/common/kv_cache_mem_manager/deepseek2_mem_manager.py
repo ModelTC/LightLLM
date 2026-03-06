@@ -1,6 +1,7 @@
 import torch
 import os
 import torch.distributed as dist
+import triton
 from lightllm.server.pd_io_struct import KVMoveTask
 from .mem_manager import MemoryManager
 from typing import List, Union, Any
@@ -9,6 +10,7 @@ from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
+from lightllm.utils.envs_utils import get_page_size
 
 
 logger = init_logger(__name__)
@@ -45,7 +47,9 @@ class Deepseek2MemoryManager(MemoryManager):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
+        page_size = get_page_size()
+        alloc_size = ((size // page_size) + 1) * page_size if page_size > 1 else size + 1
+        self.kv_buffer = torch.empty((layer_num, alloc_size, head_num, head_dim), dtype=dtype, device="cuda")
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         self.kv_move_buffer = torch.empty(

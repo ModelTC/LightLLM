@@ -1,11 +1,12 @@
 import torch
 import collections
+import triton
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_page_size
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
@@ -71,13 +72,32 @@ class ReqManager:
     def alloc(self):
         return self.req_list.alloc()
 
+    def calc_real_need_token_num(self, need_token_num, b_seq_len, b_ready_cache_len=None):
+        return max(need_token_num, self._get_need_paged_token_num(b_seq_len, b_ready_cache_len))
+
+    def calc_last_mem_index_in_prefill(self, mem_indices, b_seq_len, b_ready_cache_len=None):
+        b_token_len = b_seq_len
+        if b_ready_cache_len is not None:
+            b_token_len = b_seq_len - b_ready_cache_len
+        b_token_len_cumsum = torch.cumsum(b_token_len, dim=0)
+        b_last_mem_index = mem_indices[b_token_len_cumsum - 1]
+        return b_last_mem_index
+
+    def alloc_mem_indices(
+        self, need_size, b_seq_len=None, b_ready_cache_len=None, b_last_mem_index=None
+    ) -> torch.Tensor:
+        page_size = get_page_size()
+        if page_size > 1 and b_seq_len is not None:
+            return self._alloc_paged_mem_indices(page_size, b_seq_len, b_ready_cache_len, b_last_mem_index)
+        return self.mem_manager.alloc(need_size)
+
     def free(self, free_req_indexes: List[int], free_token_index):
         for req_index in free_req_indexes:
             self.req_list.free(req_index)
 
         if self.req_list.is_all_free():
             logger.debug(f"freed all request size {self.req_list.can_alloc_size}")
-        self.mem_manager.free(free_token_index)
+        self.mem_manager.free(self._expand_to_page_mem_indices(free_token_index))
 
     def free_req(self, free_req_index: int):
         self.req_list.free(free_req_index)
@@ -86,12 +106,72 @@ class ReqManager:
         return
 
     def free_token(self, free_token_index):
-        self.mem_manager.free(free_token_index)
+        self.mem_manager.free(self._expand_to_page_mem_indices(free_token_index))
         return
 
     def free_all(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
+
+    def _expand_to_page_mem_indices(self, free_token_index):
+        page_size = get_page_size()
+        if page_size > 1:
+            if isinstance(free_token_index, list):
+                free_token_index = torch.tensor(free_token_index, dtype=torch.int32)
+            base_indices = free_token_index[free_token_index % page_size == 0]
+            if len(base_indices) == 0:
+                return free_token_index
+            page_offsets = torch.arange(page_size, dtype=base_indices.dtype, device=base_indices.device)
+            return (base_indices[:, None] + page_offsets[None, :]).reshape(-1)
+
+        return free_token_index
+
+    def _expand_by_page_size(self, b_token_len, page_size):
+        b_page_len = triton.cdiv(b_token_len, page_size)
+        need_pages_num = b_page_len.sum()
+        p_token_len = torch.full((need_pages_num,), page_size, dtype=b_token_len.dtype, device=b_token_len.device)
+        cumsum_pages = torch.cumsum(b_page_len, dim=0)
+        last_page_positions = cumsum_pages - 1
+        remainders = b_token_len - (b_page_len - 1) * page_size
+        p_token_len[last_page_positions] = remainders
+        return need_pages_num, p_token_len
+
+    def _alloc_paged_mem_indices(self, page_size, b_seq_len, b_ready_cache_len, b_last_mem_index):
+        b_seq_len = b_seq_len.cpu()
+        if b_ready_cache_len is not None:
+            b_ready_cache_len = b_ready_cache_len.cpu()
+            b_token_len = b_seq_len - b_ready_cache_len
+            total_pages_needed, p_token_len = self._expand_by_page_size(b_token_len, page_size)
+            paged_token_idxs = self.mem_manager.alloc(total_pages_needed * page_size)
+            pages = paged_token_idxs.view(-1, page_size)
+            mask = torch.arange(page_size, device=p_token_len.device) < p_token_len.unsqueeze(1)
+            return pages[mask]
+
+        assert b_last_mem_index is not None
+        b_last_mem_index = b_last_mem_index.cpu()
+        need_new_page_mask = (b_seq_len - 1) % page_size == 0
+        new_pages_num = need_new_page_mask.sum()
+        token_idxs = torch.zeros_like(b_seq_len, device=b_seq_len.device)
+        if new_pages_num > 0:
+            new_pages_tokens = self.mem_manager.alloc(new_pages_num * page_size)
+            token_idxs[need_new_page_mask] = new_pages_tokens[::page_size]
+        mask = ~need_new_page_mask
+        if mask.any():
+            token_idxs[mask] = b_last_mem_index[mask] + 1
+        return token_idxs
+
+    def _get_need_paged_token_num(self, b_seq_len, b_ready_cache_len=None):
+        page_size = get_page_size()
+        if page_size == 1:
+            return 0
+
+        if b_ready_cache_len is not None:
+            need_tokens_array = b_seq_len - b_ready_cache_len
+            need_pages_array = triton.cdiv(need_tokens_array, page_size)
+            need_new_pages = need_pages_array.sum()
+        else:
+            need_new_pages = ((b_seq_len - 1) % page_size == 0).sum()
+        return need_new_pages * page_size
 
 
 class ReqSamplingParamsManager:
