@@ -33,10 +33,11 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
         )
         q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
-        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
-        infer_state.topk_indices = self.indexer.get_indices(
-            hidden_states=input, q_lora=q, infer_state=infer_state, att_state=att_state, layer_weight=layer_weight
-        )
+
+        infer_state.get_topk_indices_params = {
+            "hidden_states": input,
+            "q_lora": q,
+        }
 
         q = layer_weight.q_b_proj_.mm(q)
         cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
@@ -70,21 +71,30 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
+        # 计算 topk_indices
+        att_state = infer_state.prefill_att_state
+        topk_indices = self.indexer.get_indices(
+            hidden_states=infer_state.get_topk_indices_params["hidden_states"],
+            q_lora=infer_state.get_topk_indices_params["q_lora"],
+            infer_state=infer_state,
+            att_state=att_state,
+            layer_weight=layer_weight,
+        )
+        del infer_state.get_topk_indices_params
+
         # Use NSA backend for attention computation
         att_control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
-                "topk_indices": infer_state.topk_indices,
+                "topk_indices": topk_indices,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
             },
         )
 
-        del infer_state.topk_indices
-
         mla_out = infer_state.prefill_att_state.prefill_att(
             q=q_all,
-            k=infer_state.mem_manager.kv_buffer[self.layer_num_],
+            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
             v=None,
             att_control=att_control,
         )
@@ -101,22 +111,31 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
+        # 计算 topk_indices
+        att_state = infer_state.decode_att_state
+        topk_indices = self.indexer.get_indices(
+            hidden_states=infer_state.get_topk_indices_params["hidden_states"],
+            q_lora=infer_state.get_topk_indices_params["q_lora"],
+            infer_state=infer_state,
+            att_state=att_state,
+            layer_weight=layer_weight,
+        )
+        del infer_state.get_topk_indices_params
+
         # Use NSA backend for attention computation
         att_control = AttControl(
             nsa_decode=True,
             nsa_decode_dict={
-                "topk_indices": infer_state.topk_indices,
+                "topk_indices": topk_indices,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
                 "qk_rope_head_dim": self.qk_rope_head_dim,
             },
         )
 
-        del infer_state.topk_indices
-
         o_tensor = infer_state.decode_att_state.decode_att(
             q=(q_nope, q_rope),
-            k=infer_state.mem_manager.kv_buffer[self.layer_num_],
+            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
             v=None,
             att_control=att_control,
         )
@@ -153,7 +172,10 @@ class NsaInfer:
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
         destindex_copy_indexer_ks(
-            k_fp8, k_scale, infer_state.mem_index, infer_state.mem_manager.indexer_ks_buffer.kv_buffer[self.layer_idx_]
+            K_fp8=k_fp8,
+            K_scale=k_scale,
+            DestLoc=infer_state.mem_index,
+            O_buffer=infer_state.mem_manager.kv_buffer[self.layer_idx_].view(dtype=torch.uint8)[:, :, -132:],
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -169,7 +191,7 @@ class NsaInfer:
             mtp_step = get_env_start_args().mtp_step
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=infer_state.mem_manager.indexer_ks_buffer.kv_buffer[self.layer_idx_],
+            I_buffer=infer_state.mem_manager.kv_buffer[self.layer_idx_].view(dtype=torch.uint8)[:, :, -132:],
             b_seq_len=infer_state.b_seq_len,
             b_req_idx=infer_state.b_req_idx,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
