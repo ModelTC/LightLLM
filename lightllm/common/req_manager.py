@@ -1,7 +1,6 @@
 import torch
 import collections
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
-
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional, TYPE_CHECKING
@@ -77,6 +76,22 @@ class ReqManager:
 
     def alloc(self):
         return self.req_list.alloc()
+
+    def calc_real_need_token_num(self, need_token_num, b_seq_len, b_ready_cache_len=None):
+        return self.mem_manager.calc_real_need_token_num(need_token_num, b_seq_len, b_ready_cache_len)
+
+    def calc_last_mem_index_in_prefill(self, mem_indices, b_seq_len, b_ready_cache_len=None):
+        b_token_len = b_seq_len
+        if b_ready_cache_len is not None:
+            b_token_len = b_seq_len - b_ready_cache_len
+        b_token_len_cumsum = torch.cumsum(b_token_len, dim=0)
+        b_last_mem_index = mem_indices[b_token_len_cumsum - 1]
+        return b_last_mem_index
+
+    def alloc_token_indexes(
+        self, need_size, b_seq_len=None, b_ready_cache_len=None, b_last_mem_index=None
+    ) -> torch.Tensor:
+        return self.mem_manager.alloc_token_indexes(need_size, b_seq_len, b_ready_cache_len, b_last_mem_index)
 
     def free(self, free_req_indexes: List[int], free_token_index):
         for req_index in free_req_indexes:

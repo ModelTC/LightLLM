@@ -1,5 +1,6 @@
 import triton
 import triton.language as tl
+from lightllm.utils.envs_utils import get_page_size
 
 
 @triton.jit
@@ -36,6 +37,13 @@ def page_table_copy(
 ):
     assert page_table.dim() == 2, "page_table should be 2D"
     assert req_to_token_indexs.dim() == 2, "req_to_token_indexs should be 2D"
+
+    page_size = get_page_size()
+    if page_size > 1:
+        max_seq_len_k = page_table.shape[1] * page_size
+        sampled = req_to_token_indexs[b_req_idx, :max_seq_len_k:page_size]
+        page_table.copy_(sampled // page_size)
+        return
 
     max_seq_len_k = page_table.shape[1]
     batch_size = page_table.size(0)

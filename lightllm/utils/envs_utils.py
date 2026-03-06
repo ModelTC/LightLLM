@@ -214,6 +214,16 @@ def enable_full_att_decode_tune() -> bool:
     return enable_env_vars("ENABLE_FULL_ATT_DECODE_TUNE")
 
 
+@lru_cache(maxsize=None)
+def get_page_size():
+    return int(os.getenv("PAGE_SIZE", 1))
+
+
+def set_page_size(page_size: int):
+    os.environ["PAGE_SIZE"] = str(page_size)
+    get_page_size.cache_clear()
+
+
 g_model_init_done = False
 
 

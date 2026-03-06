@@ -2,6 +2,7 @@ import uuid
 import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
+from lightllm.utils.envs_utils import get_page_size
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -36,7 +37,10 @@ class ChunkedPrefillQueue(BaseQueue):
         size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
-        ok_token_num = need_max_token_num < self.max_total_tokens
+        page_size = get_page_size()
+        page_remaining = len(self.cache_len_list) * (page_size - 1) if page_size > 1 else 0
+        estimated_need_token_num = need_max_token_num + page_remaining
+        ok_token_num = estimated_need_token_num < self.max_total_tokens
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
@@ -46,7 +50,7 @@ class ChunkedPrefillQueue(BaseQueue):
         if ok_token_num and ok_req_num and ok_prefill:
             self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
-                need_max_token_num / self.max_total_tokens,
+                estimated_need_token_num / self.max_total_tokens,
                 self.dp_index,
             )
             return True, new_batch_first_router_need_tokens
