@@ -11,7 +11,7 @@ from .allocator import KvCacheAllocator
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
-from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args, get_page_size
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
@@ -38,6 +38,9 @@ class MemoryManager:
         self.dtype = dtype
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
+        page_size = get_page_size()
+        if page_size > 1:
+            self.size = (self.size // page_size) * page_size
 
         self.allocator = KvCacheAllocator(self.size)
 
@@ -87,7 +90,9 @@ class MemoryManager:
         # 分配，内部实际也没有管理，这个token是预留来对一些特殊的运行模式，如多dp下，overlap microbatch
         # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
-        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
+        page_size = get_page_size()
+        alloc_size = ((size // page_size) + 1) * page_size if page_size > 1 else size + 1
+        self.kv_buffer = torch.empty((layer_num, alloc_size, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         """

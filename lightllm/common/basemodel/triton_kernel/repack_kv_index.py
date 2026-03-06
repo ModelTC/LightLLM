@@ -2,6 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
+from lightllm.utils.envs_utils import get_page_size
 
 
 @triton.jit
@@ -33,6 +34,40 @@ def _fwd_kernel_repack_kv_index(
     return
 
 
+@triton.jit
+def _fwd_kernel_repack_page_kv_index_from_tokens(
+    req_to_token_indexs,
+    req_index,
+    out_kv_index,
+    seq_len,
+    start_loc,
+    page_size,
+    token_stride_h,
+    SEQ_BLOCK: tl.constexpr,
+):
+    cur_batch = tl.program_id(0)
+    start_seq_n = tl.program_id(1)
+
+    cur_batch_seq_len = tl.load(seq_len + cur_batch)
+    cur_batch_req_idx = tl.load(req_index + cur_batch)
+    cur_batch_start_loc = tl.load(start_loc + cur_batch)
+
+    offs_seq = (start_seq_n * SEQ_BLOCK + tl.arange(0, SEQ_BLOCK)) * page_size
+    block_end_loc = tl.minimum((start_seq_n + 1) * SEQ_BLOCK, cur_batch_seq_len) * page_size
+    token_data = tl.load(
+        req_to_token_indexs + token_stride_h * cur_batch_req_idx + offs_seq,
+        mask=offs_seq < block_end_loc,
+        other=0,
+    )
+    page_data = token_data // page_size
+
+    offs_seq = start_seq_n * SEQ_BLOCK + tl.arange(0, SEQ_BLOCK)
+    block_end_loc = tl.minimum((start_seq_n + 1) * SEQ_BLOCK, cur_batch_seq_len)
+    out_kv_index_ptr = out_kv_index + cur_batch_start_loc + offs_seq
+    tl.store(out_kv_index_ptr, page_data, mask=offs_seq < block_end_loc)
+    return
+
+
 @torch.no_grad()
 def repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv_index):
     batch_size = req_index.shape[0]
@@ -50,6 +85,34 @@ def repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv
         out_kv_index,
         seq_len,
         start_loc,
+        kv_index.stride(0),
+        SEQ_BLOCK=BLOCK,
+        num_warps=8,
+        num_stages=1,
+    )
+    return
+
+
+@torch.no_grad()
+def paged_repack_kv_index(kv_index, req_index, seq_len, start_loc, max_seq_len, out_kv_index):
+    page_size = get_page_size()
+    assert page_size > 1
+    batch_size = req_index.shape[0]
+    # flashinfer requires out_kv_index to be zeroed before use
+    out_kv_index.zero_()
+    BLOCK = 64
+    grid = (
+        batch_size,
+        triton.cdiv(max_seq_len, BLOCK),
+    )
+
+    _fwd_kernel_repack_page_kv_index_from_tokens[grid](
+        kv_index,
+        req_index,
+        out_kv_index,
+        seq_len,
+        start_loc,
+        page_size,
         kv_index.stride(0),
         SEQ_BLOCK=BLOCK,
         num_warps=8,

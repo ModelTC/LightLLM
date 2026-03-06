@@ -30,7 +30,7 @@ class TritonPrefillAttState(BasePrefillAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
-            return self._nomarl_prefill_att(q=q, k=k, v=v, alloc_func=alloc_func)
+            return self._normal_prefill_att(q=q, k=k, v=v, alloc_func=alloc_func)
 
     def _alibi_prefill_att(
         self,
@@ -59,7 +59,7 @@ class TritonPrefillAttState(BasePrefillAttState):
         )
         return out
 
-    def _nomarl_prefill_att(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
+    def _normal_prefill_att(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
         from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
 
         out = alloc_func(q.shape, q.dtype)
