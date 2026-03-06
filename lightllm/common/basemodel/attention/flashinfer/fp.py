@@ -100,14 +100,14 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             and att_control.use_sliding_window is False
             and att_control.use_att_sink is False
         )
-        return self._nomarl_prefill_att(
+        return self._normal_prefill_att(
             q=q,
             k=k,
             v=v,
             alloc_func=alloc_func,
         )
 
-    def _nomarl_prefill_att(
+    def _normal_prefill_att(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: FlashInferAttBackend = self.backend  # for typing
