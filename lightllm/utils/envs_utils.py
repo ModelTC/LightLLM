@@ -164,6 +164,11 @@ def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
+@lru_cache(maxsize=None)
+def get_page_size():
+    return int(os.getenv("PAGE_SIZE", 1))
+
+
 g_model_init_done = False
 
 

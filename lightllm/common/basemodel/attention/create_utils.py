@@ -1,5 +1,5 @@
 """Attention backend selection utilities."""
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
 from typing import Dict
@@ -11,19 +11,25 @@ from .triton.mla import MlaTritonAttBackend
 from .fa3.fp import Fa3AttBackend
 from .fa3.fp8 import Fp8Fa3AttBackend
 from .fa3.mla import MlaFa3AttBackend
+from .paged_fa3.fp import PagedFa3AttBackend
+from .paged_fa3.mla import PagedMlaFa3AttBackend
 from .flashinfer.fp8 import Fp8FlashInferAttBackend
 from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
 from .nsa.flashmla_sparse import NsaFlashMlaSparseAttBackend
+from .paged_flashinfer.fp import PagedFlashInferAttBackend
+from .paged_flashinfer.mla import PagedMlaFlashInferAttBackend
 
 logger = init_logger(__name__)
+
+_PAGE_ENABLED = get_page_size() > 1
 
 # Backend class mappings by data type
 data_type_to_backend = {
     "None": {
-        "triton": TritonAttBackend,
-        "fa3": Fa3AttBackend,
-        "flashinfer": FlashInferAttBackend,
+        "triton": TritonAttBackend,  # triton后端已支持任意page size
+        "fa3": PagedFa3AttBackend if _PAGE_ENABLED else Fa3AttBackend,
+        "flashinfer": PagedFlashInferAttBackend if _PAGE_ENABLED else FlashInferAttBackend,
     },
     "int4kv": {
         "triton": Int4kvTritonAttBackend,
@@ -40,8 +46,8 @@ data_type_to_backend = {
 mla_data_type_to_backend = {
     "None": {
         "triton": MlaTritonAttBackend,
-        "fa3": MlaFa3AttBackend,
-        "flashinfer": MlaFlashInferAttBackend,
+        "fa3": PagedMlaFa3AttBackend if _PAGE_ENABLED else MlaFa3AttBackend,
+        "flashinfer": PagedMlaFlashInferAttBackend if _PAGE_ENABLED else MlaFlashInferAttBackend,
     },
 }
 

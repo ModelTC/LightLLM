@@ -10,6 +10,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
@@ -28,6 +29,7 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
 from lightllm.utils.envs_utils import (
     get_env_start_args,
+    get_page_size,
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
 )
@@ -172,8 +174,9 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
+        radix_cache_class = PagedRadixCache if get_page_size() > 1 else RadixCache
         self.radix_cache = (
-            RadixCache(
+            radix_cache_class(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
