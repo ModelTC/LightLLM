@@ -69,8 +69,16 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
 
     # dynamic prompt cache 准备 token
     if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0])
+        token_num = g_infer_context.req_manager.calc_real_need_token_num(
+            input_ids.shape[0], b_seq_len, b_ready_cache_len
+        )
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
+    mem_indexes = g_infer_context.req_manager.alloc_token_indexes(input_ids.shape[0], b_seq_len, b_ready_cache_len)
+    b_last_mem_index = g_infer_context.req_manager.calc_last_mem_index_in_prefill(
+        mem_indexes, b_seq_len, b_ready_cache_len
+    )
+    for i, req in enumerate(req_objs):
+        req.last_kv_mem_index = b_last_mem_index[i].item()
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
@@ -102,6 +110,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_mtp_index = []
     b_seq_len = []
     b_q_seq_len = []
+    b_last_mem_index = []
     multimodal_params = []
     for req in req_objs:
         run_reqs.append(req)
@@ -113,6 +122,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         total_token_num += seq_len
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
+        b_last_mem_index.append(req.last_kv_mem_index)
         # process the draft tokens.
         for step in range(req.mtp_step):
             run_reqs.append(req)
@@ -130,6 +140,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_last_mem_index = torch.tensor(b_last_mem_index, dtype=torch.int32, device="cpu")
 
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
@@ -139,8 +150,13 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
 
     # dynamic prompt cache 准备 token
     if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0])
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0])
+        token_num = g_infer_context.req_manager.calc_real_need_token_num(b_seq_len.shape[0], b_seq_len)
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
+    mem_indexes = g_infer_context.req_manager.alloc_token_indexes(
+        b_seq_len.shape[0], b_seq_len, b_last_mem_index=b_last_mem_index
+    )
+    for i, req in enumerate(req_objs):
+        req.last_kv_mem_index = mem_indexes[i].item()
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],

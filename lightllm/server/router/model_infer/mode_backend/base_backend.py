@@ -9,6 +9,7 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
+from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -30,6 +31,7 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.utils.dist_utils import get_dp_rank_in_node, create_new_group_for_current_node
 from lightllm.utils.envs_utils import (
     get_env_start_args,
+    get_page_size,
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
 )
@@ -175,7 +177,8 @@ class ModeBackend:
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
             else:
-                self.radix_cache = RadixCache(
+                radix_cache_class = PagedRadixCache if get_page_size() > 1 else RadixCache
+                self.radix_cache = radix_cache_class(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,

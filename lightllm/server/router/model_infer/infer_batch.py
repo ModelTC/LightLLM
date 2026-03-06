@@ -501,6 +501,7 @@ class InferReq:
         self.shm_index = shm_index
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
+        self.last_kv_mem_index = -1
 
         # 请求需要被暂停
         self.wait_pause = False
@@ -614,6 +615,7 @@ class InferReq:
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                self.last_kv_mem_index = value_tensor[-1].item() if ready_cache_len > 0 else -1
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -650,6 +652,7 @@ class InferReq:
                     # 从 cpu 到 gpu 是流内阻塞操作
                     g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                     self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                    self.last_kv_mem_index = value_tensor[-1].item() if ready_cache_len > 0 else -1
                     self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                     assert self.tail_linear_att_small_page_buffer_id is None
                     # 恢复linear att 状态
@@ -665,6 +668,7 @@ class InferReq:
                         # 从 cpu 到 gpu 是流内阻塞操作
                         g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                         self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                        self.last_kv_mem_index = value_tensor[-1].item() if ready_cache_len > 0 else -1
                         self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         assert self.tail_linear_att_small_page_buffer_id is None
                         # 恢复linear att 状态
@@ -705,6 +709,12 @@ class InferReq:
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
                             self.shared_kv_node = big_page_shared_node
                             self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                            if need_tokens > 0:
+                                self.last_kv_mem_index = tail_mems[-1].item()
+                            else:
+                                self.last_kv_mem_index = (
+                                    value_tensor[cur_big_page_tokens - 1].item() if cur_big_page_tokens > 0 else -1
+                                )
                             self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         else:
                             # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
@@ -719,6 +729,9 @@ class InferReq:
                                     self.req_idx, 0:ready_cache_len
                                 ] = value_tensor[0:ready_cache_len]
                                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                                self.last_kv_mem_index = (
+                                    value_tensor[ready_cache_len - 1].item() if ready_cache_len > 0 else -1
+                                )
                                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                                 assert self.tail_linear_att_small_page_buffer_id is None
                                 # 恢复linear att 状态
