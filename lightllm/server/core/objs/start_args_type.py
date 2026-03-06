@@ -200,6 +200,7 @@ class StartArgs:
     mtp_step: int = field(default=0)
     mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
+    export_fp8kv_calibration: bool = field(default=False)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
