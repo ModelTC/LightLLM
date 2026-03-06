@@ -7,7 +7,14 @@ from .mm_weight import (
     QKVROWNMMWeight,
     COLMMWeight,
 )
-from .norm_weight import TpRMSNormWeight, RMSNormWeight, LayerNormWeight, NoTpGEMMANormWeight, QKRMSNORMWeight
+from .norm_weight import (
+    TpRMSNormWeight,
+    RMSNormWeight,
+    LayerNormWeight,
+    NoTpGEMMANormWeight,
+    QKRMSNORMWeight,
+    QKRMSNORMWeightGEMMANormWeight,
+)
 from .embedding_weight import EmbeddingWeight, LMHeadWeight, NoTpPosEmbeddingWeight
 from .att_sink_weight import TpAttSinkWeight
 from .fused_moe.fused_moe_weight import FusedMoeWeight

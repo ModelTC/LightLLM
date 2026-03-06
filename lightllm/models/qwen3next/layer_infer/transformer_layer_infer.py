@@ -57,7 +57,6 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
     """
 
     def __init__(self, layer_num, network_config):
-        # Store Qwen3Next specific configs before calling super().__init__
         self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
         self.n_routed_experts = network_config.get("num_experts", 0)
         self.is_moe = (
@@ -245,54 +244,20 @@ class Qwen3NextFullAttentionBaseLayerInfer(GemmaRMSNormMixin, LlamaTransformerLa
         QKV projection with output gating, Q/K normalization, and partial rotary embedding.
         """
         input = input.view(-1, self.embed_dim_)
-        # Single fused GEMM for both Q and output gate projections
-        if not infer_state.is_prefill:
-            q_gate_buf = self._get_decode_buffer(
-                "q_gate_out",
-                (self._graph_max_batch_size, self.tp_q_gate_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            q_gate = layer_weight.q_gate_proj.mm(input, out=q_gate_buf)
-            kv_buf = self._get_decode_buffer(
-                "kv_out",
-                (self._graph_max_batch_size, self.tp_kv_dim),
-                input.dtype,
-                input.device,
-            )[: input.size(0)]
-            kv_out = layer_weight.kv_proj.mm(input, out=kv_buf)
-        else:
-            q_gate = layer_weight.q_gate_proj.mm(input)
-            kv_out = layer_weight.kv_proj.mm(input)
-        q_dim = self.tp_q_head_num_ * self.head_dim_
-        q = q_gate[:, :q_dim].contiguous()
-        # In-place sigmoid saves one allocation (gate_value is consumed once in _get_o)
-        infer_state.gate_value = q_gate[:, q_dim:].sigmoid_()
-        cache_kv = kv_out.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        # Q normalization (in-place via out=input)
-        gemma_rmsnorm_forward(
-            q.view(-1, self.head_dim_),
-            layer_weight.q_norm_weight_.weight,
-            eps=self.eps_,
-            out=q.view(-1, self.head_dim_),
+        qkv_out = layer_weight.qkv_proj.mm(input)
+        q, cache_kv = qkv_out.split(
+            [self.tp_q_head_num_ * self.head_dim_ * 2, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_],
+            dim=-1,
         )
-
-        # K normalization
-        k_input = cache_kv[:, : self.tp_k_head_num_, :].reshape(-1, cache_kv.shape[-1])
-        if not infer_state.is_prefill:
-            k_normed = self._get_decode_buffer(
-                "k_norm_out",
-                (self._graph_max_batch_size * self.tp_k_head_num_, cache_kv.shape[-1]),
-                k_input.dtype,
-                k_input.device,
-            )[: k_input.shape[0]]
-            gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_, out=k_normed)
-        else:
-            k_normed = gemma_rmsnorm_forward(k_input, layer_weight.k_norm_weight_.weight, eps=self.eps_)
-        cache_kv[:, : self.tp_k_head_num_, :] = k_normed.view(-1, self.tp_k_head_num_, cache_kv.shape[-1])
-
-        # Rotary embedding with partial rotation support
+        o_gate = layer_weight._o_gate_proj.mm(input)
+        # In-place sigmoid saves one allocation (gate_value is consumed once in _get_o)
+        infer_state.gate_value = o_gate.sigmoid_()
+        layer_weight.qk_norm_weight_(
+            q,
+            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
+            eps=self.eps_,
+        )
+        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
         rotary_emb_fwd(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],

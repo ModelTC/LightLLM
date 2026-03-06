@@ -57,7 +57,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
         )
-        topk_weights.mul_(self.routed_scaling_factor)
+        if self.routed_scaling_factor != 1.0:
+            topk_weights.mul_(self.routed_scaling_factor)
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = (
                 torch.arange(

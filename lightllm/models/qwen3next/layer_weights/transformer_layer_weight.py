@@ -6,6 +6,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     RMSNormWeight,
     TpParameterWeight,
     KVROWNMMWeight,
+    QKVROWNMMWeight,
+    QKRMSNORMWeightGEMMANormWeight,
 )
 
 
@@ -15,35 +17,30 @@ class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         return
 
     def _init_qkv(self):
-        # Override parent's QKVROWNMMWeight which requires kv_head_num % tp == 0.
-        # Qwen3-Next has very few KV heads (e.g., 2) so we use separate q + kv weights.
-        # KVROWNMMWeight handles the kv_head_num < tp_world_size case via repeating.
         in_dim = self.n_embed
         q_out_dim = self.q_head_num_ * self.head_dim
-        # Define o_gate weight name here (used by _split_q_with_gate during load)
-        self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
-        # Fused Q + gate projection: single GEMM outputs [q, gate] concatenated
-        self.q_gate_proj = ROWMMWeight(
+        self.qkv_proj = QKVROWNMMWeight(
             in_dim=in_dim,
-            out_dims=[q_out_dim, q_out_dim],
-            weight_names=[self._q_weight_name, self._o_gate_weight_name],
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=self.get_quant_method("q_proj"),
-        )
-        self.kv_proj = KVROWNMMWeight(
-            in_dim=in_dim,
+            q_head_num=self.q_head_num_,
             kv_head_num=self.k_head_num_,
             head_dim=self.head_dim,
-            weight_names=[self._k_weight_name, self._v_weight_name],
+            weight_names=[self._q_weight_name, self._k_weight_name, self._v_weight_name],
             data_type=self.data_type_,
-            bias_names=[self._k_bias_name, self._v_bias_name],
-            quant_method=self.get_quant_method("kv_proj"),
+            bias_names=[self._q_bias_name, self._k_bias_name, self._v_bias_name],
+            quant_method=self.get_quant_method("qkv_proj"),
+        )
+        self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
+        self._o_gate_proj = ROWMMWeight(
+            in_dim=in_dim,
+            out_dims=[q_out_dim],
+            weight_names=[self._o_gate_weight_name],
+            data_type=self.data_type_,
+            bias_names=None,
+            quant_method=self.get_quant_method("o_gate_proj"),
         )
 
     def _init_weight(self):
         super()._init_weight()
-        # Additional architecture (o_gate is now fused into q_gate_proj in _init_qkv)
         self._init_gate_shared_expert_weight()
         return
 
@@ -51,6 +48,25 @@ class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         # Qwen3Next architecture uses _init_gate_shared_expert_weight() for FFN-like component
         # No standard MLP FFN weights needed for this architecture
         pass
+
+    def _init_norm(self):
+        hidden_size = self.network_config_["hidden_size"]
+        self.att_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._att_norm_weight_name,
+            data_type=self.data_type_,
+        )
+        self.ffn_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+        )
+        self.qk_norm_weight_ = QKRMSNORMWeightGEMMANormWeight(
+            dim=self.head_dim,
+            q_weight_name=self._q_norm_name,
+            k_weight_name=self._k_norm_name,
+            data_type=self.data_type_,
+        )
 
     def load_hf_weights(self, weights):
         self._split_q_with_gate(weights)

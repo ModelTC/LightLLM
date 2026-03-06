@@ -5,6 +5,7 @@ import torch.distributed as dist
 import numpy as np
 import triton
 from typing import Tuple
+from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
@@ -64,8 +65,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         q, cache_kv = qkv.split(
             [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
-        layer_weight.q_norm_weight_(q, eps=self.eps_)
-        layer_weight.k_norm_weight_(
+        layer_weight.qk_norm_weight_(
+            q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             eps=self.eps_,
         )
@@ -95,8 +96,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input)
-        layer_weight.q_norm_weight_(q, eps=self.eps_)
-        layer_weight.k_norm_weight_(
+        layer_weight.qk_norm_weight_(
+            q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
             eps=self.eps_,
         )
