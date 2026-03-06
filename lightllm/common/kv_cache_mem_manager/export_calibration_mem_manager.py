@@ -9,17 +9,12 @@ class ExportCalibrationMemoryManager(OfflineFP8QuantMemManager):
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         """
-        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
+        导出校准模式：先用普通方式拷贝原始kv（保持原始精度），然后收集校准统计数据
         """
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
+        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
-        scales = self.scales
-        destindex_copy_kv_fp8(
-            kv,
-            mem_index,
-            scales[layer_index] if scales is not None else None,
-            self.kv_buffer[layer_index].view(torch.float8_e4m3fn),
-        )
+        destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
+        self.update_calibration_data(kv, layer_index)
         return
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:

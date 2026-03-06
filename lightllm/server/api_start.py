@@ -123,6 +123,25 @@ def normal_or_p_d_start(args):
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
 
+    # FP8 KV cache mode checks
+    if args.llm_kv_type == "fp8kv" or args.export_fp8kv_calibration:
+        fp8_backends = {"fa3", "flashinfer"}
+        common = fp8_backends & set(args.llm_prefill_att_backend) & set(args.llm_decode_att_backend)
+        assert (
+            common
+        ), "fp8kv or export fp8kv mode requires prefill and decode to use the same backend (fa3 or flashinfer)"
+    if args.llm_kv_type == "fp8kv":
+        assert args.kv_quant_calibration_config_path is not None, (
+            "fp8kv inference mode requires --kv_quant_calibration_config_path. "
+            "If you want to export calibration data, use --export_fp8kv_calibration instead."
+        )
+    if args.export_fp8kv_calibration:
+        assert args.llm_kv_type == "None", (
+            "--export_fp8kv_calibration cannot be used with quantized llm kv types; "
+            "please keep --llm_kv_type None when exporting calibration data"
+        )
+        assert args.disable_cudagraph is True, "--export_fp8kv_calibration requires --disable_cudagraph"
+
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
