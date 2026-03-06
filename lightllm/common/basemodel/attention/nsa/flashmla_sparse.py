@@ -53,6 +53,7 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
             req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
             q_token_num=self.infer_state.total_token_num - self.infer_state.prefix_total_token_num,
             ragged_mem_index=self.ragged_mem_index,
+            hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         return
 
@@ -131,6 +132,7 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
             req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
             q_token_num=self.infer_state.b_seq_len.shape[0],
             ragged_mem_index=self.ragged_mem_index,
+            hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         self.nsa_cache_seqlens = torch.minimum(
             torch.full(size=(self.infer_state.batch_size,), fill_value=2048, dtype=torch.int32, device="cuda"),

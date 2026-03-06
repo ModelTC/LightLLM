@@ -91,12 +91,16 @@ def gen_nsa_ks_ke(
     req_to_token_index: torch.Tensor,
     q_token_num: int,
     ragged_mem_index: torch.Tensor,
+    hold_req_idx: int = -1,
 ):
+    """
+    hold_req_idx 这是一个特殊req idx，主要是用于padding 请求数量时使用，所以其处理存在特殊性。
+    """
     batch_size = b_seq_len.shape[0]
     ks = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     ke = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     lengths = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
-    b_same_req_mark = gen_same_req_mark(b_req_idx)
+    b_same_req_mark = gen_same_req_mark(b_req_idx, hold_req_idx=hold_req_idx)
 
     _gen_nsa_ks_ke[(batch_size,)](
         b_seq_len=b_seq_len,
@@ -117,9 +121,14 @@ def gen_nsa_ks_ke(
 
 
 @triton.jit
-def _gen_same_req_mark(b_req_idx, b_same_req_mark, BLOCK_SIZE: tl.constexpr):
+def _gen_same_req_mark(b_req_idx, b_same_req_mark, hold_req_idx, BLOCK_SIZE: tl.constexpr):
     cur_index = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_index)
+    # hold req idx 可能重复，但是单独成组。
+    if cur_req_idx == hold_req_idx:
+        tl.store(b_same_req_mark + cur_index, 1)
+        return
+
     off = tl.arange(0, BLOCK_SIZE)
     pre_req_idxs = tl.load(b_req_idx + off, (off < cur_index) & (off < tl.num_programs(0)), other=-1)
     after_req_idxs = tl.load(b_req_idx + off, (off > cur_index) & (off < tl.num_programs(0)), other=-1)
@@ -134,9 +143,11 @@ def _gen_same_req_mark(b_req_idx, b_same_req_mark, BLOCK_SIZE: tl.constexpr):
 
 
 @torch.no_grad()
-def gen_same_req_mark(b_req_idx: torch.Tensor):
+def gen_same_req_mark(b_req_idx: torch.Tensor, hold_req_idx: int = -1):
     """
     b_req_idx: torch.Tensor
+    hold_req_idx: int default is -1, hold_req_idx is used to pad batch size to cuda graph batch size,
+    so need special handle.
     out: torch.Tensor
 
     demo:
@@ -147,6 +158,9 @@ def gen_same_req_mark(b_req_idx: torch.Tensor):
     b_same_req_mark = torch.empty((batch_size,), dtype=torch.int32, device=b_req_idx.device)
     b_same_req_mark.fill_(0)
     _gen_same_req_mark[(batch_size,)](
-        b_req_idx=b_req_idx, b_same_req_mark=b_same_req_mark, BLOCK_SIZE=triton.next_power_of_2(batch_size)
+        b_req_idx=b_req_idx,
+        b_same_req_mark=b_same_req_mark,
+        hold_req_idx=hold_req_idx,
+        BLOCK_SIZE=triton.next_power_of_2(batch_size),
     )
     return b_same_req_mark
