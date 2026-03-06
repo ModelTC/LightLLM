@@ -13,7 +13,10 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
-from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
+from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
+    ExportCalibrationQwen3NextMemManager,
+    Qwen3NextMemManager,
+)
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
@@ -82,7 +85,10 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
         )
 
-        self.mem_manager = Qwen3NextMemManager(
+        mem_manager_class = (
+            ExportCalibrationQwen3NextMemManager if start_args.export_fp8kv_calibration else Qwen3NextMemManager
+        )
+        self.mem_manager = mem_manager_class(
             size=self.max_total_token_num,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,

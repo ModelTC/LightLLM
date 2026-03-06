@@ -4,10 +4,18 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
+from .export_calibration_mem_manager import ExportCalibrationMemoryManager
 from .operator import LinearAttMemOperator
 from typing import Tuple, Any, List
 
 logger = init_logger(__name__)
+
+
+class _ExportCalibrationLinearAttMemOperator(LinearAttMemOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        super().copy_kv_to_mem_manager(layer_index, mem_index, kv)
+        full_att_layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
+        self.mem_manager.update_calibration_data(kv, full_att_layer_index)
 
 
 class Qwen3NextMemManager(MemoryManager):
@@ -137,6 +145,11 @@ class Qwen3NextMemManager(MemoryManager):
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
         return
+
+
+# 保留混合注意力缓存，仅按连续编号的 full-attention 层收集校准数据。
+class ExportCalibrationQwen3NextMemManager(Qwen3NextMemManager, ExportCalibrationMemoryManager):
+    operator_class = _ExportCalibrationLinearAttMemOperator
 
 
 class Qwen3NextLinearAttPageHelper:
