@@ -56,6 +56,10 @@ class BloomTransformerLayerWeight(LlamaTransformerLayerWeight):
         self.n_embed = self.network_config_["n_embed"]
         self.n_head = self.network_config_["num_attention_heads"]
         self.n_inter = self.network_config_["n_embed"] * 4
+        self.q_head_num_ = self.n_head
+        self.k_head_num_ = self.n_head
+        self.v_head_num_ = self.n_head
+        self.o_head_num_ = self.n_head
         self.n_kv_head = self.network_config_["num_attention_heads"]
         self.head_dim = self.network_config_.get("head_dim", self.n_embed // self.n_head)
         # 计算生成alibi

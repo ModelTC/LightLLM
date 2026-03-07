@@ -21,7 +21,7 @@ def retry(max_attempts=3, wait_time=1):
                     return func(*args, **kwargs)
                 except Exception as e:
                     attempts += 1
-                    logger.info(f"try {func.__name__} {attempts}/{max_attempts} fail: {str(e)}")
+                    logger.warning(f"try {func.__name__} {attempts}/{max_attempts} fail: {str(e)}")
                     if attempts < max_attempts:
                         time.sleep(wait_time)
             raise Exception(f"{func.__name__} try all failed")
