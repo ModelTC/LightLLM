@@ -19,7 +19,7 @@ class RequestThread(threading.Thread):
             print("Error:", response.status_code, response.text)
 
 
-url = "http://localhost:8089/generate"
+url = "http://localhost:8000/generate"
 headers = {"Content-Type": "application/json"}
 
 for i in range(1):
@@ -33,16 +33,16 @@ for i in range(1):
     thread = RequestThread(url, headers, data)
     thread.start()
 
-time.sleep(2)
+# time.sleep(2)
 
-for i in range(20):
-    data = {
-        "inputs": "San Francisco is a",
-        "parameters": {
-            "do_sample": False,
-            "ignore_eos": True,
-            "max_new_tokens": 200,
-        },
-    }
-    thread = RequestThread(url, headers, data)
-    thread.start()
+# for i in range(20):
+#     data = {
+#         "inputs": "San Francisco is a",
+#         "parameters": {
+#             "do_sample": False,
+#             "ignore_eos": True,
+#             "max_new_tokens": 200,
+#         },
+#     }
+#     thread = RequestThread(url, headers, data)
+#     thread.start()

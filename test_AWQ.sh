@@ -1,0 +1,2 @@
+# export LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1
+VLLM_USE_TRITON_AWQ=1 LIGHTLLM_USE_TRITON_FP8_SCALED_MM=1 LOADWORKER=1 python -m lightllm.server.api_server --model_dir /data/Qwen3-Omni-30B-A3B-Instruct-AWQ --quant_type awq --tp 1 --graph_max_batch_size 8 --enable_multimodal --enable_multimodal_audio --max_total_token_num 40000

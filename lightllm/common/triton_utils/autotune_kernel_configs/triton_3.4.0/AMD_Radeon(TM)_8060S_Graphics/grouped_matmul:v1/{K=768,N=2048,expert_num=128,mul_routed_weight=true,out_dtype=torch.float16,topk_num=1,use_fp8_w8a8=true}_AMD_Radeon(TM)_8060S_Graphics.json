@@ -1,0 +1,20 @@
+{
+  "64": {
+    "BLOCK_SIZE_K": 32,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 256,
+    "GROUP_SIZE_M": 1,
+    "NEED_TRANS": true,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "8": {
+    "BLOCK_SIZE_K": 32,
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "GROUP_SIZE_M": 1,
+    "NEED_TRANS": true,
+    "num_stages": 4,
+    "num_warps": 4
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "1": {
+    "BLOCK_K": 32,
+    "BLOCK_M": 16,
+    "BLOCK_N": 64,
+    "GROUP_M": 8,
+    "num_stages": 5,
+    "num_warps": 4
+  },
+  "8": {
+    "BLOCK_K": 32,
+    "BLOCK_M": 16,
+    "BLOCK_N": 64,
+    "GROUP_M": 8,
+    "num_stages": 6,
+    "num_warps": 4
+  }
+}

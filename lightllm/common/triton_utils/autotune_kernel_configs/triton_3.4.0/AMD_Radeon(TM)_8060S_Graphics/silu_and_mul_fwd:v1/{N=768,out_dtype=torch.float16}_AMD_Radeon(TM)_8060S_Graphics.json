@@ -1,0 +1,14 @@
+{
+  "64": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 128,
+    "NUM_STAGES": 1,
+    "num_warps": 1
+  },
+  "8": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 128,
+    "NUM_STAGES": 1,
+    "num_warps": 4
+  }
+}

@@ -9,8 +9,7 @@ try:
 
     vllm_ops = ops
     HAS_VLLM = True
-    cutlass_scaled_mm = torch.ops._C.cutlass_scaled_mm
-
+    cutlass_scaled_mm = None
 except:
     HAS_VLLM = False
     cutlass_scaled_mm = None

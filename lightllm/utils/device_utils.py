@@ -267,7 +267,7 @@ def triton_support_tensor_descriptor() -> bool:
 
         support_tma = torch.cuda.get_device_capability() >= (9, 0)
         if support_tma:
-            logger.info("triton support tensor_descriptor")
+            logger.info(f"triton support tensor_descriptor version:{torch.cuda.get_device_capability()}")
             return True
         else:
             assert False

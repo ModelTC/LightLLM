@@ -1,0 +1,10 @@
+{
+  "1": {
+    "num_stages": 1,
+    "num_warps": 2
+  },
+  "8": {
+    "num_stages": 1,
+    "num_warps": 1
+  }
+}
