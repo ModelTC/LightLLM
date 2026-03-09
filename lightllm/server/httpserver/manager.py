@@ -456,6 +456,8 @@ class HttpServerManager:
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
+        if sampling_params.max_new_tokens == -1:
+            sampling_params.max_new_tokens = self.max_req_total_len - prompt_tokens
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
             if self.args.long_truncation_mode is None:
@@ -472,6 +474,7 @@ class HttpServerManager:
                 assert prompt_tokens == req_input_len
             else:
                 assert False, "error args"
+        sampling_params.verify_length()
 
         # last repaired
         req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
