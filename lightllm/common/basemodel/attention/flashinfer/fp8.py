@@ -20,7 +20,7 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
 
 @dataclasses.dataclass
 class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
-    offline_scales: torch.Tensor = None
+    offline_scales: list = None
 
     def init_state(self):
         super().init_state()
@@ -68,7 +68,7 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
 
 @dataclasses.dataclass
 class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
-    offline_scales: torch.Tensor = None
+    offline_scales: list = None
 
     def init_state(self):
         super().init_state()
