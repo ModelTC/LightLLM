@@ -2,19 +2,14 @@ import torch
 
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextFullAttentionTransformerLayerWeight,
-    Qwen3NextGatedDeltaNetTransformerLayerWeight,
+    Qwen3NextTransformerLayerWeight,
 )
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-class Qwen35NextFullAttentionTransformerLayerWeight(Qwen3NextFullAttentionTransformerLayerWeight):
-    pass
-
-
-class Qwen35NextGatedDeltaNetTransformerLayerWeight(Qwen3NextGatedDeltaNetTransformerLayerWeight):
+class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
     def _init_gdn_weight(self):
         # Initialize everything from parent first, then override only linear_in_proj.
         super()._init_gdn_weight()

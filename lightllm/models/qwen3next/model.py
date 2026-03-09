@@ -4,8 +4,7 @@ import triton
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextFullAttentionTransformerLayerWeight,
-    Qwen3NextGatedDeltaNetTransformerLayerWeight,
+    Qwen3NextTransformerLayerWeight,
 )
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
     Qwen3NextFullAttentionTransformerLayerInfer,
@@ -28,10 +27,11 @@ logger = init_logger(__name__)
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
 
+    transformer_weight_class = Qwen3NextTransformerLayerWeight
+
     post_layer_infer_class = Qwen3NextPostLayerInfer
     infer_state_class = Qwen3NextInferStateInfo
 
-    is_hybrid_attention = True  # Indicates model uses hybrid (full + linear) attention
     use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states
 
     radix_cache_class = HybridRadixCache
@@ -194,28 +194,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManagerForMamba(self.max_req_num, create_max_seq_len, self.mem_manager)
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
-        num_full_attention_layers = self.config["full_attention_interval"]
-        self.trans_layers_weight = [
-            (
-                Qwen3NextFullAttentionTransformerLayerWeight(
-                    i,
-                    self.data_type,
-                    network_config=self.config,
-                    quant_cfg=self.quant_cfg,
-                )
-                if (i + 1) % num_full_attention_layers == 0
-                else Qwen3NextGatedDeltaNetTransformerLayerWeight(
-                    i,
-                    self.data_type,
-                    network_config=self.config,
-                    quant_cfg=self.quant_cfg,
-                )
-            )
-            for i in range(self.config["n_layer"])
-        ]
 
     def _init_infer_layer(self):
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)

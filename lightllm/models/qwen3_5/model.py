@@ -3,8 +3,7 @@ import json
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
-    Qwen35NextFullAttentionTransformerLayerWeight,
-    Qwen35NextGatedDeltaNetTransformerLayerWeight,
+    Qwen35TransformerLayerWeight,
 )
 from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import (
@@ -54,7 +53,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     """
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
-
+    transformer_weight_class = Qwen35TransformerLayerWeight
     pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
 
     infer_state_class = Qwen35InferStateInfo
@@ -76,18 +75,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
 
-        # # Qwen3.5 MoE uses moe_intermediate_size instead of intermediate_size
-        # # Set intermediate_size for compatibility with base layer weight classes
-        # if "intermediate_size" not in self.config:
-        #     if "moe_intermediate_size" in self.config:
-        #         self.config["intermediate_size"] = self.config["moe_intermediate_size"]
-        #     else:
-        #         # Default fallback: 4x hidden_size (common in transformer architectures)
-        #         self.config["intermediate_size"] = self.config.get("hidden_size", 4096) * 4
-
         # Qwen3.5 stores RoPE config under text_config.rope_parameters.
-        # Qwen3Next/llama infer path expects flattened keys like rope_theta and
-        # partial_rotary_factor on the main config dict.
         rope_parameters = self.config.get("rope_parameters")
         if isinstance(rope_parameters, dict):
             if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
@@ -109,28 +97,6 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         # Calculate num_kv_heads for KV cache memory management
         # Required by parent class _init_mem_manager() in Qwen3NextTpPartModel
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
-        num_full_attention_layers = self.config["full_attention_interval"]
-        self.trans_layers_weight = [
-            (
-                Qwen35NextFullAttentionTransformerLayerWeight(
-                    i,
-                    self.data_type,
-                    network_config=self.config,
-                    quant_cfg=self.quant_cfg,
-                )
-                if (i + 1) % num_full_attention_layers == 0
-                else Qwen35NextGatedDeltaNetTransformerLayerWeight(
-                    i,
-                    self.data_type,
-                    network_config=self.config,
-                    quant_cfg=self.quant_cfg,
-                )
-            )
-            for i in range(self.config["n_layer"])
-        ]
 
     def _init_infer_layer(self):
         """

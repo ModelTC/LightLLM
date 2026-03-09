@@ -71,6 +71,14 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
 
+class GEMMANormWeight(RMSNormWeight):
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.weight_name in weights:
+            self.weight.copy_(weights[self.weight_name])
+            self.weight += 1
+            self.weight.load_ok = True
+
+
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
         super().__init__(tp_rank=0, tp_world_size=1)
@@ -278,7 +286,7 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         return self._forward(q=q, k=k, eps=eps)
 
 
-class QKRMSNORMWeightGEMMANormWeight(QKRMSNORMWeight):
+class QKGEMMANormWeight(QKRMSNORMWeight):
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
         if self.q_weight_name in weights:
             self.q_weight.copy_(weights[self.q_weight_name])

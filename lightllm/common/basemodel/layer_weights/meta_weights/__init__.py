@@ -10,10 +10,11 @@ from .mm_weight import (
 from .norm_weight import (
     TpRMSNormWeight,
     RMSNormWeight,
+    GEMMANormWeight,
     LayerNormWeight,
     NoTpGEMMANormWeight,
     QKRMSNORMWeight,
-    QKRMSNORMWeightGEMMANormWeight,
+    QKGEMMANormWeight,
 )
 from .embedding_weight import EmbeddingWeight, LMHeadWeight, NoTpPosEmbeddingWeight
 from .att_sink_weight import TpAttSinkWeight

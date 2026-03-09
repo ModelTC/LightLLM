@@ -4,15 +4,17 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
     RMSNormWeight,
+    GEMMANormWeight,
     TpParameterWeight,
-    KVROWNMMWeight,
     QKVROWNMMWeight,
-    QKRMSNORMWeightGEMMANormWeight,
+    QKGEMMANormWeight,
 )
 
 
-class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
+class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
+        num_full_attention_layers = network_config["full_attention_interval"]
+        self.is_linear_attention = (layer_num + 1) % num_full_attention_layers != 0
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
@@ -40,37 +42,73 @@ class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         )
 
     def _init_weight(self):
-        super()._init_weight()
-        self._init_gate_shared_expert_weight()
-        return
+        if self.is_linear_attention:
+            self._init_gdn_weight()
+        else:
+            self._init_qkv()
+            self._init_o()
 
-    def _init_ffn(self):
-        # Qwen3Next architecture uses _init_gate_shared_expert_weight() for FFN-like component
-        # No standard MLP FFN weights needed for this architecture
-        pass
+        if self.is_moe:
+            self._init_moe()
+        else:
+            self._init_ffn()
+        self._init_norm()
+
+    def _init_moe(self):
+        super()._init_moe()
+        self._init_gated_ffn()
+        return
 
     def _init_norm(self):
         hidden_size = self.network_config_["hidden_size"]
-        self.att_norm_weight_ = RMSNormWeight(
+        self.att_norm_weight_ = GEMMANormWeight(
             dim=hidden_size,
             weight_name=self._att_norm_weight_name,
             data_type=self.data_type_,
         )
-        self.ffn_norm_weight_ = RMSNormWeight(
+        self.ffn_norm_weight_ = GEMMANormWeight(
             dim=hidden_size,
             weight_name=self._ffn_norm_weight_name,
             data_type=self.data_type_,
         )
-        self.qk_norm_weight_ = QKRMSNORMWeightGEMMANormWeight(
-            dim=self.head_dim,
-            q_weight_name=self._q_norm_name,
-            k_weight_name=self._k_norm_name,
-            data_type=self.data_type_,
-        )
+        if not self.is_linear_attention:
+            self.qk_norm_weight_ = QKGEMMANormWeight(
+                dim=self.head_dim,
+                q_weight_name=self._q_norm_name,
+                k_weight_name=self._k_norm_name,
+                data_type=self.data_type_,
+            )
 
-    def load_hf_weights(self, weights):
-        self._split_q_with_gate(weights)
-        super().load_hf_weights(weights)
+    def _init_gated_ffn(self):
+        hidden_size = self.network_config_["hidden_size"]
+        if "shared_expert_intermediate_size" not in self.network_config_:
+            return
+        prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
+        inter_size = self.network_config_["shared_expert_intermediate_size"]
+        self.gate_up_proj = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[inter_size, inter_size],
+            weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
+            data_type=self.data_type_,
+            quant_method=self.get_quant_method("gate_up_proj"),
+        )
+        self.down_proj = COLMMWeight(
+            in_dim=inter_size,
+            out_dims=[hidden_size],
+            weight_names=f"{prefix}.down_proj.weight",
+            data_type=self.data_type_,
+            quant_method=self.get_quant_method("down_proj"),
+        )
+        self.ffn_gate = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[1],
+            weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
+            data_type=self.data_type_,
+            bias_names=None,
+            quant_method=None,
+            tp_rank=0,
+            tp_world_size=1,
+        )
 
     def _split_q_with_gate(self, weights):
         if self._q_weight_name in weights:
@@ -82,99 +120,12 @@ class Qwen3NextFullAttentionTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
             weights[self._q_weight_name] = _q_proj
             weights[self._o_gate_weight_name] = _gate_proj
 
-    def _init_gate_shared_expert_weight(self):
-        hidden_size = self.network_config_["hidden_size"]
-
-        # Check if this is a MoE model with shared_expert or a dense model
-        if "shared_expert_intermediate_size" in self.network_config_:
-            # MoE model with shared expert
-            prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
-            inter_size = self.network_config_["shared_expert_intermediate_size"]
-            self.shared_expert_gate_up_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[inter_size, inter_size],
-                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
-            )
-            self.shared_expert_down_proj = COLMMWeight(
-                in_dim=inter_size,
-                out_dims=[hidden_size],
-                weight_names=f"{prefix}.down_proj.weight",
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_down_proj"),
-            )
-            self.shared_expert_gate = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[1],
-                weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
-                data_type=self.data_type_,
-                bias_names=None,
-                quant_method=None,
-                tp_rank=0,
-                tp_world_size=1,
-            )
-        else:
-            # Dense model with standard MLP
-            prefix = f"model.layers.{self.layer_num_}.mlp"
-            inter_size = self.network_config_["intermediate_size"]
-            self.shared_expert_gate_up_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[inter_size, inter_size],
-                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
-            )
-            self.shared_expert_down_proj = COLMMWeight(
-                in_dim=inter_size,
-                out_dims=[hidden_size],
-                weight_names=f"{prefix}.down_proj.weight",
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_down_proj"),
-            )
-            # No shared_expert_gate for dense models
-            self.shared_expert_gate = None
-
-
-class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
-        self.is_moe = (
-            network_config.get("num_experts", 0) > 0
-            and layer_num not in network_config.get("mlp_only_layers", [])
-            and (layer_num + 1) % network_config.get("decoder_sparse_step", 1) == 0
-        )
-        super().__init__(layer_num, data_type, network_config, quant_cfg)
-
     def _parse_config(self):
         super()._parse_config()
         self.linear_num_v_heads = self.network_config_["linear_num_value_heads"]
         self.linear_num_k_heads = self.network_config_["linear_num_key_heads"]
         self.linear_k_head_dim = self.network_config_["linear_key_head_dim"]
         self.linear_v_head_dim = self.network_config_["linear_value_head_dim"]
-
-    def _init_weight(self):
-        hidden_size = self.network_config_["hidden_size"]
-        self.att_norm_weight_ = RMSNormWeight(
-            dim=hidden_size,
-            weight_name=self._att_norm_weight_name,
-            data_type=self.data_type_,
-        )
-        self._init_gdn_weight()
-        self.ffn_norm_weight_ = RMSNormWeight(
-            dim=hidden_size,
-            weight_name=self._ffn_norm_weight_name,
-            data_type=self.data_type_,
-        )
-        if self.is_moe:
-            self._init_moe()
-        else:
-            self._init_ffn()
-        self._init_gate_shared_expert_weight()
-
-    def _init_ffn(self):
-        # GatedDeltaNet architecture uses _init_gate_shared_expert_weight() for FFN-like component
-        # No standard MLP FFN weights needed for this architecture
-        pass
 
     def _init_gdn_weight(self):
         prefix = f"model.layers.{self.layer_num_}.linear_attn"
@@ -185,8 +136,6 @@ class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         kernel_size = self.network_config_.get("linear_conv_kernel_dim", 4)
 
         # Conv1d weight: after _preprocess_weight, shape is [channels, kernel_size].
-        # ROWMMWeight row-slices out_dims (rows), matching TP split of channels dim.
-        # causal_conv1d_fn expects weight shape (dim, width) = (channels_per_tp, kernel_size).
         self.linear_conv1d = ROWMMWeight(
             in_dim=kernel_size,
             out_dims=[conv1d_channels],
@@ -242,10 +191,6 @@ class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
             data_type=self.data_type_,
         )
 
-    def load_hf_weights(self, weights):
-        self._preprocess_weight(weights)
-        return super().load_hf_weights(weights)
-
     def _preprocess_weight(self, weights):
         linear_conv1d_weight_name = f"model.layers.{self.layer_num_}.linear_attn.conv1d.weight"
         linear_conv1d_bias_name = f"model.layers.{self.layer_num_}.linear_attn.conv1d.bias"
@@ -263,18 +208,6 @@ class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
         """Rearrange in_proj_qkvz and in_proj_ba weight rows from interleaved per-k-head layout
         to TP-aware grouped layout so that after ROWMMWeight's row-slicing, each rank's
         MM output is already [q_chunk, k_chunk, v_chunk, z_chunk, b_chunk, a_chunk].
-
-        This eliminates the expensive split+reshape+cat in _fix_query_key_value_ba_ordering
-        at inference time, replacing it with simple slicing.
-
-        The key challenge is that ROWMMWeight slices each weight as a contiguous row chunk
-        (rows [start:end]). So we arrange the rows such that each TP chunk contains
-        the grouped layout for that rank:
-        1. Deinterleave from per-k-head groups into per-component tensors
-        2. Chunk each component by TP
-        3. Reassemble as [q_tp0, k_tp0, v_tp0, z_tp0, q_tp1, k_tp1, ...] so row-slicing
-           gives each rank [q_chunk, k_chunk, v_chunk, z_chunk].
-        Same pattern as _parse_linear_conv1d uses for conv1d weights.
         """
         num_k = self.linear_num_k_heads
         k_dim = self.linear_k_head_dim
@@ -324,64 +257,17 @@ class Qwen3NextGatedDeltaNetTransformerLayerWeight(Qwen3MOETransformerLayerWeigh
     def _parse_linear_conv1d(self, weight):
         qk_dim = self.linear_num_k_heads * self.linear_k_head_dim
         v_dim = self.linear_num_v_heads * self.linear_v_head_dim
-        q_bias, k_bias, v_bias = torch.split(weight, [qk_dim, qk_dim, v_dim], dim=0)
-        q_splits = q_bias.chunk(self.tp_world_size_, dim=0)
-        k_splits = k_bias.chunk(self.tp_world_size_, dim=0)
-        v_splits = v_bias.chunk(self.tp_world_size_, dim=0)
+        q, k, v = torch.split(weight, [qk_dim, qk_dim, v_dim], dim=0)
+        q_splits = q.chunk(self.tp_world_size_, dim=0)
+        k_splits = k.chunk(self.tp_world_size_, dim=0)
+        v_splits = v.chunk(self.tp_world_size_, dim=0)
         new_weight = torch.cat(
             [torch.cat([q_splits[i], k_splits[i], v_splits[i]], dim=0) for i in range(self.tp_world_size_)], dim=0
         )
         return new_weight
 
-    def _init_gate_shared_expert_weight(self):
-        hidden_size = self.network_config_["hidden_size"]
-
-        # Check if this is a MoE model with shared_expert or a dense model
-        if "shared_expert_intermediate_size" in self.network_config_:
-            # MoE model with shared expert
-            prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
-            inter_size = self.network_config_["shared_expert_intermediate_size"]
-            self.shared_expert_gate_up_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[inter_size, inter_size],
-                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
-            )
-            self.shared_expert_down_proj = COLMMWeight(
-                in_dim=inter_size,
-                out_dims=[hidden_size],
-                weight_names=f"{prefix}.down_proj.weight",
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_down_proj"),
-            )
-            self.shared_expert_gate = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[1],
-                weight_names=f"model.layers.{self.layer_num_}.mlp.shared_expert_gate.weight",
-                data_type=self.data_type_,
-                bias_names=None,
-                quant_method=None,
-                tp_rank=0,
-                tp_world_size=1,
-            )
-        else:
-            # Dense model with standard MLP
-            prefix = f"model.layers.{self.layer_num_}.mlp"
-            inter_size = self.network_config_["intermediate_size"]
-            self.shared_expert_gate_up_proj = ROWMMWeight(
-                in_dim=hidden_size,
-                out_dims=[inter_size, inter_size],
-                weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_gate_up_proj"),
-            )
-            self.shared_expert_down_proj = COLMMWeight(
-                in_dim=inter_size,
-                out_dims=[hidden_size],
-                weight_names=f"{prefix}.down_proj.weight",
-                data_type=self.data_type_,
-                quant_method=self.get_quant_method("shared_expert_down_proj"),
-            )
-            # No shared_expert_gate for dense models
-            self.shared_expert_gate = None
+    def load_hf_weights(self, weights):
+        self._split_q_with_gate(weights)
+        if self.is_linear_attention:
+            self._preprocess_weight(weights)
+        super().load_hf_weights(weights)

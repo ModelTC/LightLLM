@@ -6,9 +6,8 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
     Qwen3NextFullAttentionTransformerLayerInfer,
     Qwen3NextGatedDeltaNetTransformerLayerInfer,
 )
-from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextFullAttentionTransformerLayerWeight,
-    Qwen3NextGatedDeltaNetTransformerLayerWeight,
+from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
+    Qwen35TransformerLayerWeight,
 )
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
@@ -29,7 +28,7 @@ class Qwen35FullAttentionTransformerLayerInfer(Qwen3NextFullAttentionTransformer
         self,
         input: torch.Tensor,
         infer_state: LlamaInferStateInfo,
-        layer_weight: Qwen3NextFullAttentionTransformerLayerWeight,
+        layer_weight: Qwen35TransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
 
