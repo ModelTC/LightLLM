@@ -154,7 +154,7 @@ class NsaInfer:
         self.eps = network_config["rms_norm_eps"]
         self.block_size = network_config["quantization_config"]["weight_block_size"][0]
         self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
-        self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
+        self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
         self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
 
@@ -243,6 +243,9 @@ class NsaInfer:
         k = layer_weight.wk_proj_.mm(hidden_states)
 
         k = layer_weight.k_norm_(k, eps=self.eps)
+
+        # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
+        from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],
