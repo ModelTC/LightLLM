@@ -10,6 +10,17 @@ logger = init_logger(__name__)
 
 
 class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
+    def _init_weight_names(self):
+        super()._init_weight_names()
+        self._gate_weight_name = f"model.layers.{self.layer_num_}.mlp.gate_proj.weight"
+        self._gate_bias_name = None
+        self._up_weight_name = f"model.layers.{self.layer_num_}.mlp.up_proj.weight"
+        self._up_bias_name = None
+        self._gate_up_weight_name = f"model.layers.{self.layer_num_}.mlp.gate_up_proj.weight"
+        self._gate_up_bias_name = None
+        self._down_weight_name = f"model.layers.{self.layer_num_}.mlp.down_proj.weight"
+        self._down_bias_name = None
+
     def _init_gdn_weight(self):
         # Initialize everything from parent first, then override only linear_in_proj.
         super()._init_gdn_weight()

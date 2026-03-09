@@ -6,11 +6,11 @@ from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
 )
+from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qwen3NextPreAndPostLayerWeight
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
     Qwen3NextFullAttentionTransformerLayerInfer,
     Qwen3NextGatedDeltaNetTransformerLayerInfer,
 )
-from lightllm.models.qwen3next.layer_infer.post_layer_infer import Qwen3NextPostLayerInfer
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
@@ -18,7 +18,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 
 logger = init_logger(__name__)
@@ -27,9 +26,9 @@ logger = init_logger(__name__)
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
 
+    pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
 
-    post_layer_infer_class = Qwen3NextPostLayerInfer
     infer_state_class = Qwen3NextInferStateInfo
 
     use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states

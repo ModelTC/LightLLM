@@ -3,7 +3,6 @@ import torch
 from lightllm.models.qwen3next_mtp.layer_weights.pre_and_post_layer_weight import Qwen3NextMTPPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
-from lightllm.models.qwen3next.triton_kernel.gemma_rmsnorm import gemma_rmsnorm_forward
 
 
 class Qwen3NextMTPPreLayerInfer(LlamaPreLayerInfer):
@@ -33,16 +32,10 @@ class Qwen3NextMTPPreLayerInfer(LlamaPreLayerInfer):
         assert input_embdings.shape[0] == tgt_embdings.shape[0]
 
         # Normalize embedding
-        input_embdings_normed = self.alloc_tensor(input_embdings.shape, input_embdings.dtype)
-        gemma_rmsnorm_forward(
-            input_embdings, layer_weight.pre_fc_norm_embedding_weight_.weight, self.eps_, out=input_embdings_normed
-        )
+        input_embdings_normed = layer_weight.pre_fc_norm_embedding_weight_(input=input_embdings, eps=self.eps_)
 
         # Normalize hidden state
-        tgt_embdings_normed = self.alloc_tensor(tgt_embdings.shape, tgt_embdings.dtype)
-        gemma_rmsnorm_forward(
-            tgt_embdings, layer_weight.pre_fc_norm_hidden_weight_.weight, self.eps_, out=tgt_embdings_normed
-        )
+        tgt_embdings_normed = layer_weight.pre_fc_norm_hidden_weight_(input=tgt_embdings, eps=self.eps_)
 
         # Concat normalized embedding and hidden
         cat_embdings = torch.cat((input_embdings_normed, tgt_embdings_normed), dim=-1)
