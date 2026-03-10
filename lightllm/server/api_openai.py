@@ -157,7 +157,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     created_time = int(time.time())
 
-    multimodal_params_dict = {"images": []}
+    multimodal_params_dict = {"images": [], "audios": []}
     for message in request.messages:
         if isinstance(message.content, list):
             texts = []
@@ -180,6 +180,19 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         raise ValueError(
                             "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
                         )
+                elif content.type == "audio_url" and content.audio_url is not None:
+                    audio = content.audio_url.url
+                    if audio.startswith("http://") or audio.startswith("https://"):
+                        multimodal_params_dict["audios"].append({"type": "url", "data": audio})
+                    elif audio.startswith("data:audio"):
+                        data_str = audio.split(";", 1)[1]
+                        if data_str.startswith("base64,"):
+                            data = data_str[7:]
+                            multimodal_params_dict["audios"].append({"type": "base64", "data": data})
+                        else:
+                            raise ValueError("Unrecognized audio input.")
+                    else:
+                        raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
 
     tools = None
     if request.tools and request.tool_choice != "none":
