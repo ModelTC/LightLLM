@@ -143,6 +143,23 @@ def _process_reasoning_stream(
     return reasoning_parser.parse_stream_chunk(delta)
 
 
+def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
+    from .api_http import g_objs
+
+    if index not in parser_dict:
+        # 为 tool_call_parser 提供默认值
+        tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
+        parser_dict[index] = FunctionCallParser(
+            tools=request.tools,
+            tool_call_parser=tool_parser,
+        )
+    parser = parser_dict[index]
+
+    # parse_increment => returns (normal_text, calls)
+    normal_text, calls = parser.parse_stream_chunk(delta)
+    return normal_text, calls
+
+
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -369,20 +386,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    yield f"data: {chunk.model_dump_json()}\n\n"
 
             if request.tool_choice != "none" and request.tools:
-                if index not in parser_dict:
-                    # 为 tool_call_parser 提供默认值
-                    tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
-                    parser_dict[index] = FunctionCallParser(
-                        tools=request.tools,
-                        tool_call_parser=tool_parser,
-                    )
-                parser = parser_dict[index]
-
                 # parse_increment => returns (normal_text, calls)
-                normal_text, calls = parser.parse_stream_chunk(delta)
+                normal_text, calls = _process_tools_stream(
+                    index=index, delta=delta, parser_dict=parser_dict, request=request
+                )
 
                 # 1) if there's normal_text, output it as normal content
                 if normal_text:
@@ -397,7 +407,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    yield f"data: {chunk.model_dump_json()}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
@@ -447,7 +457,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    yield f"data: {chunk.model_dump_json()}\n\n"
             else:
                 delta_message = DeltaMessage(role="assistant", content=delta)
                 stream_choice = ChatCompletionStreamResponseChoice(index=0, delta=delta_message, finish_reason=None)
@@ -457,7 +467,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     model=request.model,
                     choices=[stream_choice],
                 )
-                yield f"data: {stream_resp.model_dump_json(exclude_none=True)}\n\n"
+                yield f"data: {stream_resp.model_dump_json()}\n\n"
 
         # Determine final finish_reason: override to "tool_calls" if tool calls were emitted
         if has_emitted_tool_calls and finish_reason == "stop":
@@ -476,7 +486,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 model=request.model,
                 choices=[final_choice],
             )
-            yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+            yield f"data: {final_chunk.model_dump_json()}\n\n"
 
         if request.stream_options and request.stream_options.include_usage:
             usage = UsageInfo(
@@ -491,7 +501,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 model=request.model,
                 usage=usage,
             )
-            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
@@ -693,7 +703,7 @@ async def _handle_streaming_completion(
                 model=request.model,
                 usage=usage,
             )
-            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
