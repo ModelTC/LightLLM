@@ -37,8 +37,8 @@ def test_gen_nsa_ks_ke_basic():
     )
 
     assert torch.equal(ks, torch.tensor([0, 0, 0, 0, 0], dtype=torch.int32, device="cuda"))
-    assert torch.equal(ke, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int32, device="cuda"))
-    assert torch.equal(lengths, ke - ks + 1)
+    assert torch.equal(ke, torch.tensor([6, 7, 8, 9, 10], dtype=torch.int32, device="cuda"))
+    assert torch.equal(lengths, ke - ks)
     assert torch.equal(
         ragged_mem_index[0:10], torch.tensor([10, 11, 12, 13, 14, 15, 16, 17, 18, 19], dtype=torch.int32, device="cuda")
     )
@@ -69,8 +69,8 @@ def test_gen_nsa_ks_ke_batch():
             device="cuda",
         ),
     )
-    assert torch.equal(ke, torch.tensor([9, 10], dtype=torch.int32, device="cuda"))
-    assert torch.equal(lengths, ke - ks + 1)
+    assert torch.equal(ke, torch.tensor([10, 11], dtype=torch.int32, device="cuda"))
+    assert torch.equal(lengths, ke - ks)
     assert torch.equal(ragged_mem_index[0:11], torch.arange(100, 100 + 11).cuda())
 
 

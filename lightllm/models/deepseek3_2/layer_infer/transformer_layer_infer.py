@@ -212,8 +212,8 @@ class NsaInfer:
             topk=self.index_topk,
             row_starts=ks,
         )
+        b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
         # 将 topk index 转化为 mem index
-
         from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
 
         b_topk_index = trans_topk_index_to_mem_index(

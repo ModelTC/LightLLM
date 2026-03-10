@@ -47,7 +47,7 @@ def _gen_nsa_ks_ke(
         block_off = block_start + tl.arange(0, BLOCK_SEQ_SPLIT)
         mask = block_off < block_end
         ks_data = tl.zeros((BLOCK_SEQ_SPLIT,), dtype=tl.int32)
-        ke_data = (cur_total_len - q_seq_len) + tl.arange(0, BLOCK_SEQ_SPLIT)
+        ke_data = (cur_total_len - q_seq_len + 1) + block_off
 
         tl.store(
             ks + store_start_index + block_off,
@@ -61,14 +61,14 @@ def _gen_nsa_ks_ke(
         )
         tl.store(
             lengths + store_start_index + block_off,
-            ke_data - ks_data + 1,
+            ke_data - ks_data,
             mask=mask,
         )
 
     for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
         block_start = block_index * BLOCK_SEQ_SPLIT
         block_end = min(cur_total_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
-        mask = block_start + tl.arange(0, BLOCK_SEQ_SPLIT) < block_end
+        mask = (block_start + tl.arange(0, BLOCK_SEQ_SPLIT)) < block_end
 
         src_mem_index_ptr = (
             req_to_token_index
