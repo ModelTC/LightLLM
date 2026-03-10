@@ -3,7 +3,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
-ARG VLLM_VERSION=0.11.0
+ARG VLLM_VERSION=0.16.0
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
@@ -20,14 +20,15 @@ RUN chmod 777 -R /tmp && \
       curl \
       g++ \
       make \
-      git && \
+      git \
+      wget && \
     rm -rf /var/lib/apt/lists/*
 
 RUN case ${TARGETPLATFORM} in \
     "linux/arm64")  MAMBA_ARCH=aarch64  ;; \
     *)              MAMBA_ARCH=x86_64   ;; \
     esac && \
-    curl -fsSL -o ~/mambaforge.sh "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
+    wget -O ~/mambaforge.sh "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh" && \
     bash ~/mambaforge.sh -b -p /opt/conda && \
     rm ~/mambaforge.sh
 
@@ -44,7 +45,6 @@ COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir
 RUN pip install --no-cache-dir vllm==${VLLM_VERSION}
-RUN pip install https://github.com/ModelTC/LightKernel/releases/download/v1.0.1/lightllm_kernel-0.1.0-cp310-cp310-linux_x86_64.whl
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 

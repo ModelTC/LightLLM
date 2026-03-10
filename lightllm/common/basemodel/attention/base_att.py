@@ -65,6 +65,11 @@ class AttControl:
     mla_prefill_dict: Dict = None
     mla_decode: bool = False
     mla_decode_dict: Dict = None
+    # nsa (native sparse attention) 专用传参项
+    nsa_prefill: bool = False
+    nsa_prefill_dict: Dict = None
+    nsa_decode: bool = False
+    nsa_decode_dict: Dict = None
 
 
 @dataclass

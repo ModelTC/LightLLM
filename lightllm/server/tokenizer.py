@@ -78,6 +78,17 @@ def get_tokenizer(
 
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
+    # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
+    # a Python-based apply_chat_template that uses encoding_dsv32.py.
+    if model_type == "deepseek_v32":
+        from ..models.deepseek3_2.model import DeepSeekV32Tokenizer
+
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs
+        )
+        logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV32Tokenizer(hf_tokenizer)
+
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 

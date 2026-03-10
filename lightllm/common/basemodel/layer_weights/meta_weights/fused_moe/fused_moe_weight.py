@@ -98,7 +98,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.split_inter_size = self.moe_intermediate_size // self.tp_world_size_
         if self.enable_ep_moe:
             assert self.num_fused_shared_experts == 0, "num_fused_shared_experts must be 0 when enable_ep_moe"
-            logger.info(
+            logger.debug(
                 f"global_rank {self.global_rank_} layerindex {self.layer_num_} "
                 f"redundancy_expertids: {self.redundancy_expert_ids}"
             )
