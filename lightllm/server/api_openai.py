@@ -431,6 +431,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
                     if call_item.name:
                         # First chunk: include ID and function name
+                        tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                         tool_call_id = _process_tool_call_id(tool_parser, call_item, history_tool_calls_cnt)
                         function_name = call_item.name
                     else:
