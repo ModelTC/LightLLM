@@ -11,6 +11,7 @@ from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.distributed import all_gather_into_tensor
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -18,7 +19,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         self.index_topk = network_config["index_topk"]
         super().__init__(layer_num, network_config)
 
-        self.indexer = NsaInfer(layer_idx=self.layer_num_, network_config=self.network_config_)
+        self.indexer = NsaInfer(
+            layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
+        )
         return
 
     def _get_qkv(
@@ -143,7 +146,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
 
 class NsaInfer:
-    def __init__(self, layer_idx: int, network_config: dict):
+    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
         super().__init__()
         self.layer_idx_ = layer_idx
         self.network_config_ = network_config
@@ -157,6 +160,8 @@ class NsaInfer:
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
         self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
+        self.tp_world_size_ = tp_world_size
+        self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
 
     def get_indices(
         self,
@@ -168,6 +173,21 @@ class NsaInfer:
     ) -> torch.Tensor:
 
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
+
+        if self.tp_world_size_ > 1:
+            q_merge = torch.empty(
+                size=(self.tp_world_size_ * q.numel()),
+                dtype=q.dtype,
+                device=q.device,
+            )
+            all_gather_into_tensor(output_=q_merge, input_=q.view(-1), group=infer_state.dist_group, async_op=False)
+            q = (
+                q_merge.view(self.tp_world_size_, q.shape[0], self.tp_index_n_heads, q.shape[2])
+                .transpose(0, 1)
+                .contiguous()
+                .view(q.shape[0], self.index_n_heads, q.shape[2])
+            )
+
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
@@ -239,7 +259,7 @@ class NsaInfer:
         infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-        q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
+        q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.tp_index_n_heads, self.index_head_dim)
         k = layer_weight.wk_proj_.mm(hidden_states)
 
         k = layer_weight.k_norm_(k, eps=self.eps)

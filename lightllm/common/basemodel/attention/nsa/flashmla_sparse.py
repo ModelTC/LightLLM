@@ -101,7 +101,7 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
 
     ks: torch.Tensor = None
     ke: torch.Tensor = None
-    length: torch.Tensor = None
+    lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
     nsa_cache_seqlens: torch.Tensor = None
     nsa_cu_seqlens_k_new: torch.Tensor = None

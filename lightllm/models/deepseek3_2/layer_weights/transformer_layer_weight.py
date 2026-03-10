@@ -22,14 +22,15 @@ class Deepseek3_2TransformerLayerWeight(Deepseek2TransformerLayerWeight):
 
         prefix = f"model.layers.{self.layer_num_}.self_attn.indexer"
 
+        assert self.index_n_heads % self.tp_world_size_ == 0
         self.wq_b_proj_ = ROWMMWeight(
             in_dim=self.q_lora_rank,
             out_dims=[self.index_n_heads * self.index_head_dim],
             weight_names=f"{prefix}.wq_b.weight",
             data_type=self.data_type_,
             quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
+            tp_rank=self.tp_rank_,
+            tp_world_size=self.tp_world_size_,
         )
         self.wk_proj_ = ROWMMWeight(
             in_dim=self.hidden_size,
