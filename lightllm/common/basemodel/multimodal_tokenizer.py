@@ -40,6 +40,13 @@ class BaseMultiModalTokenizer(ABC):
             return obj_dict[name]
         return getattr(self.tokenizer, name)
 
+    def __setattr__(self, name, value):
+        # 拦截特定属性，将其设置到内部的 tokenizer 上
+        if name in ["chat_template", "init_kwargs"] and hasattr(self, "tokenizer"):
+            setattr(self.tokenizer, name, value)
+        else:
+            object.__setattr__(self, name, value)
+
     @abstractmethod
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         pass
