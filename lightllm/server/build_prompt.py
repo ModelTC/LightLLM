@@ -30,7 +30,12 @@ def init_tokenizer(args):
                 template_data = json.load(f)
                 if "chat_template" in template_data:
                     # Set it directly on the tokenizer object so apply_chat_template can use it
-                    tokenizer.chat_template = template_data["chat_template"]
+                    if hasattr(tokenizer, "tokenizer"):
+                        # 多模态 tokenizer
+                        tokenizer.tokenizer.chat_template = template_data["chat_template"]
+                    else:
+                        tokenizer.chat_template = template_data["chat_template"]
+
                     logger.info(f"Loaded chat_template.json from {default_chat_template_path}")
         except Exception as e:
             logger.warning(f"Failed to load chat_template.json from {default_chat_template_path}: {e}")
