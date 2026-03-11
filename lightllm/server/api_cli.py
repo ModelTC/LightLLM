@@ -224,6 +224,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
+    parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
     parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
     parser.add_argument(
