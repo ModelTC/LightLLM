@@ -145,7 +145,7 @@ class ModeBackend:
             wait_events.append(self.multi_level_cache_module)
 
         if self.args.enable_multimodal:
-            g_infer_context.init_cpu_embed_cache_client()
+            g_infer_context.init_cpu_embed_cache_client(init_shm_data=False)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
