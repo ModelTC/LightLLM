@@ -96,4 +96,5 @@ class Batch:
         return f"batch_id={self.batch_id}, " f"reqs={self.reqs}, "
 
     def simple_log(self):
-        return f"batch_id={self.batch_id}, time:{time.time()}s req_ids:{[req.request_id for req in self.reqs]}"
+        details_tuples = [(req.request_id, req.index_in_shm_mem) for req in self.reqs]
+        return f"batch_id={self.batch_id}, time:{time.time()}s (req_id, shm_index)s:{details_tuples}"

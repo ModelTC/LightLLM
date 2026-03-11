@@ -336,7 +336,7 @@ class HttpServerManager:
 
                     alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
                 alloced_req_indexes.append(alloc_req_index)
-            req_objs = []
+            req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
                 req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
                 req_obj.init(
@@ -347,6 +347,12 @@ class HttpServerManager:
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
                 req_objs.append(req_obj)
+
+            logger.debug(
+                f"alloc shm_req for req_id {group_request_id}, "
+                f"shm_req {sampling_params.n} details (req_id, index_in_shm_mem):  "
+                f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
+            )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
@@ -437,6 +443,12 @@ class HttpServerManager:
                 )
             else:
                 prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
+                if self.args.detail_log:
+                    logger.debug(
+                        f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
+                        f"samplingparmas: {sampling_params.to_dict()}\n"
+                        f"token_ids: {prompt_ids}"
+                    )
             return prompt_ids
 
         # 这里的校验对多模态不是很充分, to do
@@ -686,6 +698,7 @@ class HttpServerManager:
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
+                    logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)

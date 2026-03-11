@@ -430,6 +430,7 @@ class RouterManager:
             Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
         )
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
+        logger.info(f"gen new batch, {self.schedule_new_batch.simple_log()}")
         return
 
     def _multinode_tp_generate_new_batch(self):

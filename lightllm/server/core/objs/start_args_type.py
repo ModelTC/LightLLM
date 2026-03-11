@@ -64,6 +64,7 @@ class StartArgs:
     nccl_port: int = field(default=None)
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
+    detail_log: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
     router_token_ratio: float = field(default=0.0)
