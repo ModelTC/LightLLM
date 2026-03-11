@@ -26,6 +26,7 @@ class AudioItem:
         self.token_num = None
         # the audio length
         self.audio_length = None
+        self.afs_embed = False
 
         self._preload_data = None
         self.extra_params = {}
@@ -54,10 +55,7 @@ class AudioItem:
 
     def read(self):
         assert self._preload_data is not None
-        ans = self._preload_data
-        self._preload_data = None
-        self._data = None
-        return ans
+        return self._preload_data
 
     def to_dict(self):
         ret = {}
@@ -86,6 +84,7 @@ class ImageItem:
         self.grid_thwd = None
         self.image_w = 0
         self.image_h = 0
+        self.patch_num = 0
 
         self._preload_data = None
         self.extra_params = {}
@@ -119,10 +118,11 @@ class ImageItem:
 
     def read(self):
         assert self._preload_data is not None
-        ans = self._preload_data
+        return self._preload_data
+
+    def free(self):
         self._preload_data = None
         self._data = None
-        return ans
 
     def to_dict(self):
         ret = {}
@@ -153,6 +153,15 @@ class MultimodalParams:
         self.images = [ImageItem(**i) for i in images]
         self.audios = [AudioItem(**a) for a in audios]
         return
+
+    def free(self):
+        for image in self.images:
+            image.free()
+        for audio in self.audios:
+            audio.free()
+
+    def get_all_uuids(self):
+        return [image.uuid for image in self.images] + [audio.uuid for audio in self.audios]
 
     async def verify_and_preload(self, request: Request):
         for image in self.images:

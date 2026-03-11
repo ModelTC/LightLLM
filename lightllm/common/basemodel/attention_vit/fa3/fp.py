@@ -1,6 +1,7 @@
 import dataclasses
 import torch
 from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
+from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
 
 class Fa3VitAttBackend(BaseVitAttBackend):
@@ -17,41 +18,19 @@ class Fa3VitAttBackend(BaseVitAttBackend):
         head_dim = q.shape[-1]
         softmax_scale = head_dim ** -0.5
         window_size = (-1, -1)
-        torch.ops.sgl_kernel.fwd.default(
+        attn_output = flash_attn_varlen_func(
             q,
             k,
             v,
-            None,  # k_new
-            None,  # v_new
-            None,  # qv
-            o,  # out
-            cu_seqlens,
-            cu_seqlens,
-            None,  # cu_seqlens_k_new
-            None,
-            None,
-            max_seqlen,
-            max_seqlen,
-            None,  # page_table,
-            None,  # kv_batch_idx
-            None,  # leftpad_k
-            None,  # rotary cos
-            None,  # rotary sin
-            None,  # seqlens_rotary
-            None,
-            None,
-            None,
-            softmax_scale,
-            False,
-            window_size[0],
-            window_size[1],
-            0.0,
-            is_rotary_interleaved=False,
-            scheduler_metadata=None,
-            num_splits=1,
-            pack_gqa=None,
-            sm_margin=0,
-            sinks=None,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            softmax_scale=softmax_scale,
+            causal=False,
+            window_size=window_size,
+            softcap=0.0,
         )
+        o.copy_(attn_output)
 
         return o

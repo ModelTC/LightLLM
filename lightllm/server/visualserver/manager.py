@@ -20,7 +20,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
-
+from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data
 
 logger = init_logger(__name__)
 
@@ -31,13 +31,16 @@ class VisualManager:
         args: StartArgs,
         visual_model_rpc_ports,
     ):
-        context = zmq.Context(2)
+        self.args = args
+        self.visual_only = args.run_mode in ["visual", "visual_only"]
+        self.remote_vit = args.enable_remote_vit or self.visual_only
 
-        if args.enable_multimodal_audio:
-            self.send_to_next_module = context.socket(zmq.PUSH)
-            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
-        else:
-            if args.enable_cpu_cache:
+        context = zmq.Context(2)
+        if not self.visual_only:
+            if args.enable_multimodal_audio:
+                self.send_to_next_module = context.socket(zmq.PUSH)
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+            elif args.enable_cpu_cache:
                 self.send_to_next_module = context.socket(zmq.PUSH)
                 self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
             else:
@@ -45,7 +48,11 @@ class VisualManager:
                 self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
 
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+        if self.remote_vit:
+            self.zmq_recv_socket.bind(f"tcp://*:{args.remote_vit_port}")
+        else:
+            self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.cache_port = args.cache_port
@@ -56,13 +63,11 @@ class VisualManager:
         self.vit_tp = args.visual_tp
         self.infer_batch_size = args.visual_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
-        self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
 
     async def wait_to_model_ready(self):
-
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
         self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
@@ -146,7 +151,6 @@ class VisualManager:
                         continue
 
                     multimodal_params = group_req_indexes.multimodal_params
-
                     img_uuids = [img.uuid for img in multimodal_params.images]
                     # disable prompt cache通常用来测试，需要也去掉image cache的影响
                     if disable_prompt_cache:
@@ -180,6 +184,44 @@ class VisualManager:
                     processing_group_reqs = []
                 flush_ready(force=True)
 
+    async def _recv_reqs(self):
+        recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+        if not self.remote_vit:
+            return recv_req
+
+        uuids = [img.uuid for img in recv_req.multimodal_params.images]
+        already_embed = await asyncio.to_thread(self.cache_client.root.get_items_embed, uuids)
+        if all(already_embed):
+            return None
+
+        missing_uuids = []
+        token_nums = []
+        datas = []
+        for img, embed_ready in zip(recv_req.multimodal_params.images, already_embed):
+            if embed_ready:
+                continue
+            missing_uuids.append(img.uuid)
+            token_nums.append(img.token_num)
+            datas.append(img.read())
+            img.free()
+
+        while True:
+            records = await asyncio.to_thread(self.cache_client.root.alloc, missing_uuids, token_nums)
+            if records is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        ready_flags = obtain(self.cache_client.root.get_items_data(missing_uuids))
+        update_data_ids = []
+        for uid, ready, data in zip(missing_uuids, ready_flags, datas):
+            if not ready:
+                create_shm(get_shm_name_data(uid), data)
+                update_data_ids.append(uid)
+
+        if update_data_ids:
+            await asyncio.to_thread(self.cache_client.root.set_items_data, update_data_ids)
+        return recv_req
+
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
             self.visual_recv_max_count = 64
@@ -187,16 +229,37 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                    recv_req = await self._recv_reqs()
+                    if recv_req is None:
+                        continue
                     if isinstance(recv_req, GroupReqIndexes):
                         self.waiting_reqs.append(recv_req)
                     else:
                         assert False, f"Error Req Inf {recv_req}"
-                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+                self.visual_recv_max_count = min(int(self.visual_recv_max_count * 1.3), 256)
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64
             await asyncio.sleep(0.01)
+
+    async def loop_for_fwd_visual_only(self):
+        while True:
+            if len(self.waiting_reqs) == 0:
+                await asyncio.sleep(0.01)
+                continue
+
+            images_need_infer = []
+            while len(self.waiting_reqs) > 0:
+                visual_req = self.waiting_reqs.pop(0)
+                for img in visual_req.multimodal_params.images:
+                    images_need_infer.append(img)
+                    if len(images_need_infer) == self.infer_batch_size:
+                        await self.infer_imgs(images_need_infer)
+                        images_need_infer = []
+
+                if len(images_need_infer) > 0:
+                    await self.infer_imgs(images_need_infer)
+                    images_need_infer = []
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:
@@ -206,17 +269,29 @@ class VisualManager:
         return
 
 
+def create_forward_loop(args, visualserver: VisualManager, loop: asyncio.AbstractEventLoop):
+    if args.run_mode in ["visual", "visual_only"]:
+        from .register_loop import register_loop
+
+        loop.create_task(visualserver.loop_for_fwd_visual_only())
+        loop.create_task(register_loop(args))
+    else:
+        loop.create_task(visualserver.loop_for_fwd())
+
+
 def start_visual_process(args, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
+    visualserver = None
     try:
         visualserver = VisualManager(args=args, visual_model_rpc_ports=model_rpc_ports)
         asyncio.run(visualserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))
-        visualserver.clean_up()
+        if visualserver is not None:
+            visualserver.clean_up()
         raise e
 
     pipe_writer.send("init ok")
@@ -227,6 +302,6 @@ def start_visual_process(args, model_rpc_ports, pipe_writer):
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    loop.create_task(visualserver.loop_for_fwd())
+    create_forward_loop(args, visualserver, loop)
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return

@@ -1,11 +1,15 @@
+import rpyc
+import socket
 import torch
 import torch.distributed as dist
 
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
+from lightllm.server.embed_cache.utils import bytes2tensor, read_shm, get_shm_name_embed, read_afs
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 """
@@ -26,6 +30,11 @@ infer_state.multimodal_params: batch list of MultimodalParams-dict like:
 class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
+        self.args = get_env_start_args()
+        self.cache_client = None
+        if self.args.enable_remote_vit:
+            self.cache_client = rpyc.connect("localhost", self.args.cache_port, config={"allow_pickle": True})
+            self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
@@ -49,6 +58,22 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
         cpu_embed_cache_tensor = g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor
+
+        if self.args.enable_remote_vit:
+            for batch_id, p in enumerate(infer_state.multimodal_params):
+                for img in p["images"] + p["audios"]:
+                    if img["token_num"] is None:
+                        continue
+                    if self.args.image_embed_dir:
+                        embed_bytes = read_afs(get_shm_name_embed(img["uuid"]), self.args.image_embed_dir)
+                    else:
+                        embed_bytes = read_shm(get_shm_name_embed(img["uuid"]))
+                    embed_tensor = bytes2tensor(embed_bytes).to(device="cuda", non_blocking=True)
+                    g_infer_context.cpu_embed_cache_client.copy_vision_to_cache(
+                        embed_tensor=embed_tensor,
+                        start_index_in_cache=img["start_index_in_embed_cache"],
+                    )
+                    self.cache_client.root.release([img["uuid"]])
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "
