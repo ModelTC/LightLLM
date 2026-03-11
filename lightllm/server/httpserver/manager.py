@@ -350,7 +350,7 @@ class HttpServerManager:
 
             logger.debug(
                 f"alloc shm_req for req_id {group_request_id}, "
-                f"shm_req {sampling_params.n} details (req_id, index_in_shm_mem):  "
+                f"shm_req num: {sampling_params.n} details (req_id, index_in_shm_mem):  "
                 f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
             )
 
@@ -443,12 +443,13 @@ class HttpServerManager:
                 )
             else:
                 prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
-                if self.args.detail_log:
-                    logger.debug(
-                        f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
-                        f"samplingparmas: {sampling_params.to_dict()}\n"
-                        f"token_ids: {prompt_ids}"
-                    )
+
+            if self.args.detail_log:
+                logger.debug(
+                    f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
+                    f"samplingparmas: {sampling_params.to_dict()}\n"
+                    f"token_ids: {prompt_ids}"
+                )
             return prompt_ids
 
         # 这里的校验对多模态不是很充分, to do
