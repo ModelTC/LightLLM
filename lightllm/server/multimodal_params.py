@@ -67,6 +67,15 @@ class AudioItem:
         ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
         return ret
 
+    def to_origin_dict(self):
+        """
+        将内容转换为原始请求的形式，主要用于请求转发
+        """
+        ret = {}
+        ret["type"] = self._type
+        ret["data"] = self._data
+        return ret
+
 
 class ImageItem:
     def __init__(self, **kwargs):
@@ -173,4 +182,5 @@ class MultimodalParams:
         """
         ret = {}
         ret["images"] = [i.to_origin_dict() for i in self.images]
+        ret["audios"] = [a.to_origin_dict() for a in self.audios]
         return ret

@@ -10,10 +10,15 @@ class ImageURL(BaseModel):
     url: str
 
 
+class AudioURL(BaseModel):
+    url: str
+
+
 class MessageContent(BaseModel):
     type: str
     text: Optional[str] = None
     image_url: Optional[ImageURL] = None
+    audio_url: Optional[AudioURL] = None
 
 
 class Message(BaseModel):
