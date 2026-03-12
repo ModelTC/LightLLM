@@ -126,16 +126,24 @@ class InMemoryCache:
 
     def _add_ref(self, md5_sum):
         rec: Record = self._md5_to_record[md5_sum]
-        self._sorted_records.remove(rec)
-        rec.ref += 1
-        self._sorted_records.add(rec)
+        self._update_record_ref(rec, 1)
         return
 
     def _del_ref(self, md5_sum):
         rec: Record = self._md5_to_record[md5_sum]
+        self._update_record_ref(rec, -1)
+        return
+
+    def _update_record_ref(self, rec: Record, delta: int):
         self._sorted_records.remove(rec)
-        rec.ref -= 1
+        rec.ref += delta
+        rec.visittime = time.time()
         self._sorted_records.add(rec)
+        return
+
+    def _update_record_ref_by_id(self, id_: int, delta: int):
+        rec: Record = self._id_to_records[id_]
+        self._update_record_ref(rec, delta)
         return
 
     def _judge_enough_token_cache(self, md5sum_list: list[str], token_num_list: list[int]) -> bool:
@@ -214,10 +222,7 @@ class InMemoryCache:
     def release(self, ids: list[int]) -> None:
         with self.lock:
             for id_ in ids:
-                rec: Record = self._id_to_records[id_]
-                self._sorted_records.remove(rec)
-                rec.ref -= 1
-                self._sorted_records.add(rec)
+                self._update_record_ref_by_id(id_, -1)
 
     def set_items_data(self, ids: list[int]) -> None:
         for id_ in ids:

@@ -143,6 +143,9 @@ class HttpServerManager:
 
             # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
             if self.args.enable_remote_vit:
+                # 对已经命中的 embed 立即增加一份引用，确保从命中这一刻开始到 LLM 读取完成前
+                # 都不会被 LRU 提前淘汰。对未 ready 的项，该调用不会增加引用。
+                obtain(self.cache_client.root.get_items_embed(uid_list, False))
                 return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
@@ -214,7 +217,7 @@ class HttpServerManager:
                         audio.token_id = None
                         audio.token_num = None
                         audio.start_index_in_embed_cache = None
-                if ids_to_release and not self.args.enable_remote_vit:
+                if ids_to_release:
                     self.cache_client.root.release(ids_to_release)
         return
 
@@ -439,11 +442,13 @@ class HttpServerManager:
             visual_req_status = GroupReqObjs(group_request_id, multimodal_params, None, start_time)
 
             await self.transfer_to_next_module_or_node(
-                None, sampling_params, original_multimodal_params, visual_req_status, embeding_only=True
+                None, sampling_params, original_multimodal_params, visual_req_status
             )
+            await self._release_multimodal_resources(multimodal_params)
 
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
         return
@@ -542,7 +547,6 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         original_multimodal_params: MultimodalParams,
         group_req_objs: Optional[GroupReqObjs] = None,
-        embeding_only: Optional[bool] = False,
     ):
         # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
         if self.is_multinode_tp_master:
@@ -552,13 +556,12 @@ class HttpServerManager:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
 
-        await self.transfer_to_next_module(group_req_objs, embeding_only)
+        await self.transfer_to_next_module(group_req_objs)
         return
 
     async def transfer_to_next_module(
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
-        embeding_only: Optional[bool] = False,
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
@@ -566,7 +569,6 @@ class HttpServerManager:
                 await self.vit_manager.send_to_vit(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
-                    embeding_only=embeding_only,
                 )
 
             if self.args.enable_cpu_cache:

@@ -46,6 +46,8 @@ class VisualModelRpcServer(rpyc.Service):
         self.vit_rank_id = kvargs["vit_rank_id"]
         self.image_embed_dir = self.args.image_embed_dir
         self.remote_vit = self.args.enable_remote_vit or self.args.run_mode in ["visual", "visual_only"]
+        if self.remote_vit and not self.image_embed_dir:
+            raise ValueError("remote vit mode requires image_embed_dir")
 
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -127,7 +129,7 @@ class VisualModelRpcServer(rpyc.Service):
         if self.tp_rank_id != 0:
             return
 
-        ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+        ready_flags = obtain(self.cache_client.root.get_items_embed(uuids, True))
         ids_to_set = []
         cpu_embeds = None
         if self.remote_vit:

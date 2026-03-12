@@ -156,7 +156,7 @@ class VisualManager:
                     if disable_prompt_cache:
                         ready_image = [False] * len(img_uuids)
                     else:
-                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids, True))
 
                     for img, ready in zip(multimodal_params.images, ready_image):
                         if not ready:
@@ -190,7 +190,7 @@ class VisualManager:
             return recv_req
 
         uuids = [img.uuid for img in recv_req.multimodal_params.images]
-        already_embed = await asyncio.to_thread(self.cache_client.root.get_items_embed, uuids)
+        already_embed = await asyncio.to_thread(self.cache_client.root.get_items_embed, uuids, True)
         if all(already_embed):
             return None
 

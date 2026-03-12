@@ -12,6 +12,22 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def _get_afs_path(base_dir: str, name: str) -> Path:
+    if not base_dir:
+        raise ValueError("image_embed_dir must be set before using disk-backed embed cache")
+    return Path(base_dir) / name
+
+
+def _ensure_afs_dir(base_dir: Path) -> None:
+    if base_dir.exists():
+        if not base_dir.is_dir():
+            raise ValueError(f"image_embed_dir is not a directory: {base_dir}")
+        return
+
+    base_dir.mkdir(parents=True, mode=0o777, exist_ok=True)
+    os.chmod(base_dir, 0o777)
+
+
 def tensor2bytes(t: torch.Tensor):
     buf = BytesIO()
     t = t.detach().cpu()
@@ -37,16 +53,27 @@ def create_shm(name, data):
 
 
 def create_afs(name, data, path):
+    target_path = _get_afs_path(path, name)
+    _ensure_afs_dir(target_path.parent)
+    data_size = len(data)
+    tmp_path = target_path.parent / f".{target_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+
     try:
-        data_size = len(data)
-        path = os.path.join(path, name)
-        with open(path, "xb") as f:
+        with open(tmp_path, "wb") as f:
             mem_view = memoryview(data)
             f.write(mem_view[:data_size])
             f.flush()
             os.fsync(f.fileno())
-    except FileExistsError:
-        print("Warning create afs {} failed because of FileExistsError!".format(name))
+        os.chmod(tmp_path, 0o777)
+        os.replace(tmp_path, target_path)
+        os.chmod(target_path, 0o777)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.exception(f"failed to create embed file: {target_path}")
+        raise
 
 
 def read_shm(name):
@@ -56,8 +83,7 @@ def read_shm(name):
 
 
 def read_afs(name: str, base_dir) -> bytes:
-
-    path = Path(base_dir) / name
+    path = _get_afs_path(base_dir, name)
     return path.read_bytes()
 
 
@@ -68,8 +94,8 @@ def free_shm(name):
 
 
 def free_afs(name: str, base_dir) -> None:
-    path = Path(base_dir) / name
-    path.unlink()
+    path = _get_afs_path(base_dir, name)
+    path.unlink(missing_ok=True)
 
 
 def get_shm_name_data(uid):
@@ -250,8 +276,7 @@ class EmbedRefCountRedis:
         """Convert md5 to AFS file path."""
         if not self.image_embed_dir:
             return None
-        filename = self.image_embed_dir + md5 + self.path_ext
-        return filename
+        return str(_get_afs_path(self.image_embed_dir, f"{md5}{self.path_ext}"))
 
     def _delete_afs_files(self, victims: List[str]) -> None:
         """Delete AFS files for evicted md5s."""

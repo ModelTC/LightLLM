@@ -21,6 +21,30 @@ from lightllm.utils.shm_size_check import check_recommended_shm_size
 logger = init_logger(__name__)
 
 
+def _ensure_remote_vit_embed_dir(image_embed_dir: str) -> None:
+    if os.path.exists(image_embed_dir):
+        if not os.path.isdir(image_embed_dir):
+            raise ValueError(f"image_embed_dir is not a directory: {image_embed_dir}")
+        return
+
+    os.makedirs(image_embed_dir, mode=0o777, exist_ok=True)
+    os.chmod(image_embed_dir, 0o777)
+
+
+def _prepare_remote_vit_embed_dir(args):
+    remote_vit_mode = args.enable_remote_vit or args.run_mode in ["visual", "visual_only"]
+    if not remote_vit_mode:
+        return
+
+    if not args.image_embed_dir:
+        raise ValueError("remote vit mode requires --image_embed_dir to be set")
+
+    args.image_embed_dir = os.path.abspath(args.image_embed_dir)
+    _ensure_remote_vit_embed_dir(args.image_embed_dir)
+
+    logger.info(f"using image_embed_dir: {args.image_embed_dir}")
+
+
 def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
@@ -141,6 +165,7 @@ def check_and_set_args(args):
         assert args.mtp_step == 0
 
     args.enable_multimodal = is_multimodal_mode(args)
+    _prepare_remote_vit_embed_dir(args)
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))

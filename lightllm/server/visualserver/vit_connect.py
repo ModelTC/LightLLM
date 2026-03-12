@@ -159,7 +159,7 @@ class VITConnectionManager:
         self.current_vit_index = index
         return list(self.remote_vit_instances.values())[index]
 
-    async def send_to_vit(self, req: GroupReqIndexes, protocol=pickle.HIGHEST_PROTOCOL, embeding_only=False):
+    async def send_to_vit(self, req: GroupReqIndexes, protocol=pickle.HIGHEST_PROTOCOL):
         """
         发送数据到VIT实例，支持本地和远程模式
         """
@@ -176,7 +176,7 @@ class VITConnectionManager:
             raise Exception(f"Failed to send to VIT instance: {e}")
 
         # 远程模式下，发送完以后，在释放图片资源
-        await self._wait_visual_embed_ready(req, embeding_only)
+        await self._wait_visual_embed_ready(req)
         if self.remote_vit:
             req.multimodal_params.free()
 
@@ -217,7 +217,9 @@ class VITConnectionManager:
             return None
 
     async def _wait_visual_embed_ready(
-        self, req: GroupReqIndexes, embeding_only: bool = False, timeout_seconds: int = 1000
+        self,
+        req: GroupReqIndexes,
+        timeout_seconds: int = 1000,
     ):
         # 本地模式不需要等待
         if not self.remote_vit:
@@ -225,7 +227,7 @@ class VITConnectionManager:
         uuids = req.multimodal_params.get_all_uuids()
 
         async def wait_for_embeds():
-            while not all(self.cache_client.root.get_items_embed(uuids, embeding_only)):
+            while not all(self.cache_client.root.get_items_embed(uuids, True)):
                 await asyncio.sleep(0.01)
 
         try:

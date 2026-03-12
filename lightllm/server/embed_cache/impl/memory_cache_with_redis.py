@@ -27,16 +27,24 @@ class MemoryCacheWithRedis(InMemoryCache):
         # 这里之所以把cache * 2是因为，在分离模式下，cache 服务只是为了更新redis状态，以及维护图片cache的 token_id
         # 便于 dynamic prompt cache 的使用。所以要把cache_capacity * 2，保障其保留的图片cache > redis 服务维护的
         # 硬盘里的图片image embed 数量。
-        self.cache_capacity = args.cache_capacity * 2
+        self.capacity = max(1, args.cache_capacity * 2)
 
     # llm 负责release
     def release(self, ids: list[int]) -> None:
         with self.lock:
             for id in ids:
-                self._records[id].ref -= 1
-                if self.redis_cache.query(str(id)):
+                rec = self._records.get(id)
+                if rec is None:
+                    continue
+
+                redis_exist = self.redis_cache.query(str(id))
+                if redis_exist:
                     self.redis_cache.decr(str(id))
-                    # print(self.redis_cache.stats(), flush=True)
+
+                # remote_vit 模式下 release 可能走“预层提前释放 + 请求结束兜底释放”两条路径，
+                # 这里避免本地 ref 被重复减成负数，保证 release 可重复调用。
+                if rec.ref > 0:
+                    self._update_record_ref(rec, -1)
 
     # vit 负责set
     def set_items_embed(self, ids: list[int]) -> None:
@@ -44,8 +52,10 @@ class MemoryCacheWithRedis(InMemoryCache):
             for id in ids:
                 self.redis_cache.insert(str(id))
                 self._records[id].embed = True
-                self._records[id].ref -= 1
-                self.redis_cache.decr(str(id))  # vit端alloc之后ref+1 vit完成后ref-1
+                if self._records[id].ref > 0:
+                    self._update_record_ref_by_id(id, -1)
+                # 保留一份 redis 引用，直到真正的消费者读取完成后再 release，
+                # 避免 VIT 刚写完文件但 LLM 还没来得及读取时被 LRU 误删。
 
     def get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[Optional[bool]]:
         ret = []
