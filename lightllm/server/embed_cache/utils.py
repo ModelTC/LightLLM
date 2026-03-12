@@ -10,6 +10,7 @@ import multiprocessing.shared_memory as shm
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+_ENSURED_AFS_DIRS = set()
 
 
 def _get_afs_path(base_dir: str, name: str) -> Path:
@@ -19,13 +20,18 @@ def _get_afs_path(base_dir: str, name: str) -> Path:
 
 
 def _ensure_afs_dir(base_dir: Path) -> None:
+    base_dir_key = str(base_dir)
+    if base_dir_key in _ENSURED_AFS_DIRS:
+        return
     if base_dir.exists():
         if not base_dir.is_dir():
             raise ValueError(f"image_embed_dir is not a directory: {base_dir}")
+        _ENSURED_AFS_DIRS.add(base_dir_key)
         return
 
     base_dir.mkdir(parents=True, mode=0o777, exist_ok=True)
     os.chmod(base_dir, 0o777)
+    _ENSURED_AFS_DIRS.add(base_dir_key)
 
 
 def tensor2bytes(t: torch.Tensor):
@@ -40,6 +46,32 @@ def tensor2bytes(t: torch.Tensor):
 
 def bytes2tensor(b):
     return torch.load(BytesIO(b), weights_only=False)
+
+
+def save_tensor_afs(name: str, tensor: torch.Tensor, base_dir: str) -> None:
+    target_path = _get_afs_path(base_dir, name)
+    _ensure_afs_dir(target_path.parent)
+    tmp_path = target_path.parent / f".{target_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+
+    try:
+        with open(tmp_path, "wb") as f:
+            torch.save(tensor.detach().cpu(), f, _use_new_zipfile_serialization=False, pickle_protocol=4)
+        os.chmod(tmp_path, 0o777)
+        os.replace(tmp_path, target_path)
+        os.chmod(target_path, 0o777)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.exception(f"failed to save embed tensor file: {target_path}")
+        raise
+
+
+def load_tensor_afs(name: str, base_dir: str) -> torch.Tensor:
+    path = _get_afs_path(base_dir, name)
+    with open(path, "rb") as f:
+        return torch.load(f, weights_only=False)
 
 
 def create_shm(name, data):

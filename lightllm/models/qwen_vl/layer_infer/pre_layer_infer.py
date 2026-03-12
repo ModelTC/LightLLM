@@ -6,7 +6,7 @@ import torch.distributed as dist
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
-from lightllm.server.embed_cache.utils import bytes2tensor, read_shm, get_shm_name_embed, read_afs
+from lightllm.server.embed_cache.utils import bytes2tensor, read_shm, get_shm_name_embed, load_tensor_afs
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.utils.envs_utils import get_env_start_args
@@ -37,6 +37,18 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return
 
+    def _copy_loaded_embed_to_cache(
+        self, embed_tensor: torch.Tensor, cpu_embed_cache_tensor: torch.Tensor, start_index: int
+    ):
+        if embed_tensor.ndim == 2:
+            token_num, hidden_size = embed_tensor.shape
+            cpu_embed_cache_tensor[start_index : start_index + token_num, 0, :hidden_size].copy_(embed_tensor)
+            return
+
+        token_num, layer_num, hidden_size = embed_tensor.shape
+        cpu_embed_cache_tensor[start_index : start_index + token_num, :layer_num, :hidden_size].copy_(embed_tensor)
+        return
+
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         img_start_token_ids = []
         img_token_lens = []
@@ -60,20 +72,37 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         cpu_embed_cache_tensor = g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor
 
         if self.args.enable_remote_vit:
+            unique_multimodal_items = []
+            seen_uuids = set()
+            release_ids = []
             for batch_id, p in enumerate(infer_state.multimodal_params):
                 for img in p["images"] + p["audios"]:
                     if img["token_num"] is None:
                         continue
-                    if self.args.image_embed_dir:
-                        embed_bytes = read_afs(get_shm_name_embed(img["uuid"]), self.args.image_embed_dir)
-                    else:
-                        embed_bytes = read_shm(get_shm_name_embed(img["uuid"]))
-                    embed_tensor = bytes2tensor(embed_bytes).to(device="cuda", non_blocking=True)
-                    g_infer_context.cpu_embed_cache_client.copy_vision_to_cache(
-                        embed_tensor=embed_tensor,
-                        start_index_in_cache=img["start_index_in_embed_cache"],
-                    )
-                    self.cache_client.root.release([img["uuid"]])
+                    uid = img["uuid"]
+                    release_ids.append(uid)
+                    if uid in seen_uuids:
+                        continue
+                    seen_uuids.add(uid)
+                    unique_multimodal_items.append((uid, img["start_index_in_embed_cache"]))
+
+            if self.args.image_embed_dir:
+                image_embed_dir = self.args.image_embed_dir
+
+                def load_embed_tensor(uid):
+                    return load_tensor_afs(get_shm_name_embed(uid), image_embed_dir)
+
+            else:
+
+                def load_embed_tensor(uid):
+                    return bytes2tensor(read_shm(get_shm_name_embed(uid)))
+
+            for uid, start_index_in_embed_cache in unique_multimodal_items:
+                embed_tensor = load_embed_tensor(uid)
+                self._copy_loaded_embed_to_cache(embed_tensor, cpu_embed_cache_tensor, start_index_in_embed_cache)
+
+            if release_ids:
+                self.cache_client.root.release(release_ids)
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "

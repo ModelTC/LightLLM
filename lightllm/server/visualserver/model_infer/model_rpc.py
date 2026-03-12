@@ -26,7 +26,7 @@ from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
-from lightllm.server.embed_cache.utils import create_afs, get_shm_name_embed, tensor2bytes
+from lightllm.server.embed_cache.utils import create_afs, get_shm_name_embed, tensor2bytes, save_tensor_afs
 from lightllm.server.visualserver import set_vit_att_backend
 
 
@@ -142,8 +142,7 @@ class VisualModelRpcServer(rpyc.Service):
             start, end = valid_ids[i]
             image = images[i]
             if self.remote_vit:
-                cur_embed_bytes = tensor2bytes(cpu_embeds[start:end])
-                create_afs(get_shm_name_embed(uid), cur_embed_bytes, self.image_embed_dir)
+                save_tensor_afs(get_shm_name_embed(uid), cpu_embeds[start:end], self.image_embed_dir)
             else:
                 self.cpu_embed_cache_client.copy_vision_to_cache(
                     embed_tensor=all_img_embeds[start:end],
