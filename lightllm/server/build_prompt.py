@@ -10,7 +10,10 @@ def init_tokenizer(args):
     if chat_path is not None:
         with open(chat_path, "r", encoding="utf-8") as f:
             chat_template_str = f.read()
-        tokenizer.chat_template = chat_template_str
+        if hasattr(tokenizer, "tokenizer"):
+            tokenizer.tokenizer.chat_template = chat_template_str
+        else:
+            tokenizer.chat_template = chat_template_str
 
 
 async def build_prompt(request, tools) -> str:
@@ -25,10 +28,10 @@ async def build_prompt(request, tools) -> str:
 
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
-
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
-    except:
+    except Exception as e:
+        print(e, flush=True)
         #  This except branch will be triggered when the chosen model
         #  has a different tools input format that is not compatiable
         #  with openAI's apply_chat_template tool_call format, like Mistral.
