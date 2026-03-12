@@ -78,11 +78,19 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = args.enable_multimodal
+
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        if self.args.enable_multimodal_visual:
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+
+        if self.args.enable_multimodal_audio:
+            self.send_to_audio = context.socket(zmq.PUSH)
+            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
             self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
@@ -519,11 +527,12 @@ class HttpServerManager:
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
-            if self.enable_multimodal:
-                self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
+            if self.args.enable_multimodal_visual:
+                self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
+                return
+
+            if self.args.enable_multimodal_audio:
+                self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if self.args.enable_cpu_cache:

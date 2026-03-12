@@ -78,6 +78,9 @@ def normal_or_p_d_start(args):
     if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
 
+    if args.enable_multimodal_visual or args.enable_multimodal_audio:
+        args.enable_multimodal = True
+
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
@@ -279,14 +282,16 @@ def normal_or_p_d_start(args):
     ports_locker.release_port()
 
     if args.enable_multimodal:
-        from .visualserver.manager import start_visual_process
-
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_cache_manager,
             ],
             start_args=[(args,)],
         )
+
+    if args.enable_multimodal_visual:
+        from .visualserver.manager import start_visual_process
+
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_visual_process,
@@ -296,17 +301,17 @@ def normal_or_p_d_start(args):
             ],
         )
 
-        if args.enable_multimodal_audio:
-            from .audioserver.manager import start_audio_process
+    if args.enable_multimodal_audio:
+        from .audioserver.manager import start_audio_process
 
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_audio_process,
-                ],
-                start_args=[
-                    (args,),
-                ],
-            )
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args,),
+            ],
+        )
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager

@@ -79,6 +79,7 @@ class StartArgs:
     output_constraint_mode: str = field(default="none", metadata={"choices": ["none", "simple", "xgrammar"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
+    enable_multimodal_visual: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
