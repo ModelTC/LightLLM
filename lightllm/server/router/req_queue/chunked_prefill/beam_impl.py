@@ -72,11 +72,11 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
 
     def _filter_aborted_reqs(self):
         # 先移除在等待队列中已经处于aborted状态的请求, 如果发现存在aborted的请求，
-        # 则休眠100ms，保证httpserver将所有属于一组的请求都置为aborted请求，再将
+        # 则休眠10ms，保证httpserver将所有属于一组的请求都置为aborted请求，再将
         # 请求从队列中移除。
         exist_aborted_req = len([req for req in self.waiting_req_list if req.is_aborted]) > 0
         if exist_aborted_req:
-            time.sleep(0.1)
+            time.sleep(0.01)
             aborted_reqs = [req for req in self.waiting_req_list if req.is_aborted]
             self.waiting_req_list = [req for req in self.waiting_req_list if not req.is_aborted]
             for req in aborted_reqs:
