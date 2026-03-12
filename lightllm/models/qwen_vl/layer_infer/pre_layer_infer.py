@@ -48,7 +48,12 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        cpu_embed_cache_tensor = g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor
+        cpu_embed_cache_client = g_infer_context.cpu_embed_cache_client
+        cpu_embed_cache_tensor = (
+            torch.empty((0, 0, hidden_size), dtype=dtype, device=device)
+            if cpu_embed_cache_client is None
+            else cpu_embed_cache_client.cpu_embed_cache_tensor
+        )
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "
