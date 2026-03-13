@@ -233,13 +233,18 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "top_p": request.top_p,
         "top_k": request.top_k,
         "ignore_eos": request.ignore_eos,
-        "max_new_tokens": request.max_tokens,
-        "stop_sequences": request.stop,
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
         "seed": request.seed,
     }
+
+    if request.max_completion_tokens is not None:
+        sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
+    if request.max_tokens is not None:
+        sampling_params_dict["max_new_tokens"] = request.max_tokens
+    if request.stop is not None:
+        sampling_params_dict["stop_sequences"] = request.stop
 
     # Structured output handling
     if request.response_format:
@@ -571,13 +576,17 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "top_p": request.top_p,
         "top_k": request.top_k,
         "ignore_eos": request.ignore_eos,
-        "max_new_tokens": request.max_tokens,
-        "stop_sequences": request.stop,
         "n": request.n,
         "best_of": request.best_of,
         "add_special_tokens": False,
         "seed": request.seed,
     }
+    if request.max_completion_tokens is not None:
+        sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
+    if request.max_tokens is not None:
+        sampling_params_dict["max_new_tokens"] = request.max_tokens
+    if request.stop is not None:
+        sampling_params_dict["stop_sequences"] = request.stop
 
     if request.response_format:
         if request.response_format.type == "json_schema":
