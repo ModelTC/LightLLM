@@ -54,6 +54,8 @@ Large Language Models
     - 
   * - `Qwen3-Moe <https://github.com/QwenLM/Qwen3>`_ 
     - 
+  * - `DeepSeek-V3.2 `_
+    - 
 
 Multimodal Models
 ^^^^^^^^^^^^^^^^^
@@ -75,6 +77,8 @@ Multimodal Models
   * - `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct>`_
     - 
   * - `Google Gemma3 <https://huggingface.co/google/gemma-3-12b-it>`_
+    - 
+  * - `Qwen3-Vl `_
     -
 
 Reward Models
