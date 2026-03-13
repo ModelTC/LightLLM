@@ -343,7 +343,13 @@ class ModeBackend:
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
 
-    def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
+    def _async_copy_next_token_infos_to_pin_mem(
+        self,
+        next_token_ids: torch.Tensor,
+        next_token_logprobs: torch.Tensor,
+        top_k_ids: torch.Tensor = None,
+        top_k_logprobs: torch.Tensor = None,
+    ):
         """
         这个函数会把next token id和logprobs保存到pinned memory中
         这样可以保障post_handle 函数可以读取到正常的输出结果。
@@ -356,7 +362,20 @@ class ModeBackend:
             key="next_token_logprobs",
             gpu_tensor=next_token_logprobs,
         )
-        return next_token_ids_cpu, next_token_logprobs_cpu
+
+        top_k_ids_cpu = None
+        top_k_logprobs_cpu = None
+        if top_k_ids is not None:
+            top_k_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="top_k_ids",
+                gpu_tensor=top_k_ids,
+            )
+            top_k_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="top_k_logprobs",
+                gpu_tensor=top_k_logprobs,
+            )
+
+        return next_token_ids_cpu, next_token_logprobs_cpu, top_k_ids_cpu, top_k_logprobs_cpu
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
@@ -701,19 +720,27 @@ class ModeBackend:
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
+        top_k_ids: List[List[int]] = None,
+        top_k_logprobs: List[List[float]] = None,
     ):
         """
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        for req_obj, next_token_id, next_token_logprob, pack in zip(
-            run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
+        if top_k_ids is None:
+            top_k_ids = [None] * len(run_reqs)
+            top_k_logprobs = [None] * len(run_reqs)
+
+        for req_obj, next_token_id, next_token_logprob, cur_top_k_ids, cur_top_k_logprobs, pack in zip(
+            run_reqs, next_token_ids, next_token_logprobs, top_k_ids, top_k_logprobs, run_reqs_update_packs
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
+                top_k_ids=cur_top_k_ids,
+                top_k_logprobs=cur_top_k_logprobs,
                 eos_ids=self.eos_id,
                 extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
@@ -779,7 +806,7 @@ class ModeBackend:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+        next_token_ids, next_token_logprobs, top_k_ids, top_k_logprobs = sample(logits, run_reqs, self.eos_id)
         b_has_out = None
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
@@ -798,10 +825,13 @@ class ModeBackend:
             next_token_ids=next_token_ids,
             mask=b_has_out,
         )
-        next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-            next_token_ids, next_token_logprobs
-        )
-        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
+        (
+            next_token_ids_cpu,
+            next_token_logprobs_cpu,
+            top_k_ids_cpu,
+            top_k_logprobs_cpu,
+        ) = self._async_copy_next_token_infos_to_pin_mem(next_token_ids, next_token_logprobs, top_k_ids, top_k_logprobs)
+        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, top_k_ids_cpu, top_k_logprobs_cpu
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
