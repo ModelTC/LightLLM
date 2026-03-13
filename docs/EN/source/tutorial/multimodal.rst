@@ -15,8 +15,7 @@ Basic Launch Command
     --tp 2 \
     --model_dir ${MODEL_PATH} \
     --mem_fraction 0.8 \
-    --trust_remote_code \
-    --enable_multimodal_visual
+    --trust_remote_code
 
 Core Parameter Description
 --------------------------
@@ -35,7 +34,6 @@ Basic Service Parameters
 - **--model_dir**: InternVL model file path
 - **--mem_fraction 0.8**: GPU memory usage ratio
 - **--trust_remote_code**: Allow loading custom model code
-- **--enable_multimodal_visual**: Enable visual multimodal functionality
 
 Advanced Configuration Parameters
 ---------------------------------

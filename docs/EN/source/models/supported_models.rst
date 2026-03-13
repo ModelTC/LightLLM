@@ -65,17 +65,17 @@ Multimodal Models
   * - Model
     - Notes
   * - `Qwen-VL <https://huggingface.co/Qwen/Qwen-VL>`_
-    -  :code:`--trust_remote_code --enable_multimodal_visual`
+    -  :code:`--trust_remote_code`
   * - `Qwen-VL-Chat <https://huggingface.co/Qwen/Qwen-VL-Chat>`_
-    -  :code:`--trust_remote_code --enable_multimodal_visual`
+    -  :code:`--trust_remote_code`
   * - `Llava-7b <https://huggingface.co/liuhaotian/llava-v1.5-7b>`_
-    -  :code:`--enable_multimodal_visual`
+    - 
   * - `Llava-13b <https://huggingface.co/liuhaotian/llava-v1.5-13b>`_
-    -  :code:`--enable_multimodal_visual`
+    - 
   * - `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct>`_
-    -  :code:`--enable_multimodal_visual`
+    - 
   * - `Google Gemma3 <https://huggingface.co/google/gemma-3-12b-it>`_
-    -  :code:`--enable_multimodal_visual`
+    -
 
 Reward Models
 ^^^^^^^^^^^^^

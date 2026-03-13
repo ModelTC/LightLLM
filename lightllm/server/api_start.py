@@ -91,6 +91,11 @@ def normal_or_p_d_start(args):
         else:
             args.disable_audio = True
 
+    # pd 分离模式下，不启动多模态的模块
+    if args.run_mode in ["decode", "nixl_decode"]:
+        args.disable_audio = True
+        args.disable_vision = True
+
     if args.disable_vision and args.disable_audio:
         args.enable_multimodal = False
     else:
