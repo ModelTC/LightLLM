@@ -14,16 +14,8 @@ class NeoChatMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _init_weight_names(self):
         super()._init_weight_names()
-
-        if self._is_merge_kv:
-            self._q_norm_hw_name = f"model.layers.{self.layer_num_}.self_attn.q_norm_hw.weight"
-            self._k_norm_hw_name = f"model.layers.{self.layer_num_}.self_attn.k_norm_hw.weight"
-        else:
-            self._q_norm_h_name = f"model.layers.{self.layer_num_}.self_attn.q_norm_h.weight"
-            self._q_norm_w_name = f"model.layers.{self.layer_num_}.self_attn.q_norm_w.weight"
-
-            self._k_norm_h_name = f"model.layers.{self.layer_num_}.self_attn.k_norm_h.weight"
-            self._k_norm_w_name = f"model.layers.{self.layer_num_}.self_attn.k_norm_w.weight"
+        self._q_norm_hw_name = f"model.layers.{self.layer_num_}.self_attn.q_norm_hw.weight"
+        self._k_norm_hw_name = f"model.layers.{self.layer_num_}.self_attn.k_norm_hw.weight"
 
     def _init_qkv(self):
         super()._init_qkv()
@@ -51,36 +43,13 @@ class NeoChatMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             weight_name=self._k_norm_name,
             data_type=self.data_type_,
         )
-
-        if self._is_merge_kv:
-            self.q_norm_hw_weight_ = QKRMSNORMWeight(
-                dim=self.head_dim // 2,
-                weight_name=self._q_norm_hw_name,
-                data_type=self.data_type_,
-            )
-            self.k_norm_hw_weight_ = QKRMSNORMWeight(
-                dim=self.head_dim // 2,
-                weight_name=self._k_norm_hw_name,
-                data_type=self.data_type_,
-            )
-        else:
-            self.q_norm_h_weight_ = QKRMSNORMWeight(
-                dim=self.head_dim // 4,
-                weight_name=self._q_norm_h_name,
-                data_type=self.data_type_,
-            )
-            self.q_norm_w_weight_ = QKRMSNORMWeight(
-                dim=self.head_dim // 4,
-                weight_name=self._q_norm_w_name,
-                data_type=self.data_type_,
-            )
-            self.k_norm_h_weight_ = QKRMSNORMWeight(
-                dim=self.head_dim // 4,
-                weight_name=self._k_norm_h_name,
-                data_type=self.data_type_,
-            )
-            self.k_norm_w_weight_ = QKRMSNORMWeight(
-                dim=self.head_dim // 4,
-                weight_name=self._k_norm_w_name,
-                data_type=self.data_type_,
-            )
+        self.q_norm_hw_weight_ = QKRMSNORMWeight(
+            dim=self.head_dim // 2,
+            weight_name=self._q_norm_hw_name,
+            data_type=self.data_type_,
+        )
+        self.k_norm_hw_weight_ = QKRMSNORMWeight(
+            dim=self.head_dim // 2,
+            weight_name=self._k_norm_hw_name,
+            data_type=self.data_type_,
+        )
