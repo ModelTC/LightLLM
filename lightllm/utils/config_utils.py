@@ -173,6 +173,9 @@ def has_vision_module(model_path: str) -> bool:
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
             # TarsierVisionTransformerPretrainedModel
             return True
+        elif model_type == "llava":
+            # LlavaVisionModel
+            return True
         elif model_type == "internvl_chat":
             return True
         elif model_type == "gemma3":
