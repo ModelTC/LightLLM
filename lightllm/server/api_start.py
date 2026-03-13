@@ -16,6 +16,7 @@ from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.shm_size_check import check_recommended_shm_size
+from lightllm.utils.config_utils import has_audio_module, has_vision_module
 
 logger = init_logger(__name__)
 
@@ -78,7 +79,21 @@ def normal_or_p_d_start(args):
     if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
 
-    if args.enable_multimodal_visual or args.enable_multimodal_audio:
+    # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
+    if args.disable_vision is None:
+        if has_vision_module(args.model_dir):
+            args.disable_vision = False
+        else:
+            args.disable_vision = True
+    if args.disable_audio is None:
+        if has_audio_module(args.model_dir):
+            args.disable_audio = False
+        else:
+            args.disable_audio = True
+
+    if args.disable_vision and args.disable_audio:
+        args.enable_multimodal = False
+    else:
         args.enable_multimodal = True
 
     if args.enable_cpu_cache:
@@ -289,7 +304,7 @@ def normal_or_p_d_start(args):
             start_args=[(args,)],
         )
 
-    if args.enable_multimodal_visual:
+    if not args.disable_vision:
         from .visualserver.manager import start_visual_process
 
         process_manager.start_submodule_processes(
@@ -301,7 +316,7 @@ def normal_or_p_d_start(args):
             ],
         )
 
-    if args.enable_multimodal_audio:
+    if not args.disable_audio:
         from .audioserver.manager import start_audio_process
 
         process_manager.start_submodule_processes(

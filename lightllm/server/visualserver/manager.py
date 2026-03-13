@@ -32,8 +32,8 @@ class VisualManager:
         visual_model_rpc_ports,
     ):
         context = zmq.Context(2)
-
-        if args.enable_multimodal_audio:
+        enable_audio = not args.disable_audio
+        if enable_audio:
             self.send_to_next_module = context.socket(zmq.PUSH)
             self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
         else:

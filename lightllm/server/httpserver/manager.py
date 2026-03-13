@@ -83,11 +83,11 @@ class HttpServerManager:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-        if self.args.enable_multimodal_visual:
+        if not self.args.disable_vision:
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
 
-        if self.args.enable_multimodal_audio:
+        if not self.args.disable_audio:
             self.send_to_audio = context.socket(zmq.PUSH)
             self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
 
@@ -527,11 +527,11 @@ class HttpServerManager:
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
-            if self.args.enable_multimodal_visual:
+            if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
-            if self.args.enable_multimodal_audio:
+            if not self.args.disable_audio:
                 self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 

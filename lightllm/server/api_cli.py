@@ -279,14 +279,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
                         use env FIRST_ALLOWED_TOKENS to set the range, like FIRST_ALLOWED_TOKENS=1,2 ..""",
     )
     parser.add_argument(
-        "--enable_multimodal_visual",
+        "--disable_vision",
         action="store_true",
-        help="Whether or not to allow to load additional visual model module.",
+        default=None,
+        help="if the model is a multimodal model, set to not load vision part model.",
     )
     parser.add_argument(
-        "--enable_multimodal_audio",
+        "--disable_audio",
         action="store_true",
-        help="Whether or not to allow to load additional audio model module.",
+        default=None,
+        help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
