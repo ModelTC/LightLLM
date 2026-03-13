@@ -86,7 +86,7 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def check_and_set_args(args):
+def normal_or_p_d_start(args, only_prepare=False):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
@@ -196,20 +196,18 @@ def check_and_set_args(args):
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len
         else:
-            assert args.batch_max_tokens >= args.max_req_total_len, (
-                f"batch_max_tokens must >= max_req_total_len"
-                f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
-            )
+            assert args.batch_max_tokens >= args.max_req_total_len, f"batch_max_tokens must >= max_req_total_len"
+            f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
     else:
         # chunked 模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = 16384 // args.dp
         if args.chunked_prefill_size is None:
             args.chunked_prefill_size = args.batch_max_tokens // 2
-        assert args.batch_max_tokens >= args.chunked_prefill_size, (
-            "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
-            f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
-        )
+        assert (
+            args.batch_max_tokens >= args.chunked_prefill_size
+        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
+        f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -229,9 +227,8 @@ def check_and_set_args(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-
-def normal_or_p_d_start(args):
-    check_and_set_args(args)
+    if only_prepare:
+        return
 
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
@@ -268,17 +265,19 @@ def normal_or_p_d_start(args):
     can_use_ports = can_use_ports[10:]
 
     visual_model_tp_ports = []
+    visual_nccl_ports = []
     for _ in range(args.visual_dp):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
         visual_model_tp_ports.append(tp_ports_for_dp)
         can_use_ports = can_use_ports[args.visual_tp :]
+        if args.visual_nccl_ports is None:
+            visual_nccl_ports.append(can_use_ports[0])
+            can_use_ports = can_use_ports[1:]
 
-    if args.visual_nccl_ports is None:
-        visual_nccl_ports = can_use_ports[0 : args.visual_dp]
-        can_use_ports = can_use_ports[args.visual_dp :]
-    else:
-        visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+    if args.visual_nccl_ports is not None:
+        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
+    # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
     if args.pd_decode_rpyc_port is None:
@@ -305,6 +304,7 @@ def normal_or_p_d_start(args):
         args.router_max_wait_tokens = 0
 
     send_and_receive_node_ip(args)  # 多机用于收发node ip
+    # dp 必须 > 1
     if args.enable_dp_prompt_cache_fetch and args.dp <= 1:
         args.enable_dp_prompt_cache_fetch = False
         logger.warning(
@@ -326,6 +326,15 @@ def normal_or_p_d_start(args):
             ],
             start_args=[(args,)],
         )
+        if not args.enable_remote_vit:
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args, visual_model_tp_ports),
+                ],
+            )
         if args.enable_multimodal_audio:
             from .audioserver.manager import start_audio_process
 
@@ -335,15 +344,6 @@ def normal_or_p_d_start(args):
                 ],
                 start_args=[
                     (args,),
-                ],
-            )
-        if not args.enable_remote_vit:
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_visual_process,
-                ],
-                start_args=[
-                    (args, visual_model_tp_ports),
                 ],
             )
 
@@ -466,7 +466,7 @@ def pd_master_start(args):
 
 
 def visual_start(args):
-    check_and_set_args(args)
+    normal_or_p_d_start(args, only_prepare=True)
 
     already_uesd_ports = [args.remote_vit_port]
     if args.nccl_port is not None:
@@ -490,15 +490,16 @@ def visual_start(args):
     can_use_ports = can_use_ports[5:]
 
     visual_model_tp_ports = []
+    visual_nccl_ports = []
     for _ in range(args.visual_dp):
         tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        can_use_ports = can_use_ports[args.visual_tp :]
         visual_model_tp_ports.append(tp_ports_for_dp)
+        can_use_ports = can_use_ports[args.visual_tp :]
+        if args.visual_nccl_ports is None:
+            visual_nccl_ports.append(can_use_ports[0])
+            can_use_ports = can_use_ports[1:]
 
-    if args.visual_nccl_ports is None:
-        args.visual_nccl_ports = can_use_ports[0 : args.visual_dp]
-        can_use_ports = can_use_ports[args.visual_dp :]
-    else:
+    if args.visual_nccl_ports is not None:
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
     args.router_port = router_port
@@ -506,7 +507,6 @@ def visual_start(args):
     args.audio_port = audio_port
     args.cache_port = cache_port
     args.metric_port = metric_port
-    args.visual_model_rpc_ports = visual_model_tp_ports
     args.visual_node_id = uuid.uuid4().int
 
     logger.info(f"all start args:{args}")
@@ -561,9 +561,9 @@ def config_server_start(args):
         "--log-level",
         "info",
         "--access-logfile",
-        "/dev/stdout",
+        "-",
         "--error-logfile",
-        "/dev/stderr",
+        "-",
         "lightllm.server.config_server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",

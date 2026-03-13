@@ -143,9 +143,8 @@ class HttpServerManager:
 
             # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
             if self.args.enable_remote_vit:
-                # 对已经命中的 embed 立即增加一份引用，确保从命中这一刻开始到 LLM 读取完成前
-                # 都不会被 LRU 提前淘汰。对未 ready 的项，该调用不会增加引用。
-                obtain(self.cache_client.root.get_items_embed(uid_list, False))
+                # 避免远端lru被逐出
+                self.cache_client.root.get_items_embed(uid_list, False)
                 return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
@@ -586,7 +585,7 @@ class HttpServerManager:
             return
 
         if self.pd_mode.is_D():
-            # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了, 传输一个空的即可
+            # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
