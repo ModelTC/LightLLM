@@ -193,7 +193,7 @@ class VisualManager:
                         self.waiting_reqs.append(recv_req)
                     else:
                         self.send_to_next_module.send_pyobj(recv_req, protocol=pickle.HIGHEST_PROTOCOL)
-                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+                self.visual_recv_max_count = int(min(self.visual_recv_max_count * 1.3, 256))
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64
