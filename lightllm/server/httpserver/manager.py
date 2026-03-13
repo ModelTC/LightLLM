@@ -444,7 +444,7 @@ class HttpServerManager:
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
                 ), "too many multimodal items!"
                 if multimodal_params.audios:
-                    assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
+                    assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens

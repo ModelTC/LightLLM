@@ -68,9 +68,6 @@ def normal_or_p_d_start(args):
 
     set_unique_server_name(args)
 
-    if not args.disable_shm_warning:
-        check_recommended_shm_size(args)
-
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
 
@@ -107,6 +104,9 @@ def normal_or_p_d_start(args):
 
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
+
+    if not args.disable_shm_warning:
+        check_recommended_shm_size(args)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
