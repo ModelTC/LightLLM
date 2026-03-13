@@ -1,5 +1,5 @@
 import os
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads, safe_pickle_dumps
 from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -41,14 +41,14 @@ class ShmObjsIOBuffer:
             return self.int_view[0] == self.node_world_size
 
     def write_obj(self, obj):
-        obj_bytes = pickle.dumps(obj)
+        obj_bytes = safe_pickle_dumps(obj)
         self.int_view[1] = len(obj_bytes)
         self.shm.buf[8 : 8 + len(obj_bytes)] = obj_bytes
         return
 
     def read_obj(self):
         bytes_len = self.int_view[1]
-        obj = pickle.loads(self.shm.buf[8 : 8 + bytes_len])
+        obj = safe_pickle_loads(self.shm.buf[8 : 8 + bytes_len])
         return obj
 
     def _create_or_link_shm(self):
