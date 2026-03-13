@@ -79,7 +79,8 @@ class StartArgs:
     output_constraint_mode: str = field(default="none", metadata={"choices": ["none", "simple", "xgrammar"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
-    enable_multimodal_audio: bool = field(default=False)
+    disable_vision: Optional[bool] = field(default=None)
+    disable_audio: Optional[bool] = field(default=None)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
@@ -160,6 +161,3 @@ class StartArgs:
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)
-    # multi_modal
-    enable_multimodal: bool = field(default=False)
-    enable_multimodal_audio: bool = field(default=False)

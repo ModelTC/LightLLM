@@ -54,6 +54,8 @@ Large Language Models
     - 
   * - `Qwen3-Moe <https://github.com/QwenLM/Qwen3>`_ 
     - 
+  * - `DeepSeek-V3.2 `_
+    - 
 
 Multimodal Models
 ^^^^^^^^^^^^^^^^^
@@ -65,17 +67,19 @@ Multimodal Models
   * - Model
     - Notes
   * - `Qwen-VL <https://huggingface.co/Qwen/Qwen-VL>`_
-    -  :code:`--trust_remote_code --enable_multimodal`
+    -  :code:`--trust_remote_code`
   * - `Qwen-VL-Chat <https://huggingface.co/Qwen/Qwen-VL-Chat>`_
-    -  :code:`--trust_remote_code --enable_multimodal`
+    -  :code:`--trust_remote_code`
   * - `Llava-7b <https://huggingface.co/liuhaotian/llava-v1.5-7b>`_
-    -  :code:`--enable_multimodal`
+    - 
   * - `Llava-13b <https://huggingface.co/liuhaotian/llava-v1.5-13b>`_
-    -  :code:`--enable_multimodal`
+    - 
   * - `Qwen2-VL <https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct>`_
-    -  :code:`--enable_multimodal`
+    - 
   * - `Google Gemma3 <https://huggingface.co/google/gemma-3-12b-it>`_
-    -  :code:`--enable_multimodal`
+    - 
+  * - `Qwen3-Vl `_
+    -
 
 Reward Models
 ^^^^^^^^^^^^^

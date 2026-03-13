@@ -246,13 +246,13 @@ Output Constraint Parameters
 Multimodal Parameters
 ---------------------
 
-.. option:: --enable_multimodal
+.. option:: --disable_vision
 
-    Whether to allow loading additional visual models
+    If the model is a multimodal model, set this to not load the vision part model (default is None, auto-detected based on model)
 
-.. option:: --enable_multimodal_audio
+.. option:: --disable_audio
 
-    Whether to allow loading additional audio models (requires --enable_multimodal)
+    If the model is a multimodal model, set this to not load the audio part model (default is None, auto-detected based on model)
 
 .. option:: --enable_mps
 

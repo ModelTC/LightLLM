@@ -16,6 +16,7 @@ from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.shm_size_check import check_recommended_shm_size
+from lightllm.utils.config_utils import has_audio_module, has_vision_module
 
 logger = init_logger(__name__)
 
@@ -67,9 +68,6 @@ def normal_or_p_d_start(args):
 
     set_unique_server_name(args)
 
-    if not args.disable_shm_warning:
-        check_recommended_shm_size(args)
-
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
 
@@ -78,12 +76,37 @@ def normal_or_p_d_start(args):
     if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
 
+    # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
+    if args.disable_vision is None:
+        if has_vision_module(args.model_dir):
+            args.disable_vision = False
+        else:
+            args.disable_vision = True
+    if args.disable_audio is None:
+        if has_audio_module(args.model_dir):
+            args.disable_audio = False
+        else:
+            args.disable_audio = True
+
+    # pd 分离模式下，不启动多模态的模块
+    if args.run_mode in ["decode", "nixl_decode"]:
+        args.disable_audio = True
+        args.disable_vision = True
+
+    if args.disable_vision and args.disable_audio:
+        args.enable_multimodal = False
+    else:
+        args.enable_multimodal = True
+
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
 
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
+
+    if not args.disable_shm_warning:
+        check_recommended_shm_size(args)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
@@ -279,14 +302,16 @@ def normal_or_p_d_start(args):
     ports_locker.release_port()
 
     if args.enable_multimodal:
-        from .visualserver.manager import start_visual_process
-
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_cache_manager,
             ],
             start_args=[(args,)],
         )
+
+    if not args.disable_vision:
+        from .visualserver.manager import start_visual_process
+
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_visual_process,
@@ -296,17 +321,17 @@ def normal_or_p_d_start(args):
             ],
         )
 
-        if args.enable_multimodal_audio:
-            from .audioserver.manager import start_audio_process
+    if not args.disable_audio:
+        from .audioserver.manager import start_audio_process
 
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_audio_process,
-                ],
-                start_args=[
-                    (args,),
-                ],
-            )
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args,),
+            ],
+        )
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
