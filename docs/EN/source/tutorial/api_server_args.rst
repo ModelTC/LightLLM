@@ -246,13 +246,13 @@ Output Constraint Parameters
 Multimodal Parameters
 ---------------------
 
-.. option:: --enable_multimodal
+.. option:: --enable_multimodal_visual
 
-    Whether to allow loading additional visual models
+    Whether to allow loading additional visual model module
 
 .. option:: --enable_multimodal_audio
 
-    Whether to allow loading additional audio models (requires --enable_multimodal)
+    Whether to allow loading additional audio model module
 
 .. option:: --enable_mps
 

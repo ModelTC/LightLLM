@@ -16,13 +16,13 @@ Basic Launch Command
     --model_dir ${MODEL_PATH} \
     --mem_fraction 0.8 \
     --trust_remote_code \
-    --enable_multimodal
+    --enable_multimodal_visual
 
 Core Parameter Description
 --------------------------
 
 Environment Variables
-^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^
 
 - **INTERNVL_IMAGE_LENGTH**: Set the image token length for InternVL model, default is 256
 - **LOADWORKER**: Set the number of worker processes for model loading
@@ -35,7 +35,7 @@ Basic Service Parameters
 - **--model_dir**: InternVL model file path
 - **--mem_fraction 0.8**: GPU memory usage ratio
 - **--trust_remote_code**: Allow loading custom model code
-- **--enable_multimodal**: Enable multimodal functionality
+- **--enable_multimodal_visual**: Enable visual multimodal functionality
 
 Advanced Configuration Parameters
 ---------------------------------
@@ -55,16 +55,16 @@ Advanced Configuration Parameters
 .. note:: To ensure equal memory load on each GPU, visual_dp * visual_tp = tp is required. For example, if tp=2, then visual_dp=1, visual_tp=2.
 
 ViT Deployment Methods
-----------------------
+-----------------------
 
 ViT TP (Tensor Parallel)
-^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Default usage
 - --visual_tp tp_size enables tensor parallelism
 
 ViT DP (Data Parallel)
-^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^
 
 - Distribute different image batches to multiple GPUs
 - Each GPU runs a complete ViT model copy
@@ -136,4 +136,4 @@ Testing
     if response.status_code == 200:
         print(f"Result: {response.json()}")
     else:
-        print(f"Error: {response.status_code}, {response.text}") 
+        print(f"Error: {response.status_code}, {response.text}")
