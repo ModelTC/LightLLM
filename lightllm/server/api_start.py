@@ -105,6 +105,17 @@ def normal_or_p_d_start(args):
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
 
+    # 调度参数的自动设置, 人工设置则听人工的
+    if args.router_token_ratio is None:
+        if args.run_mode in ["normal"]:
+            args.router_token_ratio = 0.8
+        else:
+            # pd 分离模式下，不开启高级调度
+            args.router_token_ratio = 0.0
+    # 部分模式还不能支持与高级动态调度算法协同，to do.
+    if args.diverse_mode:
+        assert args.router_token_ratio == 0.0
+
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 
@@ -145,10 +156,6 @@ def normal_or_p_d_start(args):
     if args.return_all_prompt_logprobs:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-
-    # 部分模式还不能支持与高级动态调度算法协同，to do.
-    if args.diverse_mode:
-        assert args.router_token_ratio == 0.0
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
