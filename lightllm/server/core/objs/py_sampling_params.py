@@ -38,7 +38,7 @@ class SamplingParams:
         top_k: int = None,  # -1 is for all
         ignore_eos: bool = False,
         image_max_patch_num: int = -1,
-        max_new_tokens: int = -1,
+        max_new_tokens: int = 16384,
         min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
@@ -141,6 +141,14 @@ class SamplingParams:
             raise ValueError(f"top_p must in (0.0, 1.0], got {self.top_p}")
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
+        if self.max_new_tokens < 1:
+            raise ValueError(f"max_new_tokens must be at least 1, got {self.max_new_tokens}.")
+        if self.min_new_tokens < 1:
+            raise ValueError(f"min_new_tokens must be at least 1, got {self.min_new_tokens}.")
+        if self.min_new_tokens > self.max_new_tokens:
+            raise ValueError(
+                f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
+            )
 
         if len(self.exponential_decay_length_penalty) != 2:
             raise ValueError(
@@ -191,17 +199,6 @@ class SamplingParams:
 
         self._verify_allowed_token_ids()
 
-        return
-
-    def verify_length(self):
-        if self.max_new_tokens < 1:
-            raise ValueError(f"max_new_tokens must be at least 1, got {self.max_new_tokens}.")
-        if self.min_new_tokens < 1:
-            raise ValueError(f"min_new_tokens must be at least 1, got {self.min_new_tokens}.")
-        if self.min_new_tokens > self.max_new_tokens:
-            raise ValueError(
-                f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
-            )
         return
 
     def _verify_allowed_token_ids(self):
