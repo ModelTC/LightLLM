@@ -211,7 +211,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
-    if request.max_tokens is not None:
+    elif request.max_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_tokens
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
@@ -545,7 +545,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
     }
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
-    if request.max_tokens is not None:
+    elif request.max_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_tokens
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
