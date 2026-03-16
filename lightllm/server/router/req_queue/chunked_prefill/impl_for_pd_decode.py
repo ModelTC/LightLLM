@@ -18,7 +18,7 @@ class QueueForPDDecode(BaseQueue):
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
-                req.get_tuple_tokens(is_busy, self.router_max_new_token_len)
+                req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                 for req in current_batch.reqs
                 if req.sample_params.suggested_dp_index == self.dp_index
             ]

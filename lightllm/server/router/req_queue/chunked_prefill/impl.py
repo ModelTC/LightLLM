@@ -16,7 +16,7 @@ class ChunkedPrefillQueue(BaseQueue):
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
-                req.get_tuple_tokens(is_busy, self.router_max_new_token_len)
+                req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
                 for req in current_batch.reqs
                 if req.sample_params.suggested_dp_index == self.dp_index
             ]
@@ -26,7 +26,9 @@ class ChunkedPrefillQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, is_busy, new_batch_first_router_need_tokens):
-        self.cache_len_list.append(req.get_tuple_tokens(is_busy, self.router_max_new_token_len))  # hard to analysis
+        self.cache_len_list.append(
+            req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+        )  # hard to analysis
         self.cache_len_list.sort(key=lambda x: -x[1])
 
         left_out_len_array = np.array([e[1] for e in self.cache_len_list])

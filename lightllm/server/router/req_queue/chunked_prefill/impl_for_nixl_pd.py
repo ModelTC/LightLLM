@@ -38,7 +38,9 @@ class NIXLPDQueue(BaseQueue):
             for req in batch.reqs:
                 if req.sample_params.suggested_dp_index == self.dp_index:
                     if req.is_infer_decode():
-                        decoding_req_list.append(req.get_tuple_tokens(is_busy, self.router_max_new_token_len))
+                        decoding_req_list.append(
+                            req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                        )
                     else:
                         estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
 

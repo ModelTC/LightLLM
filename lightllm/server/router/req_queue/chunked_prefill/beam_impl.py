@@ -16,7 +16,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
-                (req, req.get_tuple_tokens(is_busy, self.router_max_new_token_len))
+                (req, req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len))
                 for req in current_batch.reqs
                 if req.sample_params.suggested_dp_index == self.dp_index
             ]
@@ -28,7 +28,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
     def _can_add_new_group_reqs(self, cur_handle_group_reqs: List[Req], is_busy, new_batch_first_router_need_tokens):
         for req in cur_handle_group_reqs:
             self.cache_len_list.append(
-                (req, req.get_tuple_tokens(is_busy, self.router_max_new_token_len))
+                (req, req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len))
             )  # hard to analysis
 
         self.cache_len_list.sort(key=lambda x: -x[1][1])

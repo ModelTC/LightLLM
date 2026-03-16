@@ -238,9 +238,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--router_token_ratio", type=float, default=0.0, help="token ratio to control router dispatch")
-    parser.add_argument(
-        "--router_max_new_token_len", type=int, default=1024, help="the request max new token len for router"
-    )
 
     parser.add_argument(
         "--router_max_wait_tokens",
