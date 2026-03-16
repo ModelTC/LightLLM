@@ -248,13 +248,13 @@ PD 分离模式参数
 多模态参数
 ----------
 
-.. option:: --enable_multimodal
+.. option:: --disable_vision
 
-    是否允许加载额外的视觉模型
+    如果模型是多模态模型，设置此参数将不加载视觉部分模型（默认为None，会根据模型自动检测）
 
-.. option:: --enable_multimodal_audio
+.. option:: --disable_audio
 
-    是否允许加载额外的音频模型（需要 --enable_multimodal）
+    如果模型是多模态模型，设置此参数将不加载音频部分模型（默认为None，会根据模型自动检测）
 
 .. option:: --enable_mps
 

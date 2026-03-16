@@ -3,6 +3,9 @@ import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.common.basemodel.infer_lock import g_router_lock
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class ChunkedPrefillQueue(BaseQueue):
@@ -96,6 +99,8 @@ class ChunkedPrefillQueue(BaseQueue):
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
         for req in abort_req_list:
+            req: Req = req
+            logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
             self.free_aborted_req_cpu_cache_pages(req)
             self.router.shm_req_manager.put_back_req_obj(req)
         self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
