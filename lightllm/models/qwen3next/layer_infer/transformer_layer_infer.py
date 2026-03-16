@@ -385,52 +385,41 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ==================== GDN Helper Methods ====================
 
-    def _fix_query_key_value_ba_ordering(self, mixed_qkvzba, is_decode=False):
-        """
-        Extract q, k, v, z, b, a from the MM output.
-
-        After weight rearrangement at load time, the MM output is already in grouped layout:
-        [all_q | all_k | all_v | all_z | all_b | all_a]
-        so this is just simple slicing — no split+reshape+cat needed.
-
-        Note:
-        Decode fast-path fused split-copy kernels are intentionally avoided here.
-        The explicit contiguous slicing path is slower but is more robust and
-        matches the reference behavior used in vLLM.
-        """
+    def _split_qkvzba(self, mixed_qkvzba, is_decode=False):
         qkv_dim = self.tp_key_dim * 2 + self.tp_value_dim
         z_end = qkv_dim + self.tp_value_dim
         b_end = z_end + self.tp_num_v_heads
-
         mixed_qkv = mixed_qkvzba[:, :qkv_dim]
         z = mixed_qkvzba[:, qkv_dim:z_end].view(-1, self.tp_num_v_heads, self.head_v_dim)
         b = mixed_qkvzba[:, z_end:b_end]
         a = mixed_qkvzba[:, b_end:]
         return mixed_qkv, z, b, a
 
-    def _split_qkvzba(self, mixed_qkvzba: torch.Tensor):
-
-        qkv_dim = self.tp_key_dim * 2 + self.tp_value_dim
-        z_end = qkv_dim + self.tp_value_dim
-        b_end = z_end + self.tp_num_v_heads
-
-        mixed_qkv = mixed_qkvzba[:, :qkv_dim]
-        z = mixed_qkvzba[:, qkv_dim:z_end].view(-1, self.tp_num_v_heads, self.head_v_dim)
-        b = mixed_qkvzba[:, z_end:b_end]
-        a = mixed_qkvzba[:, b_end:]
-        return mixed_qkv, z, b, a
-
-    def _split_qkv(self, mixed_qkv: torch.Tensor):
-        query, key, value = torch.split(
-            mixed_qkv,
-            [self.tp_key_dim, self.tp_key_dim, self.tp_value_dim],
-            dim=-1,
-        )
-        seq_len = query.shape[0]
-        query = query.view(1, seq_len, self.tp_num_k_heads, self.head_k_dim)
-        key = key.view(1, seq_len, self.tp_num_k_heads, self.head_k_dim)
-        value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
-        return query, key, value
+    def _rearrange_mixed_qkv(self, mixed_qkv, decode=False):
+        if mixed_qkv is None:
+            return None, None, None
+        if decode:
+            query, key, value = torch.split(
+                mixed_qkv,
+                [self.tp_key_dim, self.tp_key_dim, self.tp_value_dim],
+                dim=-1,
+            )
+            batch_size = mixed_qkv.shape[0]
+            query = query.view(batch_size, 1, self.tp_num_k_heads, self.head_k_dim)
+            key = key.view(batch_size, 1, self.tp_num_k_heads, self.head_k_dim)
+            value = value.view(batch_size, 1, self.tp_num_v_heads, self.head_v_dim)
+            return query, key, value
+        else:
+            query, key, value = torch.split(
+                mixed_qkv,
+                [self.tp_key_dim, self.tp_key_dim, self.tp_value_dim],
+                dim=-1,
+            )
+            seq_len = query.shape[0]
+            query = query.view(1, seq_len, self.tp_num_k_heads, self.head_k_dim)
+            key = key.view(1, seq_len, self.tp_num_k_heads, self.head_k_dim)
+            value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
+            return query, key, value
 
     def context_attention_forward(
         self,
@@ -476,7 +465,7 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(LlamaTransformerLayerInfer):
         mixed_qkv = out_tensor.transpose(0, 1)
 
         # Recurrent processing
-        query, key, value = self._split_qkv(mixed_qkv)
+        query, key, value = self._rearrange_mixed_qkv(mixed_qkv)
         initial_state = ssm_states[infer_state.b_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
         core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
@@ -521,7 +510,7 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # Recurrent processing with fused gating
         # FusedRecurrentFunction.forward calls .contiguous() on q/k/v/a/b internally
-        query, key, value = self._split_qkv(mixed_qkv)
+        query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=True)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -638,7 +627,8 @@ class Qwen3NextGatedDeltaNetTransformerLayerInfer(LlamaTransformerLayerInfer):
         conv_states, ssm_states = infer_state.mem_manager.get_mamba_cache(self.layer_num_)
 
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
-        mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+        # mixed_qkv is now returned pre-concatenated (no torch.cat needed)
+        mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)
 
         # Dispatch to appropriate kernel
         if is_prefill:

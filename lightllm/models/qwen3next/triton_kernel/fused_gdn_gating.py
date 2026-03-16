@@ -18,6 +18,8 @@ def fused_gdn_gating_kernel(
     a,
     b,
     dt_bias,
+    stride_a_row,
+    stride_b_row,
     NUM_HEADS: tl.constexpr,
     beta: tl.constexpr,
     threshold: tl.constexpr,
@@ -26,10 +28,12 @@ def fused_gdn_gating_kernel(
     i_b, i_d = tl.program_id(0), tl.program_id(1)
     head_off = i_d * BLK_HEADS + tl.arange(0, BLK_HEADS)
     off = i_b * NUM_HEADS + head_off
+    off_a = i_b * stride_a_row + head_off
+    off_b = i_b * stride_b_row + head_off
     mask = head_off < NUM_HEADS
     blk_A_log = tl.load(A_log + head_off, mask=mask)
-    blk_a = tl.load(a + off, mask=mask)
-    blk_b = tl.load(b + off, mask=mask)
+    blk_a = tl.load(a + off_a, mask=mask)
+    blk_b = tl.load(b + off_b, mask=mask)
     blk_bias = tl.load(dt_bias + head_off, mask=mask)
     x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
     softplus_x = tl.where(beta * x <= threshold, (1 / beta) * tl.log(1 + tl.exp(beta * x)), x)
@@ -78,6 +82,8 @@ def fused_gdn_gating(
         a,
         b,
         dt_bias,
+        a.stride(0),
+        b.stride(0),
         num_heads,
         beta,
         threshold,
