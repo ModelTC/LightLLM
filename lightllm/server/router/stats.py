@@ -1,47 +1,23 @@
-import time
 from lightllm.utils.log_utils import init_logger
-from .batch import Batch
+from lightllm.server.core.objs import StartArgs
 
 logger = init_logger(__name__)
 
 
-class Stats:
-    def __init__(self, log_status, log_stats_interval) -> None:
-        self.log_stats = log_status
-        self.log_stats_interval = log_stats_interval
-        self.last_log_time = time.time()
-        self.all_tokens = 0
-        self.output_tokens = 0
-        self.prompt_tokens = 0
-        return
+class RouterStatics:
+    def __init__(self, args: StartArgs):
+        self.busy_token_used_ratio = args.router_token_ratio
+        self.ema_req_out_put_len = 2048
+        self.ema_params = 0.04
 
-    def count_prompt_tokens(self, run_batch: Batch):
-        if self.log_stats and run_batch is not None:
-            tokens = run_batch.input_tokens()
-            self.prompt_tokens += tokens
-            self.all_tokens += tokens
-        return
+    def update(self, req_out_len: int):
+        # 过滤掉输出特别短的情况，防止计算得过于短，导致调度频繁引发暂停，导致系统吞吐下降。
+        req_out_len = max(req_out_len, 64)
+        self.ema_req_out_put_len = int(self.ema_req_out_put_len * (1 - self.ema_params) + req_out_len * self.ema_params)
+        self.ema_req_out_put_len = max(64, self.ema_req_out_put_len)
 
-    def count_output_tokens(self, run_batch: Batch):
-        if self.log_stats and run_batch is not None:
-            tokens = len(run_batch.reqs)
-            self.output_tokens += tokens
-            self.all_tokens += tokens
-        return
-
-    def print_stats(self):
-        if not self.log_stats:
-            return
-
-        now = time.time()
-        if now - self.last_log_time > self.log_stats_interval:
-            logger.debug(
-                f"Avg tokens(prompt+generate) throughput: {self.all_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
-                f"Avg prompt tokens throughput:           {self.prompt_tokens/(now-self.last_log_time):8.3f} tokens/s\n"
-                f"Avg generate tokens throughput:         {self.output_tokens/(now-self.last_log_time):8.3f} tokens/s"
-            )
-            self.all_tokens = 0
-            self.output_tokens = 0
-            self.prompt_tokens = 0
-            self.last_log_time = now
-        return
+    def log_str(self) -> str:
+        return (
+            f"RouterStatics busy_token_used_ratio: {self.busy_token_used_ratio} "
+            f"ema_req_out_put_len: {self.ema_req_out_put_len}"
+        )
