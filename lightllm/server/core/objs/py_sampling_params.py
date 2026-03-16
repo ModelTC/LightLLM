@@ -38,7 +38,7 @@ class SamplingParams:
         top_k: int = None,  # -1 is for all
         ignore_eos: bool = False,
         image_max_patch_num: int = -1,
-        max_new_tokens: int = 16,
+        max_new_tokens: int = 16384,
         min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
@@ -142,9 +142,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
-            raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
+            raise ValueError(f"max_new_tokens must be at least 1, got {self.max_new_tokens}.")
         if self.min_new_tokens < 1:
-            raise ValueError(f"min_new_tokens must be at least 1 , got {self.min_new_tokens}.")
+            raise ValueError(f"min_new_tokens must be at least 1, got {self.min_new_tokens}.")
         if self.min_new_tokens > self.max_new_tokens:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."

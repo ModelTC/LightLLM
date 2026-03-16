@@ -1,4 +1,6 @@
-# Adapted from https://github.com/sgl-project/sglang/blob/ce6b17c0f94e6bf53633c8f324176a891e67fa7f/python/sglang/srt/layers/attention/nsa/triton_kernel.py
+# Adapted from sglang Triton kernel implementation:
+# https://github.com/sgl-project/sglang/blob/ce6b17c0f94e6bf53633c8f324176a891e67fa7f/
+# python/sglang/srt/layers/attention/nsa/triton_kernel.py
 from typing import Optional, Tuple
 
 import torch
@@ -91,7 +93,8 @@ def act_quant(
     Quantizes the input tensor `x` using block-wise quantization with Triton.
 
     Args:
-        x (torch.Tensor): The input tensor to be quantized. Must be contiguous and its last dimension size must be divisible by `block_size`.
+        x (torch.Tensor): The input tensor to be quantized. Must be
+                          contiguous and its last dimension size must be divisible by `block_size`.
         block_size (int, optional): The size of the blocks to be used for quantization. Default is 128.
         scale_fmt (Optional[str], optional): The format of the scale. Default is None.
     Returns:
