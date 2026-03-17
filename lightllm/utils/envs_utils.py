@@ -232,3 +232,8 @@ def get_added_mtp_kv_layer_num() -> int:
         added_mtp_layer_num += get_env_start_args().mtp_step
 
     return added_mtp_layer_num
+
+
+@lru_cache(maxsize=None)
+def get_pd_split_max_new_tokens() -> int:
+    return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
