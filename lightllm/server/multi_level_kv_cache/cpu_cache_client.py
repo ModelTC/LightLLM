@@ -1,17 +1,11 @@
 import ctypes
-import torch
-import numpy as np
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.cpu_cache import CpuCacheTensorBackend, CpuCacheTensorSpec
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
 from lightllm.server.core.objs import AtomicShmLock
-from lightllm.utils.kv_cache_utils import (
-    calcu_cpu_cache_meta,
-    create_shm_kv_cache_ptr,
-    attach_shm_kv_cache_ptr,
-    register_shm_ptr_to_pin,
-)
+from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
 
 logger = init_logger(__name__)
 
@@ -30,11 +24,11 @@ class CpuKvCacheClient(object):
         self._create_cpu_status_list(init_shm_data)
 
         if not only_create_meta_data:
-            if init_shm_data:
-                self._create_shm_cpu_kv_cache()
-                self.attach_shm_handle = None
-            else:
-                self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
+            tensor_backend = CpuCacheTensorBackend(tensor_spec=self._build_tensor_spec())
+            self.cpu_kv_cache_tensor, self.attach_shm_handle = tensor_backend.create_or_attach(
+                init_shm_data=init_shm_data,
+                wait_for_register=False,
+            )
         return
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
@@ -274,50 +268,19 @@ class CpuKvCacheClient(object):
         )
         return
 
-    def _create_shm_cpu_kv_cache(self):
-        shm_ptr = create_shm_kv_cache_ptr(
-            key=self.args.cpu_kv_cache_shm_id, size=self.kv_cache_tensor_meta.calcu_size()
+    def _build_tensor_spec(self) -> CpuCacheTensorSpec:
+        return CpuCacheTensorSpec(
+            shm_key=self.args.cpu_kv_cache_shm_id,
+            shape=(
+                self.kv_cache_tensor_meta.page_num,
+                self.kv_cache_tensor_meta.layer_num,
+                self.kv_cache_tensor_meta.token_page_size,
+                self.kv_cache_tensor_meta.num_heads,
+                self.kv_cache_tensor_meta.get_merged_head_dim(),
+            ),
+            dtype=self.kv_cache_tensor_meta.data_type,
+            size_bytes=self.kv_cache_tensor_meta.calcu_size(),
         )
-        numpy_array = np.frombuffer(
-            memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8
-        )
-        # 将 NumPy 数组转换为 PyTorch 张量
-        shape = (
-            self.kv_cache_tensor_meta.page_num,
-            self.kv_cache_tensor_meta.layer_num,
-            self.kv_cache_tensor_meta.token_page_size,
-            self.kv_cache_tensor_meta.num_heads,
-            self.kv_cache_tensor_meta.get_merged_head_dim(),
-        )
-        self.cpu_kv_cache_tensor = (
-            torch.from_numpy(numpy_array).view(dtype=self.kv_cache_tensor_meta.data_type).view(shape)
-        )
-        return
-
-    def _attach_shm_cpu_kv_cache(self):
-        shm_ptr = attach_shm_kv_cache_ptr(
-            key=self.args.cpu_kv_cache_shm_id, size=self.kv_cache_tensor_meta.calcu_size()
-        )
-        handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.kv_cache_tensor_meta.calcu_size())
-        numpy_array = np.frombuffer(
-            memoryview((ctypes.c_uint8 * self.kv_cache_tensor_meta.calcu_size()).from_address(shm_ptr)), dtype=np.uint8
-        )
-        shape = (
-            self.kv_cache_tensor_meta.page_num,
-            self.kv_cache_tensor_meta.layer_num,
-            self.kv_cache_tensor_meta.token_page_size,
-            self.kv_cache_tensor_meta.num_heads,
-            self.kv_cache_tensor_meta.get_merged_head_dim(),
-        )
-        self.cpu_kv_cache_tensor = (
-            torch.from_numpy(numpy_array).view(dtype=self.kv_cache_tensor_meta.data_type).view(shape)
-        )
-        assert shm_ptr == self.cpu_kv_cache_tensor.data_ptr()
-
-        # test code
-        # self.cpu_kv_cache_tensor = torch.zeros_like(self.cpu_kv_cache_tensor, device="cpu", pin_memory=True)
-        # self.cpu_kv_cache_tensor = torch.zeros_like(self.cpu_kv_cache_tensor, device="cuda")
-        return handle
 
 
 class _CpuPageStatus(_LinkedListItem):
