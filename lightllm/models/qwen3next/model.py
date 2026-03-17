@@ -33,7 +33,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states
 
-    radix_cache_class = HybridRadixCache
+    def get_radix_class(self):
+        return HybridRadixCache
 
     def __init__(self, kvargs) -> None:
         self.mem_manager: Qwen3NextHybridMemManager = None
