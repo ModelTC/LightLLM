@@ -108,7 +108,7 @@ def normal_or_p_d_start(args):
     # 调度参数的自动设置, 人工设置则听人工的
     if args.router_token_ratio is None:
         if args.run_mode in ["normal"]:
-            args.router_token_ratio = 0.8
+            args.router_token_ratio = 0.85
         else:
             # pd 分离模式下，不开启高级调度
             args.router_token_ratio = 0.0
