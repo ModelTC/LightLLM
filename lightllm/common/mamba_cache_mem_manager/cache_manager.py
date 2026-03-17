@@ -105,6 +105,12 @@ class MambaCacheManager(TokenAllocator):
         super().free(free_index)
         return
 
+    def free_all(self):
+        self.conv_state_cache.buffer.fill_(0)
+        self.ssm_state_cache.buffer.fill_(0)
+        super().free_all()
+        return
+
 
 class ReadOnlyStaticsMambaCacheManager:
     """
