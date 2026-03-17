@@ -499,7 +499,7 @@ class RadixCache:
             " " * indent,
             f"k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
             time_id: {node.time_id} prefix_total_len: {node.node_prefix_total_len} \
-            node_value_len: {node.node_value_len}",
+            node_value_len: {node.node_value_len} buffer_idx: {node.buffer_idx}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)

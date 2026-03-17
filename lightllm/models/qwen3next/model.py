@@ -93,12 +93,13 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
         mamba_cache_size = int(mamba_memory_gb * 1024 ** 3 / total_cell_size)
 
-        if mamba_cache_size < start_args.running_max_req_size:
+        if mamba_cache_size < start_args.running_max_req_size * 2:
             ratio = mamba_cache_ratio if mamba_cache_ratio is not None else 0.5
             raise ValueError(
                 f"Insufficient memory for mamba cache allocation!\n\n"
+                f"mamba_cache_size should be at least running_max_req_size * 2\n"
                 f"Calculated mamba_cache_size ({mamba_cache_size}) < "
-                f"running_max_req_size ({start_args.running_max_req_size})\n\n"
+                f"running_max_req_size * 2 ({start_args.running_max_req_size * 2})\n\n"
                 f"Memory budget:\n"
                 f"  Available for mamba cache: {mamba_memory_gb:.2f} GB\n"
                 f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
