@@ -7,7 +7,7 @@ import pickle
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
-from lightllm.common.req_manager import ReqManager
+from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -22,6 +22,9 @@ from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 logger = init_logger(__name__)
+
+# Cache for mtp_range tensors to avoid repeated allocation
+_mtp_range_cache: Dict[int, torch.Tensor] = {}
 
 
 @dataclass
@@ -64,11 +67,8 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        if self.has_recurrent_state:
-            assert self.radix_cache is None or isinstance(
-                self.radix_cache, HybridRadixCache
-            ), "Recurrent state models only support HybridRadixCache"
-            self.mtp_step = get_env_start_args().mtp_step
+        self.mtp_step = get_env_start_args().mtp_step
+
         return
 
     def init_cpu_embed_cache_client(self):
@@ -85,26 +85,30 @@ class InferenceContext:
             self.cpu_kv_cache_stream = torch.cuda.Stream()
         return self.cpu_kv_cache_stream
 
-    def _alloc_and_copy_req_buffers(self, req_objs: List["InferReq"]) -> None:
-        """Allocate and copy buffers for requests. Delegates to req_manager which handles model-specific logic."""
+    def _alloc_and_copy_req_buffers(
+        self, req_manager: ReqManagerForMamba, radix_cache: HybridRadixCache, req_objs: List["InferReq"]
+    ) -> None:
         if not req_objs:
             return
 
-        if self.radix_cache is not None and hasattr(self.radix_cache, "free_radix_cache_to_get_enough_buffer"):
-            self.radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
+        if radix_cache is not None:
+            radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
 
-        request_indices_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
-        self.req_manager.alloc_buffer_for_req(request_indices_gpu)
+        req_idx_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
+        req_manager.alloc_buffer_for_req(req_idx_gpu)
 
-        if self.radix_cache is None:
-            return
+        if radix_cache is not None:
+            fork_req_ids = [r.req_idx for r in req_objs if r.shared_kv_node is not None]
+            if fork_req_ids:
+                src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
+                req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
+                src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
 
-        copy_data = [(r.req_idx, r.shared_kv_node.buffer_idx) for r in req_objs if r.shared_kv_node is not None]
-        if copy_data:
-            copy_indices, copy_buffers = zip(*copy_data)
-            copy_indices_tensor = torch.tensor(copy_indices, device="cuda", dtype=torch.int64)
-            copy_buffers_tensor = torch.tensor(copy_buffers, device="cuda", dtype=torch.int64)
-            self.req_manager.copy_buffer_from_another_buffer(copy_buffers_tensor, copy_indices_tensor)
+                mtp_step = req_manager.mtp_step
+                if mtp_step not in _mtp_range_cache:
+                    _mtp_range_cache[mtp_step] = torch.arange(0, mtp_step + 1, dtype=torch.int32, device="cuda")
+                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:, None], _mtp_range_cache[mtp_step][None, :]]
+                req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -144,7 +148,8 @@ class InferenceContext:
                     slave_req: InferReq = slave_req
                     slave_req.related_master_req = master_req
 
-        self._alloc_and_copy_req_buffers(req_objs)
+        if isinstance(self.req_manager, ReqManagerForMamba):
+            self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, req_objs)
 
         return req_objs
 
@@ -238,7 +243,7 @@ class InferenceContext:
             free_token_index = custom_cat(free_token_index)
             self.req_manager.free(free_req_index, free_token_index)
 
-        if len(free_buffer_index) != 0:
+        if len(free_buffer_index) != 0 and isinstance(self.req_manager, ReqManagerForMamba):
             self.req_manager.free_buffer(free_buffer_index)
 
         finished_req_ids_set = set(finished_request_ids)
@@ -288,7 +293,7 @@ class InferenceContext:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
 
-            if len(free_buffer_index) != 0:
+            if len(free_buffer_index) != 0 and isinstance(self.req_manager, ReqManagerForMamba):
                 self.req_manager.free_buffer(free_buffer_index)
 
             g_infer_state_lock.release()

@@ -100,18 +100,6 @@ class ReqManager:
         """Whether this model uses per-request recurrent state buffers (e.g. Mamba/linear attention)."""
         return self.req_to_buffer_index is not None
 
-    def alloc_buffer_for_req(self, req_index: torch.Tensor):
-        """Allocate buffers for requests. No-op for standard models without linear attention."""
-        pass
-
-    def free_buffer(self, free_buffer_indexes):
-        """Free buffer memory. No-op for standard models without linear attention."""
-        pass
-
-    def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
-        """Copy buffer state between requests. No-op for standard models without linear attention."""
-        pass
-
 
 class ReqSamplingParamsManager:
     """
@@ -276,12 +264,3 @@ class ReqManagerForMamba(ReqManager):
         if not buffer_indexes.is_cuda:
             buffer_indexes = buffer_indexes.cuda()
         self.req_to_buffer_index[req_index] = buffer_indexes.view(num_reqs, num_buffers_per_req)
-
-    def copy_buffer_from_another_buffer(self, src_buffer_index: torch.Tensor, tgt_req_index: torch.Tensor):
-        # 获取目标请求的所有 MTP buffer (从 buffer[0] 到 buffer[mtp_step])
-        mtp_range = torch.arange(0, self.mtp_step + 1, dtype=torch.int32, device="cuda")
-        all_mtp_buffers = self.req_to_buffer_index[tgt_req_index[:, None], mtp_range[None, :]]
-
-        # 将 shared buffer 广播到所有 MTP step
-        self.buffer_mem_manager.fork_state_buffers(src_buffer_index, all_mtp_buffers)
-        return
