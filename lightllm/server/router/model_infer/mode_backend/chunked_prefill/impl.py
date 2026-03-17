@@ -51,12 +51,12 @@ class ChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         return
 
-    def _maybe_insert_hybrid_radix_cache(self, run_reqs: List[InferReq]):
+    def _maybe_insert_hybrid_radix_cache(self, radix_cache: HybridRadixCache, run_reqs: List[InferReq]):
         # Insert hybrid radix cache entries if applicable, use for hybrid attention models.
-        if self.use_buffer_manager and self.radix_cache is not None:
+        if self.use_buffer_manager and radix_cache is not None:
             torch.cuda.synchronize()
             g_infer_state_lock.acquire()
-            self.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
+            radix_cache.insert_for_hybrid_radix_cache(run_reqs)
             g_infer_state_lock.release()
 
     def infer_loop(self):
@@ -146,7 +146,7 @@ class ChunkedPrefillBackend(ModeBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
-        self._maybe_insert_hybrid_radix_cache(run_reqs)
+        self._maybe_insert_hybrid_radix_cache(self.radix_cache, run_reqs)
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
@@ -231,7 +231,7 @@ class ChunkedPrefillBackend(ModeBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
-        self._maybe_insert_hybrid_radix_cache(run_reqs)
+        self._maybe_insert_hybrid_radix_cache(self.radix_cache, run_reqs)
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
