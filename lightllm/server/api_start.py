@@ -242,7 +242,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -416,7 +416,12 @@ def pd_master_start(args):
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(num=1, used_nccl_ports=[args.nccl_port, args.port])
+    can_use_ports = alloc_can_use_network_port(
+        num=1,
+        used_ports=[
+            args.port,
+        ],
+    )
     metric_port = can_use_ports[0]
 
     args.metric_port = metric_port
