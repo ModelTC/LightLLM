@@ -23,14 +23,14 @@ from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_toke
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
 )
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, print_rank0
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from .control_state import ControlState
 
 logger = init_logger(__name__)
 
-tokenizer = AutoTokenizer.from_pretrained("/data/chenjunyi/models/qwen3-8b", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("/mtc/models/qwen3-8b", trust_remote_code=True)
 
 class ChunkedPrefillBackend(ModeBackend):
     def __init__(self) -> None:
@@ -253,7 +253,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
-            print("mtp_accept_len:", mtp_accept_len)
+            print_rank0("mtp_accept_len:", mtp_accept_len)
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,

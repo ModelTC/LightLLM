@@ -80,8 +80,27 @@ class TritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
+    # MTP related state variables
+    b_mark_shared_group: torch.Tensor = None
+    mtp_size: int = 1
+
     def init_state(self):
-        pass
+        from lightllm.utils.envs_utils import get_env_start_args
+        args_mtp_step = get_env_start_args().mtp_step
+
+        if args_mtp_step > 0:
+            # MTP mode initialization
+            self.mtp_size = args_mtp_step + 1
+            batch_size = self.infer_state.batch_size
+
+            assert batch_size % self.mtp_size == 0, f"batch_size {batch_size} must be divisible by mtp_size {self.mtp_size}"
+
+            # b_mark_shared_group: 0 for non-last requests in group, mtp_size for last request
+            self.b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=self.infer_state.input_ids.device)
+            self.b_mark_shared_group[args_mtp_step::self.mtp_size] = self.mtp_size
+        else:
+            self.mtp_size = 1
+            self.b_mark_shared_group = None
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -99,9 +118,17 @@ class TritonDecodeAttState(BaseDecodeAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
+            from lightllm.utils.envs_utils import get_env_start_args
+            args_mtp_step = get_env_start_args().mtp_step
+
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
-            if q_head_num == k_head_num:
+
+            if args_mtp_step > 0:
+                # MTP mode: use mtp diverse attention
+                assert q_head_num >= k_head_num, "MTP diverse attention requires q_head_num >= k_head_num"
+                return self._mtp_diverse_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
+            elif q_head_num == k_head_num:
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
                 return self._normal_decode_gqa_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
@@ -177,6 +204,49 @@ class TritonDecodeAttState(BaseDecodeAttState):
             cache_k=k,
             cache_v=v,
             out=out,
+            alloc_tensor_func=alloc_func,
+        )
+
+        return out
+
+    def _mtp_diverse_decode_gqa_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        alloc_func=torch.empty,
+    ):
+        """
+        MTP Diverse GQA Attention for static MTP mode.
+
+        In static MTP mode, each request has 1 Q token, but the i-th request in a group
+        can only see the first i+1 KV tokens.
+        Only the last request in each group is computed, results are copied to others.
+
+        Input/Output shape: [batch_size, num_heads, head_dim]
+        """
+        from ...triton_kernel.att.decode_att.gqa.mtp_diverse import (
+            token_decode_attention_mtp_diverse_single_token,
+        )
+
+        batch_size = self.infer_state.batch_size
+        b_seq_len = self.infer_state.b_seq_len
+
+        max_kv_len = int(b_seq_len.max().item())
+        max_batch_group_size = self.mtp_size
+        block_seq = 256
+
+        out = token_decode_attention_mtp_diverse_single_token(
+            q=q,
+            k=k,
+            v=v,
+            Req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
+            B_req_idx=self.infer_state.b_req_idx,
+            b_seq_len=b_seq_len,
+            b_mark_shared_group=self.b_mark_shared_group,
+            max_batch_group_size=max_batch_group_size,
+            max_kv_len=max_kv_len,
+            block_seq=block_seq,
             alloc_tensor_func=alloc_func,
         )
 
