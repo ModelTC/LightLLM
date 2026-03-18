@@ -66,6 +66,7 @@ class AudioManager:
                 "rank_id": rank_id,
                 "cache_port": self.cache_port,
                 "data_type": self.args.data_type,
+                "init_shm_data": self.args.disable_vision,
             }
             init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
