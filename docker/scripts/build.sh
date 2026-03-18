@@ -100,5 +100,6 @@ DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile \
   --build-arg ENABLE_DEEPEP="${ENABLE_DEEPEP}" \
   --build-arg ENABLE_NIXL="${ENABLE_NIXL}" \
   --build-arg ENABLE_CACHE="${ENABLE_CACHE}" \
-  -t "${IMAGE_PREFIX}:${IMAGE_TAG}" .
+  --progress=plain \
+  -t "${IMAGE_PREFIX}:${IMAGE_TAG}" . 
 

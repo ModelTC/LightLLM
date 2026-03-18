@@ -187,6 +187,47 @@ def _validate_sdpa():
     return True, None
 
 
+def _validate_flashmla_sparse():
+    """Validate flashmla_sparse (NSA) with ground truth."""
+    try:
+        from sgl_kernel.flash_mla import flash_mla_sparse_fwd
+
+        # need sgl-kernel version >= 0.3.21 and torch >= 2.9.1
+    except Exception as e:
+        return False, f"sgl_kernel.flash_mla import failed: {type(e).__name__}: {e}"
+
+    batch, heads, seq, dim = 1, 64, 128, 512 + 64
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    q = torch.randn(batch * seq, heads, dim, dtype=dtype, device=device)
+    kv = torch.zeros(batch * seq, 1, dim, dtype=dtype, device=device)
+
+    index_topk = 128
+    topk_indices = torch.zeros(batch * seq, index_topk, dtype=torch.int32, device=device)
+    for i in range(seq):
+        topk_indices[i, :] = torch.arange(index_topk, dtype=torch.int32, device=device)
+
+    topk_indices = topk_indices.view(batch * seq, 1, index_topk)
+
+    softmax_scale = 1.0 / (dim ** 0.5)
+    kv_lora_rank = dim
+
+    try:
+        mla_out, _, _ = flash_mla_sparse_fwd(
+            q=q,
+            kv=kv,
+            indices=topk_indices,
+            sm_scale=softmax_scale,
+            d_v=kv_lora_rank,
+        )
+        torch.cuda.synchronize()
+    except Exception as e:
+        return False, f"flash_mla_sparse_fwd run failed: {type(e).__name__}: {e}"
+
+    return True, None
+
+
 def _run_in_subprocess(backend_name, pipe):
     """Run validation in subprocess with suppressed output."""
     import sys
@@ -207,6 +248,8 @@ def _run_in_subprocess(backend_name, pipe):
             success, err = _validate_flashinfer()
         elif backend_name == "triton":
             success, err = _validate_triton()
+        elif backend_name == "flashmla_sparse":
+            success, err = _validate_flashmla_sparse()
         else:
             success, err = False, f"Unknown backend: {backend_name}"
         pipe.send((success, err))

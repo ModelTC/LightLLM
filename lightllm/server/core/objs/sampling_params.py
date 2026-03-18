@@ -361,7 +361,7 @@ class SamplingParams(ctypes.Structure):
         self.top_k = -1 if top_k is None else top_k
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        self.max_new_tokens = kwargs.get("max_new_tokens", 16)
+        self.max_new_tokens = kwargs.get("max_new_tokens", 16384)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
@@ -478,14 +478,13 @@ class SamplingParams(ctypes.Structure):
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
-            raise ValueError(f"max_new_tokens must be at least 1, got {self.max_new_tokens}.")
+            raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
         if self.min_new_tokens < 1:
-            raise ValueError(f"min_new_tokens must be at least 1, got {self.min_new_tokens}.")
+            raise ValueError(f"min_new_tokens must be at least 1 , got {self.min_new_tokens}.")
         if self.min_new_tokens > self.max_new_tokens:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
-
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 

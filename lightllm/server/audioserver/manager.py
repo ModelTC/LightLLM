@@ -138,6 +138,10 @@ class AudioManager:
         while True:
             recv_req: GroupReqIndexes = await self.zmq_recv_socket.recv_pyobj()
             if isinstance(recv_req, GroupReqIndexes):
+                logger.info(
+                    f"audio recv req id {recv_req.group_req_id} "
+                    f"audio count {len(recv_req.multimodal_params.audios)}"
+                )
                 self.waiting_reqs.append(recv_req)
             else:
                 assert False, f"Error Req Inf {recv_req}"

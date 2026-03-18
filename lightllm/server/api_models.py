@@ -1,4 +1,5 @@
 import time
+from typing_extensions import deprecated
 import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -10,10 +11,15 @@ class ImageURL(BaseModel):
     url: str
 
 
+class AudioURL(BaseModel):
+    url: str
+
+
 class MessageContent(BaseModel):
     type: str
     text: Optional[str] = None
     image_url: Optional[ImageURL] = None
+    audio_url: Optional[AudioURL] = None
 
 
 class Message(BaseModel):
@@ -114,7 +120,10 @@ class CompletionRequest(BaseModel):
     # prompt: string or tokens
     prompt: Union[str, List[str], List[int], List[List[int]]]
     suffix: Optional[str] = None
-    max_tokens: Optional[int] = 8192
+    max_tokens: Optional[int] = Field(
+        default=16384, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
+    )
+    max_completion_tokens: Optional[int] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -187,7 +196,10 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
-    max_tokens: Optional[int] = 8192
+    max_tokens: Optional[int] = Field(
+        default=16384, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
+    )
+    max_completion_tokens: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None

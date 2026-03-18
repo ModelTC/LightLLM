@@ -33,6 +33,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from .stats import RouterStatics
 
 
 logger = init_logger(__name__)
@@ -105,6 +106,7 @@ class RouterManager:
             if not self.args.enable_cpu_cache
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
+        self.router_statics = RouterStatics(self.args)
         return
 
     async def wait_to_model_ready(self):
@@ -115,8 +117,6 @@ class RouterManager:
         self.model_rpc_servers = []
         # 用于 kv move 管理进程 和 推理进程进行task信息的交互。
         self.info_queue: mp.Queue = mp.Queue()
-        self.rpc_event = multiprocessing.Event()
-        self.rpc_finished_event = multiprocessing.Event()
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
@@ -124,14 +124,13 @@ class RouterManager:
         # Create tasks for parallel startup
         tasks = []
         for rank_id in range(self.node_rank * node_world_size, (self.node_rank + 1) * node_world_size):
+            rank_in_node = rank_id % node_world_size
             task = asyncio.create_task(
                 start_model_process(
                     args=self.args,
                     rank=rank_id,
-                    rank_in_node=rank_id % node_world_size,
+                    rank_in_node=rank_in_node,
                     node_world_size=node_world_size,
-                    rpc_event=self.rpc_event,
-                    rpc_finished_event=self.rpc_finished_event,
                     info_queue=self.info_queue,
                     router_lock=self.router_lock,
                 )
@@ -139,13 +138,7 @@ class RouterManager:
             tasks.append(task)
 
         # Wait for all tasks to complete in parallel
-        self.model_rpc_servers = await asyncio.gather(*tasks)
-
-        self.model_rpc_client = ModelRpcClient(
-            rpc_event=self.rpc_event,
-            rpc_finished_event=self.rpc_finished_event,
-        )
-
+        self.model_rpc_clients = await asyncio.gather(*tasks)
         kvargs = {
             "args": self.args,
             "rank_id": None,  # 由后续处理填充真实数据
@@ -178,10 +171,19 @@ class RouterManager:
             "pd_rpyc_ports": self.args.pd_node_infer_rpyc_ports,  # 非 pd 模式可以不设置
         }
 
-        await self.model_rpc_client.init_model(kvargs=kvargs)
+        # Call init_model on all model processes
+        init_tasks = []
+        for model_rpc_client in self.model_rpc_clients:
+            init_tasks.append(model_rpc_client.init_model(kvargs=kvargs))
+        await asyncio.gather(*init_tasks)
 
         if self.max_total_token_num is None:
-            self.max_total_token_num = await self.model_rpc_client.get_max_total_token_num()
+            _tasks = []
+            for model_rpc_client in self.model_rpc_clients:
+                _tasks.append(model_rpc_client.get_max_total_token_num())
+            _nums = await asyncio.gather(*_tasks)
+            assert max(_nums) == min(_nums), "all rank must have same token num"
+            self.max_total_token_num = _nums[0]
             self.args.max_total_token_num = self.max_total_token_num
         if not self.args.disable_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
@@ -256,6 +258,7 @@ class RouterManager:
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
+                        logger.debug(self.router_statics.log_str())
                         self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
@@ -347,7 +350,7 @@ class RouterManager:
 
     def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
-            self.running_batch.filter_out_finished_req(self.shm_req_manager)
+            self.running_batch.filter_out_finished_req(self.shm_req_manager, self.router_statics)
             if self.running_batch.is_clear():
                 self.running_batch = None
         return
@@ -430,6 +433,8 @@ class RouterManager:
             Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
         )
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
+        if self.schedule_new_batch is not None:
+            logger.info(f"gen new batch, {self.schedule_new_batch.simple_log()}")
         return
 
     def _multinode_tp_generate_new_batch(self):

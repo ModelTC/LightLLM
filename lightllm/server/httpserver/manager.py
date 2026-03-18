@@ -78,11 +78,19 @@ class HttpServerManager:
                 )
 
         self.enable_multimodal = args.enable_multimodal
+
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+        if not self.args.disable_vision:
             self.send_to_visual = context.socket(zmq.PUSH)
             self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+
+        if not self.args.disable_audio:
+            self.send_to_audio = context.socket(zmq.PUSH)
+            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
             self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
@@ -344,7 +352,7 @@ class HttpServerManager:
 
                     alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
                 alloced_req_indexes.append(alloc_req_index)
-            req_objs = []
+            req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):
                 req_obj = await self.shm_req_manager.async_get_req_obj_by_index(req_index)
                 req_obj.init(
@@ -355,6 +363,12 @@ class HttpServerManager:
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
                 req_objs.append(req_obj)
+
+            logger.debug(
+                f"alloc shm_req for req_id {group_request_id}, "
+                f"shm_req num: {sampling_params.n} details (req_id, index_in_shm_mem):  "
+                f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
+            )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
@@ -438,13 +452,20 @@ class HttpServerManager:
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
                 ), "too many multimodal items!"
                 if multimodal_params.audios:
-                    assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
+                    assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
             else:
                 prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
+
+            if self.args.detail_log:
+                logger.debug(
+                    f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
+                    f"samplingparmas: {sampling_params.to_dict()}\n"
+                    f"token_ids: {prompt_ids}"
+                )
             return prompt_ids
 
         # 这里的校验对多模态不是很充分, to do
@@ -467,10 +488,21 @@ class HttpServerManager:
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
             if self.args.long_truncation_mode is None:
-                raise ValueError(
-                    f"the input prompt token len {prompt_tokens} + max_new_tokens \
-                        {sampling_params.max_new_tokens} > {self.max_req_total_len}"
-                )
+                # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
+                # 修改 max_new_tokens 的值，使其满足合法约束。
+                new_max_new_tokens = self.max_req_total_len - prompt_tokens
+                if new_max_new_tokens > 0:
+                    logger.debug(
+                        f"the input prompt token len {prompt_tokens} + max_new_tokens"
+                        f"{sampling_params.max_new_tokens} > {self.max_req_total_len},"
+                        f"so change max_new_tokens to {new_max_new_tokens}"
+                    )
+                    sampling_params.max_new_tokens = new_max_new_tokens
+                else:
+                    raise ValueError(
+                        f"the input prompt token len {prompt_tokens} + max_new_tokens \
+                            {sampling_params.max_new_tokens} > {self.max_req_total_len}"
+                    )
             elif self.args.long_truncation_mode == "head":
                 prompt_ids = prompt_ids[-(self.max_req_total_len - sampling_params.max_new_tokens) :]
             elif self.args.long_truncation_mode == "center":
@@ -514,11 +546,12 @@ class HttpServerManager:
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
-            if self.enable_multimodal:
-                self.send_to_visual.send_pyobj(
-                    group_req_objs.to_group_req_index(),
-                    protocol=pickle.HIGHEST_PROTOCOL,
-                )
+            if not self.args.disable_vision:
+                self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
+                return
+
+            if not self.args.disable_audio:
+                self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if self.args.enable_cpu_cache:
@@ -694,6 +727,7 @@ class HttpServerManager:
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
+                    logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)

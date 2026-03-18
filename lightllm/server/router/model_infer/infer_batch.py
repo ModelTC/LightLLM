@@ -288,6 +288,7 @@ class InferenceContext:
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
+                    logger.debug(f"infer paused req id {req.req_id}")
 
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
@@ -312,6 +313,7 @@ class InferenceContext:
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
+                    logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
                 revovered_reqs.append(req)
 
