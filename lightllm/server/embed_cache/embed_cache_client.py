@@ -24,11 +24,11 @@ class CpuEmbedCacheClient(object):
 
         if create_meta_data:
             self.token_index_manager = MemoryManager(total_size=self.token_num)
+
+        if init_shm_data:
+            self._create_shm_embed_kv_cache()
         else:
-            if init_shm_data:
-                self._create_shm_embed_kv_cache()
-            else:
-                self._attach_shm_cpu_embed_cache()
+            self._attach_shm_cpu_embed_cache()
         return
 
     def alloc_indexes(self, token_num: int) -> Optional["MemoryBlock"]:
@@ -64,21 +64,7 @@ class CpuEmbedCacheClient(object):
         shm_ptr = create_shm_kv_cache_ptr(
             key=self.args.multi_modal_cache_shm_id, size=self.embed_cache_tensor_meta.calcu_size()
         )
-        handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.embed_cache_tensor_meta.calcu_size())
-        handle.wait()
-        numpy_array = np.frombuffer(
-            memoryview((ctypes.c_uint8 * self.embed_cache_tensor_meta.calcu_size()).from_address(shm_ptr)),
-            dtype=np.uint8,
-        )
-        # 将 NumPy 数组转换为 PyTorch 张量
-        shape = (
-            self.embed_cache_tensor_meta.token_num,
-            self.embed_cache_tensor_meta.layer_num,
-            self.embed_cache_tensor_meta.hidden_size,
-        )
-        self.cpu_embed_cache_tensor = (
-            torch.from_numpy(numpy_array).view(dtype=self.embed_cache_tensor_meta.data_type).view(shape)
-        )
+        logger.info(f"create embed cache shm ptr: {shm_ptr}, size: {self.embed_cache_tensor_meta.calcu_size()}")
         return
 
     def _attach_shm_cpu_embed_cache(self):
