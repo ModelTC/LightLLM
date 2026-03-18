@@ -13,8 +13,7 @@ from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import (
     Qwen3VLPreAndPostLayerWeight,
 )
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
-    Qwen35FullAttentionTransformerLayerInfer,
-    Qwen35GatedDeltaNetTransformerLayerInfer,
+    Qwen35TransformerLayerInfer,
 )
 from lightllm.models.qwen3_5.infer_struct import Qwen35InferStateInfo
 from lightllm.common.build_utils import repair_config
@@ -52,9 +51,11 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         - Multimodal embeddings merged with text embeddings
     """
 
-    pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
     transformer_weight_class = Qwen35TransformerLayerWeight
     pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
+
+    pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
+    transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
     infer_state_class = Qwen35InferStateInfo
 
@@ -97,26 +98,3 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         # Calculate num_kv_heads for KV cache memory management
         # Required by parent class _init_mem_manager() in Qwen3NextTpPartModel
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-
-    def _init_infer_layer(self):
-        """
-        Initialize inference layers for Qwen3.5 multimodal model.
-
-        Uses mrope-enabled transformer layers to properly handle image/video
-        tokens with 3D position encoding (temporal, height, width).
-
-        This overrides the parent class to use Qwen35* layer classes instead
-        of Qwen3Next* layer classes.
-        """
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config)
-        num_full_attention_layers = self.config["full_attention_interval"]
-
-        self.layers_infer = [
-            (
-                Qwen35FullAttentionTransformerLayerInfer(i, network_config=self.config)
-                if (i + 1) % num_full_attention_layers == 0
-                else Qwen35GatedDeltaNetTransformerLayerInfer(i, network_config=self.config)
-            )
-            for i in range(self.config["n_layer"])
-        ]

@@ -3,8 +3,7 @@ import torch.distributed as dist
 from typing import Tuple
 
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
-    Qwen3NextFullAttentionTransformerLayerInfer,
-    Qwen3NextGatedDeltaNetTransformerLayerInfer,
+    Qwen3NextTransformerLayerInfer,
 )
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
@@ -16,7 +15,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class Qwen35FullAttentionTransformerLayerInfer(Qwen3NextFullAttentionTransformerLayerInfer):
+class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         # Initialize mrope section from config
@@ -57,11 +56,3 @@ class Qwen35FullAttentionTransformerLayerInfer(Qwen3NextFullAttentionTransformer
             partial_rotary_factor=self.partial_rotary_factor,
         )
         return q, cache_kv
-
-
-class Qwen35GatedDeltaNetTransformerLayerInfer(Qwen3NextGatedDeltaNetTransformerLayerInfer):
-    def __init__(self, layer_num, network_config):
-        super().__init__(layer_num, network_config)
-        rope_scaling = network_config.get("rope_scaling", {})
-        mrope_section = rope_scaling.get("mrope_section", [11, 11, 10])
-        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")

@@ -14,7 +14,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
 class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
         num_full_attention_layers = network_config["full_attention_interval"]
-        self.is_linear_attention = (layer_num + 1) % num_full_attention_layers != 0
+        self.is_linear_attention_layer = (layer_num + 1) % num_full_attention_layers != 0
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
@@ -42,7 +42,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         )
 
     def _init_weight(self):
-        if self.is_linear_attention:
+        if self.is_linear_attention_layer:
             self._init_gdn_weight()
         else:
             self._init_qkv()
@@ -71,7 +71,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             weight_name=self._ffn_norm_weight_name,
             data_type=self.data_type_,
         )
-        if not self.is_linear_attention:
+        if not self.is_linear_attention_layer:
             self.qk_norm_weight_ = QKGEMMANormWeight(
                 dim=self.head_dim,
                 q_weight_name=self._q_norm_name,
@@ -268,6 +268,6 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def load_hf_weights(self, weights):
         self._split_q_with_gate(weights)
-        if self.is_linear_attention:
+        if self.is_linear_attention_layer:
             self._preprocess_weight(weights)
         super().load_hf_weights(weights)

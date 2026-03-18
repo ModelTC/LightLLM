@@ -41,7 +41,6 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.qwen3next_mtp.model import Qwen3NextMTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
@@ -352,8 +351,6 @@ class ModeBackend:
             elif model_type == "mistral":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_next":
-                self.draft_models.append(Qwen3NextMTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))

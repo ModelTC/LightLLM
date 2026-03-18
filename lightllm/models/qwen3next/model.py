@@ -8,8 +8,7 @@ from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
 )
 from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qwen3NextPreAndPostLayerWeight
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
-    Qwen3NextFullAttentionTransformerLayerInfer,
-    Qwen3NextGatedDeltaNetTransformerLayerInfer,
+    Qwen3NextTransformerLayerInfer,
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
@@ -26,9 +25,14 @@ logger = init_logger(__name__)
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
 
+    # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
 
+    # infer class
+    transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
+
+    # infer state class
     infer_state_class = Qwen3NextInferStateInfo
 
     use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states
@@ -135,17 +139,3 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManagerForMamba(self.max_req_num, create_max_seq_len, self.mem_manager)
-
-    def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config)
-        num_full_attention_layers = self.config["full_attention_interval"]
-
-        self.layers_infer = [
-            (
-                Qwen3NextFullAttentionTransformerLayerInfer(i, network_config=self.config)
-                if (i + 1) % num_full_attention_layers == 0
-                else Qwen3NextGatedDeltaNetTransformerLayerInfer(i, network_config=self.config)
-            )
-            for i in range(self.config["n_layer"])
-        ]
