@@ -200,7 +200,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
-        "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
+        "--max_req_total_len",
+        type=int,
+        default=16384,
+        help="Maximum allowed length for a request (input tokens + output tokens). "
+        "In PD (Prefill-Decode) mode, this value must be synchronized across the "
+        "PD master, prefill, and decode nodes.",
     )
     parser.add_argument(
         "--nccl_host",

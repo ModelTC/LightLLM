@@ -32,6 +32,8 @@ class HttpServerManagerForPDMaster:
         args: StartArgs,
     ):
         self.args = args
+        self.max_req_total_len = args.max_req_total_len
+        assert self.max_req_total_len is not None
         self.metric_client = MetricClient(args.metric_port)
         self.id_gen = ReqIDGenerator()
 
@@ -95,6 +97,16 @@ class HttpServerManagerForPDMaster:
     ):
         assert isinstance(prompt, str), "prompt must be str"
         start_time = time.time()
+        # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
+        # sampling_params 的参数进行修正。
+        input_token_num = self.tokens(prompt, multimodal_params, sampling_params)
+        fake_prompt_ids = [0 for _ in range(input_token_num)]
+        from lightllm.server.httpserver.manager import HttpServerManager
+
+        await HttpServerManager._check_and_repair_length(
+            self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
+        )
+
         # 先将请求根据max_new_tokens 参数进行分块操作，主要是 pd 分离场景中，
         # 只能使用保守调度，但是如果用户都设置一个很大的 max_new_tokens 值，会
         # 导致极大显存预留，照成系统的吞吐能力下降，所以我们将请求分割成几段进行
@@ -551,6 +563,15 @@ class PDManager:
 
     def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)
+        client_max_req_total_len = pd_client.start_args["max_req_total_len"]
+        if client_max_req_total_len != self.args.max_req_total_len:
+            logger.error(
+                f"client dont has same max_req_total_len params, but pd master is {self.args.max_req_total_len}"
+                f"client is {client_max_req_total_len}"
+                f"client info {pd_info_json}"
+            )
+            assert False
+
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
 

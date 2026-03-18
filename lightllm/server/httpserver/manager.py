@@ -480,10 +480,21 @@ class HttpServerManager:
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
             if self.args.long_truncation_mode is None:
-                raise ValueError(
-                    f"the input prompt token len {prompt_tokens} + max_new_tokens \
-                        {sampling_params.max_new_tokens} > {self.max_req_total_len}"
-                )
+                # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
+                # 修改 max_new_tokens 的值，使其满足合法约束。
+                new_max_new_tokens = self.max_req_total_len - prompt_tokens
+                if new_max_new_tokens > 0:
+                    logger.debug(
+                        f"the input prompt token len {prompt_tokens} + max_new_tokens"
+                        f"{sampling_params.max_new_tokens} > {self.max_req_total_len},"
+                        f"so change max_new_tokens to {new_max_new_tokens}"
+                    )
+                    sampling_params.max_new_tokens = new_max_new_tokens
+                else:
+                    raise ValueError(
+                        f"the input prompt token len {prompt_tokens} + max_new_tokens \
+                            {sampling_params.max_new_tokens} > {self.max_req_total_len}"
+                    )
             elif self.args.long_truncation_mode == "head":
                 prompt_ids = prompt_ids[-(self.max_req_total_len - sampling_params.max_new_tokens) :]
             elif self.args.long_truncation_mode == "center":
