@@ -137,9 +137,7 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.info(
-                    f"pd log gen sub req id {block_group_request_id}" f" for main req id {origin_group_request_id}"
-                )
+                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_group_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
 
                 results_generator = self._wait_to_token_package(
