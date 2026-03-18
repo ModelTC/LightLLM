@@ -278,6 +278,7 @@ def triton_support_tensor_descriptor() -> bool:
 
     try:
         from triton.tools.tensor_descriptor import TensorDescriptor
+
         _ = TensorDescriptor
 
         support_tma = torch.cuda.get_device_capability() >= (9, 0) and not is_5090_gpu()
