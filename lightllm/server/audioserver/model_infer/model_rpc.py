@@ -44,7 +44,8 @@ class AudioModelRpcServer(rpyc.Service):
             set_current_device_id(torch.cuda.current_device())
 
             self.cpu_embed_cache_client = CpuEmbedCacheClient(
-                create_meta_data=False, init_shm_data=kvargs["init_shm_data"]
+                create_meta_data=False,
+                init_shm_data=False,
             )
         except Exception as e:
             print("#" * 16)
