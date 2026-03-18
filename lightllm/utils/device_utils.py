@@ -90,12 +90,14 @@ def is_musa():
 
 @lru_cache(maxsize=1)
 def is_nvidia():
-    return (
+    ans = (
         torch.cuda.is_available()
         and getattr(torch.version, "cuda", None) is not None
         and getattr(torch.version, "hip", None) is None
         and not is_musa()
     )
+    logger.info(f"device is_nvidia : {ans}")
+    return ans
 
 
 @lru_cache(maxsize=None)
@@ -272,6 +274,7 @@ def set_sm_limit(percent: int, gpu_index=0):
 
 @lru_cache(maxsize=None)
 def support_tma() -> bool:
+    # 5090 关闭 tma feature，实际测试开了没啥用
     return is_nvidia() and torch.cuda.get_device_capability() >= (9, 0) and not is_5090_gpu()
 
 
