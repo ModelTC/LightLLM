@@ -271,9 +271,17 @@ def set_sm_limit(percent: int, gpu_index=0):
 
 
 @lru_cache(maxsize=None)
+def support_tma() -> bool:
+    return is_nvidia() and torch.cuda.get_device_capability() >= (9, 0) and not is_5090_gpu()
+
+
+@lru_cache(maxsize=None)
 def triton_support_tensor_descriptor() -> bool:
-    if not is_nvidia():
-        logger.info("triton tensor_descriptor requires NVIDIA CUDA GPU")
+    if not support_tma():
+        logger.info(
+            "triton tensor_descriptor requires NVIDIA Hopper or newer GPU (compute capability >= 9.0) "
+            "and is not supported on 5090"
+        )
         return False
 
     try:
@@ -281,10 +289,8 @@ def triton_support_tensor_descriptor() -> bool:
 
         _ = TensorDescriptor
 
-        support_tma = torch.cuda.get_device_capability() >= (9, 0) and not is_5090_gpu()
-        if support_tma:
-            logger.info("triton support tensor_descriptor")
-            return True
+        logger.info("triton support tensor_descriptor")
+        return True
     except Exception:
         pass
 
