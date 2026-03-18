@@ -39,6 +39,8 @@ from lightllm.models.tarsier2.model import (
     Tarsier2LlamaTpPartModel,
 )
 from lightllm.models.gpt_oss.model import GptOssTpPartModel
+from lightllm.models.neo_chat_moe.model import NeoTpMOEPartModel
+from lightllm.models.neo_chat.model import NeoTpPartModel
 from lightllm.models.qwen3_omni_moe_thinker.model import Qwen3OmniMOETpPartModel
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
 from lightllm.models.qwen3_5_moe.model import Qwen3_5MOETpPartModel

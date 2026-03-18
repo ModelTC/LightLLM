@@ -131,6 +131,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            microbatch_index=infer_state.microbatch_index,
         )
         return hidden_states.view(num_tokens, hidden_dim)
 
@@ -151,6 +152,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
             is_prefill=infer_state.is_prefill,
+            microbatch_index=infer_state.microbatch_index,
         )
 
         ep_output = ep_output.view(token_num, hidden_dim)

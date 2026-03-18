@@ -65,6 +65,7 @@ class AttControl:
     mla_prefill_dict: Dict = None
     mla_decode: bool = False
     mla_decode_dict: Dict = None
+    scale: float = None
 
 
 @dataclass

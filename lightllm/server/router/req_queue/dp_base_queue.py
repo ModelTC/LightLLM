@@ -27,6 +27,12 @@ class DpQueue:
         self.reqs_waiting_for_dp_index: List[List[Req]] = []
         return
 
+    def free_aborted_req(self, req: Req):
+        dp_index = req.sample_params.suggested_dp_index
+        assert dp_index >= 0 and dp_index < self.dp_size_in_node
+        self.inner_queues[dp_index].free_aborted_req(req)
+        return
+
     def get_dp_queue(self, dp_index: int):
         assert dp_index < self.dp_size_in_node, "dp index out of range"
         return self.inner_queues[dp_index]

@@ -54,6 +54,8 @@ class SamplingParams:
         # processor which only retains scores for the given token ids. Defaults to None.
         # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
         allowed_token_ids: Optional[List[int]] = None,
+        # if provided, the invalid token ids will be ignored during generation
+        invalid_token_ids: Optional[List[int]] = None,
         # p d mode used params
         group_request_id: Optional[int] = None,
         # move kv to deocde node, only used in pd mode
@@ -89,6 +91,7 @@ class SamplingParams:
         self.guided_grammar = guided_grammar
         self.guided_json = guided_json
         self.allowed_token_ids = allowed_token_ids
+        self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
         self.move_kv_to_decode_node = move_kv_to_decode_node
         self.suggested_dp_index = suggested_dp_index
@@ -111,13 +114,18 @@ class SamplingParams:
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            def _cfg(key, default):
+                v = generation_cfg.get(key)
+                return v if v is not None else default
+
+            cls._do_sample = _cfg("do_sample", False)
+            cls._presence_penalty = _cfg("presence_penalty", 0.0)
+            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
+            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
+            cls._temperature = _cfg("temperature", 1.0)
+            cls._top_p = _cfg("top_p", 1.0)
+            cls._top_k = _cfg("top_k", -1)
             cls._stop_sequences = generation_cfg.get("stop", None)
         except:
             pass
@@ -269,6 +277,7 @@ class SamplingParams:
         ret["guided_grammar"] = self.guided_grammar
         ret["guided_json"] = self.guided_json
         ret["allowed_token_ids"] = self.allowed_token_ids
+        ret["invalid_token_ids"] = self.invalid_token_ids
         ret["move_kv_to_decode_node"] = self.move_kv_to_decode_node
         ret["seed"] = self.seed
         return ret

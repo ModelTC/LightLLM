@@ -34,6 +34,17 @@ class BaseQueue:
             req.cpu_cache_match_page_indexes.clear()
             self.router.cpu_cache_client.lock.release()
 
+    def free_aborted_req(self, req: Req):
+        # 为了让http server 能正常返回请求，还没有开始推理的请求，直接设置结束，返回空字符串
+        input_len = req.input_len
+        req.link_prompt_ids_shm_array()
+        req.link_logprobs_shm_array()
+        req.candetoken_out_len = 1
+        req.finish_token_index = input_len
+        req.shm_prompt_ids.arr[input_len] = self.args.eos_id[0]
+        req.shm_logprobs.arr[input_len] = 0
+        req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+
     def extend(self, req_group: List[Req]):
         for req in req_group:
             req.sample_params.suggested_dp_index = self.dp_index

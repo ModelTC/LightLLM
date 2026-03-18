@@ -62,5 +62,7 @@ class FuseMoeBaseImpl:
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        moe_layer_index: Optional[int] = None,
+        microbatch_index: int = 0,
     ) -> torch.Tensor:
         pass

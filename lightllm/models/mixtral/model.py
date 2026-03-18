@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.routing_manager import init_routing_capture
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
@@ -45,6 +46,9 @@ class MixtralTpPartModel(TpPartBaseModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
+        if self.args.enable_return_routed_experts:
+            num_moe_layers = len(self.trans_layers_weight)
+            init_routing_capture(self, num_moe_layers)
         return
 
     def _init_mem_manager(self):

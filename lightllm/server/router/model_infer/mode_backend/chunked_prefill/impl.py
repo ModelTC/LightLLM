@@ -51,6 +51,14 @@ class ChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         return
 
+    def _maybe_insert_hybrid_radix_cache(self, run_reqs: List[InferReq]):
+        # Insert hybrid radix cache entries if applicable, use for hybrid attention models.
+        if self.use_buffer_manager and self.radix_cache is not None:
+            torch.cuda.synchronize()
+            g_infer_state_lock.acquire()
+            self.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
+            g_infer_state_lock.release()
+
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
         try:
@@ -110,6 +118,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
+            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -150,6 +159,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
+            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -188,6 +198,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
+            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
@@ -221,6 +232,8 @@ class ChunkedPrefillBackend(ModeBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
+        self._maybe_insert_hybrid_radix_cache(run_reqs)
+
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -238,6 +251,7 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             b_mtp_index_cpu = model_input.b_mtp_index
             model_output = self.model.forward(model_input)
+            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
             b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]

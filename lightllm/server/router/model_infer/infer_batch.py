@@ -20,6 +20,7 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.common.basemodel import routing_manager as _routing_mgr
 
 logger = init_logger(__name__)
 
@@ -52,6 +53,7 @@ class InferenceContext:
         radix_cache: RadixCache,
         shm_req_manager: ShmReqManager,
         vocab_size: int,
+        use_mamba_model: bool = False,
     ):
         self.args = get_env_start_args()
         from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -153,7 +155,21 @@ class InferenceContext:
 
         return req_objs
 
+    def _extract_routing_data(self, req: "InferReq"):
+        if req.shm_req.shm_routing_num_tokens > 0:
+            return
+        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
+        mgr = _routing_mgr.g_routing_capture_manager
+        routing_data = mgr.extract_routing_data(mem_indexes)
+        req.shm_req.create_routing_data_shm_array(mgr.num_moe_layers, req.cur_kv_len, mgr.topk, np_dtype=mgr.np_dtype)
+        req.shm_req.shm_routing_data.arr[:] = routing_data
+        req.shm_req.shm_routing_data.detach_shm()
+
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
+        # If no KV cache has been allocated yet, there's nothing to free
+        if req.cur_kv_len == 0:
+            return
+
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
@@ -226,6 +242,8 @@ class InferenceContext:
         if len(finished_request_ids) == 0:
             return
 
+        need_routing_data = _routing_mgr.g_routing_capture_manager is not None
+
         free_req_index = []
         free_token_index = []
         free_buffer_index = []
@@ -233,7 +251,12 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
+
+            if need_routing_data:
+                self._extract_routing_data(req)
+
             self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
@@ -355,6 +378,7 @@ class InferSamplingParams:
 
         self.fsm_current_state: int = 0
         self.allowed_token_ids = self.shm_param.allowed_token_ids.to_list()
+        self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
         if len(self.allowed_token_ids) == 0:
             self.allowed_token_ids = None
 
@@ -369,6 +393,11 @@ class InferSamplingParams:
             if not all(e < vocab_size for e in self.allowed_token_ids):
                 logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
                 self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
+
+        if len(self.invalid_token_ids) > 0:
+            if not all(e < vocab_size for e in self.invalid_token_ids):
+                logger.error("invalid_token_ids contain tokenid >= vobsize, we remove these token ids")
+                self.invalid_token_ids = [e for e in self.invalid_token_ids if e < vocab_size]
 
         # nixl decode node information
         if self.shm_param.nixl_params.data_len > 0:
@@ -440,6 +469,11 @@ class InferReq:
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
 
+        # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
+        self.mamba_model_match_len = 0
+        self.mamba_buffer_insert_len = 0
+        self.extra_need_to_free_token_index = []
+
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
@@ -497,7 +531,7 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            share_node, miss_prefix_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -505,6 +539,13 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+
+                if g_infer_context.use_mamba_model:
+                    MAMBA_PREFILL_BLOCK_SIZE = 128
+                    MAMBA_MIN_INSERT_LEN = 1024
+                    miss_prefix_len = miss_prefix_len - miss_prefix_len % MAMBA_PREFILL_BLOCK_SIZE
+                    if miss_prefix_len > MAMBA_MIN_INSERT_LEN:
+                        self.mamba_buffer_insert_len = miss_prefix_len
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -560,6 +601,11 @@ class InferReq:
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+
+        if self.mamba_buffer_insert_len > 0:
+            chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
+            self.mamba_buffer_insert_len = 0
+
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
@@ -586,6 +632,8 @@ class InferReq:
             self.finish_status.set_status(FinishStatus.FINISHED_STOP)
         elif output_len >= self.sampling_param.shm_param.max_new_tokens:
             self.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
+        elif self.infer_aborted:
+            self.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
         return
 
     def _stop_sequences_matched(self, output_len: int):
@@ -675,6 +723,8 @@ class InferReqUpdatePack:
             shm_req.shm_cur_output_len = self.output_len
 
             if finish_status.is_finished():
+                if _routing_mgr.g_routing_capture_manager is not None:
+                    g_infer_context._extract_routing_data(req_obj)
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
                 shm_req.finish_status = req_obj.finish_status
 

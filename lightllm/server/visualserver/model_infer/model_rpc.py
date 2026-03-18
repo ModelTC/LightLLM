@@ -4,6 +4,7 @@ import rpyc
 import torch
 import socket
 import inspect
+import setproctitle
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
@@ -19,6 +20,7 @@ from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrain
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
+from lightllm.models.neo_chat_moe.neo_visual import NeoVisionTransformerPretrainedModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
@@ -26,6 +28,8 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
+from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.envs_utils import get_unique_server_name
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -81,6 +85,8 @@ class VisualModelRpcServer(rpyc.Service):
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
                 self.model = Gemma3VisionModel()
+            elif self.model_type == "neo_chat":
+                self.model = NeoVisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             elif (
                 model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
                 == "qwen3_omni_moe_vision_encoder"
@@ -182,6 +188,8 @@ class VisualModelRpcClient:
 def _init_env(port, device_id):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server::RANK{device_id}")
+    start_parent_check_thread()
 
     import lightllm.utils.rpyc_fix_utils as _
 
