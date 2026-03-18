@@ -584,8 +584,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
-            "qwen3next_vanilla",
-            "qwen3next_eagle",
             None,
         ],
         default=None,
