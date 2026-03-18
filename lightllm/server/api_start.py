@@ -105,6 +105,17 @@ def normal_or_p_d_start(args):
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
 
+    # 调度参数的自动设置, 人工设置则听人工的
+    if args.router_token_ratio is None:
+        if args.run_mode in ["normal"]:
+            args.router_token_ratio = 0.85
+        else:
+            # pd 分离模式下，不开启高级调度
+            args.router_token_ratio = 0.0
+    # 部分模式还不能支持与高级动态调度算法协同，to do.
+    if args.diverse_mode:
+        assert args.router_token_ratio == 0.0
+
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 
@@ -145,10 +156,6 @@ def normal_or_p_d_start(args):
     if args.return_all_prompt_logprobs:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-
-    # 部分模式还不能支持与高级动态调度算法协同，to do.
-    if args.diverse_mode:
-        assert args.router_token_ratio == 0.0
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
@@ -235,7 +242,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -409,7 +416,12 @@ def pd_master_start(args):
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(num=1, used_nccl_ports=[args.nccl_port, args.port])
+    can_use_ports = alloc_can_use_network_port(
+        num=1,
+        used_ports=[
+            args.port,
+        ],
+    )
     metric_port = can_use_ports[0]
 
     args.metric_port = metric_port
@@ -435,7 +447,6 @@ def pd_master_start(args):
         "-",
         "--error-logfile",
         "-",
-        "--preload",
         "lightllm.server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
@@ -473,7 +484,6 @@ def config_server_start(args):
         "-",
         "--error-logfile",
         "-",
-        "--preload",
         "lightllm.server.config_server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",

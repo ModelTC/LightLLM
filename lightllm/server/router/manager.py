@@ -33,6 +33,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from .stats import RouterStatics
 
 
 logger = init_logger(__name__)
@@ -105,6 +106,7 @@ class RouterManager:
             if not self.args.enable_cpu_cache
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
+        self.router_statics = RouterStatics(self.args)
         return
 
     async def wait_to_model_ready(self):
@@ -256,6 +258,7 @@ class RouterManager:
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
+                        logger.debug(self.router_statics.log_str())
                         self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
@@ -347,7 +350,7 @@ class RouterManager:
 
     def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
-            self.running_batch.filter_out_finished_req(self.shm_req_manager)
+            self.running_batch.filter_out_finished_req(self.shm_req_manager, self.router_statics)
             if self.running_batch.is_clear():
                 self.running_batch = None
         return

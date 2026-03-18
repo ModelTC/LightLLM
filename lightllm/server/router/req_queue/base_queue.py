@@ -25,7 +25,6 @@ class BaseQueue:
         self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
-        self.router_max_new_token_len = args.router_max_new_token_len
 
     def free_aborted_req_cpu_cache_pages(self, req: Req):
         if self.args.enable_cpu_cache:

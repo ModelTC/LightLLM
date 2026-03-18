@@ -7,12 +7,12 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def alloc_can_use_network_port(num=3, used_nccl_ports=None, from_port_num=10000):
+def alloc_can_use_network_port(num=3, used_ports=None, from_port_num=10000):
     port_list = []
     for port in range(from_port_num, 65536):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             result = s.connect_ex(("localhost", port))
-            if result != 0 and port not in used_nccl_ports:
+            if result != 0 and port not in used_ports:
                 port_list.append(port)
             if len(port_list) > num * 30:
                 break

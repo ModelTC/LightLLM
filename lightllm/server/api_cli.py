@@ -200,7 +200,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
-        "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
+        "--max_req_total_len",
+        type=int,
+        default=16384,
+        help="Maximum allowed length for a request (input tokens + output tokens). "
+        "In PD (Prefill-Decode) mode, this value must be synchronized across the "
+        "PD master, prefill, and decode nodes.",
     )
     parser.add_argument(
         "--nccl_host",
@@ -237,11 +242,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         This setting allows you to turn off these warning checks.""",
     )
 
-    parser.add_argument("--router_token_ratio", type=float, default=0.0, help="token ratio to control router dispatch")
     parser.add_argument(
-        "--router_max_new_token_len", type=int, default=1024, help="the request max new token len for router"
+        "--router_token_ratio",
+        type=float,
+        default=None,
+        help="""Token used ratio to control router dispatch, range in [0.0, 1.0].
+            When the token VRAM usage ratio is higher than this value,
+            the dispatch strategy tends to be conservative.
+            When the token VRAM usage ratio is lower than this value,
+            the dispatching of requests tends to be aggressive.
+            The default value is None, meaning it will be automatically
+            determined by the internal system based on other startup parameters.""",
     )
-
     parser.add_argument(
         "--router_max_wait_tokens",
         type=int,
