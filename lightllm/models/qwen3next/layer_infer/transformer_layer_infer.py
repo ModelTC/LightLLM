@@ -47,13 +47,46 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             self._init_linear_layer_metadata(layer_num, network_config)
         return
 
+    def _init_linear_layer_metadata(self, layer_num, network_config):
+
+        # Linear attention specific dimensions
+        self.num_v_heads = network_config["linear_num_value_heads"]
+        self.num_k_heads = network_config["linear_num_key_heads"]
+        self.head_k_dim = network_config["linear_key_head_dim"]
+        self.head_v_dim = network_config["linear_value_head_dim"]
+        self.key_dim = self.head_k_dim * self.num_k_heads
+        self.value_dim = self.head_v_dim * self.num_v_heads
+        self.conv_kernel_dim = network_config["linear_conv_kernel_dim"]
+        self.activation = network_config["hidden_act"]
+
+        # Tensor parallelism dimensions
+        self.tp_qkvz_dim = (self.key_dim * 2 + self.value_dim * 2) // self.tp_world_size_
+        self.tp_ba_dim = (self.num_v_heads * 2) // self.tp_world_size_
+        self.tp_num_k_heads = self.num_k_heads // self.tp_world_size_
+        self.tp_num_v_heads = self.num_v_heads // self.tp_world_size_
+        self.tp_key_dim = self.key_dim // self.tp_world_size_
+        self.tp_value_dim = self.value_dim // self.tp_world_size_
+
+        assert self.num_v_heads % self.num_k_heads == 0, "num_v_heads must be divisible by num_k_heads"
+        self.num_v_heads_per_k_head = self.num_v_heads // self.num_k_heads
+
+        # SSM state dtype optimization
+        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        start_args = get_env_start_args()
+        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.mamba_ssm_data_type, torch.bfloat16)
+
+        # Pre-compute whether dtype conversion is needed
+        # GDN kernel output dtype is self.data_type
+        # Conversion needed only if SSM state uses different dtype
+        self.needs_ssm_dtype_conversion = get_llm_data_type() != self.ssm_state_dtype
+        return
+
     def _bind_func(self):
         super()._bind_func()
         self._bind_ffn()
         return
 
     def _bind_ffn(self):
-        """Bind FFN implementation based on MoE configuration."""
         if self.is_moe:
             moe_mode = os.environ.get("MOE_MODE", "TP")
             if moe_mode == "EP":
@@ -76,7 +109,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-        """MoE FFN with tensor parallelism."""
 
         shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
 
@@ -99,7 +131,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_edp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-        """MoE FFN with expert parallelism."""
         shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
@@ -124,9 +155,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        QKV projection with output gating, Q/K normalization, and partial rotary embedding.
-        """
         input = input.view(-1, self.embed_dim_)
         qkv_out = layer_weight.qkv_proj.mm(input)
         q, cache_kv = qkv_out.split(
@@ -163,40 +191,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state.gate_value = None
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
-
-    def _init_linear_layer_metadata(self, layer_num, network_config):
-
-        # Linear attention specific dimensions
-        self.num_v_heads = network_config["linear_num_value_heads"]
-        self.num_k_heads = network_config["linear_num_key_heads"]
-        self.head_k_dim = network_config["linear_key_head_dim"]
-        self.head_v_dim = network_config["linear_value_head_dim"]
-        self.key_dim = self.head_k_dim * self.num_k_heads
-        self.value_dim = self.head_v_dim * self.num_v_heads
-        self.conv_kernel_dim = network_config["linear_conv_kernel_dim"]
-        self.activation = network_config["hidden_act"]
-
-        # Tensor parallelism dimensions
-        self.tp_qkvz_dim = (self.key_dim * 2 + self.value_dim * 2) // self.tp_world_size_
-        self.tp_ba_dim = (self.num_v_heads * 2) // self.tp_world_size_
-        self.tp_num_k_heads = self.num_k_heads // self.tp_world_size_
-        self.tp_num_v_heads = self.num_v_heads // self.tp_world_size_
-        self.tp_key_dim = self.key_dim // self.tp_world_size_
-        self.tp_value_dim = self.value_dim // self.tp_world_size_
-
-        assert self.num_v_heads % self.num_k_heads == 0, "num_v_heads must be divisible by num_k_heads"
-        self.num_v_heads_per_k_head = self.num_v_heads // self.num_k_heads
-
-        # SSM state dtype optimization
-        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        start_args = get_env_start_args()
-        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.mamba_ssm_data_type, torch.bfloat16)
-
-        # Pre-compute whether dtype conversion is needed
-        # GDN kernel output dtype is self.data_type
-        # Conversion needed only if SSM state uses different dtype
-        self.needs_ssm_dtype_conversion = get_llm_data_type() != self.ssm_state_dtype
-        return
 
     # ==================== GDN Helper Methods ====================
 
@@ -236,15 +230,12 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         assert isinstance(infer_state.mem_manager, Qwen3NextHybridMemManager)
 
-        # Common preprocessing
         input = input.view(-1, self.embed_dim_)
         conv_states, ssm_states = infer_state.mem_manager.get_mamba_cache(self.layer_num_)
 
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
-        # mixed_qkv is now returned pre-concatenated (no torch.cat needed)
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)
 
-        # Dispatch to appropriate kernel
         if is_prefill:
             # Prefill: compute g/beta upfront (chunk kernel doesn't support fused gating)
             g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
@@ -255,24 +246,20 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             # Decode (non-MTP): fuse gating into recurrent kernel to save 2 kernel launches
             core_attn_out = self._gdn_decode_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
 
-        # Common postprocessing
-        num_tokens = z.shape[0]  # batch (decode) or total_tokens (prefill/MTP)
+        num_tokens = z.shape[0]
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         norm_out = self.alloc_tensor(core_attn_out.shape, core_attn_out.dtype, device=core_attn_out.device)
         gated_rmsnorm_forward(
             core_attn_out,
             layer_weight.linear_norm.weight,
-            None,  # RMSNormWeight has no bias
+            None,
             self.eps_,
             z,
             out=norm_out,
         )
-        # Merge head and value dims in a single view: (num_tokens * HV, V) → (num_tokens, HV * V)
         core_attn_out = norm_out.view(num_tokens, -1)
-
         output = layer_weight.linear_out_proj.mm(core_attn_out)
-        # Note: all_reduce is handled by context_forward/token_forward callers
         return output
 
     def _split_qkvzba(self, mixed_qkvzba, is_decode=False):
@@ -352,7 +339,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             head_first=False,
             use_qk_l2norm_in_kernel=True,
         )
-        # Use pre-computed dtype conversion flag to avoid runtime check
         if self.needs_ssm_dtype_conversion:
             ssm_states[infer_state.b_buffer_idx] = last_recurrent_state.to(self.ssm_state_dtype, copy=False)
         else:
