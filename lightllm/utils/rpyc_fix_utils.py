@@ -103,7 +103,7 @@ def fix_accept(self):
     while self.active:
         try:
             sock, addrinfo = self.listener.accept()
-            if str(sock.family) != "AddressFamily.AF_UNIX":
+            if sock.family != socket.AF_UNIX:
                 logger.info("set nodelay mode")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
