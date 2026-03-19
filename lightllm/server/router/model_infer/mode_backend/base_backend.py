@@ -374,10 +374,10 @@ class ModeBackend:
 
     def release_memory_occupation(self, tags: List[MemoryTag]):
         try:
-            self.model.release_memory_occupation(tags)
-            self.flush_cache(request=None)
             self.model.req_manager.free_all()
             self.model.mem_manager.free_all()
+            self.model.release_memory_occupation(tags)
+            self.flush_cache(request=None)
             return True, "Succeeded to release memory occupation."
         except Exception as e:
             self.logger.error(f"release memory occupation failed: {str(e)}")
@@ -386,6 +386,8 @@ class ModeBackend:
     def resume_memory_occupation(self, tags: List[MemoryTag]):
         try:
             self.model.resume_memory_occupation(tags)
+            self.model.req_manager.free_all()
+            self.model.mem_manager.free_all()
             return True, "Succeeded to resume memory occupation."
         except Exception as e:
             self.logger.error(f"resume memory occupation failed: {str(e)}")

@@ -617,7 +617,6 @@ class HttpServerManager:
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(req_to_next_module, protocol=pickle.HIGHEST_PROTOCOL)
-                print(f"send_to_visual: {req_to_next_module}")
                 return
 
             if not self.args.disable_audio:

@@ -159,7 +159,7 @@ class MambaCacheManager:
         return
 
     def free_all(self):
-        self.conv_state_cache.buffer.fill_(0)
+        self.conv_state_cache.buffer[:] = 0
         self.ssm_state_cache.buffer.fill_(0)
         self.can_use_mem_size = len(self.mem_state)
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)

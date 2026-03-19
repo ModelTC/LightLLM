@@ -149,7 +149,6 @@ class ModelRpcServer(rpyc.Service):
     def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
         try:
             req = obtain(req)
-            print(f"forward to model backend: {req.func_name}")
             if self.backend is None or not hasattr(self.backend, req.func_name):
                 raise ValueError(f"Backend does not support function {req.func_name}")
             success, ret = getattr(self.backend, req.func_name)(req.func_args)
@@ -195,7 +194,6 @@ class ModelRpcClient:
         return obtain(await ans)
 
     def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
-        print(f"forward to model client: {req.func_name}")
         ans = self.conn.root.forward_to_model(req)
         return obtain(ans)
 

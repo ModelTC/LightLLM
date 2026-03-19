@@ -552,7 +552,6 @@ class RouterManager:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
                 recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                print(f"router recv req: {recv_req}")
                 if isinstance(recv_req, GenerateReqIndex):
                     self._add_req(recv_req)
                 elif isinstance(recv_req, GeneralHttpToModelRpcReq):
@@ -601,7 +600,6 @@ class RouterManager:
         return reqs
 
     def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> None:
-        print(f"router forward to model: {req}")
         for model_rpc_client in self.model_rpc_clients:
             ret = model_rpc_client.forward_to_model(req)
             if not ret.success:

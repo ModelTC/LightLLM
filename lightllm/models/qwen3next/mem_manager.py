@@ -136,8 +136,6 @@ class Qwen3NextHybridMemManager(MemoryManager):
             self.kv_buffer[(layer_id + 1) * self.full_attention_interval - 1] = torch.empty(
                 (size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"
             )
-        for _ in range(self.mtp_layer_num):
-            self.kv_buffer.append(torch.empty((size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"))
 
     def free_all(self):
         super().free_all()
