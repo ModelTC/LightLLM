@@ -171,3 +171,7 @@ class HybridRadixCache(RadixCache):
                 self.evict_tree_set.add(parent_node)
 
         return
+
+    def flush_cache(self):
+        super().flush_cache()
+        self.evict_buffer_set.clear()
