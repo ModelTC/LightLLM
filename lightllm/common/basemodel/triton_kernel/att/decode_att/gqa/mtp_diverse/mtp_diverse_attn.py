@@ -29,8 +29,6 @@ def token_decode_attention_mtp_diverse_single_token(
     B_req_idx: torch.Tensor,
     b_seq_len: torch.Tensor,
     b_mark_shared_group: torch.Tensor,
-    max_batch_group_size: int,
-    max_kv_len: int,
     block_seq: int = 256,
     out=None,
     alloc_tensor_func=torch.empty,
@@ -51,8 +49,6 @@ def token_decode_attention_mtp_diverse_single_token(
     - b_mark_shared_group: [batch] - 组标记
         - 0: 组内非最后一个请求
         - N>=1: 一个 N 人组的最后一个请求（N=1 表示独立请求）
-    - max_batch_group_size: 最大组大小
-    - max_kv_len: 最大 KV 长度
     - block_seq: 块大小（默认 256）
     - out: 输出 tensor（可选）
     - alloc_tensor_func: tensor 分配函数
@@ -69,6 +65,9 @@ def token_decode_attention_mtp_diverse_single_token(
         o_tensor = alloc_tensor_func(q.shape, dtype=q.dtype, device=q.device)
     else:
         o_tensor = out
+
+    # 从 Req_to_tokens 获取固定的 max_kv_len，保证 CUDA graph 兼容性
+    max_kv_len = Req_to_tokens.shape[1]
 
     # 计算 kv block 数量
     seq_block_num = triton.cdiv(max_kv_len, block_seq)
@@ -100,7 +99,6 @@ def token_decode_attention_mtp_diverse_single_token(
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logsumexp,
         block_seq=block_seq,
-        max_batch_group_size=max_batch_group_size,
     )
 
     # Stage2: 将每个请求的中间结果按 seq_len 聚合
@@ -108,7 +106,6 @@ def token_decode_attention_mtp_diverse_single_token(
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logsumexp,
         B_Seqlen=b_seq_len,
-        b_mark_shared_group=b_mark_shared_group,
         O=o_tensor,
         block_seq=block_seq,
     )

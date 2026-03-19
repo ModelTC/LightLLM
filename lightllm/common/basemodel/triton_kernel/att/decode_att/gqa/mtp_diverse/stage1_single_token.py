@@ -32,14 +32,12 @@ class MTPDiverseStage1SingleTokenKernelConfig(KernelConfigs):
         batch_size: int,
         max_kv_len: int,
         gqa_group_size: int,
-        max_batch_group_size: int,
         q_head_dim: int,
         block_seq: int,
         out_dtype: str,
     ) -> dict:
         key_params = {
             "gqa_group_size": gqa_group_size,
-            "max_batch_group_size": max_batch_group_size,
             "q_head_dim": q_head_dim,
             "block_seq": block_seq,
             "out_dtype": str(out_dtype),
@@ -70,7 +68,6 @@ class MTPDiverseStage1SingleTokenKernelConfig(KernelConfigs):
     def save_config(
         cls,
         gqa_group_size: int,
-        max_batch_group_size: int,
         q_head_dim: int,
         block_seq: int,
         out_dtype: str,
@@ -78,7 +75,6 @@ class MTPDiverseStage1SingleTokenKernelConfig(KernelConfigs):
     ):
         key_params = {
             "gqa_group_size": gqa_group_size,
-            "max_batch_group_size": max_batch_group_size,
             "q_head_dim": q_head_dim,
             "block_seq": block_seq,
             "out_dtype": str(out_dtype),
@@ -123,7 +119,6 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_BATCH: tl.constexpr,
 ):
     """
     MTP Diverse Stage1 Kernel - Single Token Per Request Mode
@@ -145,6 +140,9 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
 
     cur_kv_head = tl.program_id(1)
     seq_start_block = tl.program_id(2)
+
+    # 使用固定的 BLOCK_BATCH = 16，避免 CUDA graph 动态形状问题
+    BLOCK_BATCH: tl.constexpr = 16
 
     # Q head range - 使用实际的 gqa_group_size 作为 BLOCK_HEAD 的上限
     cur_q_head_range = cur_kv_head * gqa_group_size + tl.arange(0, BLOCK_HEAD)
@@ -287,7 +285,6 @@ def mtp_diverse_stage1_single_token(
     mid_out: torch.Tensor,
     mid_out_logsumexp: torch.Tensor,
     block_seq: int,
-    max_batch_group_size: int,
     run_config: Optional[dict] = None,
 ):
     """
@@ -301,7 +298,6 @@ def mtp_diverse_stage1_single_token(
             batch_size=int(b_seq_len.shape[0]),
             max_kv_len=max_kv_len,
             gqa_group_size=int(q.shape[1] // k.shape[1]),
-            max_batch_group_size=max_batch_group_size,
             q_head_dim=int(q.shape[2]),
             block_seq=block_seq,
             out_dtype=q.dtype,
@@ -324,15 +320,9 @@ def mtp_diverse_stage1_single_token(
     assert triton.next_power_of_2(Lk) == Lk
 
     # BLOCK_HEAD 设置为 gqa_group_size 向上取整到 2 的幂
-    # 但当 gqa_group_size 较小时，不强制设为 16，避免重复索引
     BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
-    BLOCK_BATCH = triton.next_power_of_2(max_batch_group_size)
-
-    # 确保 BLOCK_HEAD * BLOCK_BATCH >= 16 用于效率
-    if BLOCK_HEAD * BLOCK_BATCH < 16:
-        # 优先增加 BLOCK_BATCH，因为 BLOCK_HEAD 过大会导致重复索引
-        if BLOCK_BATCH < 16 // BLOCK_HEAD:
-            BLOCK_BATCH = 16 // BLOCK_HEAD
+    # 使用固定的 BLOCK_BATCH = 16，避免 CUDA graph 捕获时的动态形状问题
+    BLOCK_BATCH = 16
 
     assert k.stride() == v.stride()
 
@@ -370,7 +360,6 @@ def mtp_diverse_stage1_single_token(
         BLOCK_SEQ=block_seq,
         BLOCK_HEADDIM=Lk,
         BLOCK_N=BLOCK_N,
-        BLOCK_BATCH=BLOCK_BATCH,
         num_warps=num_warps,
         num_stages=num_stages,
     )

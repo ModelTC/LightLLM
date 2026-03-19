@@ -426,6 +426,7 @@ class ChunkedPrefillBackend(ModeBackend):
             # 更新每个请求的 mtp_size
             for req, mtp_size in zip(decode_reqs, dynamic_mtp_sizes):
                 req.mtp_size = mtp_size
+            print_rank0("Updated dynamic MTP sizes:", dynamic_mtp_sizes)
         return
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):

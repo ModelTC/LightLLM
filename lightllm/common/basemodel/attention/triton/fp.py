@@ -1,5 +1,7 @@
 import dataclasses
 import torch
+
+from lightllm.utils.envs_utils import enable_dynamic_mtp_verify
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 
@@ -127,7 +129,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
 
-            if args_mtp_step > 0:
+            if args_mtp_step > 0 and enable_dynamic_mtp_verify():
                 # MTP mode: use mtp diverse attention
                 assert q_head_num >= k_head_num, "MTP diverse attention requires q_head_num >= k_head_num"
                 return self._mtp_diverse_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
@@ -237,17 +239,12 @@ class TritonDecodeAttState(BaseDecodeAttState):
         batch_size = self.infer_state.batch_size
         b_seq_len = self.infer_state.b_seq_len
 
-        max_kv_len = int(b_seq_len.max().item())
-
         # 在动态 MTP 验证模式下，使用 infer_state.b_mark_shared_group（从 model_input 传递）
         # 在静态 MTP 模式下，使用 self.b_mark_shared_group（在 init_state 中初始化）
         if enable_dynamic_mtp_verify():
             b_mark_shared_group = self.infer_state.b_mark_shared_group
-            # 动态模式下，max_batch_group_size 取当前 batch 中最大的组大小
-            max_batch_group_size = int(b_mark_shared_group.max().item())
         else:
             b_mark_shared_group = self.b_mark_shared_group
-            max_batch_group_size = self.mtp_size
 
         block_seq = 256
 
@@ -259,8 +256,6 @@ class TritonDecodeAttState(BaseDecodeAttState):
             B_req_idx=self.infer_state.b_req_idx,
             b_seq_len=b_seq_len,
             b_mark_shared_group=b_mark_shared_group,
-            max_batch_group_size=max_batch_group_size,
-            max_kv_len=max_kv_len,
             block_seq=block_seq,
             alloc_tensor_func=alloc_func,
         )

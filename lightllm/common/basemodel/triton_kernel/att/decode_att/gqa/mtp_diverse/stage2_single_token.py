@@ -14,7 +14,6 @@ import triton.language as tl
 @triton.jit
 def _fwd_kernel_mtp_diverse_stage2_single_token(
     B_Seqlen,
-    b_mark_shared_group,  # 保留参数用于区分不同的组，但当前实现中不使用
     Mid_O,  # [batch, head, seq_block_num, head_dim]
     Mid_O_LogExpSum,  # [batch, head, seq_block_num]
     O,  # [batch, num_heads, head_dim]
@@ -89,7 +88,6 @@ def mtp_diverse_stage2_single_token(
     mid_out: torch.Tensor,
     mid_out_logsumexp: torch.Tensor,
     B_Seqlen: torch.Tensor,
-    b_mark_shared_group: torch.Tensor,
     O: torch.Tensor,
     block_seq: int,
 ):
@@ -100,7 +98,6 @@ def mtp_diverse_stage2_single_token(
     - mid_out: [batch, head, seq_block_num, head_dim] - 中间结果
     - mid_out_logsumexp: [batch, head, seq_block_num] - 中间 logsumexp
     - B_Seqlen: [batch] - 每个请求的 seq_len
-    - b_mark_shared_group: [batch] - 组标记（保留参数，当前未使用）
     - O: [batch, num_heads, head_dim] - 输出
     - block_seq: 块大小
     """
@@ -111,7 +108,6 @@ def mtp_diverse_stage2_single_token(
 
     _fwd_kernel_mtp_diverse_stage2_single_token[grid](
         B_Seqlen=B_Seqlen,
-        b_mark_shared_group=b_mark_shared_group,
         Mid_O=mid_out,
         Mid_O_LogExpSum=mid_out_logsumexp,
         O=O,

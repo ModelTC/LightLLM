@@ -6,7 +6,6 @@ LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
 --mtp_draft_model_dir /mtc/models/qwen3-8b-eagle3 \
 --mtp_step 4 \
 --llm_decode_att_backend triton \
---disable_cudagraph \
 --mtp_dynamic_verify
 # if you want to enable microbatch overlap, you can uncomment the following lines
 #--enable_prefill_microbatch_overlap \

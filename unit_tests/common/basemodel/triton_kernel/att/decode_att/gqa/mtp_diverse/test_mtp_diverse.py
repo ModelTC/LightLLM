@@ -144,8 +144,6 @@ def mtp_diverse_attention(
     b_req_idx: torch.Tensor,
     b_seq_len: torch.Tensor,
     b_mark_shared_group: torch.Tensor,
-    max_batch_group_size: int,
-    max_kv_len: int,
     block_seq: int = 256,
 ) -> torch.Tensor:
     """
@@ -163,8 +161,6 @@ def mtp_diverse_attention(
         B_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
-        max_batch_group_size=max_batch_group_size,
-        max_kv_len=max_kv_len,
         block_seq=block_seq,
     )
 
@@ -202,8 +198,6 @@ def test_mtp_diverse_vs_reference(kv_len, group_size, batch_groups):
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
-        max_batch_group_size=group_size,
-        max_kv_len=group_size,
         block_seq=256,
     )
 
