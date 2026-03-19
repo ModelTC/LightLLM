@@ -1,70 +1,12 @@
-import time
 import torch
 import itertools
 import triton
 import triton.language as tl
 from typing import Optional
-from frozendict import frozendict
-from functools import lru_cache
-from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.triton_utils.autotuner import autotune
 
 logger = init_logger(__name__)
-
-
-class MropeTritonFusedKernelConfig(KernelConfigs):
-    kernel_name: str = "mrope_triton_fused_kernel"
-
-    @classmethod
-    @lru_cache(maxsize=200)
-    def try_to_get_best_config(
-        cls,
-        M: int,
-        Q_HEAD_NUM: int,
-        K_HEAD_NUM: int,
-        HEAD_DIM: int,
-        dtype: str,
-    ) -> dict:
-        key_params = {
-            "Q_HEAD_NUM": Q_HEAD_NUM,
-            "K_HEAD_NUM": K_HEAD_NUM,
-            "HEAD_DIM": HEAD_DIM,
-            "dtype": str(dtype),
-        }
-        key_params = frozendict(key_params)
-
-        finded_config = cls.get_the_config(key_params)
-
-        if finded_config:
-            config = finded_config[min(finded_config.keys(), key=lambda x: abs(int(x) - M))]
-            return config
-        else:
-            if M <= 256:
-                config = {"num_warps": 1, "num_stages": 1}
-            else:
-                config = {"num_warps": 1, "num_stages": 1}
-
-        return config
-
-    @classmethod
-    def save_config(
-        cls,
-        Q_HEAD_NUM: int,
-        K_HEAD_NUM: int,
-        HEAD_DIM: int,
-        dtype: str,
-        config_json: dict,
-    ):
-        key_params = {
-            "Q_HEAD_NUM": Q_HEAD_NUM,
-            "K_HEAD_NUM": K_HEAD_NUM,
-            "HEAD_DIM": HEAD_DIM,
-            "dtype": str(dtype),
-        }
-        key_params = frozendict(key_params)
-
-        return cls.store_config(key_params, config_json)
 
 
 @triton.jit
@@ -200,13 +142,8 @@ def mrope_triton_fused(
     num_tokens = q.shape[0]
 
     if not run_config:
-        run_config = MropeTritonFusedKernelConfig.try_to_get_best_config(
-            M=num_tokens,
-            Q_HEAD_NUM=head_num_q,
-            K_HEAD_NUM=head_num_k,
-            HEAD_DIM=head_dim,
-            dtype=str(q.dtype),
-        )
+        run_config = {"num_warps": 1, "num_stages": 1}
+
     num_stages = run_config["num_stages"]
     num_warps = run_config["num_warps"]
 
