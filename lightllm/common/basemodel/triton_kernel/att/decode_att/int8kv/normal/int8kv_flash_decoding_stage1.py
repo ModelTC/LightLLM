@@ -2,24 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.kernel_config import KernelConfigs
-from frozendict import frozendict
-from functools import lru_cache
-from typing import Dict
-from lightllm.common.triton_utils.autotuner import autotune
-
-# key_params = {
-#     "gqa_group_size": gqa_group_size,
-#     "q_head_dim": q_head_dim,
-#     "block_seq": block_seq,
-#     "out_dtype": str(out_dtype),
-# }
-
-# config = {
-#     "BLOCK_N": 16,
-#     "num_warps": 2,
-#     "num_stages": 2,
-# }
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner
 
 
 @triton.jit
@@ -173,8 +156,9 @@ def get_test_configs():
     return configs
 
 
-def get_static_key(q, k, block_seq):
+def get_static_key(q, k, k_scale, block_seq):
     key_params = {
+        "kv_quant_group_size": k.shape[-1] // k_scale.shape[-1],
         "gqa_group_size": int(q.shape[1] // k.shape[1]),
         "q_head_dim": int(q.shape[2]),
         "block_seq": block_seq,
@@ -185,18 +169,16 @@ def get_static_key(q, k, block_seq):
 
 def get_run_key(q, max_len_in_batch):
     batch_size = q.shape[0]
-    return batch_size * 1024 * 1024 * 1024 + max_len_in_batch
+    return batch_size * 1000 * 1000 * 1000 + max_len_in_batch
 
 
-autotune(
-    kernel_name="_fwd_kernel_flash_decode_normal_stage1:v2",
+@autotune(
+    kernel_name="_fwd_kernel_flash_decode_normal_stage1:v3",
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
     mutates_args=["mid_out", "mid_out_logsumexp"],
 )
-
-
 def flash_decode_stage1(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -288,3 +270,67 @@ def flash_decode_stage1(
         num_stages=num_stages,
     )
     return
+
+
+if __name__ == "__main__":
+    # static params
+    kv_quant_group_size = 8
+    gqa_group_size = 4
+    q_head_dim = 128
+    block_seq = 256
+    out_dtype = torch.bfloat16
+
+    batch_sizes = [1, 8, 16, 32, 64, 128]
+    decode_lengths = [1024, 2048, 8192, 16384]
+
+    q_head_num = gqa_group_size
+
+    import os
+
+    os.environ["LIGHTLLM_TRITON_AUTOTUNE_LEVEL"] = "2"
+    Autotuner.start_autotune_warmup()
+    # autotuing kernel
+    for batch_size in batch_sizes:
+        for length in decode_lengths:
+            # Setup test tensors
+            q = torch.randn(batch_size, q_head_num, q_head_dim, dtype=out_dtype, device="cuda")
+            k = torch.ones(batch_size * length, 1, q_head_dim, dtype=torch.int8, device="cuda")
+            k_scale = torch.randn(
+                batch_size * length, 1, q_head_dim // kv_quant_group_size, dtype=torch.float32, device="cuda"
+            )
+            v = torch.ones(batch_size * length, 1, q_head_dim, dtype=torch.int8, device="cuda")
+            v_scale = torch.randn(
+                batch_size * length, 1, q_head_dim // kv_quant_group_size, dtype=torch.float32, device="cuda"
+            )
+            Req_to_tokens = torch.arange(0, batch_size * length, dtype=torch.int32, device="cuda").view(
+                batch_size, length
+            )
+            B_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda")
+            B_seq_len = torch.full((batch_size,), length, dtype=torch.int32, device="cuda")
+
+            if batch_size <= 16:
+                block_num = 128
+            elif batch_size <= 64:
+                block_num = 64
+            else:
+                block_num = 32
+
+            mid_out = torch.zeros(batch_size, q_head_num, block_num, q_head_dim, dtype=out_dtype, device="cuda")
+            mid_out_logsumexp = torch.zeros(batch_size, q_head_num, block_num, dtype=out_dtype, device="cuda")
+
+            flash_decode_stage1(
+                q=q,
+                k=k,
+                k_scale=k_scale,
+                v=v,
+                v_scale=v_scale,
+                Req_to_tokens=Req_to_tokens,
+                B_req_idx=B_req_idx,
+                B_seq_len=B_seq_len,
+                max_len_in_batch=length,
+                mid_out=mid_out,
+                mid_out_logsumexp=mid_out_logsumexp,
+                block_seq=block_seq,
+            )
+
+    Autotuner.end_autotune_warmup()
