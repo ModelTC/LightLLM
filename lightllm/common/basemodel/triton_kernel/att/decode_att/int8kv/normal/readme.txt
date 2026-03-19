@@ -1,1 +1,0 @@
-1. 设计一个支持 vsm的 decoding 算子， grid 分配方式 为 (batch_size, vsm_count)
