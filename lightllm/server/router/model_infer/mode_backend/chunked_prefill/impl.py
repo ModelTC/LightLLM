@@ -261,23 +261,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 gpu_tensor=mtp_accept_len,
             )
 
-            # Copy accepted buffer states back to buffer[0] for MTP
-            # Only copy when accept_len > 1 (accept_len == 1 means buffer[0] is already correct)
-            mask = mtp_accept_len > 1
-            if mask.sum() > 0:
-                actual_req_idxes = model_input.b_req_idx[b_req_mtp_start_loc[mask]]
-                # Source: the accepted buffer (at index accept_len - 1)
-                src_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[
-                    actual_req_idxes, mtp_accept_len[mask] - 1
-                ]
-                # Destination: buffer[0] for each request
-                dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
-                # P2P copy both conv_states and ssm_states
-                if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_state_buffers"):
-                    g_infer_context.req_manager.buffer_mem_manager.copy_state_buffers(
-                        src_buffer_indexes, dst_buffer_indexes
-                    )
-
             verify_event = torch.cuda.Event()
             verify_event.record()
 
