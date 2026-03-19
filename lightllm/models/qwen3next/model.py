@@ -35,8 +35,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     # infer state class
     infer_state_class = Qwen3NextInferStateInfo
 
-    use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states
-
     def get_radix_class(self):
         return HybridRadixCache
 

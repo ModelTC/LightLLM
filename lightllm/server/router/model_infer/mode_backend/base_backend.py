@@ -172,8 +172,6 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
 
-        self.use_buffer_manager = getattr(self.model, "use_buffer_manager", False)
-
         radix_cache_class = self.model.get_radix_class()
         self.radix_cache = (
             radix_cache_class(
@@ -290,33 +288,21 @@ class ModeBackend:
         raise NotImplementedError()
 
     def init_mtp_draft_model(self, main_kvargs: dict):
-        # Support deepseekv3 and qwen3_next MTP modes
         self.mtp_step = self.args.mtp_step
         self.draft_models = []
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att", "qwen3next_vanilla"]:
+        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "qwen3next_eagle"]:
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
-            # Get MTP model config first to calculate mem_layer_start
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
-
-            # Calculate mem_layer_start: main model layers + previous MTP model layers
-            # For models with integrated MTP (like qwen3_next), each MTP module has 1 layer
-            # For models with separate MTP configs, use the config's num_hidden_layers
             model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "qwen3_next":
-                # Qwen3Next has integrated MTP with 1 layer per module
-                mtp_layers_per_module = 1
-            else:
-                mtp_layers_per_module = mtp_model_cfg["num_hidden_layers"]
-            mem_layer_start = self.model.config["num_hidden_layers"] + i * mtp_layers_per_module
             mtp_model_kvargs = {
                 "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -329,7 +315,7 @@ class ModeBackend:
                 "data_type": main_kvargs.get("data_type", "float16"),
                 "graph_max_batch_size": main_kvargs.get("graph_max_batch_size", 16),
                 "graph_max_len_in_batch": main_kvargs.get("graph_max_len_in_batch", 8196),
-                "disable_cudagraph": True,  # Disable CUDA graphs for MTP draft models
+                "disable_cudagraph": main_kvargs.get("disable_cudagraph", False),
                 "mem_fraction": main_kvargs["mem_fraction"],
                 "batch_max_tokens": main_kvargs.get("batch_max_tokens", None),
                 "quant_type": main_kvargs.get("quant_type", None),
@@ -337,13 +323,12 @@ class ModeBackend:
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
-                "mem_layer_start": mem_layer_start,
-                "mtp_index": i,
             }
 
             # Select MTP model class based on model type
             model_type = mtp_model_cfg.get("model_type", "")
             if model_type == "deepseek_v3":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
             elif model_type == "qwen3_moe":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]

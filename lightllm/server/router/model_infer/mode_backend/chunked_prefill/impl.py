@@ -24,7 +24,6 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from .control_state import ControlState
 
 logger = init_logger(__name__)
@@ -137,7 +136,6 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -260,7 +258,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="mtp_accept_len",
                 gpu_tensor=mtp_accept_len,
             )
-
             verify_event = torch.cuda.Event()
             verify_event.record()
 

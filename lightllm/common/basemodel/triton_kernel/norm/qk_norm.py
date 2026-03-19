@@ -78,10 +78,10 @@ def _qk_rms_norm_fused_kernel(
     WK_ptr,
     stride_k_row,
     stride_k_col,
+    eps,
     # Dimensions
     num_heads_q: tl.constexpr,  # Q 的头数 (用于判断边界)
     head_dim: tl.constexpr,
-    eps: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     FP32_MULTIPLY: tl.constexpr,
 ):

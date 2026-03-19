@@ -453,6 +453,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     key="mtp_accept_len",
                     gpu_tensor=mtp_accept_len,
                 )
+
             verify_event = torch.cuda.Event()
             verify_event.record()
 
@@ -765,6 +766,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     gpu_tensor=mtp_accept_len,
                 )
                 all_next_token_ids.append(next_token_ids)
+
             verify_event = torch.cuda.Event()
             verify_event.record()
 
