@@ -2,7 +2,6 @@ import torch
 
 import triton
 import triton.language as tl
-from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
 from lightllm.common.triton_utils.autotuner import autotune
 
 
@@ -121,7 +120,10 @@ def silu_and_mul_fwd(
     size_n = input.shape[-1] // 2
 
     if not run_config:
-        run_config = MoeSiluAndMulKernelConfig.try_to_get_best_config(M=size_m, N=size_n, out_dtype=str(output.dtype))
+        if size_m < 256:
+            run_config = {"BLOCK_M": 1, "BLOCK_N": 128, "num_warps": 1, "NUM_STAGES": 1}
+        else:
+            run_config = {"BLOCK_M": 16, "BLOCK_N": 128, "num_warps": 4, "NUM_STAGES": 5}
 
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_N = run_config["BLOCK_N"]
