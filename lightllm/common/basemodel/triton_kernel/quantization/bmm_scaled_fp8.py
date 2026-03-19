@@ -2,66 +2,45 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-
-from lightllm.common.kernel_config import KernelConfigs
-from frozendict import frozendict
-from functools import lru_cache
-from typing import Dict
+from lightllm.common.triton_utils.autotuner import autotune
 
 
-class BmmScaledFp8KernelConfig(KernelConfigs):
-    kernel_name: str = "bmm_scaled_fp8"
+def get_test_configs():
+    """Generate test configurations for autotuning."""
+    configs = []
+    for block_size_m in [64, 128, 256]:
+        for block_size_n in [64, 128, 256]:
+            for block_size_k in [64, 128]:
+                for group_size_m in [4, 8, 16]:
+                    for num_warps in [4, 8]:
+                        for num_stages in [2, 3, 4]:
+                            t_config = {
+                                "BLOCK_SIZE_M": block_size_m,
+                                "BLOCK_SIZE_N": block_size_n,
+                                "BLOCK_SIZE_K": block_size_k,
+                                "GROUP_SIZE_M": group_size_m,
+                                "num_stages": num_stages,
+                                "num_warps": num_warps,
+                            }
+                            configs.append(t_config)
+    return configs
 
-    def closest_power_2(n: int) -> int:
-        return 1 << (n - 1).bit_length() if n & (n - 1) else n
 
-    @classmethod
-    @lru_cache(maxsize=200)
-    def try_to_get_best_config(
-        cls,
-        B,
-        M,
-        N,
-        K,
-        batch_size,
-        head_dim,
-    ) -> dict:
-        key_params = {
-            "B": B,
-            "M": M,
-            "N": N,
-            "K": K,
-            "out_dtype": str(torch.bfloat16),
-        }
-        finded_config = cls.get_the_config(frozendict(key_params))
+def _get_static_key(a, b, c):
+    """Returns static key for caching (shape parameters that don't change during run)."""
+    B, M, K = a.shape
+    _, K, N = b.shape
+    return {
+        "B": B,
+        "N": N,
+        "K": K,
+        "out_dtype": str(c.dtype),
+    }
 
-        search_keys = [batch_size, head_dim]
-        if finded_config:
-            config = finded_config
-            for key in search_keys:
-                config = config[min(config.keys(), key=lambda x: abs(int(x) - key))]
-        else:
-            config = {
-                "BLOCK_SIZE_M": 128,
-                "BLOCK_SIZE_N": 256,
-                "BLOCK_SIZE_K": 128,
-                "GROUP_SIZE_M": 8,
-                "num_stages": 4,
-                "num_warps": 8,
-            }
-        return config
 
-    @classmethod
-    def save_config(cls, B, M, N, K, config_json: Dict[int, Dict[int, Dict]]):
-        key_params = {
-            "B": B,
-            "M": M,
-            "N": N,
-            "K": K,
-            "out_dtype": str(torch.bfloat16),
-        }
-        key_params = frozendict(key_params)
-        return cls.store_config(key_params, config_json)
+def _get_run_key(a):
+    """Returns run-time key for indexing configs (the varying dimension)."""
+    return a.shape[1]  # M dimension
 
 
 @triton.jit
@@ -142,7 +121,28 @@ def bmm_scaled_fp8_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-def bmm_scaled_fp8(a, a_scale, b, b_scale, c, **run_config):
+@autotune(
+    kernel_name="bmm_scaled_fp8:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=_get_static_key,
+    run_key_func=_get_run_key,
+    mutates_args=["c"],
+)
+def bmm_scaled_fp8(a, a_scale, b, b_scale, c, run_config=None):
+    """Batched matrix multiplication with FP8 scaling.
+
+    Args:
+        a: Input tensor A with shape [batch, M, K] in FP8 format.
+        a_scale: Scale tensor for A with shape [batch, M, 1].
+        b: Input tensor B with shape [batch, K, N] in FP8 format.
+        b_scale: Scale tensor for B with shape [batch, N, 1].
+        c: Output tensor with shape [batch, M, N].
+        run_config: Optional config dict with BLOCK_SIZE_M, BLOCK_SIZE_N,
+                   BLOCK_SIZE_K, GROUP_SIZE_M, num_stages, num_warps.
+
+    Returns:
+        torch.Tensor: The output tensor c.
+    """
     assert a.shape[0] == b.shape[0], "Incompatible dimensions"
     assert c.shape[0] == b.shape[0], "Incompatible dimensions"
     assert a.shape[2] == b.shape[1], "Incompatible dimensions"
@@ -152,15 +152,14 @@ def bmm_scaled_fp8(a, a_scale, b, b_scale, c, **run_config):
     HEAD = a.shape[0]
 
     if not run_config:
-        M2 = BmmScaledFp8KernelConfig.closest_power_2(M)
-        run_config = BmmScaledFp8KernelConfig.try_to_get_best_config(
-            B=HEAD,
-            M=M2,
-            N=N,
-            K=K,
-            batch_size=M2,
-            head_dim=N,
-        )
+        run_config = {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 8,
+            "num_stages": 4,
+            "num_warps": 8,
+        }
 
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),

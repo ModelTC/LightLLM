@@ -2,7 +2,6 @@ import torch
 
 import triton
 import triton.language as tl
-from .moe_silu_and_mul_config import MoeSiluAndMulKernelConfig
 
 
 @triton.jit

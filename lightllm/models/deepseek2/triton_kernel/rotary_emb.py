@@ -134,16 +134,11 @@ def rotary_emb_fwd(q, k, cos, sin, run_config=None):
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
     assert triton.next_power_of_2(head_dim) == head_dim
 
-    from .rotary_emb_config import DeepseekV3RotaryKernelConfig
-
     if not run_config:
-        run_config = DeepseekV3RotaryKernelConfig.try_to_get_best_config(
-            M=total_len,
-            Q_HEAD_NUM=head_num_q,
-            K_HEAD_NUM=head_num_k,
-            HEAD_DIM=head_dim,
-            dtype=str(q.dtype),
-        )
+        if total_len <= 256:
+            run_config = {"BLOCK_SEQ": 1, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1}
+        else:
+            run_config = {"BLOCK_SEQ": 16, "NUM_STAGE": 1, "num_warps": 1, "num_stages": 1, "HEAD_PARALLEL_NUM": 1}
 
     BLOCK_SEQ = run_config["BLOCK_SEQ"]
     HEAD_PARALLEL_NUM = run_config["HEAD_PARALLEL_NUM"]

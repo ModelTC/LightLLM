@@ -1,9 +1,7 @@
 import torch
-
 import triton
 import triton.language as tl
-from .moe_sum_recude_config import MoeSumReduceKernelConfig
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Dict
 from lightllm.common.triton_utils.autotuner import autotune
 
 
@@ -77,9 +75,12 @@ def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict =
     assert output.shape[0] == token_num and output.shape[1] == hidden_dim
 
     if not run_config:
-        run_config = MoeSumReduceKernelConfig.try_to_get_best_config(
-            M=token_num, topk_num=topk_num, hidden_dim=hidden_dim, out_dtype=str(output.dtype)
-        )
+        run_config = {
+            "BLOCK_M": 1,
+            "BLOCK_DIM": 128,
+            "NUM_STAGE": 1,
+            "num_warps": 2,
+        }
 
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_DIM = run_config["BLOCK_DIM"]
