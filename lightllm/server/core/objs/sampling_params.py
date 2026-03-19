@@ -345,6 +345,7 @@ class SamplingParams(ctypes.Structure):
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
+        ("seed", ctypes.c_int64),  # random seed
     ]
 
     _do_sample: bool = False
@@ -357,29 +358,38 @@ class SamplingParams(ctypes.Structure):
 
     def init(self, tokenizer, **kwargs):
         super().__init__()
+        # 移除kwargs中为null的参数，避免覆盖默认值
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-        def _get(key, default):
-            v = kwargs.get(key)
-            return v if v is not None else default
+        self.best_of = kwargs.get("best_of", 1)
+        self.n = kwargs.get("n", self.best_of)
+        do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
+        self.do_sample = False if do_sample is None else do_sample
 
-        self.best_of = _get("best_of", 1)
-        self.n = _get("n", self.best_of)
-        self.do_sample = _get("do_sample", SamplingParams._do_sample)
-        self.presence_penalty = _get("presence_penalty", SamplingParams._presence_penalty)
-        self.frequency_penalty = _get("frequency_penalty", SamplingParams._frequency_penalty)
-        self.repetition_penalty = _get("repetition_penalty", SamplingParams._repetition_penalty)
-        self.temperature = _get("temperature", SamplingParams._temperature)
-        self.top_p = _get("top_p", SamplingParams._top_p)
-        self.top_k = _get("top_k", SamplingParams._top_k)
-        self.ignore_eos = _get("ignore_eos", False)
-        self.min_pixels = _get("min_pixels", -1)
-        self.max_pixels = _get("max_pixels", -1)
-        self.image_max_patch_num = _get("image_max_patch_num", -1)
-        self.max_new_tokens = _get("max_new_tokens", 16)
-        self.min_new_tokens = _get("min_new_tokens", 1)
-        self.input_penalty = _get("input_penalty", DEFAULT_INPUT_PENALTY)
-        self.group_request_id = _get("group_request_id", -1)
-        self.suggested_dp_index = _get("suggested_dp_index", -1)
+        presence_penalty = kwargs.get("presence_penalty", SamplingParams._presence_penalty)
+        self.presence_penalty = 0.0 if presence_penalty is None else presence_penalty
+
+        frequency_penalty = kwargs.get("frequency_penalty", SamplingParams._frequency_penalty)
+        self.frequency_penalty = 0.0 if frequency_penalty is None else frequency_penalty
+
+        repetition_penalty = kwargs.get("repetition_penalty", SamplingParams._repetition_penalty)
+        self.repetition_penalty = 1.0 if repetition_penalty is None else repetition_penalty
+
+        temperature = kwargs.get("temperature", SamplingParams._temperature)
+        self.temperature = 1.0 if temperature is None else temperature
+
+        top_p = kwargs.get("top_p", SamplingParams._top_p)
+        self.top_p = 1.0 if top_p is None else top_p
+
+        top_k = kwargs.get("top_k", SamplingParams._top_k)
+        self.top_k = -1 if top_k is None else top_k
+        self.ignore_eos = kwargs.get("ignore_eos", False)
+        self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
+        self.max_new_tokens = kwargs.get("max_new_tokens", 16384)
+        self.min_new_tokens = kwargs.get("min_new_tokens", 1)
+        self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
+        self.group_request_id = kwargs.get("group_request_id", -1)
+        self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
         self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
@@ -387,6 +397,7 @@ class SamplingParams(ctypes.Structure):
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
+        self.seed = kwargs.get("seed", -1)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
@@ -444,18 +455,35 @@ class SamplingParams(ctypes.Structure):
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            # Some checkpoints store null sampling fields in generation_config.json.
+            # Keep robust numeric defaults instead of propagating None into ctypes fields.
+            cls._do_sample = generation_cfg.get("do_sample", False)
+            if cls._do_sample is None:
+                cls._do_sample = False
 
-            def _cfg(key, default):
-                v = generation_cfg.get(key)
-                return v if v is not None else default
+            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
+            if cls._presence_penalty is None:
+                cls._presence_penalty = 0.0
 
-            cls._do_sample = _cfg("do_sample", False)
-            cls._presence_penalty = _cfg("presence_penalty", 0.0)
-            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
-            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
-            cls._temperature = _cfg("temperature", 1.0)
-            cls._top_p = _cfg("top_p", 1.0)
-            cls._top_k = _cfg("top_k", -1)
+            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
+            if cls._frequency_penalty is None:
+                cls._frequency_penalty = 0.0
+
+            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
+            if cls._repetition_penalty is None:
+                cls._repetition_penalty = 1.0
+
+            cls._temperature = generation_cfg.get("temperature", 1.0)
+            if cls._temperature is None:
+                cls._temperature = 1.0
+
+            cls._top_p = generation_cfg.get("top_p", 1.0)
+            if cls._top_p is None:
+                cls._top_p = 1.0
+
+            cls._top_k = generation_cfg.get("top_k", -1)
+            if cls._top_k is None:
+                cls._top_k = -1
         except:
             pass
 
@@ -479,14 +507,13 @@ class SamplingParams(ctypes.Structure):
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
-            raise ValueError(f"max_new_tokens must be at least 1, got {self.max_new_tokens}.")
+            raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
         if self.min_new_tokens < 1:
-            raise ValueError(f"min_new_tokens must be at least 1, got {self.min_new_tokens}.")
+            raise ValueError(f"min_new_tokens must be at least 1 , got {self.min_new_tokens}.")
         if self.min_new_tokens > self.max_new_tokens:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
-
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 
@@ -541,6 +568,7 @@ class SamplingParams(ctypes.Structure):
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
+            "seed": self.seed,
         }
 
     def to_origin_dict(self):

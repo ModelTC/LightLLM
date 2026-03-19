@@ -5,16 +5,11 @@ import numpy as np
 
 from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
-from lightllm.common.allocator_utils import TokenAllocator
 from lightllm.common.basemodel.triton_kernel.mamba_buffer_copy import copy_mamba_buffer, fork_mamba_buffer
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 
 logger = init_logger(__name__)
-
-
-def _get_mamba_cache_shm_name():
-    return f"{get_unique_server_name()}_mamba_cache_can_use_num"
 
 
 class LayerCache:
@@ -30,7 +25,7 @@ class LayerCache:
         return np.prod(self.shape) * self.layer_num * torch._utils._element_size(self.dtype)
 
 
-class MambaCacheManager(TokenAllocator):
+class MambaCacheManager:
     def __init__(
         self,
         size: int,
@@ -40,7 +35,25 @@ class MambaCacheManager(TokenAllocator):
         ssm_state_dtype: torch.dtype,
         ssm_state_shape: Tuple[int, ...],
     ):
-        super().__init__(size, f"{_get_mamba_cache_shm_name()}_{get_current_rank_in_node()}")
+        # init the mem state
+        self.size = size
+        self.mem_state = torch.arange(
+            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self._mem_state_return = torch.arange(
+            0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self._return_start = 0
+        self.mark_start = 0
+        self.mark_end = self.size
+        self.can_use_mem_size = self.size
+        self.shared_can_use_token_num = SharedInt(
+            f"{get_unique_server_name()}_mamba_cache_can_use_num_{get_current_rank_in_node()}"
+        )
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.HOLD_TOKEN_MEMINDEX = self.size
+
+        # init the layer cache
         self.conv_state_cache = LayerCache(size, conv_state_dtype, conv_state_shape, layer_num)
         self.ssm_state_cache = LayerCache(size, ssm_state_dtype, ssm_state_shape, layer_num)
         self.HOLD_BUFFER_INDEX = size
@@ -58,7 +71,7 @@ class MambaCacheManager(TokenAllocator):
         ssm_state = self.ssm_state_cache.buffer[layer_idx]
         return conv_state, ssm_state
 
-    def copy_buffer_p2p(self, src_buffer_indexes: torch.Tensor, dst_buffer_indexes: torch.Tensor):
+    def copy_state_buffers(self, src_buffer_indexes: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         copy_mamba_buffer(
             self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
         )
@@ -66,7 +79,7 @@ class MambaCacheManager(TokenAllocator):
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_indexes, dst_buffer_indexes
         )
 
-    def copy_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
+    def fork_state_buffers(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         fork_mamba_buffer(
             self.conv_state_cache.buffer, self.conv_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
@@ -74,7 +87,7 @@ class MambaCacheManager(TokenAllocator):
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
 
-    def copy_ssm_buffer_broadcast(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
+    def fork_ssm_buffers(self, src_buffer_index: torch.Tensor, dst_buffer_indexes: torch.Tensor):
         """
         Fork ONLY SSM states (not conv states) from source indices to destination indices.
 
@@ -84,6 +97,26 @@ class MambaCacheManager(TokenAllocator):
         fork_mamba_buffer(
             self.ssm_state_cache.buffer, self.ssm_state_cache.buffer, src_buffer_index, dst_buffer_indexes
         )
+
+    def alloc(self, need_size) -> torch.Tensor:
+        if need_size > self.mark_end - self.mark_start:
+            logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
+            assert False, "error alloc state"
+
+        start = self.mark_start
+        end = self.mark_start + need_size
+        self.mark_start += need_size
+
+        self.can_use_mem_size -= need_size
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+        # 利用缓冲区返回，避免异步情况下的内存竞争
+        if self._return_start + need_size > self._mem_state_return.shape[0]:
+            self._return_start = 0
+        ans = self._mem_state_return[self._return_start : self._return_start + need_size]
+        ans.copy_(self.mem_state[start:end])
+        self._return_start += need_size
+        return ans
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
         """
@@ -103,8 +136,51 @@ class MambaCacheManager(TokenAllocator):
         self.conv_state_cache.buffer[:, free_index_tensor, ...] = 0
         self.ssm_state_cache.buffer[:, free_index_tensor, ...] = 0
 
-        # Call parent's free method to update allocator state
-        super().free(free_index)
+        # update the mem state
+        end = self.mark_start
+        start = self.mark_start - len(free_index)
+        assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
+
+        if isinstance(free_index, list):
+            free_index_tensor = torch.tensor(free_index, dtype=self.mem_state.dtype, device=self.mem_state.device)
+            self.mem_state[start:end] = free_index_tensor
+        else:
+            # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
+            self.mem_state[start:end] = free_index
+
+        self.mark_start -= len(free_index)
+
+        self.can_use_mem_size += len(free_index)
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+
+        if self.can_use_mem_size == len(self.mem_state):
+            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
+
+        return
+
+    def free_all(self):
+        self.conv_state_cache.buffer.fill_(0)
+        self.ssm_state_cache.buffer.fill_(0)
+        self.can_use_mem_size = len(self.mem_state)
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.mem_state.numpy()[:] = list(range(0, len(self.mem_state)))
+        self.mark_start = 0
+        self.mark_end = len(self.mem_state)
+
+        return
+
+    def resize_mem(self, new_size):
+        """
+        just for test code
+        """
+        self.size = new_size
+        self.mem_state = torch.arange(
+            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+        )
+        self.mark_start = 0
+        self.mark_end = self.size
+        self.can_use_mem_size = self.size
+        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         return
 
 
@@ -121,7 +197,7 @@ class ReadOnlyStaticsMambaCacheManager:
         # 兼容多机 dp size=1 纯 tp 模式的情况
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.shared_tp_can_use_token_nums = [
-            SharedInt(f"{_get_mamba_cache_shm_name()}_{rank_in_node}")
+            SharedInt(f"{get_unique_server_name()}_mamba_cache_can_use_num_{rank_in_node}")
             for rank_in_node in range(0, self.node_world_size, self.dp_world_size)
         ]
 

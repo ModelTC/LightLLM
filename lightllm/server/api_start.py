@@ -18,6 +18,7 @@ from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.config_utils import has_audio_module, has_vision_module
 
 logger = init_logger(__name__)
 
@@ -93,9 +94,6 @@ def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
     set_unique_server_name(args)
 
-    if not args.disable_shm_warning:
-        check_recommended_shm_size(args)
-
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
 
@@ -104,12 +102,48 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
         return
 
+    # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
+    if args.disable_vision is None:
+        if has_vision_module(args.model_dir):
+            args.disable_vision = False
+        else:
+            args.disable_vision = True
+    if args.disable_audio is None:
+        if has_audio_module(args.model_dir):
+            args.disable_audio = False
+        else:
+            args.disable_audio = True
+
+    # pd 分离模式下，不启动多模态的模块
+    if args.run_mode in ["decode", "nixl_decode"]:
+        args.disable_audio = True
+        args.disable_vision = True
+
+    if args.disable_vision and args.disable_audio:
+        args.enable_multimodal = False
+    else:
+        args.enable_multimodal = True
+
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
 
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
+
+    # 调度参数的自动设置, 人工设置则听人工的
+    if args.router_token_ratio is None:
+        if args.run_mode in ["normal"]:
+            args.router_token_ratio = 0.85
+        else:
+            # pd 分离模式下，不开启高级调度
+            args.router_token_ratio = 0.0
+    # 部分模式还不能支持与高级动态调度算法协同，to do.
+    if args.diverse_mode:
+        assert args.router_token_ratio == 0.0
+
+    if not args.disable_shm_warning:
+        check_recommended_shm_size(args)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
@@ -148,10 +182,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.return_all_prompt_logprobs:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-
-    # 部分模式还不能支持与高级动态调度算法协同，to do.
-    if args.diverse_mode:
-        assert args.router_token_ratio == 0.0
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
@@ -243,7 +273,7 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1),
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -311,14 +341,16 @@ def _launch_subprocesses(args: StartArgs):
     ports_locker.release_port()
 
     if args.enable_multimodal:
-        from .visualserver.manager import start_visual_process
-
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_cache_manager,
             ],
             start_args=[(args,)],
         )
+
+    if not args.disable_vision:
+        from .visualserver.manager import start_visual_process
+
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_visual_process,
@@ -328,17 +360,17 @@ def _launch_subprocesses(args: StartArgs):
             ],
         )
 
-        if args.enable_multimodal_audio:
-            from .audioserver.manager import start_audio_process
+    if not args.disable_audio:
+        from .audioserver.manager import start_audio_process
 
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_audio_process,
-                ],
-                start_args=[
-                    (args,),
-                ],
-            )
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args,),
+            ],
+        )
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
@@ -423,7 +455,12 @@ def pd_master_start(args: StartArgs):
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(num=1, used_nccl_ports=[args.nccl_port, args.port])
+    can_use_ports = alloc_can_use_network_port(
+        num=1,
+        used_ports=[
+            args.port,
+        ],
+    )
     metric_port = can_use_ports[0]
 
     args.metric_port = metric_port
@@ -449,7 +486,6 @@ def pd_master_start(args: StartArgs):
         "-",
         "--error-logfile",
         "-",
-        "--preload",
         "lightllm.server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
@@ -487,7 +523,6 @@ def config_server_start(args: StartArgs):
         "-",
         "--error-logfile",
         "-",
-        "--preload",
         "lightllm.server.config_server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",

@@ -136,8 +136,12 @@ class AudioManager:
 
     async def loop_for_netio_req(self):
         while True:
-            recv_req: BaseReq = await self.zmq_recv_socket.recv_pyobj()
+            recv_req: GenerateReqIndex = await self.zmq_recv_socket.recv_pyobj()
             if isinstance(recv_req, GenerateReqIndex):
+                logger.info(
+                    f"audio recv req id {recv_req.group_req_id} "
+                    f"audio count {len(recv_req.multimodal_params.audios)}"
+                )
                 self.waiting_reqs.append(recv_req)
             else:
                 assert False, f"Error Req Inf {recv_req}"

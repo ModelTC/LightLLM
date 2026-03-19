@@ -32,8 +32,8 @@ class VisualManager:
         visual_model_rpc_ports,
     ):
         context = zmq.Context(2)
-
-        if args.enable_multimodal_audio:
+        enable_audio = not args.disable_audio
+        if enable_audio:
             self.send_to_next_module = context.socket(zmq.PUSH)
             self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
         else:
@@ -187,13 +187,18 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                    # 目前只有 GenerateReqIndex 会进入这个队列，判断是否需要推理图片
+                    recv_req: GenerateReqIndex = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GenerateReqIndex):
+                        logger.info(
+                            f"visual recv req id {recv_req.group_req_id} "
+                            f"img count {len(recv_req.multimodal_params.images)}"
+                        )
                         self.waiting_reqs.append(recv_req)
                     else:
+                        print(f"visual recv req: {recv_req}")
                         self.send_to_next_module.send_pyobj(recv_req, protocol=pickle.HIGHEST_PROTOCOL)
-                self.visual_recv_max_count = min(self.visual_recv_max_count * 1.3, 256)
+                        print(f"visual send req: {recv_req}")
+                self.visual_recv_max_count = int(min(self.visual_recv_max_count * 1.3, 256))
             except zmq.ZMQError:
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64

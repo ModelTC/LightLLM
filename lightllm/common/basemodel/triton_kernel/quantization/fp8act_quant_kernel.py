@@ -154,7 +154,7 @@ def per_token_group_quant_fp8(
             )
 
         # 使用SGL kernel进行量化
-        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False)
+        sgl_ops.sgl_per_token_group_quant_fp8(x, x_q, x_s, group_size, 1e-10, fp8_min, fp8_max, False, enable_v2=True)
     else:
         # 使用LightLLM kernel进行量化
         x_s = alloc_func(

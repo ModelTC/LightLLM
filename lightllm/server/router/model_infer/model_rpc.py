@@ -1,12 +1,17 @@
 import os
 import asyncio
+import rpyc
+import socket
+import uuid
 import torch.multiprocessing as mp
 import multiprocessing
 import threading
 import inspect
 import setproctitle
-from datetime import timedelta
 from typing import Dict, List, Tuple
+from rpyc.utils.classic import obtain
+from rpyc.utils.server import ThreadedServer
+from rpyc.utils.factory import unix_connect
 from lightllm.server.router.model_infer.mode_backend import (
     ChunkedPrefillBackend,
     FirstTokenConstraintBackend,
@@ -27,7 +32,6 @@ from lightllm.server.router.model_infer.mode_backend import (
     NIXLDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
-from lightllm.server.core.objs import RpcShmParams, RpcShmResults, ShmSyncStatusArray
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -39,76 +43,21 @@ from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHt
 logger = init_logger(__name__)
 
 
-class ModelRpcServer:
-    def __init__(
-        self,
-        args,
-        rank: int,
-        rank_in_node: int,
-        node_world_size: int,
-        rpc_event: multiprocessing.Event,
-        rpc_finished_event: multiprocessing.Event,
-        info_queue: mp.Queue,
-    ):
+class ModelRpcServer(rpyc.Service):
+    def __init__(self, args, rank: int, rank_in_node: int, node_world_size: int, info_queue: mp.Queue):
         super().__init__()
         self.args: StartArgs = args
         self.node_world_size = node_world_size
         self.info_queue = info_queue
-        self.rpc_event = rpc_event
-        self.rpc_finished_event = rpc_finished_event
-
-        self.rpc_shm_params = RpcShmParams()
-        self.rpc_shm_params.create_or_link_shm()
-        self.rpc_shm_results = RpcShmResults()
-        self.rpc_shm_results.create_or_link_shm()
-        self.rpc_shm_sync_status = ShmSyncStatusArray(self.node_world_size)
-        self.rpc_shm_sync_status.create_or_link_shm()
 
         self.rank = rank
         self.rank_in_node = rank_in_node
         logger.info(f"Initialized RPC server for rank {self.rank}.")
-
-        self.rpc_loop_thread = threading.Thread(target=self.rpc_loop, daemon=True)
-        self.rpc_loop_thread.start()
         return
 
-    def rpc_loop(self):
-        error_count = 0
-        while True:
-            try:
-                self.rpc_event.wait()
-                func_name, args = self.rpc_shm_params.read_func_params()
-
-                ans = getattr(self, func_name)(*args)
-                if ans is not None and self.rank_in_node == 0:
-                    self.rpc_shm_results.write_func_result(func_name=func_name, ret=ans)
-
-                # 下面得执行顺序不可随意交换, 否则容易出现同步或者死锁问题。
-                self.rpc_shm_sync_status.add_mark(self.rank_in_node)
-                while not self.rpc_shm_sync_status.run_finished():
-                    pass
-
-                self.rpc_event.clear()
-
-                self.rpc_shm_sync_status.add_mark1(self.rank_in_node)
-                while not self.rpc_shm_sync_status.run_finished1():
-                    pass
-
-                if self.rank_in_node == 0:
-                    self.rpc_finished_event.set()
-
-            except BaseException as e:
-                logger.exception(str(e))
-                error_count += 1
-
-            if error_count >= 1:
-                logger.error("infer process error to exit")
-                os._exit(-1)
-
-        return
-
-    def init_model(self, kvargs):
+    def exposed_init_model(self, kvargs):
         # 填充真正的 rank_id 参数
+        kvargs = obtain(kvargs)
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
         return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
@@ -178,7 +127,7 @@ class ModelRpcServer:
             self.redundancy_expert_manager = None
         return
 
-    def get_max_total_token_num(self):
+    def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
     def release_memory_occupation(self, tags: List[MemoryTag]):
@@ -197,8 +146,10 @@ class ModelRpcServer:
             logger.exception(f"resume memory occupation failed: {str(e)}")
             return False
 
-    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+    def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
         try:
+            req = obtain(req)
+            print(f"forward to model backend: {req.func_name}")
             if self.backend is None or not hasattr(self.backend, req.func_name):
                 raise ValueError(f"Backend does not support function {req.func_name}")
             success, ret = getattr(self.backend, req.func_name)(req.func_args)
@@ -211,43 +162,42 @@ class ModelRpcServer:
 
 
 class ModelRpcClient:
-    def __init__(self, rpc_event, rpc_finished_event):
-        self.rpc_shm_params = RpcShmParams()
-        self.rpc_shm_params.create_or_link_shm()
-        self.rpc_shm_results = RpcShmResults()
-        self.rpc_shm_results.create_or_link_shm()
+    def __init__(self, conn):
+        self.conn = conn
 
-        self.rpc_event = rpc_event
-        self.rpc_finished_event = rpc_finished_event
+        def async_wrap(f):
+            f = rpyc.async_(f)
+
+            async def _func(*args, **kwargs):
+                try:
+                    ans = f(*args, **kwargs)
+                except BaseException as e:
+                    logger.exception(str(e))
+                    os._exit(-1)
+
+                await asyncio.to_thread(ans.wait)
+                # raise if exception
+                return ans.value
+
+            return _func
+
+        self._init_model = async_wrap(self.conn.root.init_model)
+        self._get_max_total_token_num = async_wrap(self.conn.root.get_max_total_token_num)
         return
 
     async def init_model(self, kvargs):
-        self.rpc_shm_params.write_func_params("init_model", (kvargs,))
-        self.rpc_event.set()
-
-        self.rpc_finished_event.wait()
-        self.rpc_finished_event.clear()
+        ans = self._init_model(kvargs)
+        await ans
         return
 
     async def get_max_total_token_num(self):
-        self.rpc_shm_params.write_func_params("get_max_total_token_num", ())
-        self.rpc_event.set()
-
-        self.rpc_finished_event.wait()
-        self.rpc_finished_event.clear()
-        func_name, ret = self.rpc_shm_results.read_func_result()
-        assert func_name == "get_max_total_token_num"
-        return ret
+        ans = self._get_max_total_token_num()
+        return obtain(await ans)
 
     def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
-        self.rpc_shm_params.write_func_params("forward_to_model", (req,))
-        self.rpc_event.set()
-
-        self.rpc_finished_event.wait()
-        self.rpc_finished_event.clear()
-        func_name, ret = self.rpc_shm_results.read_func_result()
-        assert func_name == "forward_to_model"
-        return ret
+        print(f"forward to model client: {req.func_name}")
+        ans = self.conn.root.forward_to_model(req)
+        return obtain(ans)
 
 
 def _init_env(
@@ -257,9 +207,8 @@ def _init_env(
     node_world_size,
     info_queue,
     router_lock,
-    rpc_event: mp.Event,
-    rpc_finished_event: mp.Event,
-    success_event: mp.Event,
+    socket_path,
+    success_event,
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -273,12 +222,12 @@ def _init_env(
 
     g_router_lock.obj = router_lock
 
-    model_rpc_server = ModelRpcServer(
-        args, rank, rank_in_node, node_world_size, rpc_event, rpc_finished_event, info_queue
-    )
-    success_event.set()
+    model_rpc_server = ModelRpcServer(args, rank, rank_in_node, node_world_size, info_queue)
+    # Start rpyc server with Unix socket
+    t = ThreadedServer(model_rpc_server, socket_path=socket_path, protocol_config={"allow_pickle": True})
 
-    model_rpc_server.rpc_loop_thread.join()
+    success_event.set()
+    t.start()
     return
 
 
@@ -287,12 +236,14 @@ async def start_model_process(
     rank,
     rank_in_node,
     node_world_size,
-    rpc_event,
-    rpc_finished_event,
     info_queue: mp.Queue,
-    router_lock: mp.Queue,
+    router_lock,
 ):
     import lightllm.utils.rpyc_fix_utils as _
+
+    socket_path = _generate_unix_socket_path()
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
 
     success_event = mp.Event()
     proc = mp.Process(
@@ -304,8 +255,7 @@ async def start_model_process(
             node_world_size,
             info_queue,
             router_lock,
-            rpc_event,
-            rpc_finished_event,
+            socket_path,
             success_event,
         ),
     )
@@ -319,4 +269,14 @@ async def start_model_process(
     await asyncio.to_thread(success_event.wait, timeout=40)
     assert proc.is_alive()
 
-    return None
+    from lightllm.utils.retry_utils import retry
+
+    conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
+
+    return ModelRpcClient(conn=conn)
+
+
+def _generate_unix_socket_path() -> str:
+    """Generate a random Unix socket path"""
+    unique_id = uuid.uuid4().hex[:8]
+    return f"/tmp/lightllm_model_infer_{unique_id}.sock"

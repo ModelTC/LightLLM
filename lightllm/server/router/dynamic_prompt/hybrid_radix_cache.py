@@ -59,46 +59,13 @@ class HybridRadixCache(RadixCache):
                     self.evict_tree_set.add(parent_node)
         return
 
-    def insert_for_hybrid_radix_cache(self, reqs):
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-        reqs_to_insert = [req for req in reqs if req.cur_kv_len < req.get_cur_total_len()]
-
-        if len(reqs_to_insert) == 0:
-            return
-
-        self.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
-        req_idxes = torch.tensor([req.req_idx for req in reqs_to_insert], dtype=torch.int64, device="cuda")
-        req_to_buffer_index = g_infer_context.req_manager.req_to_buffer_index
-        # Make contiguous and convert to int64 for Triton kernel compatibility
-        cur_buffer_indexes = req_to_buffer_index[req_idxes, 0].contiguous().to(torch.int64)
-
-        new_buffer_indexes = self.buffer_mem_manager.alloc(len(reqs_to_insert))
-        # Move to CUDA and convert to int64, ensure contiguous
-        new_buffer_indexes_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
-
-        self.buffer_mem_manager.copy_buffer_p2p(cur_buffer_indexes, new_buffer_indexes_cuda)
-
-        for i, req in enumerate(reqs_to_insert):
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = g_infer_context.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-            prefix_len, new_shared_kv_node = super().insert(key, value)
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            self.dec_node_ref_counter(req.shared_kv_node)
-            self.add_node_ref_counter(new_shared_kv_node)
-            self.add_buffer_idx_to_node(new_shared_kv_node, new_buffer_indexes[i].item())
-            req.extra_need_to_free_token_index.append(
-                g_infer_context.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-            )
-            req.shared_kv_node = new_shared_kv_node
-
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         miss_prefix_len = 0
         evict_token_list = []
+        kv_len = tree_node.node_prefix_total_len
         while tree_node != self.root_node and tree_node.buffer_idx is None:
             if tree_node.is_leaf():
                 self.evict_tree_set.discard(tree_node)
@@ -129,7 +96,7 @@ class HybridRadixCache(RadixCache):
             self.mem_manager.free(evict_token_value)
 
         if tree_node == self.root_node:
-            return None, miss_prefix_len, None
+            return None, kv_len - miss_prefix_len, None
 
         update_node = tree_node
         while update_node != self.root_node:

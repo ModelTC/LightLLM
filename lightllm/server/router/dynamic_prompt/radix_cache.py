@@ -112,10 +112,10 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None, kv_cache_mem_manager=None):
+    def __init__(self, unique_name, total_token_num, rank_in_node, kv_cache_mem_manager=None):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        self.mem_manager: MemoryManager = kv_cache_mem_manager if kv_cache_mem_manager is not None else mem_manager
+        self.mem_manager: MemoryManager = kv_cache_mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -523,7 +523,7 @@ class RadixCache:
             " " * indent,
             f"k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
             time_id: {node.time_id} prefix_total_len: {node.node_prefix_total_len} \
-            node_value_len: {node.node_value_len}",
+            node_value_len: {node.node_value_len} buffer_idx: {node.buffer_idx}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)

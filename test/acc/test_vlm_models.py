@@ -14,14 +14,8 @@ pip install -e lmms-eval/
 """
 
 # VLM models for testing
-MODELS = [
-    SimpleNamespace(
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        mmmu_accuracy=0.4,
-    ),
-]
 os.environ["OPENAI_API_KEY"] = "lightllm123"
-os.environ["OPENAI_API_BASE"] = "http://localhost:8000/v1"
+os.environ["OPENAI_API_BASE"] = "http://localhost:8089/v1"
 
 
 def run_mmmu_eval(
@@ -37,7 +31,7 @@ def run_mmmu_eval(
     model = "openai_compatible"
     tp = 1
     tasks = "mmmu_val"
-    batch_size = 16
+    batch_size = 900
     log_suffix = "openai_compatible"
     os.makedirs(output_path, exist_ok=True)
 
@@ -72,4 +66,4 @@ def run_mmmu_eval(
     )
 
 
-run_mmmu_eval("/mtc/sangchengmeng/models/Qwen3-VL-8B-Instruct/", "./logs")
+run_mmmu_eval("/mtc/models/Qwen3-VL-8B-Instruct", "./logs")

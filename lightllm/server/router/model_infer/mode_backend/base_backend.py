@@ -44,7 +44,6 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.qwen3next_mtp.model import Qwen3NextMTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
@@ -187,9 +186,7 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
 
-        self.use_buffer_manager = getattr(self.model, "use_buffer_manager", False)
-
-        radix_cache_class = self.model.radix_cache_class
+        radix_cache_class = self.model.get_radix_class()
         self.radix_cache = (
             radix_cache_class(
                 get_unique_server_name(),
@@ -311,7 +308,6 @@ class ModeBackend:
         raise NotImplementedError()
 
     def init_mtp_draft_model(self, main_kvargs: dict):
-        # Support deepseekv3 and qwen3_next MTP modes
         self.mtp_step = self.args.mtp_step
         self.draft_models = []
 
@@ -327,17 +323,7 @@ class ModeBackend:
         for i in range(num_mtp_modules):
             # Get MTP model config first to calculate mem_layer_start
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
-
-            # Calculate mem_layer_start: main model layers + previous MTP model layers
-            # For models with integrated MTP (like qwen3_next), each MTP module has 1 layer
-            # For models with separate MTP configs, use the config's num_hidden_layers
             model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "qwen3_next":
-                # Qwen3Next has integrated MTP with 1 layer per module
-                mtp_layers_per_module = 1
-            else:
-                mtp_layers_per_module = mtp_model_cfg["num_hidden_layers"]
-            mem_layer_start = self.model.config["num_hidden_layers"] + i * mtp_layers_per_module
             mtp_model_kvargs = {
                 "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -358,13 +344,13 @@ class ModeBackend:
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
-                "mem_layer_start": mem_layer_start,
                 "mtp_index": i,
             }
 
             # Select MTP model class based on model type
             model_type = mtp_model_cfg.get("model_type", "")
             if model_type == "deepseek_v3":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
             elif model_type == "qwen3_moe":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
@@ -372,8 +358,6 @@ class ModeBackend:
             elif model_type == "mistral":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_next":
-                self.draft_models.append(Qwen3NextMTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))

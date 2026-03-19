@@ -161,3 +161,74 @@ def get_fixed_kv_len():
         return len(model_cfg["prompt_cache_token_ids"])
     else:
         return 0
+
+
+@lru_cache(maxsize=None)
+def has_vision_module(model_path: str) -> bool:
+    try:
+        from transformers.configuration_utils import PretrainedConfig
+
+        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_type = model_cfg["model_type"]
+        if model_type == "qwen":
+            # QWenVisionTransformer
+            model_cfg["visual"]
+            return True
+        elif model_type == "qwen2_vl":
+            # Qwen2VisionTransformerPretrainedModel
+            model_cfg["vision_config"]
+            return True
+        elif model_type == "qwen2_5_vl":
+            # Qwen2_5_VisionTransformerPretrainedModel
+            model_cfg["vision_config"]
+            return True
+        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+            # Qwen3VisionTransformerPretrainedModel
+            model_cfg["vision_config"]
+            return True
+        elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+            # TarsierVisionTransformerPretrainedModel
+            return True
+        elif model_type == "llava":
+            # LlavaVisionModel
+            return True
+        elif model_type == "internvl_chat":
+            return True
+        elif model_type == "gemma3":
+            return True
+        elif (
+            model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
+            == "qwen3_omni_moe_vision_encoder"
+        ):
+            # Qwen3OmniMoeVisionTransformerPretrainedModel
+            return True
+        elif model_type in ["qwen3_5", "qwen3_5_moe"]:
+            return True
+        else:
+            raise Exception("unknown vision model type")
+    except:
+        logger.info(f"model path: {model_path} does not has vision module")
+        return False
+
+
+@lru_cache(maxsize=None)
+def has_audio_module(model_path: str) -> bool:
+    try:
+        from transformers.configuration_utils import PretrainedConfig
+
+        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        if model_cfg.get("thinker_config") is not None:
+            model_cfg = model_cfg["thinker_config"]
+        audio_config = model_cfg["audio_config"]
+        model_type = audio_config["model_type"]
+        if model_type == "clap_audio_model" or model_type == "whisper":
+            # WhisperAudioModel
+            return True
+        elif model_type == "qwen3_omni_moe_audio_encoder":
+            # Qwen3OmniMoeAudioEncoder
+            return True
+        else:
+            raise Exception("unknown audio model type")
+    except:
+        logger.info(f"model path: {model_path} does not has audio module")
+        return False

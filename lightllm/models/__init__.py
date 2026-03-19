@@ -8,7 +8,6 @@ from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen3.model import Qwen3TpPartModel
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
-from lightllm.models.qwen3next_mtp.model import Qwen3NextMTPModel
 from lightllm.models.internlm.model import InternlmTpPartModel
 from lightllm.models.stablelm.model import StablelmTpPartModel
 from lightllm.models.internlm2.model import Internlm2TpPartModel
@@ -20,6 +19,7 @@ from lightllm.models.qwen_vl.model import QWenVLTpPartModel
 from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.deepseek3_2.model import Deepseek3_2TpPartModel
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
 from lightllm.models.internvl.model import (
     InternVLLlamaTpPartModel,

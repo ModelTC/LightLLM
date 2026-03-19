@@ -191,11 +191,6 @@ PD 分离模式参数
 
     判断服务是否繁忙的阈值，默认为 ``0.0``，一旦kv cache 使用率超过此值，则会直接变为保守调度。
 
-.. option:: --router_max_new_token_len
-
-    调度器评估请求kv占用时，使用的请求输出长度，默认为 ``1024``，一般低于用户设置的max_new_tokens。该参数只在 --router_token_ratio 大于0时生效。
-    设置改参数，会使请求调度更为激进，系统同时处理的请求数会更多，同时也会不可避免的造成请求的暂停重计算。
-
 .. option:: --router_max_wait_tokens
 
     每 router_max_wait_tokens 解码步骤后触发一次调度新请求，默认为 ``6``
@@ -248,13 +243,13 @@ PD 分离模式参数
 多模态参数
 ----------
 
-.. option:: --enable_multimodal
+.. option:: --disable_vision
 
-    是否允许加载额外的视觉模型
+    如果模型是多模态模型，设置此参数将不加载视觉部分模型（默认为None，会根据模型自动检测）
 
-.. option:: --enable_multimodal_audio
+.. option:: --disable_audio
 
-    是否允许加载额外的音频模型（需要 --enable_multimodal）
+    如果模型是多模态模型，设置此参数将不加载音频部分模型（默认为None，会根据模型自动检测）
 
 .. option:: --enable_mps
 

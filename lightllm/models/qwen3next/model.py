@@ -4,14 +4,12 @@ import triton
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextFullAttentionTransformerLayerWeight,
-    Qwen3NextGatedDeltaNetTransformerLayerWeight,
+    Qwen3NextTransformerLayerWeight,
 )
+from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qwen3NextPreAndPostLayerWeight
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
-    Qwen3NextFullAttentionTransformerLayerInfer,
-    Qwen3NextGatedDeltaNetTransformerLayerInfer,
+    Qwen3NextTransformerLayerInfer,
 )
-from lightllm.models.qwen3next.layer_infer.post_layer_infer import Qwen3NextPostLayerInfer
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
@@ -19,7 +17,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 
 logger = init_logger(__name__)
@@ -28,13 +25,18 @@ logger = init_logger(__name__)
 @ModelRegistry("qwen3_next")
 class Qwen3NextTpPartModel(Qwen3MOEModel):
 
-    post_layer_infer_class = Qwen3NextPostLayerInfer
+    # weight class
+    pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
+    transformer_weight_class = Qwen3NextTransformerLayerWeight
+
+    # infer class
+    transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
+
+    # infer state class
     infer_state_class = Qwen3NextInferStateInfo
 
-    is_hybrid_attention = True  # Indicates model uses hybrid (full + linear) attention
-    use_buffer_manager = True  # Indicates model needs per-request buffer management for linear attention states
-
-    radix_cache_class = HybridRadixCache
+    def get_radix_class(self):
+        return HybridRadixCache
 
     def __init__(self, kvargs) -> None:
         self.mem_manager: Qwen3NextHybridMemManager = None
@@ -50,76 +52,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def autotune_layers(self):
         return self.config["full_attention_interval"]
-
-    def _calculate_mamba_cache_size(self, start_args: StartArgs) -> int:
-        """Calculate mamba cache size based on available memory and mamba_cache_ratio."""
-        from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
-        import torch.distributed as dist
-
-        use_ratio = self.max_total_token_num is None and start_args.mamba_cache_size is None
-
-        world_size = dist.get_world_size()
-        total_memory = get_total_gpu_memory()
-        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - self.mem_fraction)
-
-        conv_kernel_size = self.config["linear_conv_kernel_dim"]
-        conv_dim = (
-            self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
-        ) // self.tp_world_size_
-
-        num_linear_layers = self.config["n_layer"] - (self.config["n_layer"] // self.config["full_attention_interval"])
-
-        conv_cell_size = (
-            num_linear_layers * conv_dim * (conv_kernel_size - 1) * torch._utils._element_size(self.data_type)
-        )
-
-        ssm_dtype = torch.bfloat16 if start_args.mamba_ssm_data_type == "bfloat16" else torch.float32
-        ssm_cell_size = (
-            num_linear_layers
-            * (self.num_linear_v_heads // self.tp_world_size_)
-            * self.head_linear_k_dim
-            * self.head_linear_v_dim
-            * torch._utils._element_size(ssm_dtype)
-        )
-
-        total_cell_size = conv_cell_size + ssm_cell_size
-
-        if use_ratio:
-            # mamba_cache_ratio = mamba_memory / total_cache_memory
-            mamba_cache_ratio = start_args.mamba_cache_ratio if start_args.mamba_cache_ratio is not None else 0.5
-            mamba_memory_gb = available_memory * mamba_cache_ratio
-        else:
-            mamba_memory_gb = available_memory
-            mamba_cache_ratio = None
-
-        mamba_cache_size = int(mamba_memory_gb * 1024 ** 3 / total_cell_size)
-
-        if mamba_cache_size < start_args.running_max_req_size:
-            ratio = mamba_cache_ratio if mamba_cache_ratio is not None else 0.5
-            raise ValueError(
-                f"Insufficient memory for mamba cache allocation!\n\n"
-                f"Calculated mamba_cache_size ({mamba_cache_size}) < "
-                f"running_max_req_size ({start_args.running_max_req_size})\n\n"
-                f"Memory budget:\n"
-                f"  Available for mamba cache: {mamba_memory_gb:.2f} GB\n"
-                f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
-                f"  Calculated buffers: {mamba_cache_size}\n"
-                f"  Required buffers: {start_args.running_max_req_size}\n\n"
-                f"Solutions:\n"
-                f"  1. Reduce --running_max_req_size to {mamba_cache_size} or lower\n"
-                f"  2. Increase --mamba_cache_ratio from {ratio} to "
-                f"{start_args.running_max_req_size / mamba_cache_size * ratio:.3f} or higher\n"
-                f"  3. Increase --mem_fraction to leave more memory for caches\n"
-            )
-
-        logger.info(
-            f"Mamba cache allocation:\n"
-            f"  Available memory: {mamba_memory_gb:.2f} GB\n"
-            f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
-            f"  Calculated mamba_cache_size: {mamba_cache_size}"
-        )
-
-        return mamba_cache_size
 
     def _init_config(self):
         super()._init_config()
@@ -143,13 +75,24 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         self.head_linear_v_dim = self.config["linear_value_head_dim"]
 
         if mamba_cache_size is None:
-            mamba_cache_size = self._calculate_mamba_cache_size(start_args)
+            mamba_cache_size = Qwen3NextHybridMemManager.calculate_mamba_cache_size(
+                start_args=start_args,
+                max_total_token_num=self.max_total_token_num,
+                mem_fraction=self.mem_fraction,
+                config=self.config,
+                head_linear_k_dim=self.head_linear_k_dim,
+                num_linear_k_heads=self.num_linear_k_heads,
+                head_linear_v_dim=self.head_linear_v_dim,
+                num_linear_v_heads=self.num_linear_v_heads,
+                tp_world_size=self.tp_world_size_,
+                data_type=self.data_type,
+            )
         else:
-            if mamba_cache_size < start_args.running_max_req_size:
+            if mamba_cache_size < start_args.running_max_req_size * 2:
                 raise ValueError(
                     f"Explicitly set mamba_cache_size ({mamba_cache_size}) < "
-                    f"running_max_req_size ({start_args.running_max_req_size})\n"
-                    f"Please increase mamba_cache_size to at least {start_args.running_max_req_size}"
+                    f"running_max_req_size * 2 ({start_args.running_max_req_size * 2})\n"
+                    f"Please increase mamba_cache_size to at least {start_args.running_max_req_size * 2}"
                 )
 
         conv_kernel_size = self.config["linear_conv_kernel_dim"]
@@ -194,39 +137,3 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManagerForMamba(self.max_req_num, create_max_seq_len, self.mem_manager)
-
-    def _init_weights(self):
-        self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
-        num_full_attention_layers = self.config["full_attention_interval"]
-        self.trans_layers_weight = [
-            (
-                Qwen3NextFullAttentionTransformerLayerWeight(
-                    i,
-                    self.data_type,
-                    network_config=self.config,
-                    quant_cfg=self.quant_cfg,
-                )
-                if (i + 1) % num_full_attention_layers == 0
-                else Qwen3NextGatedDeltaNetTransformerLayerWeight(
-                    i,
-                    self.data_type,
-                    network_config=self.config,
-                    quant_cfg=self.quant_cfg,
-                )
-            )
-            for i in range(self.config["n_layer"])
-        ]
-
-    def _init_infer_layer(self):
-        self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
-        self.post_infer = self.post_layer_infer_class(network_config=self.config)
-        num_full_attention_layers = self.config["full_attention_interval"]
-
-        self.layers_infer = [
-            (
-                Qwen3NextFullAttentionTransformerLayerInfer(i, network_config=self.config)
-                if (i + 1) % num_full_attention_layers == 0
-                else Qwen3NextGatedDeltaNetTransformerLayerInfer(i, network_config=self.config)
-            )
-            for i in range(self.config["n_layer"])
-        ]

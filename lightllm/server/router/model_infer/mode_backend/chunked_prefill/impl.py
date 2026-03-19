@@ -51,14 +51,6 @@ class ChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         return
 
-    def _maybe_insert_hybrid_radix_cache(self, run_reqs: List[InferReq]):
-        # Insert hybrid radix cache entries if applicable, use for hybrid attention models.
-        if self.use_buffer_manager and self.radix_cache is not None:
-            torch.cuda.synchronize()
-            g_infer_state_lock.acquire()
-            self.radix_cache.insert_for_hybrid_radix_cache(run_reqs)
-            g_infer_state_lock.release()
-
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
         try:
@@ -147,8 +139,6 @@ class ChunkedPrefillBackend(ModeBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
-        self._maybe_insert_hybrid_radix_cache(run_reqs)
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -234,8 +224,6 @@ class ChunkedPrefillBackend(ModeBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
-        self._maybe_insert_hybrid_radix_cache(run_reqs)
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -289,8 +277,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 # Destination: buffer[0] for each request
                 dst_buffer_indexes = g_infer_context.req_manager.req_to_buffer_index[actual_req_idxes, 0]
                 # P2P copy both conv_states and ssm_states
-                if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_buffer_p2p"):
-                    g_infer_context.req_manager.buffer_mem_manager.copy_buffer_p2p(
+                if hasattr(g_infer_context.req_manager.buffer_mem_manager, "copy_state_buffers"):
+                    g_infer_context.req_manager.buffer_mem_manager.copy_state_buffers(
                         src_buffer_indexes, dst_buffer_indexes
                     )
 

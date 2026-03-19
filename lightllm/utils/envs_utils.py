@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import uuid
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
@@ -10,11 +11,12 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
+    node_uuid = uuid.uuid1().hex[0:8]
+
     if args.run_mode == "pd_master":
-        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.port) + "_pd_master"
+        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(node_uuid) + "_pd_master"
     else:
-        assert str(args.nccl_port) != "None", "nccl_port is not set"
-        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(args.nccl_port) + "_" + str(args.node_rank)
+        os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(node_uuid) + "_" + str(args.node_rank)
     return
 
 
@@ -235,3 +237,8 @@ def get_added_mtp_kv_layer_num() -> int:
         added_mtp_layer_num += get_env_start_args().mtp_step
 
     return added_mtp_layer_num
+
+
+@lru_cache(maxsize=None)
+def get_pd_split_max_new_tokens() -> int:
+    return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))

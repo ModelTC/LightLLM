@@ -37,7 +37,7 @@ class StartArgs:
     eos_id: Optional[List[int]] = field(default=None)
     tool_call_parser: Optional[str] = field(
         default=None,
-        metadata={"choices": ["qwen25", "llama3", "mistral", "deepseekv3", "kimi_k2", "qwen", "qwen3_coder"]},
+        metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen", "qwen3_coder"]},
     )
     reasoning_parser: Optional[str] = field(
         default=None,
@@ -70,10 +70,10 @@ class StartArgs:
     nccl_port: int = field(default=None)
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
+    detail_log: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
     router_token_ratio: float = field(default=0.0)
-    router_max_new_token_len: int = field(default=1024)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
@@ -84,7 +84,8 @@ class StartArgs:
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
-    enable_multimodal_audio: bool = field(default=False)
+    disable_vision: Optional[bool] = field(default=None)
+    disable_audio: Optional[bool] = field(default=None)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)

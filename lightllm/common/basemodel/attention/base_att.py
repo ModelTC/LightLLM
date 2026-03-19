@@ -60,12 +60,17 @@ class AttControl:
     sliding_window: Tuple[int, int] = (-1, -1)
     use_att_sink: bool = False
     sink_weight: torch.Tensor = None
+    scale: float = None
     # mla 专用传参项
     mla_prefill: bool = False
     mla_prefill_dict: Dict = None
     mla_decode: bool = False
     mla_decode_dict: Dict = None
-    scale: float = None
+    # nsa (native sparse attention) 专用传参项
+    nsa_prefill: bool = False
+    nsa_prefill_dict: Dict = None
+    nsa_decode: bool = False
+    nsa_decode_dict: Dict = None
 
 
 @dataclass

@@ -24,6 +24,9 @@ from lightllm.common.basemodel import routing_manager as _routing_mgr
 
 logger = init_logger(__name__)
 
+# Cache for mtp_range tensors to avoid repeated allocation
+_mtp_range_cache: Dict[int, torch.Tensor] = {}
+
 
 @dataclass
 class InferenceContext:
@@ -39,7 +42,9 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
 
-    use_mamba_model: bool = False
+    @property
+    def has_recurrent_state(self):
+        return self.req_manager is not None and self.req_manager.has_recurrent_state
 
     def register(
         self,
@@ -64,13 +69,8 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.use_mamba_model = use_mamba_model
-        if self.use_mamba_model:
-            assert self.radix_cache is None or isinstance(
-                self.radix_cache, HybridRadixCache
-            ), "Mamba model only support HybridRadixCache"
-            assert isinstance(self.req_manager, ReqManagerForMamba), "Mamba model only support ReqManagerForMamba"
-            self.mtp_step = get_env_start_args().mtp_step
+        self.mtp_step = get_env_start_args().mtp_step
+
         return
 
     def init_cpu_embed_cache_client(self):
@@ -87,26 +87,30 @@ class InferenceContext:
             self.cpu_kv_cache_stream = torch.cuda.Stream()
         return self.cpu_kv_cache_stream
 
-    def _alloc_and_copy_req_buffers(self, req_objs: List["InferReq"]) -> None:
-        """Allocate and copy buffers for requests. Delegates to req_manager which handles model-specific logic."""
+    def _alloc_and_copy_req_buffers(
+        self, req_manager: ReqManagerForMamba, radix_cache: HybridRadixCache, req_objs: List["InferReq"]
+    ) -> None:
         if not req_objs:
             return
 
-        if self.radix_cache is not None and hasattr(self.radix_cache, "free_radix_cache_to_get_enough_buffer"):
-            self.radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
+        if radix_cache is not None:
+            radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
 
-        request_indices_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
-        self.req_manager.alloc_buffer_for_req(request_indices_gpu)
+        req_idx_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
+        req_manager.alloc_buffer_for_req(req_idx_gpu)
 
-        if self.radix_cache is None:
-            return
+        if radix_cache is not None:
+            fork_req_ids = [r.req_idx for r in req_objs if r.shared_kv_node is not None]
+            if fork_req_ids:
+                src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
+                req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
+                src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
 
-        copy_data = [(r.req_idx, r.shared_kv_node.buffer_idx) for r in req_objs if r.shared_kv_node is not None]
-        if copy_data:
-            copy_indices, copy_buffers = zip(*copy_data)
-            copy_indices_tensor = torch.tensor(copy_indices, device="cuda", dtype=torch.int64)
-            copy_buffers_tensor = torch.tensor(copy_buffers, device="cuda", dtype=torch.int64)
-            self.req_manager.copy_buffer_from_another_buffer(copy_buffers_tensor, copy_indices_tensor)
+                mtp_step = req_manager.mtp_step
+                if mtp_step not in _mtp_range_cache:
+                    _mtp_range_cache[mtp_step] = torch.arange(0, mtp_step + 1, dtype=torch.int32, device="cuda")
+                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:, None], _mtp_range_cache[mtp_step][None, :]]
+                req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -146,7 +150,8 @@ class InferenceContext:
                     slave_req: InferReq = slave_req
                     slave_req.related_master_req = master_req
 
-        self._alloc_and_copy_req_buffers(req_objs)
+        if isinstance(self.req_manager, ReqManagerForMamba):
+            self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, req_objs)
 
         return req_objs
 
@@ -183,10 +188,6 @@ class InferenceContext:
                 req.shared_kv_node = None
 
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
-        # 返回该请求的 mamba buffer 是否需要手动释放
-        if req.cur_kv_len == 0:
-            return True
-
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
@@ -202,10 +203,6 @@ class InferenceContext:
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
 
-            if len(req.extra_need_to_free_token_index) > 0:
-                free_token_index.extend(req.extra_need_to_free_token_index)
-                req.extra_need_to_free_token_index = []
-
             if node.buffer_idx is None:
                 req_to_buffer_index = self.req_manager.req_to_buffer_index
                 buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
@@ -216,7 +213,7 @@ class InferenceContext:
 
     def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
         """释放请求的 KV cache 和 buffer 内存"""
-        if self.use_mamba_model:
+        if self.has_recurrent_state:
             need_free_base_buffer = self.free_a_req_mem_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
             if need_free_base_buffer:
@@ -245,8 +242,6 @@ class InferenceContext:
         if len(finished_request_ids) == 0:
             return
 
-        need_routing_data = _routing_mgr.g_routing_capture_manager is not None
-
         free_req_index = []
         free_token_index = []
         free_buffer_index = []
@@ -254,12 +249,7 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-
-            if need_routing_data:
-                self._extract_routing_data(req)
-
             self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
-
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
@@ -269,7 +259,7 @@ class InferenceContext:
             free_token_index = custom_cat(free_token_index)
             self.req_manager.free(free_req_index, free_token_index)
 
-        if self.use_mamba_model and len(free_buffer_index) != 0:
+        if len(free_buffer_index) != 0 and isinstance(self.req_manager, ReqManagerForMamba):
             self.req_manager.free_buffer(free_buffer_index)
 
         finished_req_ids_set = set(finished_request_ids)
@@ -314,12 +304,13 @@ class InferenceContext:
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
+                    logger.debug(f"infer paused req id {req.req_id}")
 
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
 
-            if self.use_mamba_model and len(free_buffer_index) != 0:
+            if len(free_buffer_index) != 0 and isinstance(self.req_manager, ReqManagerForMamba):
                 self.req_manager.free_buffer(free_buffer_index)
 
             g_infer_state_lock.release()
@@ -338,6 +329,7 @@ class InferenceContext:
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
+                    logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
                 revovered_reqs.append(req)
 
@@ -490,6 +482,12 @@ class InferReq:
             self.decode_need_token_num = self._normal_decode_need_token_num
 
         self._init_all_state()
+
+        self.generator = None
+        if self.sampling_param.shm_param.seed != -1:
+            self.generator = torch.Generator(device="cuda")
+            self.generator.manual_seed(self.sampling_param.shm_param.seed)
+
         if init_prefix_cache:
             self._match_radix_cache()
         return

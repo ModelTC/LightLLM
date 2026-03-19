@@ -2,77 +2,25 @@ import torch
 
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
-    Qwen3NextFullAttentionTransformerLayerWeight,
-    Qwen3NextGatedDeltaNetTransformerLayerWeight,
+    Qwen3NextTransformerLayerWeight,
 )
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-def split_fused_expert_weights(weights, layer_num, moe_intermediate_size):
-    layer_prefix = f"model.layers.{layer_num}."
-    keys = list(weights.keys())
-    gate_up_count = 0
-    down_count = 0
-    num_experts = 0
+class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
+    def _init_weight_names(self):
+        super()._init_weight_names()
+        self._gate_weight_name = f"model.layers.{self.layer_num_}.mlp.gate_proj.weight"
+        self._gate_bias_name = None
+        self._up_weight_name = f"model.layers.{self.layer_num_}.mlp.up_proj.weight"
+        self._up_bias_name = None
+        self._gate_up_weight_name = f"model.layers.{self.layer_num_}.mlp.gate_up_proj.weight"
+        self._gate_up_bias_name = None
+        self._down_weight_name = f"model.layers.{self.layer_num_}.mlp.down_proj.weight"
+        self._down_bias_name = None
 
-    for k in keys:
-        if not k.startswith(layer_prefix):
-            continue
-
-        if "mlp.experts.gate_up_proj" in k:
-            fused_weight = weights.pop(k)  # [num_experts, 2*inter_size, hidden_size]
-            num_experts = fused_weight.shape[0]
-
-            prefix = k.rsplit(".gate_up_proj", 1)[0]
-
-            gate_weight = fused_weight[:, :moe_intermediate_size, :]
-            up_weight = fused_weight[:, moe_intermediate_size:, :]
-
-            for expert_idx in range(num_experts):
-                weights[f"{prefix}.{expert_idx}.gate_proj.weight"] = gate_weight[expert_idx]
-                weights[f"{prefix}.{expert_idx}.up_proj.weight"] = up_weight[expert_idx]
-
-            gate_up_count += 1
-
-        elif "mlp.experts.down_proj" in k:
-            down_weight = weights.pop(k)  # [num_experts, hidden_size, inter_size]
-            num_experts = down_weight.shape[0]
-
-            prefix = k.rsplit(".down_proj", 1)[0]
-
-            for expert_idx in range(num_experts):
-                weights[f"{prefix}.{expert_idx}.down_proj.weight"] = down_weight[expert_idx]
-
-            down_count += 1
-
-
-class Qwen35NextFullAttentionTransformerLayerWeight(Qwen3NextFullAttentionTransformerLayerWeight):
-    def load_hf_weights(self, weights):
-        self._split_fused_expert_weights(weights)
-        super().load_hf_weights(weights)
-
-    def _split_fused_expert_weights(self, weights):
-        moe_intermediate_size = self.network_config_.get("moe_intermediate_size")
-        if moe_intermediate_size is None:
-            moe_intermediate_size = self.network_config_.get("intermediate_size")
-
-        if moe_intermediate_size is None:
-            logger.warning(
-                f"Layer {self.layer_num_}: Cannot find moe_intermediate_size in config, "
-                "skipping fused expert weight splitting"
-            )
-            return
-
-        layer_prefix = f"model.layers.{self.layer_num_}.mlp.experts"
-        has_fused_weights = any(layer_prefix in k and ("gate_up_proj" in k or "down_proj" in k) for k in weights.keys())
-
-        if has_fused_weights:
-            split_fused_expert_weights(weights, self.layer_num_, moe_intermediate_size)
-
-
-class Qwen35NextGatedDeltaNetTransformerLayerWeight(Qwen3NextGatedDeltaNetTransformerLayerWeight):
     def _init_gdn_weight(self):
         # Initialize everything from parent first, then override only linear_in_proj.
         super()._init_gdn_weight()
@@ -104,10 +52,6 @@ class Qwen35NextGatedDeltaNetTransformerLayerWeight(Qwen3NextGatedDeltaNetTransf
             data_type=self.data_type_,
             quant_method=self.get_quant_method("in_proj_weight"),
         )
-
-    def load_hf_weights(self, weights):
-        self._split_fused_expert_weights(weights)
-        super().load_hf_weights(weights)
 
     def _preprocess_weight(self, weights):
         # Keep parent conv1d preprocessing path.
@@ -146,21 +90,3 @@ class Qwen35NextGatedDeltaNetTransformerLayerWeight(Qwen3NextGatedDeltaNetTransf
         weights[f"{prefix}.in_proj_k.weight"] = k
         weights[f"{prefix}.in_proj_v.weight"] = v
         del weights[qkv_name]
-
-    def _split_fused_expert_weights(self, weights):
-        moe_intermediate_size = self.network_config_.get("moe_intermediate_size")
-        if moe_intermediate_size is None:
-            moe_intermediate_size = self.network_config_.get("intermediate_size")
-
-        if moe_intermediate_size is None:
-            logger.warning(
-                f"Layer {self.layer_num_}: Cannot find moe_intermediate_size in config, "
-                "skipping fused expert weight splitting"
-            )
-            return
-
-        layer_prefix = f"model.layers.{self.layer_num_}.mlp.experts"
-        has_fused_weights = any(layer_prefix in k and ("gate_up_proj" in k or "down_proj" in k) for k in weights.keys())
-
-        if has_fused_weights:
-            split_fused_expert_weights(weights, self.layer_num_, moe_intermediate_size)

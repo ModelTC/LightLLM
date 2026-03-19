@@ -38,7 +38,7 @@ class SamplingParams:
         top_k: int = None,  # -1 is for all
         ignore_eos: bool = False,
         image_max_patch_num: int = -1,
-        max_new_tokens: int = 16,
+        max_new_tokens: int = 16384,
         min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
@@ -62,6 +62,7 @@ class SamplingParams:
         move_kv_to_decode_node: Optional[dict] = None,
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
+        seed: Optional[int] = -1,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -94,6 +95,7 @@ class SamplingParams:
         self.group_request_id = group_request_id
         self.move_kv_to_decode_node = move_kv_to_decode_node
         self.suggested_dp_index = suggested_dp_index
+        self.seed = seed
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -148,9 +150,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
         if self.max_new_tokens < 1:
-            raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
+            raise ValueError(f"max_new_tokens must be at least 1, got {self.max_new_tokens}.")
         if self.min_new_tokens < 1:
-            raise ValueError(f"min_new_tokens must be at least 1 , got {self.min_new_tokens}.")
+            raise ValueError(f"min_new_tokens must be at least 1, got {self.min_new_tokens}.")
         if self.min_new_tokens > self.max_new_tokens:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
@@ -277,6 +279,7 @@ class SamplingParams:
         ret["allowed_token_ids"] = self.allowed_token_ids
         ret["invalid_token_ids"] = self.invalid_token_ids
         ret["move_kv_to_decode_node"] = self.move_kv_to_decode_node
+        ret["seed"] = self.seed
         return ret
 
     def to_origin_dict(self):

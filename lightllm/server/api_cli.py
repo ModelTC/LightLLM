@@ -127,7 +127,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool_call_parser",
         type=str,
-        choices=["qwen25", "llama3", "mistral", "deepseekv3", "qwen", "deepseekv31", "glm47", "kimi_k2", "qwen3_coder"],
+        choices=[
+            "qwen25",
+            "llama3",
+            "mistral",
+            "deepseekv3",
+            "qwen",
+            "deepseekv31",
+            "deepseekv32",
+            "glm47",
+            "kimi_k2",
+            "qwen3_coder",
+        ],
         default=None,
         help="tool call parser type",
     )
@@ -166,7 +177,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--running_max_req_size", type=int, default=1000, help="the max size for forward requests in the same time"
+        "--running_max_req_size", type=int, default=256, help="the max size for forward requests in the same time"
     )
     parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")
     parser.add_argument("--node_rank", type=int, default=0, help="the rank of the current node")
@@ -199,7 +210,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="the dp balancer type, default is bs_balancer",
     )
     parser.add_argument(
-        "--max_req_total_len", type=int, default=16384, help="the max value for req_input_len + req_output_len"
+        "--max_req_total_len",
+        type=int,
+        default=16384,
+        help="Maximum allowed length for a request (input tokens + output tokens). "
+        "In PD (Prefill-Decode) mode, this value must be synchronized across the "
+        "PD master, prefill, and decode nodes.",
     )
     parser.add_argument(
         "--nccl_host",
@@ -223,6 +239,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
+    parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
     parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
     parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
     parser.add_argument(
@@ -235,11 +252,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         This setting allows you to turn off these warning checks.""",
     )
 
-    parser.add_argument("--router_token_ratio", type=float, default=0.0, help="token ratio to control router dispatch")
     parser.add_argument(
-        "--router_max_new_token_len", type=int, default=1024, help="the request max new token len for router"
+        "--router_token_ratio",
+        type=float,
+        default=None,
+        help="""Token used ratio to control router dispatch, range in [0.0, 1.0].
+            When the token VRAM usage ratio is higher than this value,
+            the dispatch strategy tends to be conservative.
+            When the token VRAM usage ratio is lower than this value,
+            the dispatching of requests tends to be aggressive.
+            The default value is None, meaning it will be automatically
+            determined by the internal system based on other startup parameters.""",
     )
-
     parser.add_argument(
         "--router_max_wait_tokens",
         type=int,
@@ -258,7 +282,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
 
-    parser.add_argument("--chunked_prefill_size", type=int, default=8192, help="chunked prefill size")
+    parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
@@ -277,12 +301,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                         use env FIRST_ALLOWED_TOKENS to set the range, like FIRST_ALLOWED_TOKENS=1,2 ..""",
     )
     parser.add_argument(
-        "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional visual models."
+        "--disable_vision",
+        action="store_true",
+        default=None,
+        help="if the model is a multimodal model, set to not load vision part model.",
     )
     parser.add_argument(
-        "--enable_multimodal_audio",
+        "--disable_audio",
         action="store_true",
-        help="Whether or not to allow to load additional audio models (requird --enable_multimodal).",
+        default=None,
+        help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
@@ -555,8 +583,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
-            "qwen3next_vanilla",
-            "qwen3next_eagle",
             None,
         ],
         default=None,

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 from lightllm.server.core.objs import ShmReqManager, Req
 from lightllm.utils.log_utils import init_logger
+from .stats import RouterStatics
 
 logger = init_logger(__name__)
 
@@ -49,11 +50,14 @@ class Batch:
             all_dp_req_num[req.sample_params.suggested_dp_index] += 1
         return all_dp_req_num
 
-    def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
+    def filter_out_finished_req(self, shm_req_manager: ShmReqManager, router_statics: RouterStatics):
         unfinished_req_ids = []
         for req in self.reqs:
             if req.shm_infer_released:
                 logger.info(f"router release req id {req.request_id}")
+                if not req.is_aborted:
+                    router_statics.update(req.candetoken_out_len)
+
                 shm_req_manager.put_back_req_obj(req)
                 req = None
             else:
@@ -96,4 +100,5 @@ class Batch:
         return f"batch_id={self.batch_id}, " f"reqs={self.reqs}, "
 
     def simple_log(self):
-        return f"batch_id={self.batch_id}, time:{time.time()}s req_ids:{[req.request_id for req in self.reqs]}"
+        details_tuples = [(req.request_id, req.index_in_shm_mem) for req in self.reqs]
+        return f"batch_id={self.batch_id}, time:{time.time()}s (req_id, shm_index)s:{details_tuples}"

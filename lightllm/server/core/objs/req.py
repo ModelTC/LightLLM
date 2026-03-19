@@ -330,7 +330,7 @@ class Req(ctypes.Structure):
     def get_used_tokens(self):
         return max(0, self.shm_cur_kv_len)
 
-    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
+    def get_tuple_tokens(self, is_busy, ema_req_out_len):
         raise NotImplementedError("Subclasses should implement this method")
 
     def get_decode_need_tokens(self):
@@ -381,7 +381,7 @@ ADDED_OUTPUT_LEN = 16
 class ChunkedPrefillReq(Req):
     _pack_ = 4
 
-    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
+    def get_tuple_tokens(self, is_busy, ema_req_out_len):
         args = get_env_start_args()
         # chuncked prefill 推理的过程中，存在很多模式的延迟 step 推理的控制， 用于
         # 保证更好的包间数据或者是提升 dp 模式下prefill 的效率，但是在估计 token 显存
@@ -397,9 +397,7 @@ class ChunkedPrefillReq(Req):
         elif is_busy:
             cur_max_new_token_len = self.sample_params.max_new_tokens
         else:
-            cur_max_new_token_len = min(
-                self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), router_max_new_token_len)
-            )
+            cur_max_new_token_len = min(self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), ema_req_out_len))
 
         a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
         b_len = (
