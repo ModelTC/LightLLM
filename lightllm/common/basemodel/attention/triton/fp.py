@@ -85,7 +85,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
     mtp_size: int = 1
 
     def init_state(self):
-        from lightllm.utils.envs_utils import get_env_start_args
+        from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
         args_mtp_step = get_env_start_args().mtp_step
 
         if args_mtp_step > 0:
@@ -93,11 +93,14 @@ class TritonDecodeAttState(BaseDecodeAttState):
             self.mtp_size = args_mtp_step + 1
             batch_size = self.infer_state.batch_size
 
-            assert batch_size % self.mtp_size == 0, f"batch_size {batch_size} must be divisible by mtp_size {self.mtp_size}"
+            # 在动态 MTP 验证模式下，b_mark_shared_group 会在 _create_inferstate 中从 model_input 传递
+            # 因为动态模式下每个请求的 mtp_size 可能不同，无法静态初始化
+            if not enable_dynamic_mtp_verify():
+                assert batch_size % self.mtp_size == 0, f"batch_size {batch_size} must be divisible by mtp_size {self.mtp_size}"
 
-            # b_mark_shared_group: 0 for non-last requests in group, mtp_size for last request
-            self.b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=self.infer_state.input_ids.device)
-            self.b_mark_shared_group[args_mtp_step::self.mtp_size] = self.mtp_size
+                # b_mark_shared_group: 0 for non-last requests in group, mtp_size for last request
+                self.b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=self.infer_state.input_ids.device)
+                self.b_mark_shared_group[args_mtp_step::self.mtp_size] = self.mtp_size
         else:
             self.mtp_size = 1
             self.b_mark_shared_group = None
@@ -217,23 +220,35 @@ class TritonDecodeAttState(BaseDecodeAttState):
         alloc_func=torch.empty,
     ):
         """
-        MTP Diverse GQA Attention for static MTP mode.
+        MTP Diverse GQA Attention for static and dynamic MTP mode.
 
         In static MTP mode, each request has 1 Q token, but the i-th request in a group
         can only see the first i+1 KV tokens.
-        Only the last request in each group is computed, results are copied to others.
+        In dynamic MTP mode, each request has a dynamic mtp_size, and b_mark_shared_group
+        is built dynamically based on the actual mtp_size of each request.
 
         Input/Output shape: [batch_size, num_heads, head_dim]
         """
         from ...triton_kernel.att.decode_att.gqa.mtp_diverse import (
             token_decode_attention_mtp_diverse_single_token,
         )
+        from lightllm.utils.envs_utils import enable_dynamic_mtp_verify
 
         batch_size = self.infer_state.batch_size
         b_seq_len = self.infer_state.b_seq_len
 
         max_kv_len = int(b_seq_len.max().item())
-        max_batch_group_size = self.mtp_size
+
+        # 在动态 MTP 验证模式下，使用 infer_state.b_mark_shared_group（从 model_input 传递）
+        # 在静态 MTP 模式下，使用 self.b_mark_shared_group（在 init_state 中初始化）
+        if enable_dynamic_mtp_verify():
+            b_mark_shared_group = self.infer_state.b_mark_shared_group
+            # 动态模式下，max_batch_group_size 取当前 batch 中最大的组大小
+            max_batch_group_size = int(b_mark_shared_group.max().item())
+        else:
+            b_mark_shared_group = self.b_mark_shared_group
+            max_batch_group_size = self.mtp_size
+
         block_seq = 256
 
         out = token_decode_attention_mtp_diverse_single_token(
@@ -243,7 +258,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             Req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
             B_req_idx=self.infer_state.b_req_idx,
             b_seq_len=b_seq_len,
-            b_mark_shared_group=self.b_mark_shared_group,
+            b_mark_shared_group=b_mark_shared_group,
             max_batch_group_size=max_batch_group_size,
             max_kv_len=max_kv_len,
             block_seq=block_seq,

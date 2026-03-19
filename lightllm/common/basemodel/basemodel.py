@@ -30,7 +30,7 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel, enable_dynamic_mtp_verify
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
@@ -327,6 +327,9 @@ class TpPartBaseModel:
         else:
             if enable_diverse_mode_gqa_decode_fast_kernel():
                 infer_state.b_shared_seq_len = model_input.b_shared_seq_len
+                infer_state.b_mark_shared_group = model_input.b_mark_shared_group
+            elif enable_dynamic_mtp_verify():
+                # 动态 MTP 验证模式下，也需要传递 b_mark_shared_group
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params

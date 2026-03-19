@@ -435,6 +435,9 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+        # mtp_size 用来记录当前 step 动态计算的 MTP 验证长度（<= mtp_step）
+        # 在启用动态 MTP 验证时，每步会根据 prob 分布重新设置该值
+        self.mtp_size: int = self.mtp_step
         if self.mtp_step > 0:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
@@ -603,7 +606,10 @@ class InferReq:
         return 1
 
     def _mtp_decode_need_token_num(self) -> int:
-        return (1 + self.mtp_step) * 2
+        # 使用动态 mtp_size 计算需要的 token 数量
+        # (1 + mtp_size) 个 token 用于主 token + mtp_size 个 draft token 的验证
+        # * 2 是为了预留额外的空间
+        return (1 + self.mtp_size) * 2
 
 
 class InferReqUpdatePack:

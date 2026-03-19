@@ -7,6 +7,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
     get_diverse_max_batch_shared_group_size,
+    enable_dynamic_mtp_verify,
 )
 
 
@@ -109,7 +110,8 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        for step in range(req.mtp_step):
+        # 动态 MTP 模式：使用动态 mtp_size 构建 batch
+        for step in range(req.mtp_size):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -126,8 +128,13 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
 
+    # diverse mode 和 dynamic MTP mode 使用不同的 shared group 构建逻辑
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
+    elif enable_dynamic_mtp_verify():
+        # MTP 模式下，使用专门的 shared group 构建函数
+        b_shared_seq_len = None  # MTP 模式不需要 b_shared_seq_len
+        b_mark_shared_group = build_mtp_shared_group_infos(b_mtp_index=b_mtp_index)
     else:
         b_shared_seq_len = None
         b_mark_shared_group = None
@@ -200,3 +207,36 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
     b_shared_seq_len = torch.tensor(b_shared_seq_len, dtype=torch.int32, device="cpu")
     b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
     return b_shared_seq_len, b_mark_shared_group
+
+
+def build_mtp_shared_group_infos(
+    b_mtp_index: torch.Tensor,
+) -> torch.Tensor:
+    """
+    为 MTP 动态验证模式构建 b_mark_shared_group 信息
+
+    MTP 模式下，每个原始请求会扩展成 (1 + mtp_size) 个请求，这些请求共享相同的 KV 前缀
+    例如：mtp_size=3 时，4 个请求 [A0, A1, A2, A3] 共享前缀，标记为 [0, 0, 0, 4]
+
+    Args:
+        b_mtp_index: 每个请求的 mtp_index (0 表示原始请求，1,2,...表示 draft 请求)
+
+    Returns:
+        b_mark_shared_group: 标记请求组的数组，0 表示非组内最后一个请求，N>=1 表示 N 人组的最后一个请求
+    """
+    batch_size = b_mtp_index.shape[0]
+    b_mark_shared_group = [0] * batch_size
+
+    # 遍历 b_mtp_index，找到每个组的结束位置
+    # mtp_index=0 表示一个新组的开始，前一个组的结束位置的下一个位置
+    group_start = 0
+    for i in range(1, batch_size + 1):
+        # 到达数组末尾或者遇到新的组（mtp_index == 0）
+        if i == batch_size or b_mtp_index[i] == 0:
+            # 标记前一个组的结束位置
+            group_size = i - group_start
+            b_mark_shared_group[i - 1] = group_size
+            group_start = i
+
+    b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
+    return b_mark_shared_group

@@ -681,6 +681,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         currently, deepseekv3 model only support 1 step""",
     )
     parser.add_argument(
+        "--mtp_dynamic_verify",
+        action="store_true",
+        help="""Whether to enable dynamic verification for MTP multi-prediction results.""" 
+    )
+    parser.add_argument(
         "--kv_quant_calibration_config_path",
         type=str,
         default=None,

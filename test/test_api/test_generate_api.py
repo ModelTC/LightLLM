@@ -22,7 +22,7 @@ class RequestThread(threading.Thread):
 url = "http://localhost:8088/generate"
 headers = {"Content-Type": "application/json"}
 
-for i in range(1):
+for i in range(2):
     data = {
         "inputs": "San Francisco is a",
         # 'temperature': 0.1,
