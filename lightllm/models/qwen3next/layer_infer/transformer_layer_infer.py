@@ -237,13 +237,11 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)
 
         if is_prefill:
-            # Prefill: compute g/beta upfront (chunk kernel doesn't support fused gating)
             g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
             core_attn_out = self._gdn_prefill_kernel(
                 mixed_qkv, conv_states, ssm_states, g, beta, infer_state, layer_weight
             )
         else:
-            # Decode (non-MTP): fuse gating into recurrent kernel to save 2 kernel launches
             core_attn_out = self._gdn_decode_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
 
         num_tokens = z.shape[0]
@@ -355,8 +353,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ):
-        """Decode kernel for GDN forward pass (single-token, non-MTP mode).
-        Uses fused gating: g/beta computed inline in the recurrent kernel."""
         mixed_qkv = causal_conv1d_update(
             mixed_qkv,
             conv_states,
