@@ -5,6 +5,7 @@ import torch.distributed as dist
 from lightllm.utils.config_utils import get_model_architectures
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from .mem_manager import MemoryManager
 
 logger = init_logger(__name__)
@@ -16,43 +17,36 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
 
         self.qmax = torch.finfo(torch.float8_e4m3fn).max
         self.qmin = torch.finfo(torch.float8_e4m3fn).min
-        self.total_head_num = head_num * dist.get_world_size() if dist.is_initialized() else head_num
         self.scales = None
-        self.scales_list = None
-        
-        enable_per_head = True
-        assert get_env_start_args().kv_quant_calibration_config_path is not None, "no kv_quant_calibration_config_path be set"
-        logger.info(
-            f"kv_quant_calibration_config_path {get_env_start_args().kv_quant_calibration_config_path} is set, "
-            "will load kv quant calibration config"
-        )
-        cfg = self._load_and_check_config()
-        self.scales_list = cfg["scales"]
-        self.scales = torch.tensor(self.scales_list, dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
-        if not enable_per_head:
-            self.scales = torch.repeat_interleave(self.scales, head_num, dim=-1)
-        elif cfg["num_head"] > self.total_head_num:
-            factor = cfg["num_head"] // self.total_head_num
-            self.scales = self.scales[..., ::factor].contiguous()
-        elif cfg["num_head"] < self.total_head_num:
-            factor = self.total_head_num // cfg["num_head"]
-            self.scales = torch.repeat_interleave(self.scales, factor, dim=-1).contiguous()
-        if enable_per_head and dist.is_initialized() and dist.get_world_size() > 1:
-            v_offset = self.total_head_num
-            start_head = dist.get_rank() * head_num
-            end_head = start_head + head_num
-            k_scales = self.scales[:, start_head:end_head].contiguous()
-            v_scales = self.scales[:, v_offset + start_head : v_offset + end_head].contiguous()
-            current_scales = torch.cat((k_scales, v_scales), dim=-1)
 
-            self.scales_list = current_scales.tolist()
-            self.scales = current_scales
+        
+        if get_env_start_args().kv_quant_calibration_config_path is not None:
+            logger.info(
+                f"kv_quant_calibration_config_path {get_env_start_args().kv_quant_calibration_config_path} is set, "
+                "will load kv quant calibration config"
+            )
+            cfg = self._load_and_check_config()
+            all_head_num = cfg["num_head"]
+            all_scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
+   
+            factor = (get_dp_world_size() * head_num) // all_head_num
+            all_scales = torch.repeat_interleave(input=all_scales,
+                                                 repeats=factor,
+                                                 dim=-1)
+            rank_in_dp = get_current_rank_in_dp()
+            
+            v_offset = all_scales.shape[1] // 2
+            start_head = rank_in_dp * head_num
+            end_head = start_head + head_num
+            k_scales = all_scales[:, start_head:end_head].contiguous()
+            v_scales = all_scales[:, v_offset + start_head : v_offset + end_head].contiguous()
+            self.scales = torch.cat((k_scales, v_scales), dim=-1)
+        else:
+            self.scales = torch.ones((self.kv_buffer.shape[0], 2 * head_num), dtype=torch.flaot32, device="cuda")
         return
 
 
     def _load_and_check_config(self):
-        enable_per_head = True
-
         if os.path.exists(get_env_start_args().kv_quant_calibration_config_path):
             with open(get_env_start_args().kv_quant_calibration_config_path, "r") as f:
                 cfg = json.load(f)
@@ -74,13 +68,7 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
                 raise ValueError(
                     f"num_head {cfg['num_head']} in config " f"not match current model head num {self.total_head_num}"
                 )
-            if enable_per_head:
-                if cfg["quant_type"] != "per_head":
-                    raise ValueError(f"quant type {cfg['quant_type']} in config not match per-head backend")
-            else:
-                if cfg["quant_type"] != "per_tensor":
-                    raise ValueError(f"quant type {cfg['quant_type']} in config not match per-tensor backend")
-
+            assert cfg["quant_type"] == "per_head", f"quant type {cfg['quant_type']} in config not match per-head backend"
             return cfg
         else:
             raise FileNotFoundError(
