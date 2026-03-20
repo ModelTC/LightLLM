@@ -54,7 +54,7 @@ class CacheServer(rpyc.Service):
 
 
 def get_cache_manager(args):
-    if args.enable_remote_vit or args.run_mode == "visual":
+    if args.enable_remote_vit or args.run_mode in ["visual", "visual_only"]:
         return MemoryCacheWithRedis(args)
     else:
         return InMemoryCache(args)

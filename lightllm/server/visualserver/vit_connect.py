@@ -159,7 +159,7 @@ class VITConnectionManager:
         self.current_vit_index = index
         return list(self.remote_vit_instances.values())[index]
 
-    async def send_to_vit(self, req: GroupReqIndexes, protocol=pickle.HIGHEST_PROTOCOL, free_mode: str = "all"):
+    async def send_to_vit(self, req: GroupReqIndexes, protocol=pickle.HIGHEST_PROTOCOL):
         """
         发送数据到VIT实例，支持本地和远程模式
         """
@@ -174,10 +174,7 @@ class VITConnectionManager:
         if self.remote_vit:
             await self._wait_visual_embed_ready(req)
 
-        if free_mode == "all":
-            req.multimodal_params.free()
-        elif free_mode == "images":
-            req.multimodal_params.free_images()
+        req.multimodal_params.free_images()
 
     async def vit_handle_loop(self):
         """
@@ -223,7 +220,7 @@ class VITConnectionManager:
         # 本地模式不需要等待
         if not self.remote_vit:
             return
-        uuids = req.multimodal_params.get_all_uuids()
+        uuids = [image.uuid for image in req.multimodal_params.images]
 
         async def wait_for_embeds():
             while not all(self.cache_client.root.get_items_embed(uuids, True)):

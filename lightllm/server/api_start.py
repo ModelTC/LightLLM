@@ -5,7 +5,7 @@ import uuid
 import subprocess
 import signal
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
-from lightllm.utils.start_utils import process_manager, kill_recursive, is_multimodal_mode
+from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
@@ -200,7 +200,6 @@ def normal_or_p_d_start(args, only_prepare=False):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
-    args.enable_multimodal = is_multimodal_mode(args)
     _prepare_remote_vit_embed_dir(args)
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
@@ -361,18 +360,6 @@ def normal_or_p_d_start(args, only_prepare=False):
             start_args=[(args,)],
         )
 
-    if not args.disable_audio:
-        from .audioserver.manager import start_audio_process
-
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_audio_process,
-            ],
-            start_args=[
-                (args,),
-            ],
-        )
-
     if not args.disable_vision and not args.enable_remote_vit:
         from .visualserver.manager import start_visual_process
 
@@ -382,6 +369,18 @@ def normal_or_p_d_start(args, only_prepare=False):
             ],
             start_args=[
                 (args, visual_model_tp_ports),
+            ],
+        )
+
+    if not args.disable_audio:
+        from .audioserver.manager import start_audio_process
+
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_audio_process,
+            ],
+            start_args=[
+                (args,),
             ],
         )
 

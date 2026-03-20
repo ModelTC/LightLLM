@@ -92,7 +92,7 @@ class G_Objs:
             self.httpserver_manager = HttpServerManagerForPDMaster(
                 args=args,
             )
-        elif args.run_mode == "visual":
+        elif args.run_mode in ["visual", "visual_only"]:
             self.metric_client = MetricClient(args.metric_port)
         else:
             init_tokenizer(args)  # for openai api
@@ -138,7 +138,7 @@ def get_model_name():
 @app.get("/health", summary="Check server health")
 @app.head("/health", summary="Check server health")
 async def healthcheck(request: Request):
-    if g_objs.args.run_mode in ["pd_master", "visual"]:
+    if g_objs.args.run_mode in ["pd_master", "visual", "visual_only"]:
         return JSONResponse({"message": "Ok"}, status_code=200)
 
     if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":

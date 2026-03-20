@@ -11,7 +11,7 @@ if __name__ == "__main__":
         pd_master_start(args)
     elif args.run_mode == "config_server":
         config_server_start(args)
-    elif args.run_mode == "visual":
+    elif args.run_mode in ["visual", "visual_only"]:
         visual_start(args)
     else:
         normal_or_p_d_start(args)

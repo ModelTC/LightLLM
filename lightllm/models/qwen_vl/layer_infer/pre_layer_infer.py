@@ -31,7 +31,6 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
         self.args = get_env_start_args()
-        self.cache_client = None
         if self.args.enable_remote_vit:
             self.cache_client = rpyc.connect("localhost", self.args.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -52,12 +51,14 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         img_token_lens = []
         img_start_locs_in_cache = []
         unique_uids = []
+        all_uids = []
         device = layer_weight.wte_weight_.weight.device
         dtype = layer_weight.wte_weight_.weight.dtype
         hidden_size = layer_weight.wte_weight_.weight.shape[1]
 
         for _, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
+                all_uids.append(img["uuid"])
                 # skip the same image
                 if img["token_id"] in img_start_token_ids:
                     continue
@@ -77,17 +78,12 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         )
 
         if self.args.enable_remote_vit:
-            release_ids = []
-            for _, p in enumerate(infer_state.multimodal_params):
-                for img in p["images"] + p["audios"]:
-                    release_ids.append(img["uuid"])
-
             for uid, start_index_in_embed_cache in zip(unique_uids, img_start_locs_in_cache):
                 embed_tensor = load_tensor_afs(get_shm_name_embed(uid), self.args.image_embed_dir)
                 self._copy_loaded_embed_to_cache(embed_tensor, cpu_embed_cache_tensor, start_index_in_embed_cache)
 
-            if release_ids:
-                self.cache_client.root.release(release_ids)
+            if all_uids:
+                self.cache_client.root.release(all_uids)
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "
