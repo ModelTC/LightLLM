@@ -203,7 +203,7 @@ class InferenceContext:
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
 
-            if node.buffer_idx is None:
+            if node is not None and node.buffer_idx is None:
                 req_to_buffer_index = self.req_manager.req_to_buffer_index
                 buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
                 self.radix_cache.add_buffer_idx_to_node(node, buffer_idx)
