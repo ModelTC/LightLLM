@@ -29,21 +29,9 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
             all_head_num = cfg["num_head"]
             all_scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
    
-            factor = (get_dp_world_size() * head_num) // all_head_num
-            assert (get_dp_world_size() * head_num) % all_head_num == 0
-            all_scales = torch.repeat_interleave(input=all_scales,
-                                                 repeats=factor,
-                                                 dim=-1)
-            rank_in_dp = get_current_rank_in_dp()
-            
-            v_offset = all_scales.shape[1] // 2
-            start_head = rank_in_dp * head_num
-            end_head = start_head + head_num
-            k_scales = all_scales[:, start_head:end_head].contiguous()
-            v_scales = all_scales[:, v_offset + start_head : v_offset + end_head].contiguous()
-            self.scales = torch.cat((k_scales, v_scales), dim=-1)
+            self.scales = all_scales
         else:
-            self.scales = torch.ones((self.kv_buffer.shape[0], 2 * head_num), dtype=torch.float32, device="cuda")
+            self.scales = torch.ones((self.kv_buffer.shape[0], 2), dtype=torch.float32, device="cuda")
         return
 
 
@@ -65,7 +53,7 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
                 raise ValueError(
                     f"num_layers {cfg['num_layers']} in config " f"not match current layer_num {self.layer_num}"
                 )
-            assert cfg["quant_type"] == "per_head", f"quant type {cfg['quant_type']} in config not match per-head backend"
+            assert cfg["quant_type"] == "per_tensor", f"quant type {cfg['quant_type']} in config not match per-tensor backend"
             return cfg
         else:
             raise FileNotFoundError(
