@@ -307,7 +307,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         while True:
             # 等待接收消息，设置超时为10秒
             data = await websocket.receive_bytes()
-            obj = pickle.loads(data)
+            obj = json.loads(data.decode())
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except (WebSocketDisconnect, Exception, RuntimeError) as e:
@@ -328,7 +328,7 @@ async def kv_move_status(websocket: WebSocket):
         while True:
             # 等待接收消息，设置超时为10秒
             data = await websocket.receive_bytes()
-            upkv_status = pickle.loads(data)
+            upkv_status = json.loads(data.decode())
             logger.info(f"received upkv_status {upkv_status} from {(client_ip, client_port)}")
             await g_objs.httpserver_manager.update_req_status(upkv_status)
     except (WebSocketDisconnect, Exception, RuntimeError) as e:

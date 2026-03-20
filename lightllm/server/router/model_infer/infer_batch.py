@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import numpy as np
 import collections
-import pickle
+import ujson as json
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
@@ -285,7 +285,7 @@ class InferSamplingParams:
 
         # nixl decode node information
         if self.shm_param.nixl_params.data_len > 0:
-            self.nixl_decode_node: NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
+            self.nixl_decode_node: NIXLDecodeNodeInfo = json.loads(self.shm_param.nixl_params.get().decode())
         else:
             self.nixl_decode_node: NIXLDecodeNodeInfo = None
 

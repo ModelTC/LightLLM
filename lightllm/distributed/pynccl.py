@@ -26,6 +26,7 @@ import time
 from typing import Optional, Union, Dict, Deque, Tuple, Any
 from collections import deque
 import logging
+import ujson as json
 
 # ===================== import region =====================
 import torch
@@ -85,7 +86,7 @@ class StatelessP2PProcessGroup:
         """Send an object to a destination rank."""
         self.expire_data()
         key = f"send_to/{self.dest_id}/{self.send_dst_counter}"
-        self.store.set(key, pickle.dumps(obj))
+        self.store.set(key, json.dumps(obj).encode())
         self.send_dst_counter += 1
         self.entries.append((key, time.time()))
 
@@ -102,7 +103,7 @@ class StatelessP2PProcessGroup:
 
     def recv_obj(self) -> Any:
         """Receive an object from a source rank."""
-        obj = pickle.loads(self.store.get(f"send_to/{self.dest_id}/{self.recv_src_counter}"))
+        obj = json.loads(self.store.get(f"send_to/{self.dest_id}/{self.recv_src_counter}").decode())
         self.recv_src_counter += 1
         return obj
 
