@@ -35,8 +35,10 @@ data_type_to_backend = {
         # "fa3": Fp8Fa3AttBackend,
         # "flashinfer": Fp8FlashInferAttBackend,
     },
-    "fp8kv": {
+    "fp8kv_sph": {
         "fa3": Fp8Fa3AttBackend,
+    },
+    "fp8kv_spt": {
         "flashinfer": Fp8FlashInferAttBackend,
     },
 }
