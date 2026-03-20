@@ -363,11 +363,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=["None", "int8kv", "int4kv", "fp8kv"],
+        choices=["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"],
         default="None",
         help="""kv type used in llm, None for dtype that llm used in config.json.
-                fp8kv: use float8_e4m3fn to store kv cache for inference, need fa3 or flashinfer backend.
-                requires --kv_quant_calibration_config_path to load pre-computed FP8 scales.""",
+                fp8kv_sph: use float8_e4m3fn to store kv cache for inference,
+                quant way is static per head kv quant.
+                fp8kv_spt: use float8_e4m3fn to store kv cache for inference,
+                quant way is static per tensor kv quant.
+                fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
+                to load pre-computed FP8 scales.""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",
