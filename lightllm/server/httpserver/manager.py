@@ -82,14 +82,15 @@ class HttpServerManager:
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            if not self.args.disable_vision:
-                from lightllm.server.visualserver.vit_connect import VITConnectionManager
 
-                self.vit_manager = VITConnectionManager(args, context, args.visual_port, self.cache_client)
+        if not self.args.disable_vision:
+            from lightllm.server.visualserver.vit_connect import VITConnectionManager
 
-            if not self.args.disable_audio:
-                self.send_to_audio = context.socket(zmq.PUSH)
-                self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+            self.vit_manager = VITConnectionManager(args, context, args.visual_port, self.cache_client)
+
+        if not self.args.disable_audio:
+            self.send_to_audio = context.socket(zmq.PUSH)
+            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
 
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
@@ -151,7 +152,6 @@ class HttpServerManager:
             if self.args.enable_remote_vit:
                 # 避免远端lru被逐出
                 self.cache_client.root.get_items_embed(uid_list, False)
-                return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
@@ -592,25 +592,13 @@ class HttpServerManager:
 
         if self.pd_mode.is_P_or_NORMAL():
             group_req_index = group_req_objs.to_group_req_index()
-            has_images = len(group_req_index.multimodal_params.images) > 0
-            has_audios = len(group_req_index.multimodal_params.audios) > 0
-
-            if has_images and not self.args.disable_vision:
-                free_mode = "all"
-                if self.args.enable_remote_vit and has_audios and not self.args.disable_audio:
-                    free_mode = "images"
-
-                await self.vit_manager.send_to_vit(
-                    group_req_index, protocol=pickle.HIGHEST_PROTOCOL, free_mode=free_mode
-                )
-
+            if not self.args.disable_vision:
+                await self.vit_manager.send_to_vit(group_req_index, protocol=pickle.HIGHEST_PROTOCOL)
                 if not self.args.enable_remote_vit:
                     return
 
-            if has_audios and not self.args.disable_audio:
+            if not self.args.disable_audio:
                 self.send_to_audio.send_pyobj(group_req_index, protocol=pickle.HIGHEST_PROTOCOL)
-                if self.args.enable_remote_vit:
-                    group_req_index.multimodal_params.free()
                 return
 
             if self.args.enable_cpu_cache:
