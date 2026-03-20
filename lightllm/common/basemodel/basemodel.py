@@ -1047,6 +1047,7 @@ class TpPartBaseModel:
         return special_model_input
 
     def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
+        torch.cuda.synchronize()
         if tags is None:
             self.release_all()
             return
@@ -1101,8 +1102,8 @@ class TpPartBaseModel:
         torch.cuda.empty_cache()
         gc.collect()
         self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
-        torch.cuda.synchronize()
         self.mem_manager.free_all()
+        torch.cuda.synchronize()
 
     def resume_graph(self):
         torch.cuda.empty_cache()

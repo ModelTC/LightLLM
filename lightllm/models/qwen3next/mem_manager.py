@@ -27,6 +27,7 @@ class Qwen3NextHybridMemManager(MemoryManager):
         import torch.distributed as dist
 
         use_ratio = max_total_token_num is None and start_args.mamba_cache_size is None
+        print(f"mem_fraction ", mem_fraction, flush=True)
 
         world_size = dist.get_world_size()
         total_memory = get_total_gpu_memory()
