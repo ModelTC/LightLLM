@@ -89,19 +89,21 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
     ) -> torch.Tensor:
         self.backend: Fp8Fa3AttBackend = self.backend  # for typing
 
+        q_head_num = q.shape[1]
+        q_head_dim = q.shape[2]
+        k_head_num = k.shape[1]
         q, q_scale = q_per_head_fp8_quant(
-            q,
+            q.reshape(q.shape[0], k_head_num, -1),
             self.infer_state.b_seq_len,
             self.cu_seqlens_q,
-            self.mid_token_batch_ids,
+            token_batch_ids=self.mid_token_batch_ids,
         )
-        k_head_num = k.shape[1]
         k_head_dim = k.shape[2]
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
         o = flash_attn_with_kvcache(
-            q=q,
+            q=q.reshape(-1, q_head_num, q_head_dim),
             k_cache=cache_k,
             v_cache=cache_v,
             page_table=self.page_table,
@@ -200,9 +202,11 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
 
         q_head_num = q.shape[1]
-        q, q_scale = scaled_fp8_quant(q.view(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
+        if scaled_fp8_quant is None:
+            raise ImportError("scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention.")
+        q, q_scale = scaled_fp8_quant(q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
         o = flash_attn_with_kvcache(
-            q=q.view(-1, q_head_num, k_head_dim),
+            q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,
             v_cache=cache_v,
             page_table=self.page_table,

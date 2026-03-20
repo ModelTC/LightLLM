@@ -20,7 +20,6 @@ from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_cl
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     CalibrationFP8KVMemoryManager,
-    ExportCalibrationMemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
