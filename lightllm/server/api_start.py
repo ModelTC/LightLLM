@@ -158,12 +158,7 @@ def normal_or_p_d_start(args):
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
 
     # FP8 KV cache mode checks
-    if args.llm_kv_type == "fp8kv":
-        fp8_backends = {"fa3", "flashinfer"}
-        common = fp8_backends & set(args.llm_prefill_att_backend) & set(args.llm_decode_att_backend)
-        assert (
-            common
-        ), "fp8kv or export fp8kv mode requires prefill and decode to use the same backend (fa3 or flashinfer)"
+    if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
         assert (
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
