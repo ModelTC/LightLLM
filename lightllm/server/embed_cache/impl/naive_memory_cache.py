@@ -10,7 +10,10 @@ from typing import List, Dict
 import multiprocessing.shared_memory as shm
 from ..utils import get_shm_name_data, free_shm
 from lightllm.utils.log_utils import init_logger
-from ..embed_cache_client import CpuEmbedCacheClient, MemoryBlock, SortedSet
+from sortedcontainers import SortedSet
+
+from ..allocator import MemoryBlock
+from ..embed_cache_client import CpuEmbedCacheClient
 
 logger = init_logger(__name__)
 
