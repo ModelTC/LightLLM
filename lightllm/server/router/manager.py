@@ -566,7 +566,7 @@ class RouterManager:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
-        self._process_special_reqs(special_reqs)
+        await self._process_special_reqs(special_reqs)
 
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
@@ -575,12 +575,12 @@ class RouterManager:
                 self._generate_new_batch()
         return
 
-    def _process_special_reqs(self, special_reqs: List[BaseReq]):
+    async def _process_special_reqs(self, special_reqs: List[BaseReq]):
         if self.is_multinode_tp:
             special_reqs = self.broadcast_reqs_to_other_nodes(special_reqs)
         for req in special_reqs:
             assert isinstance(req, GeneralHttpToModelRpcReq), "special request must be GeneralHttpToModelRpcReq"
-            self.forward_to_model(req)
+            await self.forward_to_model(req)
 
     def broadcast_reqs_to_other_nodes(self, reqs: List[BaseReq]):
         req_num = len(reqs)
@@ -599,12 +599,14 @@ class RouterManager:
                 dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
         return reqs
 
-    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> None:
+    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> None:
+        forward_to_model_tasks = []
         for model_rpc_client in self.model_rpc_clients:
-            ret = model_rpc_client.forward_to_model(req)
-            if not ret.success:
-                ret = ret
-                break
+            forward_to_model_tasks.append(model_rpc_client.forward_to_model(req))
+        all_ret = await asyncio.gather(*forward_to_model_tasks)
+        succes = all(ret.success for ret in all_ret)
+        ret = all_ret[0]
+        ret.success = succes
         if self.is_multinode_tp:
             output_list = [None for _ in self.nnodes] if self.node_rank == 0 else None
             dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)

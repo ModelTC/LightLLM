@@ -182,6 +182,7 @@ class ModelRpcClient:
 
         self._init_model = async_wrap(self.conn.root.init_model)
         self._get_max_total_token_num = async_wrap(self.conn.root.get_max_total_token_num)
+        self._forward_to_model = async_wrap(self.conn.root.forward_to_model)
         return
 
     async def init_model(self, kvargs):
@@ -193,9 +194,9 @@ class ModelRpcClient:
         ans = self._get_max_total_token_num()
         return obtain(await ans)
 
-    def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
-        ans = self.conn.root.forward_to_model(req)
-        return obtain(ans)
+    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        ans = self._forward_to_model(req)
+        return obtain(await ans)
 
 
 def _init_env(
