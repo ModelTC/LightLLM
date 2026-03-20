@@ -1,3 +1,4 @@
+from lightllm.utils.device_utils import is_metax
 import torch
 import torch.nn.functional as F
 
@@ -34,7 +35,11 @@ class XformersVitAttBackend(BaseVitAttBackend):
         if max_seqlen:
             assert max(seqlens) <= max_seqlen
 
-        attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens, device=q.device)
+        # The version of xformers on metex is 0.0.22 (nv is 0.0.32.post1), no device param
+        if is_metax():
+            attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens)
+        else:
+            attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens, device=q.device)
 
         q_ = q.unsqueeze(0)  # [1, T, H, D]
         k_ = k.unsqueeze(0)  # [1, T, H, D]

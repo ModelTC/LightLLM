@@ -32,6 +32,11 @@ def is_4090():
 
 
 @lru_cache(maxsize=None)
+def is_metax():
+    return torch.cuda.is_available() and "MetaX" in torch.cuda.get_device_name(0)
+
+
+@lru_cache(maxsize=None)
 def get_device_sm_count():
     import triton
     from triton.runtime import driver
