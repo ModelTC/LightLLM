@@ -24,7 +24,19 @@ class CpuKvCacheClient(object):
         self._create_cpu_status_list(init_shm_data)
 
         if not only_create_meta_data:
-            tensor_creator = CpuCacheCreator(tensor_spec=self._build_tensor_spec())
+            tensor_spec = CpuCacheTensorSpec(
+                shm_key=self.args.cpu_kv_cache_shm_id,
+                shape=(
+                    self.kv_cache_tensor_meta.page_num,
+                    self.kv_cache_tensor_meta.layer_num,
+                    self.kv_cache_tensor_meta.token_page_size,
+                    self.kv_cache_tensor_meta.num_heads,
+                    self.kv_cache_tensor_meta.get_merged_head_dim(),
+                ),
+                dtype=self.kv_cache_tensor_meta.data_type,
+                size_bytes=self.kv_cache_tensor_meta.calcu_size(),
+            )
+            tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
             self.cpu_kv_cache_tensor, self.attach_shm_handle = tensor_creator.create_or_attach(
                 init_shm_data=init_shm_data,
                 pin=not init_shm_data,
@@ -268,20 +280,6 @@ class CpuKvCacheClient(object):
             init_shm_data=init_shm_data,
         )
         return
-
-    def _build_tensor_spec(self) -> CpuCacheTensorSpec:
-        return CpuCacheTensorSpec(
-            shm_key=self.args.cpu_kv_cache_shm_id,
-            shape=(
-                self.kv_cache_tensor_meta.page_num,
-                self.kv_cache_tensor_meta.layer_num,
-                self.kv_cache_tensor_meta.token_page_size,
-                self.kv_cache_tensor_meta.num_heads,
-                self.kv_cache_tensor_meta.get_merged_head_dim(),
-            ),
-            dtype=self.kv_cache_tensor_meta.data_type,
-            size_bytes=self.kv_cache_tensor_meta.calcu_size(),
-        )
 
 
 class _CpuPageStatus(_LinkedListItem):

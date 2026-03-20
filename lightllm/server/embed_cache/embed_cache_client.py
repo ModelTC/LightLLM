@@ -38,7 +38,7 @@ class CpuEmbedCacheClient(object):
         self.cpu_embed_cache_tensor, _ = cache_tensor_creator.create_or_attach(
             init_shm_data=init_shm_data,
             pin=not init_shm_data,
-            pin_no_blocking=True,
+            pin_no_blocking=False,
         )
         return
 
