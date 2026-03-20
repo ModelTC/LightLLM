@@ -1,10 +1,10 @@
 from . import (
     MemoryManager,
-    CalibrationFP8KVMemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
     Deepseek3_2MemoryManager,
+    FP8StaticPerHeadQuantMemManager
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
@@ -40,8 +40,8 @@ def select_mem_manager_class():
         memory_manager_class = PPLINT8KVMemoryManager
     elif get_env_start_args().llm_kv_type == "int4kv":
         memory_manager_class = PPLINT4KVMemoryManager
-    elif get_env_start_args().llm_kv_type == "fp8kv":
-        memory_manager_class = CalibrationFP8KVMemoryManager
+    elif get_env_start_args().llm_kv_type == "fp8kv_sph":
+        memory_manager_class = FP8StaticPerHeadQuantMemManager
     elif get_env_start_args().llm_kv_type == "None":
         memory_manager_class = MemoryManager
 
@@ -52,4 +52,4 @@ def select_mem_manager_class():
 @lru_cache(maxsize=None)
 def used_mem_manager_has_scale() -> bool:
     mem_class = select_mem_manager_class()
-    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager, CalibrationFP8KVMemoryManager]
+    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager, FP8StaticPerHeadQuantMemManager]
