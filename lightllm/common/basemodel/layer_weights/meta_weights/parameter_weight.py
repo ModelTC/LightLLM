@@ -36,10 +36,12 @@ class ParameterWeight(BaseWeightTpl):
             t_weight = weights[self.weight_name]
             self.weight.copy_(t_weight.to(self.data_type_))
             self.weight.load_ok = True
+            del weights[self.weight_name]
         if self.bias_name is not None and self.bias_name in weights:
             t_bias = weights[self.bias_name]
             self.bias.copy_(t_bias.to(self.data_type_))
             self.bias.load_ok = True
+            del weights[self.bias_name]
 
     def verify_load(self) -> bool:
         if self.weight is not None and not getattr(self.weight, "load_ok", False):
@@ -77,7 +79,9 @@ class TpParameterWeight(ParameterWeight):
             t_weight = weights[self.weight_name][start:end]
             self.weight.copy_(t_weight.to(self.data_type_))
             self.weight.load_ok = True
+            del weights[self.weight_name]
         if self.bias_name is not None and self.bias_name in weights:
             t_bias = weights[self.bias_name][start:end]
             self.bias.copy_(t_bias.to(self.data_type_))
             self.bias.load_ok = True
+            del weights[self.bias_name]

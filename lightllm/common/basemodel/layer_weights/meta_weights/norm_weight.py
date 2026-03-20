@@ -24,6 +24,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
             self.weight.load_ok = True
+            del weights[self.weight_name]
 
     def verify_load(self):
         return self.weight.load_ok
@@ -77,6 +78,7 @@ class GEMMANormWeight(RMSNormWeight):
             self.weight.copy_(weights[self.weight_name])
             self.weight += 1
             self.weight.load_ok = True
+            del weights[self.weight_name]
 
 
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
@@ -98,9 +100,11 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
             self.weight.load_ok = True
+            del weights[self.weight_name]
         if self.bias_name in weights:
             self.bias.copy_(weights[self.bias_name])
             self.bias.load_ok = True
+            del weights[self.bias_name]
 
     def verify_load(self):
         return self.weight.load_ok and self.bias.load_ok
@@ -191,6 +195,7 @@ class TpRMSNormWeight(RMSNormWeight):
             # the padding part is zero
             self.weight[end - start :].zero_()
             self.weight.load_ok = True
+            del weights[self.weight_name]
 
 
 class NoTpGEMMANormWeight(RMSNormWeight):
@@ -201,6 +206,7 @@ class NoTpGEMMANormWeight(RMSNormWeight):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
             self.weight += 1
+            del weights[self.weight_name]
 
 
 class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
@@ -222,9 +228,11 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         if self.q_weight_name in weights:
             self.q_weight.copy_(weights[self.q_weight_name])
             self.q_weight.load_ok = True
+            del weights[self.q_weight_name]
         if self.k_weight_name in weights:
             self.k_weight.copy_(weights[self.k_weight_name])
             self.k_weight.load_ok = True
+            del weights[self.q_weight_name]
 
     def verify_load(self):
         return self.q_weight.load_ok and self.k_weight.load_ok
@@ -292,10 +300,12 @@ class QKGEMMANormWeight(QKRMSNORMWeight):
             self.q_weight.copy_(weights[self.q_weight_name])
             self.q_weight += 1
             self.q_weight.load_ok = True
+            del weights[self.q_weight_name]
         if self.k_weight_name in weights:
             self.k_weight.copy_(weights[self.k_weight_name])
             self.k_weight += 1
             self.k_weight.load_ok = True
+            del weights[self.k_weight_name]
 
     def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
         assert q.ndim == 2 and self.q_weight.ndim == 1

@@ -268,6 +268,7 @@ class FusedMoeWeight(BaseWeightTpl):
         # Load bias
         if self.e_score_correction_bias_name in weights:
             self.e_score_correction_bias.copy_(weights[self.e_score_correction_bias_name])
+            del weights[self.e_score_correction_bias_name]
         self._load_weight(self.expert_idx_to_local_idx, weights)
         if self.redundancy_expert_num > 0:
             self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
@@ -345,10 +346,13 @@ class FusedMoeWeight(BaseWeightTpl):
         col_slice_func = self.col_slicer._slice_weight
         if w1_weight in weights:
             self.quant_method.load_weight(row_slice_func(weights[w1_weight]), self.w1_list[local_expert_idx])
+            del weights[w1_weight]
         if w3_weight in weights:
             self.quant_method.load_weight(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
+            del weights[w3_weight]
         if w2_weight in weights:
             self.quant_method.load_weight(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
+            del weights[w2_weight]
 
     def _load_merge_weight(self, weights: Dict[str, torch.Tensor]):
         w1_merge_weight = f"{self.weight_prefix}.{self.w1_weight_name}"
@@ -358,10 +362,13 @@ class FusedMoeWeight(BaseWeightTpl):
         col_slice_func = self.col_slicer._slice_weight
         if w1_merge_weight in weights:
             self.quant_method.load_weight(row_slice_func(weights[w1_merge_weight]), self.w1)
+            del weights[w1_merge_weight]
         if w2_merge_weight in weights:
             self.quant_method.load_weight(col_slice_func(weights[w2_merge_weight]), self.w2)
+            del weights[w2_merge_weight]
         if w3_merge_weight in weights:
             self.quant_method.load_weight(row_slice_func(weights[w3_merge_weight]), self.w3)
+            del weights[w3_merge_weight]
 
     def _load_expert_scale(
         self,

@@ -69,11 +69,13 @@ class FusedMoeWeightEPAutoRedundancy:
             w3_weight = f"{self._ep_w.weight_prefix}.{i_experts}.{self._ep_w.w3_weight_name}.weight"
             if w1_weight in weights:
                 self.experts_gate_projs[i] = weights[w1_weight]
+                del weights[w1_weight]
             if w3_weight in weights:
                 self.experts_up_projs[i] = weights[w3_weight]
+                del weights[w3_weight]
             if w2_weight in weights:
                 self.w2_list[i] = weights[w2_weight]
-
+                del weights[w2_weight]
         self._load_weight_scale(weights)
         self._fuse()
 

@@ -126,6 +126,7 @@ class MMWeightTpl(BaseWeightTpl):
             slicer = self._get_param_slicer(sub_child_index)
             weight = slicer._slice_weight(weights[param_name])
             self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
+            del weights[param_name]
         return
 
     def _load_bias(
@@ -136,6 +137,7 @@ class MMWeightTpl(BaseWeightTpl):
             bias = slicer._slice_bias(weights[param_name])
             self.bias_list[sub_child_index].copy_(bias)
             self.bias_list[sub_child_index].load_ok = True
+            del weights[param_name]
         return
 
     def _load_weight_scale(
