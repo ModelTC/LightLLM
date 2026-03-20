@@ -3,7 +3,7 @@ from typing import Optional
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.embed_utils import calcu_embed_cache_meta
-from lightllm.common.cpu_cache import CpuCacheTensorBackend, CpuCacheTensorSpec
+from lightllm.common.cpu_cache import CpuCacheCreator, CpuCacheTensorSpec
 from .allocator import MemoryBlock, MemoryManager
 from .copy_to_cache import offload_embed_tensor_to_cache
 
@@ -24,10 +24,21 @@ class CpuEmbedCacheClient(object):
         if create_meta_data:
             self.token_index_manager = MemoryManager(total_size=self.token_num)
 
-        tensor_backend = CpuCacheTensorBackend(tensor_spec=self._build_tensor_spec())
-        self.cpu_embed_cache_tensor, self.attach_shm_handle = tensor_backend.create_or_attach(
+        cache_tensor_spec = CpuCacheTensorSpec(
+            shm_key=self.args.multi_modal_cache_shm_id,
+            shape=(
+                self.embed_cache_tensor_meta.token_num,
+                self.embed_cache_tensor_meta.layer_num,
+                self.embed_cache_tensor_meta.hidden_size,
+            ),
+            dtype=self.embed_cache_tensor_meta.data_type,
+            size_bytes=self.embed_cache_tensor_meta.calcu_size(),
+        )
+        cache_tensor_creator = CpuCacheCreator(tensor_spec=cache_tensor_spec)
+        self.cpu_embed_cache_tensor, _ = cache_tensor_creator.create_or_attach(
             init_shm_data=init_shm_data,
-            wait_for_register=True,
+            pin=not init_shm_data,
+            pin_no_blocking=True,
         )
         return
 
@@ -58,17 +69,7 @@ class CpuEmbedCacheClient(object):
         )
         return
 
-    def _build_tensor_spec(self) -> CpuCacheTensorSpec:
-        return CpuCacheTensorSpec(
-            shm_key=self.args.multi_modal_cache_shm_id,
-            shape=(
-                self.embed_cache_tensor_meta.token_num,
-                self.embed_cache_tensor_meta.layer_num,
-                self.embed_cache_tensor_meta.hidden_size,
-            ),
-            dtype=self.embed_cache_tensor_meta.data_type,
-            size_bytes=self.embed_cache_tensor_meta.calcu_size(),
-        )
+        return
 
 
 if __name__ == "__main__":

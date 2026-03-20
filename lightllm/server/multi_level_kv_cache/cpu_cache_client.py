@@ -2,7 +2,7 @@ import ctypes
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.cpu_cache import CpuCacheTensorBackend, CpuCacheTensorSpec
+from lightllm.common.cpu_cache import CpuCacheCreator, CpuCacheTensorSpec
 from .shm_objs import ShmDict, ShmLinkedList, _LinkedListItem, IntList
 from lightllm.server.core.objs import AtomicShmLock
 from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
@@ -24,10 +24,11 @@ class CpuKvCacheClient(object):
         self._create_cpu_status_list(init_shm_data)
 
         if not only_create_meta_data:
-            tensor_backend = CpuCacheTensorBackend(tensor_spec=self._build_tensor_spec())
-            self.cpu_kv_cache_tensor, self.attach_shm_handle = tensor_backend.create_or_attach(
+            tensor_creator = CpuCacheCreator(tensor_spec=self._build_tensor_spec())
+            self.cpu_kv_cache_tensor, self.attach_shm_handle = tensor_creator.create_or_attach(
                 init_shm_data=init_shm_data,
-                wait_for_register=False,
+                pin=not init_shm_data,
+                pin_no_blocking=True,
             )
         return
 

@@ -1,10 +1,8 @@
 import ctypes
+import torch
+import numpy as np
 from dataclasses import dataclass
 from typing import Optional, Tuple
-
-import numpy as np
-import torch
-
 from lightllm.utils.kv_cache_utils import attach_shm_kv_cache_ptr, create_shm_kv_cache_ptr, register_shm_ptr_to_pin
 
 
@@ -16,28 +14,29 @@ class CpuCacheTensorSpec:
     size_bytes: int
 
 
-class CpuCacheTensorBackend:
+class CpuCacheCreator:
     def __init__(self, tensor_spec: CpuCacheTensorSpec):
         self.tensor_spec = tensor_spec
 
     def create_or_attach(
-        self, init_shm_data: bool, wait_for_register: bool = True
-    ) -> Tuple[torch.Tensor, Optional[object]]:
-        return self._init_tensor(create_mode=init_shm_data, wait_for_register=wait_for_register)
-
-    def _init_tensor(self, create_mode: bool, wait_for_register: bool) -> Tuple[torch.Tensor, Optional[object]]:
-        if create_mode:
+        self, init_shm_data: bool, pin: bool, pin_no_blocking: bool
+    ) -> Tuple[Optional[torch.Tensor], Optional[object]]:
+        if init_shm_data:
             shm_ptr = create_shm_kv_cache_ptr(key=self.tensor_spec.shm_key, size=self.tensor_spec.size_bytes)
         else:
             shm_ptr = attach_shm_kv_cache_ptr(key=self.tensor_spec.shm_key, size=self.tensor_spec.size_bytes)
-        attach_handle = None
-        if not create_mode:
+
+        if pin:
             attach_handle = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.tensor_spec.size_bytes)
-            if wait_for_register:
+            # 是否阻塞等待pin 完成
+            if not pin_no_blocking:
                 attach_handle.wait()
-        cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
-        assert shm_ptr == cpu_cache_tensor.data_ptr()
-        return cpu_cache_tensor, attach_handle
+            cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
+            assert shm_ptr == cpu_cache_tensor.data_ptr()
+            return cpu_cache_tensor, attach_handle
+        else:
+            cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
+            return cpu_cache_tensor, None
 
     def _build_tensor_view(self, shm_ptr: int) -> torch.Tensor:
         numpy_array = np.frombuffer(

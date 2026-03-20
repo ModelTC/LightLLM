@@ -1,3 +1,3 @@
-from .tensor_backend import CpuCacheTensorBackend, CpuCacheTensorSpec
+from .creator import CpuCacheCreator, CpuCacheTensorSpec
 
-__all__ = ["CpuCacheTensorBackend", "CpuCacheTensorSpec"]
+__all__ = ["CpuCacheCreator", "CpuCacheTensorSpec"]
