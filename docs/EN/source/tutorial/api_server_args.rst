@@ -333,6 +333,16 @@ Performance Optimization Parameters
     * ``flashinfer``: Use FlashInfer backend
     * ``triton``: Use Triton backend
 
+.. option:: --llm_kv_type
+
+    Set the KV cache data type for inference. Available options:
+
+    * ``None``: Use the dtype from model's config.json
+    * ``int8kv``: INT8 KV quantization
+    * ``int4kv``: INT4 KV quantization
+    * ``fp8kv_sph``: FP8 static per-head quantization, uses fa3 backend
+    * ``fp8kv_spt``: FP8 static per-tensor quantization, uses flashinfer backend
+
 .. option:: --disable_cudagraph
 
     Disable cudagraph in the decoding phase
