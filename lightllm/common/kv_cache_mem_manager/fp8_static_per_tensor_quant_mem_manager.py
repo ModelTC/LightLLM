@@ -5,7 +5,6 @@ import torch.distributed as dist
 from lightllm.utils.config_utils import get_model_architectures
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from .mem_manager import MemoryManager
 
 logger = init_logger(__name__)
@@ -26,7 +25,6 @@ class FP8StaticPerTensorQuantMemManager(MemoryManager):
                 "will load kv quant calibration config"
             )
             cfg = self._load_and_check_config()
-            all_head_num = cfg["num_head"]
             all_scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
    
             self.scales = all_scales
