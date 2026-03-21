@@ -56,6 +56,16 @@ LightLLM 支持两种 FP8 KV 量化模式：
 - ``fp8kv_sph`` 和 ``fp8kv_spt`` 模式必须提供 ``--kv_quant_calibration_config_path``。
 - attention backend 会根据量化模式自动选择，无需手动指定。
 
+.. note::
+
+   使用 ``fp8kv_spt`` 模式（FP8 静态按 tensor 量化，使用 flashinfer 后端）时，
+   必须安装 ``flashinfer-python==0.6.5``。默认安装的版本是 0.6.3，
+   可能导致运行错误。请使用以下命令安装正确版本：
+
+   .. code-block:: console
+
+       $ pip install flashinfer-python==0.6.5
+
 校准文件格式
 ------------
 

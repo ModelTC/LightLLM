@@ -56,6 +56,16 @@ Notes:
 - ``fp8kv_sph`` and ``fp8kv_spt`` require ``--kv_quant_calibration_config_path``.
 - The attention backend will be automatically selected based on the quantization mode, no need to manually specify.
 
+.. note::
+
+   When using ``fp8kv_spt`` mode (FP8 static per-tensor quantization with flashinfer backend), 
+   you must install ``flashinfer-python==0.6.5``. The default installed version is 0.6.3, 
+   which may cause runtime issues. Install the correct version with:
+
+   .. code-block:: console
+
+       $ pip install flashinfer-python==0.6.5
+
 Calibration File Schema
 -----------------------
 

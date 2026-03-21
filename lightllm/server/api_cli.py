@@ -371,7 +371,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 fp8kv_spt: use float8_e4m3fn to store kv cache for inference,
                 quant way is static per tensor kv quant.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
-                to load pre-computed FP8 scales.""",
+                to load pre-computed FP8 scales.
+                Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
+                may cause runtime issues). Install with: pip install flashinfer-python==0.6.5""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",
