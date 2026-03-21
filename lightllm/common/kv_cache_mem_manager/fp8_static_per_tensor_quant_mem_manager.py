@@ -26,11 +26,11 @@ class FP8StaticPerTensorQuantMemManager(MemoryManager):
                 "will load kv quant calibration config"
             )
             cfg = self._load_and_check_config()
-            all_scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
-
-            self.scales = all_scales
+            self.scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
         else:
             self.scales = torch.ones((self.kv_buffer.shape[0], 2), dtype=torch.float32, device="cuda")
+
+        self.cpu_scales = self.scales.detach().cpu().numpy()
         return
 
     def _load_and_check_config(self):
@@ -66,12 +66,12 @@ class FP8StaticPerTensorQuantMemManager(MemoryManager):
         """
         from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
 
-        scales = self.scales
         destindex_copy_kv_fp8(
             kv,
             mem_index,
-            scales[layer_index] if scales is not None else None,
+            self.scales[layer_index],
             self.kv_buffer[layer_index].view(torch.float8_e4m3fn),
+            is_per_tensor_quant=True,
         )
         return
 
