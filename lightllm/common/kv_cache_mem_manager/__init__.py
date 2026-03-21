@@ -1,5 +1,4 @@
 from .mem_manager import MemoryManager, ReadOnlyStaticsMemoryManager
-from .calibration_fp8kv_mem_manager import CalibrationFP8KVMemoryManager
 from .ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
 from .ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
 from .deepseek2_mem_manager import Deepseek2MemoryManager
@@ -10,7 +9,6 @@ from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemM
 __all__ = [
     "MemoryManager",
     "ReadOnlyStaticsMemoryManager",
-    "CalibrationFP8KVMemoryManager",
     "PPLINT4KVMemoryManager",
     "PPLINT8KVMemoryManager",
     "Deepseek2MemoryManager",
