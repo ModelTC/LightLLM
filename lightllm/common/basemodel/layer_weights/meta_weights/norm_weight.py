@@ -71,6 +71,14 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
 
+class GEMMANormWeight(RMSNormWeight):
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.weight_name in weights:
+            self.weight.copy_(weights[self.weight_name])
+            self.weight += 1
+            self.weight.load_ok = True
+
+
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
         super().__init__(tp_rank=0, tp_world_size=1)
@@ -276,3 +284,23 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         eps: float,
     ) -> None:
         return self._forward(q=q, k=k, eps=eps)
+
+
+class QKGEMMANormWeight(QKRMSNORMWeight):
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.q_weight_name in weights:
+            self.q_weight.copy_(weights[self.q_weight_name])
+            self.q_weight += 1
+            self.q_weight.load_ok = True
+        if self.k_weight_name in weights:
+            self.k_weight.copy_(weights[self.k_weight_name])
+            self.k_weight += 1
+            self.k_weight.load_ok = True
+
+    def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
+        assert q.ndim == 2 and self.q_weight.ndim == 1
+        assert k.ndim == 2 and self.k_weight.ndim == 1
+        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
+        # See https://github.com/huggingface/transformers/pull/29402
+        # So we need to set fp32_multiply to True here.
+        return qk_rmsnorm_fused_forward(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps, fp32_multiply=True)

@@ -9,7 +9,6 @@ from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
@@ -172,12 +171,14 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
+
+        radix_cache_class = self.model.get_radix_class()
         self.radix_cache = (
-            RadixCache(
+            radix_cache_class(
                 get_unique_server_name(),
                 self.model.mem_manager.size,
                 self.rank_in_node,
-                mem_manager=self.model.mem_manager,
+                kv_cache_mem_manager=self.model.mem_manager,
             )
             if self.use_dynamic_prompt_cache
             else None
@@ -287,9 +288,8 @@ class ModeBackend:
         raise NotImplementedError()
 
     def init_mtp_draft_model(self, main_kvargs: dict):
-        # 当前只支持 deepseekv3 模式的 mtp
         self.mtp_step = self.args.mtp_step
-        self.draft_models: List[Deepseek3MTPModel] = []
+        self.draft_models = []
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
@@ -302,6 +302,7 @@ class ModeBackend:
 
         for i in range(num_mtp_modules):
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
+            model_type = mtp_model_cfg.get("model_type", "")
             mtp_model_kvargs = {
                 "weight_dir": self.args.mtp_draft_model_dir[i],
                 "max_total_token_num": self.model.mem_manager.size,
@@ -324,21 +325,22 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
-            if mtp_model_cfg["model_type"] == "deepseek_v3":
+            # Select MTP model class based on model type
+            model_type = mtp_model_cfg.get("model_type", "")
+            if model_type == "deepseek_v3":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "qwen3_moe":
+            elif model_type == "qwen3_moe":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "mistral":
+            elif model_type == "mistral":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
             else:
-                assert False, f"error mtp mode {mtp_model_cfg['model_type']}"
+                raise ValueError(f"Unsupported MTP model type: {model_type}")
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return

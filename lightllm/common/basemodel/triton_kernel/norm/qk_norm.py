@@ -78,11 +78,12 @@ def _qk_rms_norm_fused_kernel(
     WK_ptr,
     stride_k_row,
     stride_k_col,
+    eps,
     # Dimensions
     num_heads_q: tl.constexpr,  # Q 的头数 (用于判断边界)
     head_dim: tl.constexpr,
-    eps,
     BLOCK_SIZE: tl.constexpr,
+    FP32_MULTIPLY: tl.constexpr,
 ):
     # PID 0: 处理第几个 Token (Row)
     row_idx = tl.program_id(0)
@@ -108,13 +109,15 @@ def _qk_rms_norm_fused_kernel(
         # RMSNorm 计算
         var = tl.sum(x * x, axis=0) / head_dim
         rstd = 1 / tl.sqrt(var + eps)
+        x *= rstd
 
         # 加载 Q 的权重 (假设所有 Head 共享同一组 dim=head_dim 的权重)
         w = tl.load(WQ_ptr + offs)
-
-        x *= rstd
-        y = x.to(w.dtype) * w
-
+        if FP32_MULTIPLY:
+            w = w.to(tl.float32)
+        else:
+            x = x.to(Q_ptr.dtype.element_ty)
+        y = (x * w).to(Q_ptr.dtype.element_ty)
         # 写回 Q
         tl.store(Q_ptr + q_ptr_offset, y)
 
@@ -132,18 +135,27 @@ def _qk_rms_norm_fused_kernel(
         # RMSNorm 计算
         var = tl.sum(x * x, axis=0) / head_dim
         rstd = 1 / tl.sqrt(var + eps)
+        x *= rstd
 
         # 加载 K 的权重
         w = tl.load(WK_ptr + offs)
-        x *= rstd
-
-        y = x.to(w.dtype) * w
-
+        if FP32_MULTIPLY:
+            w = w.to(tl.float32)
+        else:
+            x = x.to(K_ptr.dtype.element_ty)
+        y = (x * w).to(K_ptr.dtype.element_ty)
         # 写回 K
         tl.store(K_ptr + k_ptr_offset, y)
 
 
-def qk_rmsnorm_fused_forward(q: torch.Tensor, k: torch.Tensor, w_q: torch.Tensor, w_k: torch.Tensor, eps: float = 1e-6):
+def qk_rmsnorm_fused_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w_q: torch.Tensor,
+    w_k: torch.Tensor,
+    eps: float = 1e-6,
+    fp32_multiply: bool = False,
+):
     """
     In-place RMSNorm for both Q and K in a single kernel launch.
     Supports GQA (different number of heads for Q and K).
@@ -197,6 +209,7 @@ def qk_rmsnorm_fused_forward(q: torch.Tensor, k: torch.Tensor, w_q: torch.Tensor
         num_heads_q=num_heads_q,
         head_dim=head_dim,
         eps=eps,
+        FP32_MULTIPLY=fp32_multiply,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=4,
     )

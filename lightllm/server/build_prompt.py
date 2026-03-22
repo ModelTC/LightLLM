@@ -46,6 +46,7 @@ async def build_prompt(request, tools) -> str:
     global tokenizer
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
+
     kwargs = {"conversation": messages}
     if request.character_settings:
         kwargs["character_settings"] = request.character_settings
@@ -57,15 +58,7 @@ async def build_prompt(request, tools) -> str:
 
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
-    except:
-        #  This except branch will be triggered when the chosen model
-        #  has a different tools input format that is not compatiable
-        #  with openAI's apply_chat_template tool_call format, like Mistral.
-        tools = [t if "function" in t else {"function": t} for t in tools]
-        input_str = tokenizer.apply_chat_template(
-            **kwargs,
-            tokenize=True,
-            add_generation_prompt=True,
-            tools=tools,
-        )
+    except BaseException as e:
+        logger.error(f"Failed to build prompt: {e}")
+        raise e
     return input_str

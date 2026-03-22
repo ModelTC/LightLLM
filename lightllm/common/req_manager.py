@@ -3,6 +3,7 @@ import collections
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
+
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
@@ -67,6 +68,7 @@ class ReqManager:
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
+        self.req_to_buffer_index = None
 
     def alloc(self):
         return self.req_list.alloc()
@@ -92,6 +94,11 @@ class ReqManager:
     def free_all(self):
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
+
+    @property
+    def has_recurrent_state(self):
+        """Whether this model uses per-request recurrent state buffers (e.g. Mamba/linear attention)."""
+        return self.req_to_buffer_index is not None
 
 
 class ReqSamplingParamsManager:
@@ -232,3 +239,28 @@ class ReqSamplingParamsManager:
             p_token_counts_tensor.cuda(non_blocking=True),
             p_cumsum_seq_len_tensor.cuda(non_blocking=True),
         )
+
+
+class ReqManagerForMamba(ReqManager):
+    def __init__(self, max_request_num, max_sequence_length, mem_manager):
+        from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
+
+        super().__init__(max_request_num, max_sequence_length, mem_manager)
+        self.mtp_step = get_env_start_args().mtp_step
+        self.buffer_mem_manager: MambaCacheManager = self.mem_manager.mamba_cache_mem_manager
+        self.req_to_buffer_index = torch.zeros(
+            (self.max_request_num + 1, self.mtp_step + 1), dtype=torch.int32, device="cuda"
+        )
+        self.req_to_buffer_index[self.HOLD_REQUEST_ID, :] = self.buffer_mem_manager.HOLD_BUFFER_INDEX
+
+    def free_buffer(self, free_buffer_indexes: List[int]):
+        self.buffer_mem_manager.free(free_buffer_indexes)
+        return
+
+    def alloc_buffer_for_req(self, req_index: torch.Tensor):
+        num_reqs = req_index.shape[0]
+        num_buffers_per_req = self.mtp_step + 1
+        buffer_indexes = self.buffer_mem_manager.alloc(num_reqs * num_buffers_per_req)
+        if not buffer_indexes.is_cuda:
+            buffer_indexes = buffer_indexes.cuda()
+        self.req_to_buffer_index[req_index] = buffer_indexes.view(num_reqs, num_buffers_per_req)
