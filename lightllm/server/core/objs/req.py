@@ -7,7 +7,7 @@ import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
-from .token_chunck_hash_list import TokenHashList, CpuCachePageList
+from .token_chunck_hash_list import TokenHashList, CpuCachePageList, PastKVCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
@@ -129,6 +129,8 @@ class Req(ctypes.Structure):
         ("cpu_cache_token_page_size", ctypes.c_int),
         # Number of tokens in routing data SHM, written by model worker, read by HTTP server.
         ("shm_routing_num_tokens", ctypes.c_int),
+        # 用于图片生成场景，记录请求对应的kv cache页面信息，供生成过程使用。
+        ("past_kv_cache_page_indexes", PastKVCachePageList),
     ]
 
     def get_str(self):
@@ -193,6 +195,9 @@ class Req(ctypes.Structure):
         self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
         if get_env_start_args().enable_cpu_cache:
             self._fill_input_token_hash()
+
+        if sample_param.img_gen_prefill:
+            self.past_kv_cache_page_indexes = PastKVCachePageList(self.input_len)
         return
 
     def post_init(self):

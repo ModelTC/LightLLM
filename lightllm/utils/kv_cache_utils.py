@@ -62,7 +62,7 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
-    assert args.enable_cpu_cache
+    assert args.enable_cpu_cache or args.enable_multimodal_x2i
 
     mem_manager_class = select_mem_manager_class()
     if mem_manager_class is Deepseek2MemoryManager:
@@ -96,28 +96,6 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             head_dim=get_head_dim(args.model_dir),
             data_type=torch.int8,
             scale_head_dim=get_head_dim(args.model_dir) // 8,
-            scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is PPLINT8KVMemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=get_num_key_value_heads(args.model_dir) * 2,
-            head_dim=get_head_dim(args.model_dir) * 2,
-            data_type=get_llm_data_type(),
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is MemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=get_num_key_value_heads(args.model_dir) * 2,
-            head_dim=get_head_dim(args.model_dir),
-            data_type=get_llm_data_type(),
-            scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
     else:

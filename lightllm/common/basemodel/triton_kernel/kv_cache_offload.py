@@ -704,3 +704,308 @@ def load_cpu_kv_to_gpu(
         num_stages=1,
     )
     return
+
+
+
+@triton.jit
+def _offload_gpu_kv_to_cpu_for_x2i(
+    token_indexes_ptr,
+    gpu_kv_cache_ptr,
+    gpu_stride0,
+    gpu_stride1,
+    gpu_stride2,
+    gpu_kv_cache_scale_ptr,
+    gpu_scale_stride0,
+    gpu_scale_stride1,
+    gpu_scale_stride2,
+    cpu_kv_cache_ptr,
+    cpu_stride0,
+    cpu_stride1,
+    cpu_stride2,
+    cpu_stride3,
+    cpu_kv_cache_scale_ptr,
+    cpu_scale_stride0,
+    cpu_scale_stride1,
+    cpu_scale_stride2,
+    cpu_scale_stride3,
+    page_indexes_ptr,
+    layer_num,
+    head_dim,
+    scale_head_dim,
+    block_num,
+    token_num,
+    cpu_k_start_head_index: tl.constexpr,
+    cpu_k_head_num: tl.constexpr,
+    gpu_k_start_head_index: tl.constexpr,
+    gpu_k_head_num: tl.constexpr,
+    cpu_v_start_head_index: tl.constexpr,
+    cpu_v_head_num: tl.constexpr,
+    gpu_v_start_head_index: tl.constexpr,
+    gpu_v_head_num: tl.constexpr,
+    BLOCK_HEAD_DIM: tl.constexpr,
+    TOKEN_BLOCK: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
+):
+    block_start_index = tl.program_id(0)
+    block_split_size = tl.num_programs(axis=0)
+
+    for block_index in tl.range(block_start_index, block_num, block_split_size):
+        cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
+        token_range = block_index * TOKEN_BLOCK + tl.arange(0, TOKEN_BLOCK)
+        token_range_mask = token_range < token_num
+        token_indexes = tl.load(token_indexes_ptr + token_range, mask=token_range_mask).to(tl.int64)
+        head_dim_range = tl.arange(0, BLOCK_HEAD_DIM)
+        head_dim_mask = head_dim_range < head_dim
+        scale_head_dim_mask = head_dim_range < scale_head_dim
+
+        token_head_mask = token_range_mask[:, None] & head_dim_mask[None, :]
+        token_scale_mask = token_range_mask[:, None] & scale_head_dim_mask[None, :]
+        for layer_index in range(layer_num):
+            for k_head_index in range(gpu_k_head_num):
+                gpu_k_head_index = k_head_index + gpu_k_start_head_index
+                cpu_k_head_index = k_head_index + cpu_k_start_head_index
+
+                gpu_ptr = (
+                    gpu_kv_cache_ptr
+                    + layer_index.to(tl.int64) * gpu_stride0
+                    + token_indexes[:, None] * gpu_stride1
+                    + gpu_k_head_index.to(tl.int64) * gpu_stride2
+                    + head_dim_range[None, :]
+                )
+                gpu_data = tl.load(gpu_ptr, mask=token_head_mask, other=0.0)
+                cpu_ptr = (
+                    cpu_kv_cache_ptr
+                    + cpu_page_index * cpu_stride0
+                    + layer_index.to(tl.int64) * cpu_stride1
+                    + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
+                    + cpu_k_head_index * cpu_stride3
+                    + head_dim_range[None, :]
+                )
+                tl.store(cpu_ptr, gpu_data, mask=token_head_mask, cache_modifier=".wt")
+
+                if HAS_SCALE:
+                    gpu_scale_ptr = (
+                        gpu_kv_cache_scale_ptr
+                        + layer_index.to(tl.int64) * gpu_scale_stride0
+                        + token_indexes[:, None] * gpu_scale_stride1
+                        + gpu_k_head_index.to(tl.int64) * gpu_scale_stride2
+                        + head_dim_range[None, :]
+                    )
+                    gpu_scale_data = tl.load(gpu_scale_ptr, mask=token_scale_mask, other=0.0)
+                    cpu_scale_ptr = (
+                        cpu_kv_cache_scale_ptr
+                        + cpu_page_index * cpu_scale_stride0
+                        + layer_index.to(tl.int64) * cpu_scale_stride1
+                        + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_scale_stride2
+                        + cpu_k_head_index * cpu_scale_stride3
+                        + head_dim_range[None, :]
+                    )
+                    tl.store(cpu_scale_ptr, gpu_scale_data, mask=token_scale_mask, cache_modifier=".wt",)
+
+
+            for v_head_index in range(gpu_v_head_num):
+                gpu_v_head_index = v_head_index + gpu_v_start_head_index
+                cpu_v_head_index = v_head_index + cpu_v_start_head_index
+
+                gpu_ptr = (
+                    gpu_kv_cache_ptr
+                    + layer_index.to(tl.int64) * gpu_stride0
+                    + token_indexes[:, None] * gpu_stride1
+                    + gpu_v_head_index.to(tl.int64) * gpu_stride2
+                    + head_dim_range[None, :]
+                )
+                gpu_data = tl.load(gpu_ptr, mask=token_head_mask, other=0.0)
+                cpu_ptr = (
+                    cpu_kv_cache_ptr
+                    + cpu_page_index * cpu_stride0
+                    + layer_index.to(tl.int64) * cpu_stride1
+                    + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_stride2
+                    + cpu_v_head_index * cpu_stride3
+                    + head_dim_range[None, :]
+                )
+                tl.store(cpu_ptr, gpu_data, mask=token_head_mask, cache_modifier=".wt")
+
+                if HAS_SCALE:
+                    gpu_scale_ptr = (
+                        gpu_kv_cache_scale_ptr
+                        + layer_index.to(tl.int64) * gpu_scale_stride0
+                        + token_indexes[:, None] * gpu_scale_stride1
+                        + gpu_v_head_index.to(tl.int64) * gpu_scale_stride2
+                        + head_dim_range[None, :]
+                    )
+                    gpu_scale_data = tl.load(gpu_scale_ptr, mask=token_scale_mask, other=0.0)
+                    cpu_scale_ptr = (
+                        cpu_kv_cache_scale_ptr
+                        + cpu_page_index * cpu_scale_stride0
+                        + layer_index.to(tl.int64) * cpu_scale_stride1
+                        + tl.arange(0, TOKEN_BLOCK)[:, None] * cpu_scale_stride2
+                        + cpu_v_head_index * cpu_scale_stride3
+                        + head_dim_range[None, :]
+                    )
+                    tl.store(cpu_scale_ptr, gpu_scale_data, mask=token_scale_mask, cache_modifier=".wt",)
+
+
+
+@torch.no_grad()
+def offload_gpu_kv_to_cpu_for_x2i(
+    token_indexes: torch.Tensor,
+    gpu_kv_cache: torch.Tensor,
+    gpu_kv_cache_scale: Optional[torch.Tensor],
+    cpu_kv_cache: torch.Tensor,
+    cpu_kv_cache_scale: Optional[torch.Tensor],
+    page_indexes: torch.Tensor,
+    tp_index: int,
+    tp_world_size: int,
+    grid_num: int,
+    _cache_data={},
+):
+    """
+    Args:
+        token_indexes: (token_num, )
+        gpu_kv_cache: (layer_num, token_num, head_num, head_dim)
+        cpu_kv_cache: (all_page_num, layer_num, token_block_size, head_num, head_dim)
+        page_indexes: (page_num,)
+    """
+
+    token_block_size = cpu_kv_cache.shape[2]
+    token_num = token_indexes.shape[0]
+    assert token_num <= page_indexes.shape[0] * token_block_size
+
+    gpu_heads = gpu_kv_cache.shape[2]
+    gpu_head_dim = gpu_kv_cache.shape[3]
+    cpu_heads = cpu_kv_cache.shape[3]
+    cpu_head_dim = cpu_kv_cache.shape[4]
+
+    assert gpu_head_dim == cpu_head_dim
+    assert gpu_kv_cache.shape[0] == cpu_kv_cache.shape[1]
+
+    scale_size = (tp_world_size * gpu_heads) // cpu_heads
+
+    if (gpu_heads, cpu_heads, tp_index, tp_world_size) in _cache_data:
+        need_offload, head_info_tuple = _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)]
+    else:
+        if cpu_heads > 1:
+            assert (tp_world_size * gpu_heads) % cpu_heads == 0
+            assert cpu_heads % 2 == 0
+            cpu_heads_index = (
+                torch.arange(0, cpu_heads, device="cpu", dtype=torch.int32)
+                .view(cpu_heads, 1)
+                .tile((1, scale_size))
+                .view(2, tp_world_size, -1)
+            )
+            k_cpu_heads_index = cpu_heads_index[0][tp_index]
+            v_cpu_heads_index = cpu_heads_index[1][tp_index]
+
+            cpu_heads_index = torch.cat([k_cpu_heads_index, v_cpu_heads_index], dim=0).view(2, -1).numpy()
+            gpu_heads_index = torch.arange(0, gpu_heads, device="cpu", dtype=torch.int32).view(2, -1)
+
+            need_offload = tp_index % scale_size == 0
+
+            cpu_k_start_head_index = int(cpu_heads_index[0, 0])
+            cpu_k_head_num = len(cpu_heads_index[0])
+            gpu_k_start_head_index = int(gpu_heads_index[0, 0])
+            gpu_k_head_num = len(gpu_heads_index[0])
+            assert cpu_k_head_num == gpu_k_head_num
+            cpu_v_start_head_index = int(cpu_heads_index[1, 0])
+            cpu_v_head_num = len(cpu_heads_index[1])
+            gpu_v_start_head_index = int(gpu_heads_index[1, 0])
+            gpu_v_head_num = len(gpu_heads_index[1])
+            assert cpu_v_head_num == gpu_v_head_num
+
+        else:
+            assert gpu_heads == 1
+            assert cpu_heads == 1
+
+            need_offload == tp_index == 0
+            cpu_k_start_head_index = 0
+            cpu_k_head_num = 1
+            gpu_k_start_head_index = 0
+            gpu_k_head_num = 1
+            cpu_v_start_head_index = 0
+            cpu_v_head_num = 0
+            gpu_v_start_head_index = 0
+            gpu_v_head_num = 0
+
+        head_info_tuple = (
+            cpu_k_start_head_index,
+            cpu_k_head_num,
+            gpu_k_start_head_index,
+            gpu_k_head_num,
+            cpu_v_start_head_index,
+            cpu_v_head_num,
+            gpu_v_start_head_index,
+            gpu_v_head_num,
+        )
+        _cache_data[(gpu_heads, cpu_heads, tp_index, tp_world_size)] = (need_offload, head_info_tuple)
+
+    if not need_offload:
+        return
+
+    (
+        cpu_k_start_head_index,
+        cpu_k_head_num,
+        gpu_k_start_head_index,
+        gpu_k_head_num,
+        cpu_v_start_head_index,
+        cpu_v_head_num,
+        gpu_v_start_head_index,
+        gpu_v_head_num,
+    ) = head_info_tuple
+
+    assert token_block_size == triton.next_power_of_2(token_block_size)
+
+    page_num = page_indexes.shape[0]
+    grid = (grid_num, )
+    num_warps = 4
+    num_stages = 1
+    HAS_SCALE = gpu_kv_cache_scale is not None and cpu_kv_cache_scale is not None
+    if HAS_SCALE:
+        scale_head_dim = gpu_kv_cache_scale.shape[-1]
+        gpu_scale_stride = gpu_kv_cache_scale.stride()
+        cpu_scale_stride = cpu_kv_cache_scale.stride()
+    else:
+        scale_head_dim = 0
+        gpu_scale_stride = [0 for _ in range(5)]
+        cpu_scale_stride = [0 for _ in range(5)]
+
+
+    _offload_gpu_kv_to_cpu_for_x2i[grid](
+        token_indexes_ptr = token_indexes,
+        gpu_kv_cache_ptr = gpu_kv_cache,
+        gpu_stride0 = gpu_kv_cache.stride(0),
+        gpu_stride1 = gpu_kv_cache.stride(1),
+        gpu_stride2 = gpu_kv_cache.stride(2),
+        gpu_kv_cache_scale_ptr = gpu_kv_cache_scale,
+        gpu_scale_stride0=gpu_scale_stride[0],
+        gpu_scale_stride1=gpu_scale_stride[1],
+        gpu_scale_stride2=gpu_scale_stride[2],
+        cpu_kv_cache_ptr=cpu_kv_cache,
+        cpu_stride0=cpu_kv_cache.stride(0),
+        cpu_stride1=cpu_kv_cache.stride(1),
+        cpu_stride2=cpu_kv_cache.stride(2),
+        cpu_stride3=cpu_kv_cache.stride(3),
+        cpu_kv_cache_scale_ptr=cpu_kv_cache_scale,
+        cpu_scale_stride0=cpu_scale_stride[0],
+        cpu_scale_stride1=cpu_scale_stride[1],
+        cpu_scale_stride2=cpu_scale_stride[2],
+        cpu_scale_stride3=cpu_scale_stride[3],
+        page_indexes_ptr=page_indexes,
+        layer_num=gpu_kv_cache.shape[0],
+        head_dim=gpu_head_dim,
+        scale_head_dim=scale_head_dim,
+        block_num=page_num,
+        token_num=token_num,
+        cpu_k_start_head_index=cpu_k_start_head_index,
+        cpu_k_head_num=cpu_k_head_num,
+        gpu_k_start_head_index=gpu_k_start_head_index,
+        gpu_k_head_num=gpu_k_head_num,
+        cpu_v_start_head_index=cpu_v_start_head_index,
+        cpu_v_head_num=cpu_v_head_num,
+        gpu_v_start_head_index=gpu_v_start_head_index,
+        gpu_v_head_num=gpu_v_head_num,
+        BLOCK_HEAD_DIM=triton.next_power_of_2(gpu_head_dim),
+        TOKEN_BLOCK=token_block_size,
+        HAS_SCALE=HAS_SCALE,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )

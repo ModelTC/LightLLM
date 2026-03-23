@@ -111,6 +111,9 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_multimodal:
         args.multi_modal_cache_shm_id = uuid.uuid1().int % 123456789
 
+    if args.enable_multimodal_x2i:
+        args.multi_modal_x2i_cache_shm_id = uuid.uuid1().int % 123456789
+
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
     if args.zmq_mode == "ipc:///tmp/":
@@ -242,7 +245,7 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
+        num=12+ node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -256,8 +259,10 @@ def _launch_subprocesses(args: StartArgs):
         metric_port,
         multi_level_kv_cache_port,
         pd_decode_rpyc_port,
-    ) = can_use_ports[0:10]
-    can_use_ports = can_use_ports[10:]
+        x2i_port,
+        http_server_port_for_x2i,
+    ) = can_use_ports[0:12]
+    can_use_ports = can_use_ports[12:]
 
     visual_model_tp_ports = []
     visual_nccl_ports = []
@@ -283,6 +288,8 @@ def _launch_subprocesses(args: StartArgs):
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
     args.visual_nccl_ports = visual_nccl_ports
+    args.x2i_port = x2i_port
+    args.http_server_port_for_x2i = http_server_port_for_x2i
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
@@ -333,6 +340,18 @@ def _launch_subprocesses(args: StartArgs):
             process_manager.start_submodule_processes(
                 start_funcs=[
                     start_audio_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
+
+        if args.enable_multimodal_x2i:
+            from .x2i_server.manager import start_x2i_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_x2i_process,
                 ],
                 start_args=[
                     (args,),

@@ -88,3 +88,14 @@ class CpuCachePageList(ctypes.Structure):
 
     def get_all(self):
         return list(self.items[0 : self.size])
+
+
+class PastKVCachePageList(CpuCachePageList):
+    _pack_ = 4
+    _fields_ = CpuCachePageList._fields_ +[
+        ("token_len", ctypes.c_int),  # 对应的token数量
+    ]
+
+    def __init__(self, token_len: int = 0):
+        super().__init__()
+        self.token_len = token_len

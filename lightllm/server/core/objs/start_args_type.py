@@ -82,8 +82,7 @@ class StartArgs:
     token_healing_mode: bool = field(default=False)
     output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
-    enable_multimodal: bool = field(default=False)
-    enable_multimodal_audio: bool = field(default=False)
+
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
@@ -164,9 +163,13 @@ class StartArgs:
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)
+    x2i_port: int = field(default=None)
+    http_server_port_for_x2i: int = field(default=None)
+
     # multi_modal
     enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
+    enable_multimodal_x2i: bool = field(default=False)
 
     httpserver_workers: int = field(default=1)
     disable_shm_warning: bool = field(default=False)

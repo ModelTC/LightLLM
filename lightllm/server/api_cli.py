@@ -285,6 +285,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Whether or not to allow to load additional audio models (requird --enable_multimodal).",
     )
     parser.add_argument(
+        "--enable_multimodal_x2i",
+        action="store_true",
+        help="Whether or not to allow to generate images (requird --enable_multimodal)."
+    )
+    parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
     parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")

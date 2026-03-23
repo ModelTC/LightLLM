@@ -170,7 +170,7 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
             for file_ in bin_weight_files:
                 f = torch.load(os.path.join(weight_dir, file_), "cpu")
                 for k, v in f.items():
-                    if "vision_model" in k:
+                     if "vision_model" in k and  "fm_modules" not in k :
                         weight_dict[k[len("vision_model.embeddings.") :]] = v
         else:
             hf_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".safetensors")]
@@ -178,7 +178,7 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
             for file_ in hf_weight_files:
                 f = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
                 for k in f.keys():
-                    if "vision_model" in k:
+                     if "vision_model" in k and  "fm_modules" not in k:
                         weight_dict[k[len("vision_model.embeddings.") :]] = f.get_tensor(k)
         self.load_state_dict(weight_dict)
 

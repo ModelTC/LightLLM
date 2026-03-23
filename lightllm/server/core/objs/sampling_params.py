@@ -345,6 +345,7 @@ class SamplingParams(ctypes.Structure):
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
+        ("img_gen_prefill", ctypes.c_bool),  # whether to prefill for image generation, need return past key values back
     ]
 
     _do_sample: bool = False
@@ -382,6 +383,8 @@ class SamplingParams(ctypes.Structure):
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
         self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
+
+        self.img_gen_prefill = kwargs.get("img_gen_prefill", False)
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -436,6 +439,9 @@ class SamplingParams(ctypes.Structure):
         ):  # temperature is too slow, change to greedy search
             self.temperature = 1.0
             self.top_k = 1
+
+        if self.img_gen_prefill:
+            self.max_new_tokens = 1
 
         self.verify()
 
