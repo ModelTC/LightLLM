@@ -139,7 +139,7 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         if enable_diverse_mode_gqa_decode_fast_kernel():
             return self.diverse_decode_att(q=q, k=k, k_scale=k_scale, v=v, v_scale=v_scale, alloc_func=alloc_func)
         else:
-            return self.ppl_mha_int8kv_decode_att(
+            return self.normal_decode_att(
                 q=q,
                 k=k,
                 k_scale=k_scale,
@@ -172,7 +172,7 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
             alloc_tensor_func=alloc_func,
         )
 
-    def ppl_mha_int8kv_decode_att(
+    def normal_decode_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -180,10 +180,8 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         v: torch.Tensor,
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        from ...triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
-            token_decode_attention_flash_decoding,
-        )
+    ):
+        from ...triton_kernel.att.decode_att.int8kv.normal import token_decode_attention_flash_decoding
 
         return token_decode_attention_flash_decoding(
             q=q,

@@ -25,7 +25,6 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
-from .moe_kernel_configs import MoeGroupedGemmKernelConfig
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
@@ -726,16 +725,26 @@ def grouped_matmul(
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
 
     if run_config is None:
-        run_config = MoeGroupedGemmKernelConfig.try_to_get_best_config(
-            M=token_inputs.shape[0],
-            N=n,
-            K=k,
-            topk_num=topk_num,
-            expert_num=expert_num,
-            mul_routed_weight=mul_routed_weight,
-            use_fp8_w8a8=use_fp8_w8a8,
-            out_dtype=str(out.dtype),
-        )
+        if token_inputs.shape[0] <= expert_num:
+            run_config = {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 1,
+                "NEED_TRANS": False,
+                "num_warps": 4,
+                "num_stages": 1,
+            }
+        else:
+            run_config = {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+                "NEED_TRANS": False,
+                "num_warps": 4,
+                "num_stages": 1,
+            }
 
     BLOCK_SIZE_M = run_config["BLOCK_SIZE_M"]
     BLOCK_SIZE_N = run_config["BLOCK_SIZE_N"]

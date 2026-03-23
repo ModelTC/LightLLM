@@ -20,11 +20,8 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
 
 @dataclasses.dataclass
 class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
-    offline_scales: torch.Tensor = None
-
     def init_state(self):
         super().init_state()
-        self.offline_scales = self.infer_state.mem_manager.scales_list
 
     def prefill_att(
         self,
@@ -53,9 +50,8 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
-        offline_scales = self.offline_scales
-        k_descale = offline_scales[layer_index][0] if offline_scales is not None else None
-        v_descale = offline_scales[layer_index][1] if offline_scales is not None else None
+        k_descale = self.infer_state.mem_manager.cpu_scales[layer_index][0]
+        v_descale = self.infer_state.mem_manager.cpu_scales[layer_index][1]
         self.prefill_wrapper.run(
             q,
             (k, v),
@@ -68,11 +64,8 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
 
 @dataclasses.dataclass
 class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
-    offline_scales: torch.Tensor = None
-
     def init_state(self):
         super().init_state()
-        self.offline_scales = self.infer_state.mem_manager.scales_list
 
     def copy_for_decode_cuda_graph(self, new_state):
         return super().copy_for_decode_cuda_graph(new_state)
@@ -108,11 +101,10 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
 
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        offline_scales = self.offline_scales
         layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
 
-        k_descale = offline_scales[layer_index][0] if offline_scales is not None else None
-        v_descale = offline_scales[layer_index][1] if offline_scales is not None else None
+        k_descale = self.infer_state.mem_manager.cpu_scales[layer_index][0]
+        v_descale = self.infer_state.mem_manager.cpu_scales[layer_index][1]
         self.decode_wrapper.run(
             q,
             (k, v),

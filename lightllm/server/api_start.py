@@ -157,6 +157,12 @@ def normal_or_p_d_start(args):
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
 
+    # FP8 KV cache mode checks
+    if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
+        assert (
+            args.kv_quant_calibration_config_path is not None
+        ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
+
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
