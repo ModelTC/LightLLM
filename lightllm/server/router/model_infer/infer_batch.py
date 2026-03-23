@@ -466,7 +466,6 @@ class InferReq:
 
         # 在开启radix cache的情况下，用于标记命中情况，用于插入算法
         self.mamba_model_match_len = 0
-        self.mamba_buffer_insert_len = 0
         self.extra_need_to_free_token_index = []
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
@@ -535,13 +534,6 @@ class InferReq:
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
-                if g_infer_context.use_mamba_model:
-                    MAMBA_PREFILL_BLOCK_SIZE = 128
-                    MAMBA_MIN_INSERT_LEN = 1024
-                    miss_prefix_len = miss_prefix_len - miss_prefix_len % MAMBA_PREFILL_BLOCK_SIZE
-                    if miss_prefix_len > MAMBA_MIN_INSERT_LEN:
-                        self.mamba_buffer_insert_len = miss_prefix_len
-
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
 
@@ -596,11 +588,6 @@ class InferReq:
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
-
-        if self.mamba_buffer_insert_len > 0:
-            chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
-            self.mamba_buffer_insert_len = 0
-
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
