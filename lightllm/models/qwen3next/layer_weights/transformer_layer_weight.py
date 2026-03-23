@@ -5,6 +5,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     COLMMWeight,
     RMSNormWeight,
     GEMMANormWeight,
+    GatedRMSNormWeight,
     TpParameterWeight,
     QKVROWNMMWeight,
     QKGEMMANormWeight,
@@ -185,7 +186,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
         # Norm is applied per-head across head_dim, not across all heads
         linear_norm_dim = self.linear_v_head_dim
-        self.linear_norm = RMSNormWeight(
+        self.linear_norm = GatedRMSNormWeight(
             dim=linear_norm_dim,
             weight_name=f"{prefix}.norm.weight",
             data_type=self.data_type_,

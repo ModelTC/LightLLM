@@ -11,6 +11,7 @@ from .norm_weight import (
     TpRMSNormWeight,
     RMSNormWeight,
     GEMMANormWeight,
+    GatedRMSNormWeight,
     LayerNormWeight,
     NoTpGEMMANormWeight,
     QKRMSNORMWeight,

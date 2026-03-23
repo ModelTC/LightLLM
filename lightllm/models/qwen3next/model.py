@@ -65,65 +65,28 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-
         start_args: StartArgs = get_env_start_args()
-        mamba_cache_size = start_args.mamba_cache_size
-
-        self.num_linear_k_heads = self.config["linear_num_key_heads"]
-        self.num_linear_v_heads = self.config["linear_num_value_heads"]
+        self.num_linear_k_heads = self.config["linear_num_key_heads"] // self.tp_world_size_
+        self.num_linear_v_heads = self.config["linear_num_value_heads"] // self.tp_world_size_
         self.head_linear_k_dim = self.config["linear_key_head_dim"]
         self.head_linear_v_dim = self.config["linear_value_head_dim"]
-
-        if mamba_cache_size is None:
-            mamba_cache_size = Qwen3NextHybridMemManager.calculate_mamba_cache_size(
-                start_args=start_args,
-                max_total_token_num=self.max_total_token_num,
-                mem_fraction=self.mem_fraction,
-                config=self.config,
-                head_linear_k_dim=self.head_linear_k_dim,
-                num_linear_k_heads=self.num_linear_k_heads,
-                head_linear_v_dim=self.head_linear_v_dim,
-                num_linear_v_heads=self.num_linear_v_heads,
-                tp_world_size=self.tp_world_size_,
-                data_type=self.data_type,
-            )
-        else:
-            if mamba_cache_size < start_args.running_max_req_size * 2:
-                raise ValueError(
-                    f"Explicitly set mamba_cache_size ({mamba_cache_size}) < "
-                    f"running_max_req_size * 2 ({start_args.running_max_req_size * 2})\n"
-                    f"Please increase mamba_cache_size to at least {start_args.running_max_req_size * 2}"
-                )
-
         conv_kernel_size = self.config["linear_conv_kernel_dim"]
-        conv_dim = (
-            self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
-        )
-
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        if start_args.mamba_ssm_data_type not in ssm_dtype_dict:
-            raise ValueError(
-                f"Invalid mamba_ssm_data_type: {start_args.mamba_ssm_data_type}."
-                f" Must be one of {list(ssm_dtype_dict.keys())}"
-            )
-
         self.mem_manager = Qwen3NextHybridMemManager(
             full_attn_cache_size=self.max_total_token_num,
-            linear_attn_cache_size=mamba_cache_size,
+            linear_attn_cache_size=start_args.mamba_cache_size,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
             layer_num=self.config["n_layer"],
-            mtp_layer_num=start_args.mtp_step,
             full_attention_interval=self.config["full_attention_interval"],
             conv_state_dtype=self.data_type,
-            conv_state_shape=(conv_dim // self.tp_world_size_, conv_kernel_size - 1),
             ssm_state_dtype=ssm_dtype_dict[start_args.mamba_ssm_data_type],
-            ssm_state_shape=(
-                self.num_linear_v_heads // self.tp_world_size_,
-                self.head_linear_k_dim,
-                self.head_linear_v_dim,
-            ),
+            conv_kernel_size=conv_kernel_size,
+            num_linear_k_heads=self.num_linear_k_heads,
+            num_linear_v_heads=self.num_linear_v_heads,
+            head_linear_k_dim=self.head_linear_k_dim,
+            head_linear_v_dim=self.head_linear_v_dim,
             max_req_num=self.max_req_num,
             mem_fraction=self.mem_fraction,
         )

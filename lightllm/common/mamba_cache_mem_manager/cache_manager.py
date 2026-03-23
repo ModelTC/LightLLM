@@ -20,7 +20,6 @@ class LayerCache:
         self.dtype = dtype
         self.shape = shape
         self.layer_num = layer_num
-
         self.buffer = torch.zeros((self.layer_num, size + 1, *shape), dtype=dtype, device="cuda")
 
     def get_cell_size(self):
@@ -33,12 +32,33 @@ class MambaCacheManager:
         size: int,
         layer_num: int,
         conv_state_dtype: torch.dtype,
-        conv_state_shape: Tuple[int, ...],
         ssm_state_dtype: torch.dtype,
-        ssm_state_shape: Tuple[int, ...],
+        conv_kernel_size: int,
+        num_linear_k_heads: int,
+        num_linear_v_heads: int,
+        head_linear_k_dim: int,
+        head_linear_v_dim: int,
     ):
         # init the mem state
         self.size = size
+        self.num_linear_k_heads = num_linear_k_heads
+        self.num_linear_v_heads = num_linear_v_heads
+        self.head_linear_k_dim = head_linear_k_dim
+        self.head_linear_v_dim = head_linear_v_dim
+        self.conv_dim = (
+            self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
+        )
+        self.layer_num = layer_num
+        self.conv_kernel_size = conv_kernel_size
+        conv_state_shape = (self.conv_dim, conv_kernel_size - 1)
+        ssm_state_shape = (
+            self.num_linear_v_heads,
+            self.head_linear_k_dim,
+            self.head_linear_v_dim,
+        )
+        self.ssm_state_dtype = ssm_state_dtype
+        self.conv_state_dtype = conv_state_dtype
+        self.profile_size()
         self.mem_state = torch.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
@@ -51,20 +71,11 @@ class MambaCacheManager:
         self.can_use_mem_size = self.size
         self.shared_can_use_token_num = SharedInt(f"{MAMBA_CACHE_CAN_USE_NUM_SHM_NAME}_{get_current_rank_in_node()}")
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        self.HOLD_TOKEN_MEMINDEX = self.size
 
         # init the layer cache
-        self.conv_state_cache = LayerCache(size, conv_state_dtype, conv_state_shape, layer_num)
-        self.ssm_state_cache = LayerCache(size, ssm_state_dtype, ssm_state_shape, layer_num)
-        self.HOLD_BUFFER_INDEX = size
-
-        logger.warning(
-            f"Linear attention state cache size: {size}\n"
-            f"Conv state use : "
-            f"{self.conv_state_cache.get_cell_size() * size / 1024 ** 3} GB Memory.\n"
-            f"Ssm state use : "
-            f"{self.ssm_state_cache.get_cell_size() * size / 1024 ** 3} GB Memory.\n"
-        )
+        self.conv_state_cache = LayerCache(self.size, conv_state_dtype, conv_state_shape, layer_num)
+        self.ssm_state_cache = LayerCache(self.size, ssm_state_dtype, ssm_state_shape, layer_num)
+        self.HOLD_BUFFER_INDEX = self.size
 
     def get_mamba_cache(self, layer_idx: int):
         conv_state = self.conv_state_cache.buffer[layer_idx]
@@ -181,6 +192,69 @@ class MambaCacheManager:
         self.mark_end = self.size
         self.can_use_mem_size = self.size
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        return
+
+    def profile_size(
+        self,
+    ):
+        start_args = get_env_start_args()
+        if self.size is not None:
+            assert self.size < start_args.running_max_req_size * 2, (
+                f"error mamba_cache_size {self.size} < running_max_req_size * 2 {start_args.running_max_req_size * 2}",
+                f"mamba_cache_size should be at least running_max_req_size * 2",
+            )
+            return
+        from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
+        import torch.distributed as dist
+
+        mem_fraction = start_args.mem_fraction
+        world_size = dist.get_world_size()
+        total_memory = get_total_gpu_memory()
+        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
+        conv_cell_size = (
+            self.layer_num
+            * self.conv_dim
+            * (self.conv_kernel_size - 1)
+            * torch._utils._element_size(self.conv_state_dtype)
+        )
+        ssm_cell_size = (
+            self.layer_num
+            * (self.num_linear_v_heads)
+            * self.head_linear_k_dim
+            * self.head_linear_v_dim
+            * torch._utils._element_size(self.ssm_state_dtype)
+        )
+        total_cell_size = conv_cell_size + ssm_cell_size
+        mamba_cache_ratio = start_args.mamba_cache_ratio if start_args.mamba_cache_ratio is not None else 0.5
+        mamba_memory_gb = available_memory * mamba_cache_ratio
+        mamba_cache_size = int(mamba_memory_gb * 1024 ** 3 / total_cell_size)
+
+        if mamba_cache_size < start_args.running_max_req_size * 2:
+            ratio = mamba_cache_ratio if mamba_cache_ratio is not None else 0.5
+            raise ValueError(
+                f"Insufficient memory for mamba cache allocation!\n\n"
+                f"mamba_cache_size should be at least running_max_req_size * 2\n"
+                f"Calculated mamba_cache_size ({mamba_cache_size}) < "
+                f"running_max_req_size * 2 ({start_args.running_max_req_size * 2})\n\n"
+                f"Memory budget:\n"
+                f"  Available for mamba cache: {mamba_memory_gb:.2f} GB\n"
+                f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
+                f"  Calculated buffers: {mamba_cache_size}\n"
+                f"  Required buffers: {start_args.running_max_req_size}\n\n"
+                f"Solutions:\n"
+                f"  1. Reduce --running_max_req_size to {mamba_cache_size} or lower\n"
+                f"  2. Increase --mamba_cache_ratio from {ratio} to "
+                f"{start_args.running_max_req_size / mamba_cache_size * ratio:.3f} or higher\n"
+                f"  3. Increase --mem_fraction to leave more memory for caches\n"
+            )
+
+        logger.info(
+            f"Mamba cache allocation:\n"
+            f"  Available memory: {mamba_memory_gb:.2f} GB\n"
+            f"  Memory per buffer: {total_cell_size / 1024 ** 2:.2f} MB\n"
+            f"  Calculated mamba_cache_size: {mamba_cache_size}"
+        )
+        self.size = mamba_cache_size
         return
 
 

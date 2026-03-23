@@ -12,7 +12,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
 from typing import Tuple
-from lightllm.models.qwen3next.triton_kernel.gated_rmsnorm import gated_rmsnorm_forward
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
@@ -162,7 +161,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             dim=-1,
         )
         o_gate = layer_weight._o_gate_proj.mm(input)
-        # In-place sigmoid saves one allocation (gate_value is consumed once in _get_o)
         infer_state.gate_value = o_gate.sigmoid_()
         layer_weight.qk_norm_weight_(
             q,
@@ -238,25 +236,24 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)
 
         if is_prefill:
-            g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
             core_attn_out = self._gdn_prefill_kernel(
-                mixed_qkv, conv_states, ssm_states, g, beta, infer_state, layer_weight
+                mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight
             )
         else:
-            core_attn_out = self._gdn_decode_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
+            core_attn_out = self._gdn_decode_kernel(
+                mixed_qkv,
+                conv_states,
+                ssm_states,
+                a,
+                b,
+                infer_state,
+                layer_weight,
+            )
 
         num_tokens = z.shape[0]
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        norm_out = self.alloc_tensor(core_attn_out.shape, core_attn_out.dtype, device=core_attn_out.device)
-        gated_rmsnorm_forward(
-            core_attn_out,
-            layer_weight.linear_norm.weight,
-            None,
-            self.eps_,
-            z,
-            out=norm_out,
-        )
+        core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
+        z = z.contiguous().view(-1, z.shape[-1])
+        norm_out = layer_weight.linear_norm(core_attn_out, z, self.eps_)
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)
         return output
@@ -300,13 +297,12 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         mixed_qkv: torch.Tensor,
         conv_states: torch.Tensor,
         ssm_states: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ):
-        """Prefill kernel for GDN forward pass."""
-        # Conv1D processing
+        g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
         mixed_qkv = mixed_qkv.transpose(0, 1)
         out_tensor = causal_conv1d_fn(
             mixed_qkv,
