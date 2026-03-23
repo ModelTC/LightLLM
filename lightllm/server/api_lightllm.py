@@ -5,6 +5,7 @@ from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
+from lightllm.utils.envs_utils import get_env_start_args
 import ujson as json
 
 
@@ -154,13 +155,15 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
 
 async def lightllm_get_image_embedding(request: Request, httpserver_manager: HttpServerManager) -> Response:
     request_dict = await request.json()
-    # request_dict: {'parameters': {'max_new_tokens': 128},
-    # 'multimodal_params': {'images': [{'type': 'base64', 'data': 'base64'}]}}
+    args = get_env_start_args()
+    assert not args.disable_vision
+    assert args.enable_remote_vit
     sample_params_dict = request_dict["parameters"]
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=None, **sample_params_dict)
     sampling_params.verify()
     multimodal_params_dict = request_dict.get("multimodal_params", {})
+    assert not multimodal_params_dict.get("audios")
     multimodal_params = MultimodalParams(**multimodal_params_dict)
 
     await httpserver_manager.get_image_embeding(sampling_params, multimodal_params, request=request)

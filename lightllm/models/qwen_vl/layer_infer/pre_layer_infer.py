@@ -50,22 +50,18 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         img_start_token_ids = []
         img_token_lens = []
         img_start_locs_in_cache = []
-        unique_uids = []
-        all_uids = []
         device = layer_weight.wte_weight_.weight.device
         dtype = layer_weight.wte_weight_.weight.dtype
         hidden_size = layer_weight.wte_weight_.weight.shape[1]
 
-        for _, p in enumerate(infer_state.multimodal_params):
+        for batch_id, p in enumerate(infer_state.multimodal_params):
             for img in p["images"] + p["audios"]:
-                all_uids.append(img["uuid"])
                 # skip the same image
                 if img["token_id"] in img_start_token_ids:
                     continue
                 img_start_token_ids.append(img["token_id"])
                 img_token_lens.append(img["token_num"])
                 img_start_locs_in_cache.append(img["start_index_in_embed_cache"])
-                unique_uids.append(img["uuid"])
         out = torch.zeros((len(input_ids), hidden_size), dtype=dtype, device=device)
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -78,12 +74,19 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
         )
 
         if self.args.enable_remote_vit:
-            for uid, start_index_in_embed_cache in zip(unique_uids, img_start_locs_in_cache):
-                embed_tensor = load_tensor_afs(get_shm_name_embed(uid), self.args.image_embed_dir)
-                self._copy_loaded_embed_to_cache(embed_tensor, cpu_embed_cache_tensor, start_index_in_embed_cache)
+            unique_image_uids = []
+            for _, p in enumerate(infer_state.multimodal_params):
+                for img in p["images"]:
+                    if img["uuid"] in unique_image_uids:
+                        continue
+                    img_uid = img["uuid"]
+                    img_idx = img["start_index_in_embed_cache"]
+                    unique_image_uids.append(img_uid)
+                    embed_tensor = load_tensor_afs(get_shm_name_embed(img_uid), self.args.image_embed_dir)
+                    self._copy_loaded_embed_to_cache(embed_tensor, cpu_embed_cache_tensor, img_idx)
 
-            if all_uids:
-                self.cache_client.root.release(all_uids)
+            if unique_image_uids:
+                self.cache_client.root.release(unique_image_uids)
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "

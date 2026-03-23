@@ -56,10 +56,8 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
     ):
         if sampling_params.image_max_patch_num > 0:
             img.extra_params["image_patch_max_num"] = sampling_params.image_max_patch_num
-            return
         elif os.getenv("MAX_PATCH_NUM"):
             img.extra_params["image_patch_max_num"] = int(os.getenv("MAX_PATCH_NUM"))
-            return
         else:
             num_images = len(multi_params.images)
             if num_images == 1:
