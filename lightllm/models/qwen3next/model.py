@@ -59,12 +59,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-    def _init_custom(self):
-        super()._init_custom()
-        # Only initialize DeepEP group for MoE models with num_experts
-        if "num_experts" in self.config and self.config["num_experts"] > 0:
-            dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
-
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
 

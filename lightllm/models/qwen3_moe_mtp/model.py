@@ -26,6 +26,7 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
         return
 
     def _init_custom(self):
+        super()._init_custom()
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
         return
