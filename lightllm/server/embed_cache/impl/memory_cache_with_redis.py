@@ -54,6 +54,13 @@ class MemoryCacheWithRedis(InMemoryCache):
                 rec = self._records.get(id)
                 if rec is not None:
                     rec.embed = True
+                    # Before the embed becomes ready, concurrent miss requests are only
+                    # tracked by the local record refcount. Materialize the remaining
+                    # pending readers into Redis so each later release has a matching
+                    # remote ref to consume.
+                    pending_remote_readers = max(rec.ref - 1, 0)
+                    for _ in range(pending_remote_readers):
+                        self.redis_cache.query_and_incre(str(id))
                     if rec.ref > 0:
                         self._update_record_ref_by_id(id, -1)
                 # 保留一份 redis 引用，直到真正的消费者读取完成后再 release，

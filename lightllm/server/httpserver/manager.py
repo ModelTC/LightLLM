@@ -139,6 +139,7 @@ class HttpServerManager:
                 raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
 
             uid_list = []
+            unique_image_uids = []
             for item, rec in zip(items, records):
                 item: Union[ImageItem, AudioItem] = item
                 item.uuid = rec["id"]
@@ -147,11 +148,13 @@ class HttpServerManager:
                 item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
 
                 uid_list.append(rec["id"])
+                if isinstance(item, ImageItem) and rec["id"] not in unique_image_uids:
+                    unique_image_uids.append(rec["id"])
 
-            # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
+            # # If enable the vit-llm disaggregation, no need to cache the data in the memory of the server
             if self.args.enable_remote_vit:
                 # 避免远端lru被逐出
-                self.cache_client.root.get_items_embed(uid_list, False)
+                self.cache_client.root.get_items_embed(unique_image_uids, False)
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
@@ -251,6 +254,16 @@ class HttpServerManager:
                 sampling_params,
                 multimodal_params,
             ) = await self.multinode_req_manager.recv_pyobj()
+
+            # 多机tp下，slave节点收到/get_image_embedding请求，无prompt
+            if prompt is None:
+
+                async def image_embedding_wrapper(sampling_params, multimodal_params):
+                    await self.get_image_embeding(sampling_params, multimodal_params, None)
+
+                asyncio.create_task(image_embedding_wrapper(sampling_params, multimodal_params))
+                continue
+
             results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
 
             async def generate_wrapper(results_generator):
@@ -450,7 +463,11 @@ class HttpServerManager:
             visual_req_status = GroupReqObjs(group_request_id, multimodal_params, None, start_time)
 
             await self.transfer_to_next_module_or_node(
-                None, sampling_params, original_multimodal_params, visual_req_status
+                None,
+                sampling_params,
+                original_multimodal_params,
+                visual_req_status,
+                only_visual=True,
             )
             await self._release_multimodal_resources(multimodal_params)
 
@@ -573,6 +590,7 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         original_multimodal_params: MultimodalParams,
         group_req_objs: Optional[GroupReqObjs] = None,
+        only_visual: bool = False,
     ):
         # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
         if self.is_multinode_tp_master:
@@ -582,19 +600,20 @@ class HttpServerManager:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
 
-        await self.transfer_to_next_module(group_req_objs)
+        await self.transfer_to_next_module(group_req_objs, only_visual=only_visual)
         return
 
     async def transfer_to_next_module(
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
+        only_visual: bool = False,
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
             group_req_index = group_req_objs.to_group_req_index()
             if not self.args.disable_vision:
                 await self.vit_manager.send_to_vit(group_req_index, protocol=pickle.HIGHEST_PROTOCOL)
-                if not self.args.enable_remote_vit:
+                if only_visual or not self.args.enable_remote_vit:
                     return
 
             if not self.args.disable_audio:

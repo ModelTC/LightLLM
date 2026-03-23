@@ -543,6 +543,8 @@ def visual_start(args):
 
     if args.visual_nccl_ports is not None:
         args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+    else:
+        args.visual_nccl_ports = visual_nccl_ports
 
     args.router_port = router_port
     args.visual_port = visual_port
