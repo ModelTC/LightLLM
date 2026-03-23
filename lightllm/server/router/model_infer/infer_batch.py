@@ -357,6 +357,9 @@ class InferReq:
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
 
+        # img gen req need copy kv to cpu
+        self.past_kv_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step

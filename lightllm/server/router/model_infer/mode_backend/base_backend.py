@@ -47,6 +47,7 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+from .past_kv_cache import PastKVCacheModule
 
 
 class ModeBackend:
@@ -146,6 +147,9 @@ class ModeBackend:
 
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
+
+        if self.args.enable_multimodal_x2i:
+            self.past_kv_cache_module = PastKVCacheModule(self)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
@@ -551,6 +555,9 @@ class ModeBackend:
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
+        if self.args.enable_multimodal_x2i and len(g_infer_context.infer_req_ids) > 0:
+            self.past_kv_cache_module.update_past_kv_cache_task_states()
+
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
 
@@ -647,6 +654,10 @@ class ModeBackend:
             )
         else:
             true_finished_reqs = finished_reqs
+
+        if self.args.enable_multimodal_x2i:
+            true_finished_reqs = self.past_kv_cache_module.offload_finished_reqs_to_past_kv_cache(
+                finished_reqs=true_finished_reqs)
 
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)

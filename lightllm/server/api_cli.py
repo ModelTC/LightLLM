@@ -303,6 +303,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
+        "--enable_multimodal_x2i",
+        action="store_true",
+        help="Whether or not to allow to generate images (requird --enable_multimodal)."
+    )
+    parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
     parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")

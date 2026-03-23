@@ -10,6 +10,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+import re
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -24,6 +25,7 @@ from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
+from lightllm.server.core.objs.x2i_params import X2IParams, X2ICacheRelease, X2IResponse
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
@@ -94,6 +96,15 @@ class HttpServerManager:
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
             self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+
+        if args.enable_multimodal_x2i:
+            from lightllm.server.x2i_server.past_kv_cache_client import PastKVCacheClient
+            self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=True, init_shm_data=False)
+            self.send_to_x2i = context.socket(zmq.PUSH)
+            self.send_to_x2i.connect(f"{args.zmq_mode}127.0.0.1:{args.x2i_port}")
+            self.recv_from_x2i = context.socket(zmq.PULL)
+            self.recv_from_x2i.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
+            self.req_id_to_x2i_reqs: Dict[int, X2IReqStatus] = {}
 
         self.shm_req_manager = ShmReqManager()
 
@@ -354,6 +365,15 @@ class HttpServerManager:
                     self.tokenizer,
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
+                if sampling_params.img_gen_prefill:
+                    # allocate pages, may block if cache is full, but it won't cause deadlock
+                    # because the prefill process is designed to be sequential and the pages
+                    # will be released after prefill.
+                    kv_pages = self.past_kv_cache_client.allocate_pages(
+                        req_obj.request_id, req_obj.input_len)
+
+                    req_obj.past_kv_cache_page_indexes.fill(kv_pages)
+
                 req_objs.append(req_obj)
 
             logger.debug(
@@ -404,9 +424,81 @@ class HttpServerManager:
             # 进行回收。
             if group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
+
+            if sampling_params.img_gen_prefill:
+                # 预分配了 kv cache 的请求，在异常情况下需要主动释放 kv cache 资源
+                self.past_kv_cache_client.free_pages_by_req_id(group_request_id)
+
             await self.abort(group_request_id)
+
             raise e
         return
+
+
+    async def generate_image(self, prompt: str, generation_params: X2IParams, multimodal_params: MultimodalParams, request: Request):
+        generate_req_ids = []
+        async def generation_wrapper(prompt, sample, multimodal, request):
+            async for sub_req_id, _, metadata, finish_status in self.generate(
+                prompt, sample, multimodal, request
+            ):
+                kv_cache_pages = self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
+                if kv_cache_pages is None:
+                    raise Exception(f"kv_cache_pages is None for sub_req_id {sub_req_id}")
+                metadata["kv_cache_pages"] = kv_cache_pages
+                metadata["request_id"] = sub_req_id
+                metadata["finish_status"] = finish_status
+                generate_req_ids.append(sub_req_id)
+                return metadata
+
+        try:
+            # 1. construct 3 or 2 images based on the multimodel_parmas
+            sample_params = SamplingParams()
+            sample_params.init(self.tokenizer, **{"img_gen_prefill": True})
+            img_len = len(multimodal_params.images)
+
+            if img_len > 0:
+                # call it2i
+                prompt_condition = f"Please generate an image based on the following instruction: {prompt}"
+                prompt_text_uncondition = "Please generate an image based on the following instruction: "+ '<image>\n' * img_len
+                prompt_img_uncondition = "Please generate an image based on the following instruction: " + re.sub(r"<image>\n?", "", prompt)
+                (con_gen, text_uncon_gen, img_uncon_gen) = await asyncio.gather(*[
+                    generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
+                    generation_wrapper(prompt_text_uncondition, sample_params, multimodal_params, request),
+                    generation_wrapper(prompt_img_uncondition, sample_params, MultimodalParams(), request)])
+                generation_params.update_it2i(con_gen, text_uncon_gen, img_uncon_gen)
+            else:
+                # call t2i
+                prompt_condition = f"Please generate an image based on the following caption: {prompt}"
+                prompt_uncondition = f"Please generate an image based on the following caption: "
+                (con_gen, uncon_gen) = await asyncio.gather(*[
+                    generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
+                    generation_wrapper(prompt_uncondition, sample_params, multimodal_params, request)])
+                generation_params.update_t2i(con_gen, uncon_gen)
+            # use the first reqeust id as the gen image request id
+            x2i_req_id = generate_req_ids[0]
+            generation_params.request_id = x2i_req_id
+
+            req_status =  X2IReqStatus(generation_params, generate_req_ids)
+            self.req_id_to_x2i_reqs[generation_params.request_id] = req_status
+
+            # send generation_params to generation server for image generation
+            await self.send_to_x2i.send_pyobj(generation_params, protocol=pickle.HIGHEST_PROTOCOL)
+
+            await req_status.event.wait()
+
+            assert req_status.response is not None
+
+            self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
+
+            return req_status.response.images
+
+        except Exception as e:
+            logger.error(str(e))
+            pass
+
+        finally:
+            for req_id in generate_req_ids:
+                self.past_kv_cache_client.free_pages_by_req_id(req_id)
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
@@ -739,6 +831,28 @@ class HttpServerManager:
                     )
         return
 
+    async def loop_for_x2i(self):
+
+        while True:
+            try:
+                recv_obj = await asyncio.wait_for(self.recv_from_x2i.recv_pyobj(), timeout=0.05)
+
+                if isinstance(recv_obj, X2ICacheRelease):
+                    status = self.req_id_to_x2i_reqs[recv_obj.request_id]
+                    for req_id in status.req_ids:
+                        self.past_kv_cache_client.free_pages_by_req_id(req_id)
+
+                elif isinstance(recv_obj, X2IResponse):
+                    status = self.req_id_to_x2i_reqs[recv_obj.request_id]
+                    status.response = recv_obj
+                    status.event.set()
+
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                logger.error(e)
+
+
     async def handle_loop(self):
         self.recycle_event = asyncio.Event()
         asyncio.create_task(self.recycle_resource_loop())
@@ -752,6 +866,9 @@ class HttpServerManager:
             from lightllm.server.httpserver.pd_loop import pd_handle_loop
 
             asyncio.create_task(pd_handle_loop(self))
+
+        if self.args.enable_multimodal_x2i:
+            asyncio.create_task(self.loop_for_x2i())
 
         while True:
             try:
@@ -839,3 +956,10 @@ class ReqStatus:
             if not req.can_release():
                 return False
         return True
+
+class X2IReqStatus:
+    def __init__(self, req_param: X2IParams, req_ids: List[int]):
+        self.req = X2IParams
+        self.req_ids = req_ids
+        self.event = asyncio.Event()
+        self.response: X2IResponse = None

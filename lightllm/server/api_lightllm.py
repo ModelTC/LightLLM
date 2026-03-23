@@ -3,6 +3,7 @@ from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
+from lightllm.server.core.objs.x2i_params import X2IParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 import ujson as json
@@ -150,3 +151,18 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+async def lightllm_generate_image(request: Request, httpserver_manager: HttpServerManager) -> Response:
+    # 这个接口目前主要是给x2v gen用的，输入是文本，输出是图片特征
+    request_dict = await request.json()
+    prompt = request_dict.pop("inputs")
+    generation_params_dict = request_dict["parameters"]
+    generation_params = X2IParams()
+    generation_params.init(**generation_params_dict)
+    multimodal_params_dict = request_dict.get("multimodal_params", {})
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
+
+    results = await httpserver_manager.generate_image(prompt, generation_params, multimodal_params, request=request)
+
+    return Response(content=json.dumps({"images": results}, ensure_ascii=False).encode("utf-8"))
