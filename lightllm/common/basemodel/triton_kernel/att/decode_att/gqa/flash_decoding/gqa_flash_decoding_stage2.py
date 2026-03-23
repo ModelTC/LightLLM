@@ -19,6 +19,7 @@ def _fwd_kernel_flash_decode_stage2(
     stride_obs,
     stride_oh,
     stride_od,
+    block_num,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
@@ -28,7 +29,7 @@ def _fwd_kernel_flash_decode_stage2(
     offs_d = tl.arange(0, BLOCK_DMODEL)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
 
-    block_n_size = tl.where(cur_batch_seq_len <= 0, 0, cur_batch_seq_len + BLOCK_SEQ - 1) // BLOCK_SEQ
+    block_num = tl.minimum(tl.cdiv(cur_batch_seq_len, BLOCK_SEQ), block_num)
 
     sum_exp = 0.0
     max_logic = -float("inf")
@@ -36,9 +37,9 @@ def _fwd_kernel_flash_decode_stage2(
 
     offs_v = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + offs_d
     offs_logic = cur_batch * stride_mid_o_eb + cur_head * stride_mid_o_eh
-    for block_seq_n in range(0, block_n_size, 1):
-        tv = tl.load(Mid_O + offs_v + block_seq_n * stride_mid_os)
-        tlogic = tl.load(Mid_O_LogExpSum + offs_logic + block_seq_n)
+    for block_index in range(0, block_num, 1):
+        tv = tl.load(Mid_O + offs_v + block_index * stride_mid_os)
+        tlogic = tl.load(Mid_O_LogExpSum + offs_logic + block_index)
         new_max_logic = tl.maximum(tlogic, max_logic)
 
         old_scale = tl.exp(max_logic - new_max_logic)
@@ -58,6 +59,7 @@ def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq):
     assert Lk in {16, 32, 64, 128}
     batch, head_num = mid_out.shape[0], mid_out.shape[1]
     grid = (batch, head_num)
+    block_num = mid_out.shape[2]
 
     _fwd_kernel_flash_decode_stage2[grid](
         B_Seqlen,
@@ -74,6 +76,7 @@ def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq):
         out.stride(0),
         out.stride(1),
         out.stride(2),
+        block_num,
         BLOCK_SEQ=block_seq,
         BLOCK_DMODEL=Lk,
         num_warps=4,
