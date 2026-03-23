@@ -10,6 +10,7 @@ from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qw
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
     Qwen3NextTransformerLayerInfer,
 )
+from lightllm.models.qwen3next.layer_infer.post_layer_infer import Qwen3NextPostLayerInfer
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
@@ -26,11 +27,12 @@ logger = init_logger(__name__)
 class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     # weight class
-    pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
+    # pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
 
     # infer class
     transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
+    post_layer_infer_class = Qwen3NextPostLayerInfer
 
     # infer state class
     infer_state_class = Qwen3NextInferStateInfo
