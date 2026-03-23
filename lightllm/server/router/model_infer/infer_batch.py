@@ -318,7 +318,7 @@ class InferenceContext:
                 can_alloc_token_num -= prefill_need_token_num
                 revovered_reqs.append(req)
 
-            self._alloc_and_copy_req_buffers(revovered_reqs)
+            self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, revovered_reqs)
             g_infer_state_lock.release()
         return
 

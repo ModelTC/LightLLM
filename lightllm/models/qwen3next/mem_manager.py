@@ -130,14 +130,12 @@ class Qwen3NextHybridMemManager(MemoryManager):
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         # KV buffer layout: [None, None, None, kv_cache, None, None, None, kv_cache, ...,
         #                    None, kv_cache, mtp_kv_cache, mtp_kv_cache]
-        # Only full attention layers and MTP layers have KV cache.
+        # Only full attention layers have KV cache.
         self.kv_buffer = [None for _ in range(self.layer_num)]
         for layer_id in range(self.full_attn_layer_num):
             self.kv_buffer[(layer_id + 1) * self.full_attention_interval - 1] = torch.empty(
                 (size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"
             )
-        for _ in range(self.mtp_layer_num):
-            self.kv_buffer.append(torch.empty((size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"))
 
     def free_all(self):
         super().free_all()

@@ -200,6 +200,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ):
+        # full attention layer
         if not self.is_linear_attention_layer:
             return super().context_attention_forward(input_embdings, infer_state, layer_weight)
 
@@ -271,8 +272,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return mixed_qkv, z, b, a
 
     def _rearrange_mixed_qkv(self, mixed_qkv, decode=False):
-        if mixed_qkv is None:
-            return None, None, None
         if decode:
             query, key, value = torch.split(
                 mixed_qkv,
