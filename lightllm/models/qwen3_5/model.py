@@ -9,9 +9,8 @@ from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import (
     Qwen3VLMultimodalPreLayerInfer,
 )
-from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import (
-    Qwen3VLPreAndPostLayerWeight,
-)
+from lightllm.models.qwen3_5.layer_weights.pre_and_post_layer_weight import Qwen35PreAndPostLayerWeight
+
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35TransformerLayerInfer,
 )
@@ -52,7 +51,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     """
 
     transformer_weight_class = Qwen35TransformerLayerWeight
-    pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
+    pre_and_post_weight_class = Qwen35PreAndPostLayerWeight
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
