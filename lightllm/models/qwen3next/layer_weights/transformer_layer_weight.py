@@ -165,11 +165,9 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             quant_method=self.get_quant_method("out_proj_weight"),
         )
 
-        split_n_embed = self.linear_num_v_heads // self.tp_world_size_
         self.linear_dt_bias = TpParameterWeight(
             weight_name=f"{prefix}.dt_bias",
             data_type=torch.float32,
-            split_n_embed=split_n_embed,
             bias_name=None,
             weight_shape=(self.linear_num_v_heads,),  # Full shape before TP split
             bias_shape=None,
@@ -178,7 +176,6 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         self.linear_A_log = TpParameterWeight(
             weight_name=f"{prefix}.A_log",
             data_type=torch.float32,
-            split_n_embed=split_n_embed,
             bias_name=None,
             weight_shape=(self.linear_num_v_heads,),  # Full shape before TP split
             bias_shape=None,
