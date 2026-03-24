@@ -47,6 +47,23 @@ async def build_prompt(request, tools) -> str:
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
 
+    # Convert tool_calls function.arguments from JSON string to dict for Jinja template compatibility
+    # Qwen's chat template expects arguments to be a dict (uses |items filter)
+    # but OpenAI format sends arguments as a JSON string
+    for msg in messages:
+        tool_calls = msg.get("tool_calls")
+        if tool_calls and isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                func = tool_call.get("function")
+                if func and isinstance(func, dict):
+                    args = func.get("arguments")
+                    if isinstance(args, str) and args:
+                        try:
+                            func["arguments"] = json.loads(args)
+                        except (json.JSONDecodeError, TypeError):
+                            # Keep original string if not valid JSON
+                            pass
+
     kwargs = {"conversation": messages}
     if request.character_settings:
         kwargs["character_settings"] = request.character_settings
