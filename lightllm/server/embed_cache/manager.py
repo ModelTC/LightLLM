@@ -6,7 +6,6 @@ from typing import Union, Optional
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
-from lightllm.server.embed_cache.impl.memory_cache_with_redis import MemoryCacheWithRedis
 from rpyc.utils.classic import obtain
 from lightllm.utils.envs_utils import get_unique_server_name
 
@@ -48,16 +47,9 @@ class CacheServer(rpyc.Service):
         ids = obtain(ids)
         return self._impl.set_items_embed(ids)
 
-    def exposed_get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[bool]:
+    def exposed_get_items_embed(self, ids: list[int]) -> list[bool]:
         ids = obtain(ids)
-        return self._impl.get_items_embed(ids, embeding_only)
-
-
-def get_cache_manager(args):
-    if args.enable_remote_vit or args.run_mode in ["visual", "visual_only"]:
-        return MemoryCacheWithRedis(args)
-    else:
-        return InMemoryCache(args)
+        return self._impl.get_items_embed(ids)
 
 
 def start_cache_manager(args: StartArgs, pipe_writer):
@@ -65,7 +57,7 @@ def start_cache_manager(args: StartArgs, pipe_writer):
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::cache_manager")
-    manager = get_cache_manager(args)
+    manager = InMemoryCache(args)
     service = CacheServer(manager)
     from rpyc.utils.server import ThreadedServer
     import lightllm.utils.rpyc_fix_utils as _
