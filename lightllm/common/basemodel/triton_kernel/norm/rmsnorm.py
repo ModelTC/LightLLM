@@ -44,7 +44,7 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y, mask=mask)
 
 
-def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
+def _rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
@@ -79,13 +79,15 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
     return y
 
 
-# def rmsnorm_forward(hidden_states, weight, eps, out=None):
-#     input_dtype = hidden_states.dtype
-#     hidden_states = hidden_states.to(torch.float32)
-#     variance = hidden_states.pow(2).mean(-1, keepdim=True)
-#     hidden_states = hidden_states * torch.rsqrt(variance + eps)
-#     out = weight * hidden_states.to(input_dtype)
-#     return out
+def rmsnorm_forward(x, weight, eps, out=None):
+    hidden_states = x
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + eps)
+    _out = weight * hidden_states.to(input_dtype)
+    out.copy_(_out)
+    return out
 
 
 def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
