@@ -36,7 +36,6 @@ class InMemoryCache:
     def __init__(self, args) -> None:
         self.args = args
         self._id_to_records = dict()
-        self._records = self._id_to_records
         self._md5_to_record = dict()
         self._sorted_records = SortedSet(key=lambda x: (x.ref, x.visittime, x.id))
         self.capacity = max(1, args.cache_capacity)
@@ -169,13 +168,18 @@ class InMemoryCache:
                     new_md5_dict[m] = token_need
 
             new_needed = len(new_md5_dict)
+
             alloc_md5_dict = self._free_to_alloc(
                 free_min_count=new_needed - (self.capacity - self.occupied), new_md5_dict=new_md5_dict
             )
+            for md5 in add_ref_m_list:
+                # 解锁
+                self._del_ref(md5)
+
             if len(alloc_md5_dict) == len(new_md5_dict):
                 for md5sum, mem_block in alloc_md5_dict.items():
                     token_num = new_md5_dict[md5sum]
-                    uid_int = md5sum
+                    uid_int = uuid.uuid1().int
                     self._check_and_set_new_id_range(token_num)
                     rec = Record(
                         id=uid_int,
@@ -195,10 +199,6 @@ class InMemoryCache:
                     self._sorted_records.add(rec)
                     self.occupied += 1
 
-                for md5 in add_ref_m_list:
-                    # 解锁
-                    self._del_ref(md5)
-
                 # 遍历加 ref
                 results = []
                 for md5 in md5sum_list:
@@ -215,8 +215,6 @@ class InMemoryCache:
 
                 return results
             else:
-                for md5sum in add_ref_m_list:
-                    self._del_ref(md5sum)
                 return None
 
     def release(self, ids: list[int]) -> None:
@@ -235,5 +233,5 @@ class InMemoryCache:
         for id_ in ids:
             self._id_to_records[id_].embed = True
 
-    def get_items_embed(self, ids: list[int], embeding_only: bool = False) -> list[Optional[bool]]:
+    def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         return [self._id_to_records.get(id_).embed if id_ in self._id_to_records else False for id_ in ids]
