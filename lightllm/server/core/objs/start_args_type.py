@@ -20,6 +20,8 @@ class StartArgs:
     pd_master_port: int = field(default=1212)
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
+    config_server_vit_redis_port: int = field(default=None)
+    afs_image_embed_dir: str = field(default=None)
     pd_decode_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(default=None)
     model_name: str = field(default="default_model_name")

@@ -15,8 +15,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "nixl_decode",
             "pd_master",
             "config_server",
-            "visual",
-            "visual_only",
+            "only_visual_infer",
         ],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
@@ -70,6 +69,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="The port number for the config server in config_server mode.",
+    )
+    parser.add_argument(
+        "--config_server_vit_redis_port",
+        type=int,
+        default=None,
+        help="""when run_mode is config_server, set this params will start a redis server,
+        when a llm infer node start to set this params, the visual infer module will start a
+        proxy module use config server to find  remote vit infer nodes to infer img"""
     )
     parser.add_argument(
         "--nixl_pd_kv_page_num",
@@ -616,38 +623,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""The interval of the schedule time, default is 30ms.""",
     )
     parser.add_argument(
-        "--image_embed_dir",
+        "--afs_image_embed_dir",
         type=str,
         default=None,
-        help="path for vit embed",
-    )
-    parser.add_argument(
-        "--enable_remote_vit",
-        action="store_true",
-        help="Whether to enable remote vit for multimodal service.",
-    )
-    parser.add_argument(
-        "--remote_vit_port",
-        type=int,
-        default=12346,
-        help="The port number for the remote vit service.",
-    )
-    parser.add_argument(
-        "--redis_port",
-        type=int,
-        default=6379,
-        help="The port number for the redis service in config_server mode.",
-    )
-    parser.add_argument(
-        "--redis_evict_fraction",
-        type=float,
-        default=0.3,
-        help="The evict fraction for the redis service in config_server mode.",
-    )
-    parser.add_argument(
-        "--start_redis",
-        action="store_true",
-        help="Whether to start the redis service in config_server mode.",
+        help="path for vit embed, when use vit remote infer mode",
     )
     parser.add_argument(
         "--enable_cpu_cache",
