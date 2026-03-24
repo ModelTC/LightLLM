@@ -1,15 +1,11 @@
-import rpyc
-import socket
 import torch
 import torch.distributed as dist
 
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
-from lightllm.server.embed_cache.utils import get_shm_name_embed, load_tensor_afs
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 """
@@ -30,20 +26,6 @@ infer_state.multimodal_params: batch list of MultimodalParams-dict like:
 class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
-        self.args = get_env_start_args()
-        if self.args.enable_remote_vit:
-            self.cache_client = rpyc.connect("localhost", self.args.cache_port, config={"allow_pickle": True})
-            self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        return
-
-    def _copy_loaded_embed_to_cache(
-        self, embed_tensor: torch.Tensor, cpu_embed_cache_tensor: torch.Tensor, start_index: int
-    ):
-        if embed_tensor.ndim == 2:
-            embed_tensor = embed_tensor.unsqueeze(1)
-
-        token_num, layer_num, hidden_size = embed_tensor.shape
-        cpu_embed_cache_tensor[start_index : start_index + token_num, :layer_num, :hidden_size].copy_(embed_tensor)
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
@@ -72,21 +54,6 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             if cpu_embed_cache_client is None
             else cpu_embed_cache_client.cpu_embed_cache_tensor
         )
-
-        if self.args.enable_remote_vit:
-            unique_image_uids = []
-            for _, p in enumerate(infer_state.multimodal_params):
-                for img in p["images"]:
-                    if img["uuid"] in unique_image_uids:
-                        continue
-                    img_uid = img["uuid"]
-                    img_idx = img["start_index_in_embed_cache"]
-                    unique_image_uids.append(img_uid)
-                    embed_tensor = load_tensor_afs(get_shm_name_embed(img_uid), self.args.image_embed_dir)
-                    self._copy_loaded_embed_to_cache(embed_tensor, cpu_embed_cache_tensor, img_idx)
-
-            if unique_image_uids:
-                self.cache_client.root.release(unique_image_uids)
 
         assert cpu_embed_cache_tensor.shape[2] == hidden_size, (
             f"Dimension mismatch: text weight dimension is {hidden_size}, "
