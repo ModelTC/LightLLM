@@ -1,7 +1,6 @@
 import dataclasses
 import torch
 from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
-from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
 
 class Fa3VitAttBackend(BaseVitAttBackend):
