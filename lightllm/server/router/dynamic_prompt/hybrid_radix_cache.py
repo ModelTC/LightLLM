@@ -20,43 +20,22 @@ class HybridRadixCache(RadixCache):
     def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
         if need_buffer_num > self.buffer_mem_manager.can_use_mem_size:
             need_evict_buffer_num = need_buffer_num - self.buffer_mem_manager.can_use_mem_size
-
-            release_mems = []
-
-            def release_mem(mem_index):
-                release_mems.append(mem_index)
-                return
-
             release_buffers = []
 
             def release_buffer(buffer_idx):
                 release_buffers.append(buffer_idx)
                 return
 
-            self._evict_buffer(need_evict_buffer_num, release_buffer, release_mem)
-            self.buffer_mem_manager.free(release_buffers)
-            if len(release_mems) > 0:
-                mem_index = torch.concat(release_mems)
-                self.mem_manager.free(mem_index)
+            self._evict_buffer(need_evict_buffer_num, release_buffer)
         return
 
-    def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback, evict_token_callback):
+    def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback):
         while need_evict_buffer_num > 0:
             node = self.evict_buffer_set.pop(0)
             assert node.buffer_idx is not None
             evict_buffer_callback(node.buffer_idx)
             node.buffer_idx = None
             need_evict_buffer_num -= 1
-            # 当一个节点的buffer_idx变为None时，事实上无法在后续进行match，
-            # 但当该节点子节点或者引用数不为0时，仍然需要保留， 否则则应该被删除
-            if node.is_leaf() and node.ref_counter == 0:
-                self.evict_tree_set.discard(node)
-                evict_token_callback(node.token_mem_index_value)
-                self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-                parent_node: TreeNode = node.parent
-                parent_node.remove_child(node)
-                if parent_node.is_leaf():
-                    self.evict_tree_set.add(parent_node)
         return
 
     def match_prefix(self, key, update_refs=False):
