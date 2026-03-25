@@ -42,6 +42,20 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         self.image_start_id = tokenizer.convert_tokens_to_ids(self.image_start_tag)
         self.image_end_tag = IMG_END_TOKEN
         self.image_end_id = tokenizer.convert_tokens_to_ids(self.image_end_tag)
+        self.conversation_module = self.load_conversion_module(tokenizer.name_or_path)
+        self.template = model_cfg.get("template", "neo1_0")
+
+    def load_conversion_module(self, model_dir: str):
+        import importlib
+        conversion_path = os.path.join(model_dir, "conversation.py")
+        if not os.path.exists(conversion_path):
+            return None
+
+        spec = importlib.util.spec_from_file_location("conversation", str(conversion_path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # must run the module
+        return module
+
 
     def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
@@ -117,6 +131,33 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
                 break
         input_ids.extend(origin_ids)
         return input_ids
+
+    def _build_t2i_query(self, msg, thinking_content=""):
+        template = self.conversation_module.get_conv_template(self.template)
+        template.append_message(template.roles[0], msg)
+        template.append_message(template.roles[1], None)
+        return template.get_prompt() + thinking_content + IMG_START_TOKEN
+
+    def fix_prompt(self, prompt: str, img_len: int):
+        prompt_img_len = prompt.count(IMG_TOKEN)
+        assert prompt_img_len <= img_len, f"not enough images provided, need {prompt_img_len}, given {img_len}"
+        if prompt_img_len < img_len:
+            return f"{IMG_TOKEN}\n" * (img_len - prompt_img_len) + prompt
+        return prompt
+
+    def get_query_for_it2i(self, prompt: str):
+        image_len = prompt.count(IMG_TOKEN)
+        query_condition = self._build_t2i_query(prompt, thinking_content="<think>\n\n</think>\n\n")
+        query_text_uncondition = self._build_t2i_query(IMG_TOKEN * image_len)
+        question_img_uncondition = self._build_t2i_query("")
+        return query_condition, query_text_uncondition, question_img_uncondition
+
+    def get_query_for_t2i(self, prompt):
+        query_condition = self._build_t2i_query(
+            f"Please generate an image based on the following description: {prompt}",
+            thinking_content="<think>\n\n</think>\n\n")
+        query_uncondition = self._build_t2i_query(f"")
+        return query_condition, query_uncondition
 
 
 @ModelRegistry(["neo_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3_moe"))

@@ -12,15 +12,9 @@ from lightllm.utils.kv_cache_utils import (
     attach_shm_kv_cache_ptr,
     register_shm_ptr_to_pin,
 )
+from lightllm.server.core.objs.x2i_params import PastKVCacheItem
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class PastKVCacheItem:
-    req_id: int
-    token_len: int
-    page_indexes: List[int]
 
 
 class PastKVCacheClient(object):
@@ -49,7 +43,7 @@ class PastKVCacheClient(object):
                 self.attach_shm_handle.wait()
         return
 
-    def allocate_pages(self, req_id: int, need_tokens: int) -> List[int]:
+    def allocate_pages(self, req_id: int, need_tokens: int, img_tokens: int = 0, img_len: int = 0) -> List[int]:
         need_pages = (need_tokens + self.token_page_size - 1) // self.token_page_size
         if need_pages > self.page_num:
             logger.error(
@@ -64,7 +58,7 @@ class PastKVCacheClient(object):
 
             page_indexes, self.free_pages = self.free_pages[:need_pages], self.free_pages[need_pages:]
             self.allocated_pages_dict[req_id] = PastKVCacheItem(
-                req_id=req_id, token_len=need_tokens, page_indexes=page_indexes)
+                req_id=req_id, token_len=need_tokens, page_indexes=page_indexes, img_tokens=img_tokens, img_len=img_len)
 
             return page_indexes
 
@@ -78,7 +72,7 @@ class PastKVCacheClient(object):
     def get_pages_by_req_id(self, req_id: int) -> Optional[List[int]]:
         with self.lock:
             item = self.allocated_pages_dict.get(req_id, None)
-            return item.page_indexes if item is not None else None
+            return item
 
     def get_kv_cache_for_x2i(self, page_indexes: List[int], token_num: int) -> Optional[torch.Tensor]:
         if page_indexes is None:

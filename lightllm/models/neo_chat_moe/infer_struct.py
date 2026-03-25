@@ -66,8 +66,8 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             images = p.get("images", [])
             for img in images:
                 b_image_start_idx.append(img["start_idx"])
-                a = img["start_idx"]
-                print(f"img start_idx: {a}")
+                # a = img["start_idx"]
+                # print(f"img start_idx: {a}")
                 b_image_len.append(img["token_num"])
                 b_image_thwd.append(img["grid_thwd"])
             b_image_nums.append(len(images))

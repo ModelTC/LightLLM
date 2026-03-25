@@ -69,7 +69,6 @@ class AudioItem:
         ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
         return ret
 
-
 class ImageItem:
     def __init__(self, **kwargs):
         self._type = kwargs["type"]
@@ -185,3 +184,6 @@ class MultimodalParams:
         for audio in self.audios:
             audio.free()
         return
+
+    def clone(self):
+        return MultimodalParams(**self.to_origin_dict())

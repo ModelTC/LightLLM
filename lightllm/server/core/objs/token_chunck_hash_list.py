@@ -94,8 +94,18 @@ class PastKVCachePageList(CpuCachePageList):
     _pack_ = 4
     _fields_ = CpuCachePageList._fields_ +[
         ("token_len", ctypes.c_int),  # 对应的token数量
+        ("img_tokens", ctypes.c_int),
+        ("img_len", ctypes.c_int)
     ]
 
     def __init__(self, token_len: int = 0):
         super().__init__()
         self.token_len = token_len
+        self.img_tokens = 0
+        self.img_len = 0
+
+    def get_compressed_len(self):
+        return self.token_len - self.img_tokens + self.img_len
+
+    def __repr__(self):
+        return f"(token_len={self.token_len}, img_tokens={self.img_tokens}, img_len={self.img_len})"
