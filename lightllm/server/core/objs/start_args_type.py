@@ -127,7 +127,7 @@ class StartArgs:
         default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
     llm_kv_type: str = field(
-        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"]}
+        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
     )
     llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
