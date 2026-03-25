@@ -6,6 +6,7 @@ import inspect
 import setproctitle
 import pickle
 import torch
+import os
 from typing import List
 from lightllm.server.core.objs import StartArgs
 
@@ -15,9 +16,11 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease
+from lightllm.utils.dist_utils import set_current_device_id
 from .past_kv_cache_client import PastKVCacheClient
 
 logger = init_logger(__name__)
+
 
 '''
 manage a generation service,
@@ -44,10 +47,6 @@ class X2IManager:
 
         self.waiting_reqs: List[X2IParams] = []
 
-        from lightllm.utils.dist_utils import set_current_device_id
-
-        set_current_device_id(torch.cuda.current_device())
-
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
     async def wait_to_model_ready(self):
@@ -61,7 +60,20 @@ class X2IManager:
         #     config_json = self.args.x2v_gen_model_config,
         # )
 
+        from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
+
+        self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
+
         pass
+
+    async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
+        images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
+        return images
+
+    async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
+        images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
+        return images
+
 
     async def loop_for_fwd(self):
         while True:
@@ -81,8 +93,6 @@ class X2IManager:
                 )
                 is_t2i = x2i_param.past_kvcache_img.is_empty()
 
-                logger.info(f"past kv cache shape: {past_kv_cache.shape}, past_kv_cache_text shape: {past_kv_cache_text.shape}")
-
                 past_kv_cache_img = None
                 if not is_t2i: # t2i
                     past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
@@ -94,13 +104,24 @@ class X2IManager:
                     X2ICacheRelease(request_id=x2i_param.request_id),
                     protocol=pickle.HIGHEST_PROTOCOL)
 
-                # call generate images
+                images = []
+                logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with x2i_param: {x2i_param}")
+                if is_t2i:
+                    images = await self.t2i_generate(past_kv_cache, past_kv_cache_text, x2i_param)
+                else:
+                    images = await self.it2i_generate(past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param)
+
                 self.send_to_httpserver.send_pyobj(X2IResponse(
                     request_id=x2i_param.request_id,
-                    images=[]),
+                    images=images),
                     protocol=pickle.HIGHEST_PROTOCOL)
 
             except Exception as e:
+                self.send_to_httpserver.send_pyobj(X2IResponse(
+                    request_id=x2i_param.request_id,
+                    images=None),
+                    protocol=pickle.HIGHEST_PROTOCOL)
+
                 logger.error(e)
 
 
@@ -115,11 +136,35 @@ class X2IManager:
 
             await asyncio.sleep(0.01)
 
+    def clean_up(self):
+        pass
+
+def setup_devices(args: StartArgs):
+    devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    logger.info(f"current devices: {devices} {torch.cuda.device_count()}")
+    if not devices:
+        devices = list(range(torch.cuda.device_count()))
+    else:
+        devices = [int(x.strip()) for x in devices.split(",") if x.strip()]
+
+    llm_need_gpus = args.tp * args.dp
+    x2i_need_gpus = args.x2i_server_used_gpus
+    if len(devices) < llm_need_gpus + x2i_need_gpus:
+        raise ValueError(f"devices {devices} not enough, need {llm_need_gpus} and {x2i_need_gpus}")
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, devices[
+        llm_need_gpus:llm_need_gpus + x2i_need_gpus]))
+
+    logger.info(f"setup devices for x2i server: {os.environ['CUDA_VISIBLE_DEVICES']}, "
+                f"{torch.cuda.device_count()} {torch.cuda.current_device()}")
+
+
 def start_x2i_process(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::x2i_server")
     start_parent_check_thread()
+    set_current_device_id(torch.cuda.current_device())
     try:
         x2iserver = X2IManager(args=args,)
         asyncio.run(x2iserver.wait_to_model_ready())

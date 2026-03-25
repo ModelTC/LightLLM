@@ -47,7 +47,6 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
 
     def load_conversion_module(self, model_dir: str):
         import importlib
-
         conversion_path = os.path.join(model_dir, "conversation.py")
         if not os.path.exists(conversion_path):
             return None
@@ -155,8 +154,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
     def get_query_for_t2i(self, prompt):
         query_condition = self._build_t2i_query(
             f"Please generate an image based on the following description: {prompt}",
-            thinking_content="<think>\n\n</think>\n\n",
-        )
+            thinking_content="<think>\n\n</think>\n\n")
         query_uncondition = self._build_t2i_query(f"")
         return query_condition, query_uncondition
 

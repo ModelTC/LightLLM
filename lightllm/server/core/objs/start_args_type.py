@@ -162,4 +162,7 @@ class StartArgs:
     multi_level_kv_cache_port: int = field(default=None)
     x2i_port: int = field(default=None)
     http_server_port_for_x2i: int = field(default=None)
+    x2i_server_used_gpus: int = field(default=1)
+
+    # multi_modal
     enable_multimodal_x2i: bool = field(default=False)

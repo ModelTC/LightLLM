@@ -25,7 +25,7 @@ from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.server.core.objs.x2i_params import X2IParams, X2ICacheRelease, X2IResponse
+from lightllm.server.core.objs.x2i_params import X2IParams, X2ICacheRelease, X2IResponse, PastKVCacheItem
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
@@ -369,8 +369,10 @@ class HttpServerManager:
                     # allocate pages, may block if cache is full, but it won't cause deadlock
                     # because the prefill process is designed to be sequential and the pages
                     # will be released after prefill.
+                    img_tokens = sum([img.token_num for img in multimodal_params.images])
+                    img_len = len(multimodal_params.images)
                     kv_pages = self.past_kv_cache_client.allocate_pages(
-                        req_obj.request_id, req_obj.input_len)
+                        req_obj.request_id, req_obj.input_len, img_tokens, img_len)
 
                     req_obj.past_kv_cache_page_indexes.fill(kv_pages)
 
@@ -417,7 +419,7 @@ class HttpServerManager:
                 yield sub_req_id, request_output, metadata, finish_status
 
         except Exception as e:
-            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}", exc_info=e)
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
@@ -441,35 +443,36 @@ class HttpServerManager:
             async for sub_req_id, _, metadata, finish_status in self.generate(
                 prompt, sample, multimodal, request
             ):
-                kv_cache_pages = self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
-                if kv_cache_pages is None:
+                kv_cache_item: PastKVCacheItem = self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
+                if kv_cache_item is None:
                     raise Exception(f"kv_cache_pages is None for sub_req_id {sub_req_id}")
-                metadata["kv_cache_pages"] = kv_cache_pages
+                metadata["kv_cache_item"] = kv_cache_item
                 metadata["request_id"] = sub_req_id
                 metadata["finish_status"] = finish_status
                 generate_req_ids.append(sub_req_id)
                 return metadata
 
         try:
-            # 1. construct 3 or 2 images based on the multimodel_parmas
+            # 1. construct 3 or 2 generate based on the multimodel_parmas
             sample_params = SamplingParams()
             sample_params.init(self.tokenizer, **{"img_gen_prefill": True})
             img_len = len(multimodal_params.images)
 
             if img_len > 0:
                 # call it2i
-                prompt_condition = f"Please generate an image based on the following instruction: {prompt}"
-                prompt_text_uncondition = "Please generate an image based on the following instruction: "+ '<image>\n' * img_len
-                prompt_img_uncondition = "Please generate an image based on the following instruction: " + re.sub(r"<image>\n?", "", prompt)
+                # fix prompt, add <image> tag if img_len greater than <image>s in prompt
+                prompt = self.tokenizer.fix_prompt(prompt, img_len)
+
+                prompt_condition, prompt_text_uncondition, prompt_img_uncondition = self.tokenizer.get_query_for_it2i(prompt)
                 (con_gen, text_uncon_gen, img_uncon_gen) = await asyncio.gather(*[
                     generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
-                    generation_wrapper(prompt_text_uncondition, sample_params, multimodal_params, request),
+                    generation_wrapper(prompt_text_uncondition, sample_params, multimodal_params.clone(), request),
                     generation_wrapper(prompt_img_uncondition, sample_params, MultimodalParams(), request)])
                 generation_params.update_it2i(con_gen, text_uncon_gen, img_uncon_gen)
             else:
                 # call t2i
-                prompt_condition = f"Please generate an image based on the following caption: {prompt}"
-                prompt_uncondition = f"Please generate an image based on the following caption: "
+                prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt)
+                logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
                 (con_gen, uncon_gen) = await asyncio.gather(*[
                     generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
                     generation_wrapper(prompt_uncondition, sample_params, multimodal_params, request)])
@@ -494,7 +497,7 @@ class HttpServerManager:
 
         except Exception as e:
             logger.error(str(e))
-            pass
+            return []
 
         finally:
             for req_id in generate_req_ids:
@@ -844,13 +847,18 @@ class HttpServerManager:
 
                 elif isinstance(recv_obj, X2IResponse):
                     status = self.req_id_to_x2i_reqs[recv_obj.request_id]
+                    if recv_obj.images is None:
+                        for req_id in status.req_ids:
+                            self.past_kv_cache_client.free_pages_by_req_id(req_id)
+
                     status.response = recv_obj
                     status.event.set()
 
             except asyncio.TimeoutError:
                 pass
+
             except Exception as e:
-                logger.error(e)
+                logger.error(e, exc_info=e)
 
 
     async def handle_loop(self):

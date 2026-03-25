@@ -308,6 +308,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Whether or not to allow to generate images (requird --enable_multimodal)."
     )
     parser.add_argument(
+        "--x2i_server_used_gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use for x2i server (requird --enable_multimodal_x2i).",
+    )
+    parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
     parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")

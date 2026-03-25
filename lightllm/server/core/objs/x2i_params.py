@@ -1,6 +1,6 @@
 import ctypes
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 from enum import IntEnum
 from .token_chunck_hash_list import PastKVCachePageList
 
@@ -8,6 +8,21 @@ class CfgNormType(IntEnum):
     NONE = 0
     CFG_ZERO_STAR = 1
     GLOBAL = 2
+    TEXT_CHANNEL = 3
+    CHANNEL = 4
+
+    def as_str(self) -> str:
+        mapping = {
+            CfgNormType.NONE: "none",
+            CfgNormType.CFG_ZERO_STAR: "cfg_zero_star",
+            CfgNormType.GLOBAL: "global",
+            CfgNormType.TEXT_CHANNEL: "text_channel",
+            CfgNormType.CHANNEL: "channel",
+        }
+        return mapping[self]
+
+    def __repr__(self):
+        return self.as_str()
 
 
 class X2IParams(ctypes.Structure):
@@ -28,9 +43,9 @@ class X2IParams(ctypes.Structure):
         ("request_id", ctypes.c_int64),
     ]
 
-    _width: int = 512
-    _height: int = 512
-    _steps: int = 30
+    _width: int = 1024
+    _height: int = 1024
+    _steps: int = 50
     _guidance_scale: float = 7.0
     _image_guidance_scale: float = 7.0
     _seed: int = 42
@@ -56,8 +71,11 @@ class X2IParams(ctypes.Structure):
         self.request_id = 0
 
     def update(self, past_kv: PastKVCachePageList, meta: Dict):
-        past_kv.token_len = meta.get("prompt_tokens")
-        past_kv.fill(meta.get("kv_cache_pages"))
+        item: PastKVCacheItem = meta.get("kv_cache_item")
+        past_kv.token_len = item.token_len
+        past_kv.img_tokens = item.img_tokens
+        past_kv.img_len = item.img_len
+        past_kv.fill(item.page_indexes)
         self.total_prompt_tokens += past_kv.token_len
 
     def update_t2i(self, meta, meta_uncond):
@@ -69,12 +87,36 @@ class X2IParams(ctypes.Structure):
         self.update(self.past_kvcache_text, meta_text_uncond)
         self.update(self.past_kvcache_img, meta_img_uncond)
 
+    def get_cfg_norm(self):
+        return CfgNormType(self.cfg_norm).as_str()
+
+    def to_string(self):
+        parts = []
+        for field_name, _ in self._fields_:
+            value = getattr(self, field_name)
+            parts.append(f"{field_name}={value}")
+
+        return "X2IParams(" + ", ".join(parts) + ")"
+
+    def __repr__(self):
+        return self.to_string()
+
 
 @dataclass
 class X2IResponse:
     request_id: int
-    images: List[bytes]
+    images: Optional[List[bytes]]
+
 
 @dataclass
 class X2ICacheRelease:
     request_id: int
+
+
+@dataclass
+class PastKVCacheItem:
+    req_id: int
+    token_len: int
+    img_tokens: int
+    img_len: int
+    page_indexes: List[int]
