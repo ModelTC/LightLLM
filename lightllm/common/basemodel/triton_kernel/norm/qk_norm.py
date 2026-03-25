@@ -84,6 +84,7 @@ def _qk_rms_norm_fused_kernel(
     head_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     FP32_MULTIPLY: tl.constexpr,
+    GEMMA_NORM: tl.constexpr,
 ):
     # PID 0: 处理第几个 Token (Row)
     row_idx = tl.program_id(0)
@@ -112,12 +113,13 @@ def _qk_rms_norm_fused_kernel(
         x *= rstd
 
         # 加载 Q 的权重 (假设所有 Head 共享同一组 dim=head_dim 的权重)
-        w = tl.load(WQ_ptr + offs)
+        w = tl.load(WQ_ptr + offs).to(tl.float32)
+        if GEMMA_NORM:
+            w = w + 1.0
         if FP32_MULTIPLY:
-            w = w.to(tl.float32)
+            y = (x * w).to(Q_ptr.dtype.element_ty)
         else:
-            x = x.to(Q_ptr.dtype.element_ty)
-        y = (x * w).to(Q_ptr.dtype.element_ty)
+            y = x.to(Q_ptr.dtype.element_ty) * w.to(Q_ptr.dtype.element_ty)
         # 写回 Q
         tl.store(Q_ptr + q_ptr_offset, y)
 
@@ -138,12 +140,13 @@ def _qk_rms_norm_fused_kernel(
         x *= rstd
 
         # 加载 K 的权重
-        w = tl.load(WK_ptr + offs)
+        w = tl.load(WK_ptr + offs).to(tl.float32)
+        if GEMMA_NORM:
+            w = w + 1.0
         if FP32_MULTIPLY:
-            w = w.to(tl.float32)
+            y = (x * w).to(K_ptr.dtype.element_ty)
         else:
-            x = x.to(K_ptr.dtype.element_ty)
-        y = (x * w).to(K_ptr.dtype.element_ty)
+            y = x.to(K_ptr.dtype.element_ty) * w.to(K_ptr.dtype.element_ty)
         # 写回 K
         tl.store(K_ptr + k_ptr_offset, y)
 
@@ -155,6 +158,7 @@ def qk_rmsnorm_fused_forward(
     w_k: torch.Tensor,
     eps: float = 1e-6,
     fp32_multiply: bool = False,
+    gemma_norm: bool = False,
 ):
     """
     In-place RMSNorm for both Q and K in a single kernel launch.
@@ -210,6 +214,7 @@ def qk_rmsnorm_fused_forward(
         head_dim=head_dim,
         eps=eps,
         FP32_MULTIPLY=fp32_multiply,
+        GEMMA_NORM=gemma_norm,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=4,
     )

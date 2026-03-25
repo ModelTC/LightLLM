@@ -2,7 +2,7 @@ import torch
 from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward, gemma_rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
@@ -74,10 +74,35 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 class GEMMANormWeight(RMSNormWeight):
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        # Store checkpoint values as-is (near 0). The +1 is applied at runtime
+        # in fp32 inside the kernel, matching Qwen3.5/Gemma: y = x_hat * (1 + w).
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
-            self.weight += 1
             self.weight.load_ok = True
+
+    def _native_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        assert input.ndim == 2 and self.weight.ndim == 1
+        assert input.shape[-1] == self.dim, f"Expected hidden_size to be {self.dim}, but found: {input.shape[-1]}"
+        x = input.to(torch.float32)
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + eps)
+        x = (x * (1.0 + self.weight.float())).to(self.data_type_)
+        if out is not None:
+            out.copy_(x)
+            return out
+        return x
+
+    def _triton_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        assert (
+            input.ndim in [2, 3] and self.weight.ndim == 1
+        ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
+        if out is None:
+            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        return gemma_rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out)
 
 
 class GatedRMSNormWeight(RMSNormWeight):
@@ -243,14 +268,9 @@ class TpRMSNormWeight(RMSNormWeight):
             self.weight.load_ok = True
 
 
-class NoTpGEMMANormWeight(RMSNormWeight):
+class NoTpGEMMANormWeight(GEMMANormWeight):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
-
-    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name in weights:
-            self.weight.copy_(weights[self.weight_name])
-            self.weight += 1
 
 
 class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
@@ -338,19 +358,20 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
 
 class QKGEMMANormWeight(QKRMSNORMWeight):
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        # Store checkpoint values as-is (near 0). The +1 is applied at runtime
+        # in fp32 inside the kernel: y = x_hat * (1 + w).
         if self.q_weight_name in weights:
             self.q_weight.copy_(weights[self.q_weight_name])
-            self.q_weight += 1
             self.q_weight.load_ok = True
         if self.k_weight_name in weights:
             self.k_weight.copy_(weights[self.k_weight_name])
-            self.k_weight += 1
             self.k_weight.load_ok = True
 
     def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
         assert q.ndim == 2 and self.q_weight.ndim == 1
         assert k.ndim == 2 and self.k_weight.ndim == 1
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        # So we need to set fp32_multiply to True here.
-        return qk_rmsnorm_fused_forward(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps, fp32_multiply=True)
+        # Llama does x.to(float16) * w whilst Gemma/Qwen3.5 is (x * (1+w)).to(float16)
+        # gemma_norm=True adds 1 to w in fp32 inside the kernel.
+        return qk_rmsnorm_fused_forward(
+            q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps, fp32_multiply=True, gemma_norm=True
+        )

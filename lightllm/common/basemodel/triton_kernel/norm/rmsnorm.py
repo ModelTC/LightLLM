@@ -79,6 +79,71 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
     return y
 
 
+@triton.jit
+def _gemma_rms_norm_fwd_fused(
+    X,
+    Y,
+    W,
+    x_stride0,
+    x_stride1,
+    y_stride0,
+    y_stride1,
+    N,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # GEMMA-style RMSNorm: y = x_hat * (1 + w), computed entirely in fp32.
+    # Weight stored as zero-centred offsets (checkpoint values near 0).
+    row = tl.program_id(0)
+    Y += row * y_stride0
+    X += row * x_stride0
+    _var = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    for off in range(0, N, BLOCK_SIZE):
+        cols = off + tl.arange(0, BLOCK_SIZE)
+        x = tl.load(X + cols * x_stride1, mask=cols < N, other=0.0).to(tl.float32)
+        _var += x * x
+    var = tl.sum(_var, axis=0) / N
+    rstd = 1 / tl.sqrt(var + eps)
+    for off in range(0, N, BLOCK_SIZE):
+        cols = off + tl.arange(0, BLOCK_SIZE)
+        mask = cols < N
+        w = tl.load(W + cols, mask=mask).to(tl.float32)
+        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
+        x_hat = x * rstd
+        y = x_hat * (w + 1.0)
+        tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
+
+
+def gemma_rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
+    # Llama does x.to(float16) * w whilst Gemma/Qwen3.5 is (x * (1+w)).to(float16)
+    y = torch.empty_like(x) if out is None else out
+    x_arg = x.view(-1, x.shape[-1])
+    y_arg = y.view(-1, x.shape[-1])
+    assert x_arg.shape[-1] == weight.shape[0] and x_arg.shape == y_arg.shape
+    assert y.data_ptr() == y_arg.data_ptr()
+    M, N = x_arg.shape
+    MAX_FUSED_SIZE = 65536 // x.element_size()
+    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
+    if N > BLOCK_SIZE:
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+    if BLOCK_SIZE > 16384:
+        BLOCK_SIZE = 16384
+    _gemma_rms_norm_fwd_fused[(M,)](
+        x_arg,
+        y_arg,
+        weight,
+        x_arg.stride(0),
+        x_arg.stride(1),
+        y_arg.stride(0),
+        y_arg.stride(1),
+        N,
+        eps,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=rmsnorm_num_warps,
+    )
+    return y
+
+
 def torch_rms_norm(x, weight, eps):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight
 
