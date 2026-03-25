@@ -49,22 +49,36 @@ async def build_prompt(request, tools) -> str:
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
 
-    # Convert tool_calls function.arguments from JSON string to dict for Jinja template compatibility
-    # Qwen's chat template expects arguments to be a dict (uses |items filter)
-    # but OpenAI format sends arguments as a JSON string
+    # 当有工具调用时，content 被设置为None，被exclude_none=True排除，
+    # 导致后续模板处理无法识别， 这里补齐content字段为""， 以兼容原有模板逻辑。
     for msg in messages:
+        if "content" not in msg:
+            msg["content"] = ""
+
+    # 对于工具调用的消息，确保 tool_calls 字段存在且格式正确， 以兼容模板中对工具调用的处理逻辑。
+    for msg in messages:
+        if msg.get("role") != "assistant" or "tool_calls" not in msg:
+            continue
         tool_calls = msg.get("tool_calls")
-        if tool_calls and isinstance(tool_calls, list):
-            for tool_call in tool_calls:
-                func = tool_call.get("function")
-                if func and isinstance(func, dict):
-                    args = func.get("arguments")
-                    if isinstance(args, str) and args:
-                        try:
-                            func["arguments"] = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            # Keep original string if not valid JSON
-                            pass
+        if not isinstance(tool_calls, list):
+            continue
+        # Drop empty tool_calls so templates take the normal assistant path
+        if len(tool_calls) == 0:
+            msg.pop("tool_calls", None)
+            continue
+        for tool_call in tool_calls:
+            func = tool_call.get("function")
+            if not func or not isinstance(func, dict):
+                continue
+            args = func.get("arguments")
+            if args and not isinstance(args, (dict, list)):
+                try:
+                    func["arguments"] = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    func["arguments"] = {}
+            elif not args:
+                # Missing or empty arguments default to empty dict
+                func["arguments"] = {}
 
     kwargs = {"conversation": messages}
     if request.character_settings:
