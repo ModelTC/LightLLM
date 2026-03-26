@@ -57,7 +57,8 @@ class SepEmbedManager:
     def __init__(
         self,
         afs_embed_dir: str,
-        redis_url: str = "redis://localhost:6379/0",
+        redis_host: str,
+        redis_port: int,
         capacity: int = 50000,
         evict_fraction: float = 0.1,
     ) -> None:
@@ -66,6 +67,7 @@ class SepEmbedManager:
         if capacity < 1:
             raise ValueError("capacity must be >=1")
 
+        redis_url = f"redis://{redis_host}:{redis_port}/0"
         self.redis_client = RedisMetadataClient(redis_url=redis_url)
         self.capacity = capacity
         self.remove_count = min(int(self.capacity * evict_fraction), 1000)  # full的时候，每次清理的数量
