@@ -26,7 +26,7 @@ from partial_json_parser.core.exceptions import MalformedJSON
 from partial_json_parser.core.options import Allow
 from pydantic import BaseModel, Field
 
-from .api_models import Tool
+from .api_models import Tool, ToolChoice
 
 logger = logging.getLogger(__name__)
 
@@ -326,16 +326,8 @@ class BaseFormatDetector(ABC):
                     # If the current tool's JSON is complete, send all remaining arguments
                     if is_current_complete:
                         argument_diff = cur_args_json[sent:]
-                        completing_tool_id = self.current_tool_id  # Save the ID of the tool that's completing
-
-                        # Only remove the processed portion, keep unprocessed content
+                        completing_tool_id = self.current_tool_id
                         self._buffer = current_text[start_idx + end_idx :]
-
-                        if self.current_tool_id < len(self.prev_tool_call_arr):
-                            self.prev_tool_call_arr[self.current_tool_id].clear()
-                        self.current_tool_name_sent = False
-                        self.streamed_args_for_tool[self.current_tool_id] = ""
-                        self.current_tool_id += 1
 
                     # If the tool is still being parsed, send incremental changes
                     elif prev_arguments:
@@ -344,10 +336,17 @@ class BaseFormatDetector(ABC):
                             prefix = _find_common_prefix(prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]
 
+                    if self.current_tool_id >= 0:
+                        while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                            self.prev_tool_call_arr.append({})
+                        self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
+
+                    if is_current_complete:
+                        self.current_tool_name_sent = False
+                        self.current_tool_id += 1
+
                     # Send the argument diff if there's something new
                     if argument_diff is not None:
-                        # Use the correct tool_index: completing_tool_id for completed tools,
-                        # current_tool_id for ongoing
                         tool_index_to_use = completing_tool_id if is_current_complete else self.current_tool_id
                         res = StreamingParseResult(
                             calls=[
@@ -357,15 +356,7 @@ class BaseFormatDetector(ABC):
                                 )
                             ],
                         )
-                        if not is_current_complete:
-                            self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-
-            # Update prev_tool_call_arr with current state
-            if self.current_tool_id >= 0:
-                # Ensure prev_tool_call_arr is large enough
-                while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                    self.prev_tool_call_arr.append({})
-                self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
+                        self.streamed_args_for_tool[tool_index_to_use] += argument_diff
 
             return res
 
@@ -2035,6 +2026,112 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
         return StreamingParseResult(calls=calls, normal_text=normal_text)
+
+
+def _get_tool_schema_defs(tools: List[Tool]) -> dict:
+    all_defs = {}
+    for tool in tools:
+        if tool.function.parameters is None:
+            continue
+        defs = tool.function.parameters.get("$defs", {})
+        for def_name, def_schema in defs.items():
+            if def_name in all_defs and all_defs[def_name] != def_schema:
+                raise ValueError(f"Tool definition '{def_name}' has multiple schemas, which is not supported.")
+            all_defs[def_name] = def_schema
+    return all_defs
+
+
+def _get_tool_schema(tool: Tool) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "enum": [tool.function.name]},
+            "parameters": tool.function.parameters if tool.function.parameters else {"type": "object", "properties": {}},
+        },
+        "required": ["name", "parameters"],
+        "additionalProperties": False,
+    }
+
+
+def get_json_schema_constraint(tools: List[Tool], tool_choice) -> Optional[dict]:
+    if isinstance(tool_choice, ToolChoice):
+        fn_name = tool_choice.function.name
+        for tool in tools:
+            if tool.function.name == fn_name:
+                return {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": _get_tool_schema(tool),
+                }
+        return None
+
+    if tool_choice == "required":
+        json_schema = {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "anyOf": [_get_tool_schema(tool) for tool in tools],
+            },
+        }
+        json_schema_defs = _get_tool_schema_defs(tools)
+        if json_schema_defs:
+            json_schema["$defs"] = json_schema_defs
+        return json_schema
+
+    return None
+
+
+class JsonArrayParser(BaseFormatDetector):
+    def __init__(self, tools: List[Tool]):
+        super().__init__()
+        self.bot_token = "["
+        self.eot_token = "]"
+        self.tool_call_separator = ","
+        self.tools = tools
+        self.detector = self
+
+    def has_tool_call(self, text: str) -> bool:
+        return "[" in text or "{" in text
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        parsed = orjson.loads(text)
+        if not isinstance(parsed, list):
+            parsed = [parsed]
+
+        tool_names = self._get_tool_indices(tools)
+        calls = []
+        for tool_index, act in enumerate(parsed):
+            name = act.get("name")
+            if not (name and name in tool_names):
+                logger.warning(f"Model attempted to call undefined function: {name}")
+                continue
+            calls.append(
+                ToolCallItem(
+                    tool_index=tool_index,
+                    name=name,
+                    parameters=json.dumps(act.get("parameters") or act.get("arguments", {}), ensure_ascii=False),
+                )
+            )
+        return StreamingParseResult(normal_text="", calls=calls)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        return super().parse_streaming_increment(new_text, tools)
+
+    def parse_non_stream(self, full_text: str) -> Tuple[str, List[ToolCallItem]]:
+        if not self.tools:
+            return full_text, []
+        parsed_result = self.detect_and_parse(full_text, self.tools)
+        if parsed_result.calls:
+            return parsed_result.normal_text, parsed_result.calls
+        return full_text, []
+
+    def parse_stream_chunk(self, chunk_text: str) -> Tuple[str, List[ToolCallItem]]:
+        if not self.tools:
+            return chunk_text, []
+        sp_result = self.parse_streaming_increment(chunk_text, self.tools)
+        return sp_result.normal_text, sp_result.calls
 
 
 class FunctionCallParser:

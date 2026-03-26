@@ -11,7 +11,7 @@ import uuid
 
 from lightllm.server.reasoning_parser import ReasoningParser
 
-from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser, ToolCallItem
+from .function_call_parser import FunctionCallParser, JsonArrayParser, ToolCallItem, get_json_schema_constraint
 from .build_prompt import build_prompt, init_tokenizer
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -144,24 +144,18 @@ def _process_reasoning_stream(
 
 
 def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
-    from .api_http import g_objs
-
     if index not in parser_dict:
-        # 为 tool_call_parser 提供默认值
-        tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
-        parser_dict[index] = FunctionCallParser(
-            tools=request.tools,
-            tool_call_parser=tool_parser,
-        )
+        parser_dict[index] = _create_tool_parser(request)
     parser = parser_dict[index]
 
-    # parse_increment => returns (normal_text, calls)
     normal_text, calls = parser.parse_stream_chunk(delta)
     return normal_text, calls
 
 
 def _check_for_unstreamed_tool_args(parser: FunctionCallParser) -> Optional[str]:
     detector = getattr(parser, "detector", None)
+    if detector is None and hasattr(parser, "prev_tool_call_arr"):
+        detector = parser
     if detector is None:
         return None
     if not hasattr(detector, "prev_tool_call_arr") or not detector.prev_tool_call_arr:
@@ -182,6 +176,29 @@ def _check_for_unstreamed_tool_args(parser: FunctionCallParser) -> Optional[str]
     return remaining_call or None
 
 
+def _has_strict_tools(request: ChatCompletionRequest) -> bool:
+    return any(getattr(tool.function, "strict", False) for tool in (request.tools or []))
+
+
+def _uses_json_schema_tool_constraint(request: ChatCompletionRequest) -> bool:
+    return request.tools is not None and (
+        request.tool_choice == "required" or not isinstance(request.tool_choice, str)
+    )
+
+
+def _create_tool_parser(request: ChatCompletionRequest):
+    from .api_http import g_objs
+
+    if _uses_json_schema_tool_constraint(request):
+        return JsonArrayParser(request.tools)
+
+    tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
+    return FunctionCallParser(
+        tools=request.tools,
+        tool_call_parser=tool_parser,
+    )
+
+
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -193,6 +210,24 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     if request.function_call != "none":
         return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
+
+    if request.tools and request.tool_choice != "none":
+        if _has_strict_tools(request) and request.tool_choice == "auto":
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                "strict tool schemas with tool_choice='auto' are not supported by this parser; use tool_choice='required' or a named tool",
+            )
+        if _uses_json_schema_tool_constraint(request):
+            if request.response_format is not None:
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "response_format constraints are not compatible with constrained tool_choice requests",
+                )
+            if get_env_start_args().output_constraint_mode != "xgrammar":
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "tool_choice='required' and named tool_choice require launching LightLLM with --output_constraint_mode xgrammar",
+                )
 
     created_time = int(time.time())
 
@@ -286,6 +321,15 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+    if _uses_json_schema_tool_constraint(request):
+        json_schema = get_json_schema_constraint(request.tools, request.tool_choice)
+        if json_schema is None:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                "Failed to build tool JSON schema constraint for the requested tool_choice",
+            )
+        sampling_params_dict["guided_json"] = json.dumps(json_schema)
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
@@ -351,17 +395,18 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             tool_calls = None
             tool_choice = request.tool_choice
             tools = request.tools
-            if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
+            if tool_choice != "none" and tools:
                 if finish_reason == "stop":
                     finish_reason = "tool_calls"
                 try:
-                    # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
-                    parser = FunctionCallParser(tools, tool_parser)
+                    parser = _create_tool_parser(request)
                     full_normal_text, call_info_list = parser.parse_non_stream(full_text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
+                        if not isinstance(parser, JsonArrayParser) and call_info.name is None:
+                            continue
                         tool_id = _process_tool_call_id(tool_parser, call_info, history_tool_calls_cnt)
                         tool_calls.append(
                             ToolCall(
@@ -370,6 +415,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 function=FunctionResponse(name=call_info.name, arguments=call_info.parameters),
                             )
                         )
+                    if not call_info_list:
+                        tool_calls = None
+                        if finish_reason == "tool_calls":
+                            finish_reason = "stop"
+                        text = full_text
                 except Exception as e:
                     logger.error(f"Exception: {e}")
                     return create_error_response(
