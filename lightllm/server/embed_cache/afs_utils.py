@@ -20,37 +20,56 @@ class AfsUtils:
             os.chmod(base_dir, 0o777)
         return
 
-    def _get_afs_path(self, name: str) -> Path:
-        return Path(self.base_dir) / name
-
-    def save_tensor_afs(self, name: str, tensor: torch.Tensor) -> None:
+    def save_tensor_afs(self, name: str, tensor: torch.Tensor) -> bool:
         target_path = self._get_afs_path(name)
-
+        if target_path.exists():
+            return True
+        tmp_path = self._get_afs_path(name=name, uuid_tail_str=str(uuid.uuid4()))
         try:
-            with open(target_path, "wb") as f:
+            with open(tmp_path, "wb") as f:
                 tensor = tensor.detach().cpu()
                 dest = torch.empty_like(tensor)
                 dest.copy_(tensor)
                 torch.save(dest, f, _use_new_zipfile_serialization=False, pickle_protocol=4)
-
+            os.rename(tmp_path, target_path)
             os.chmod(target_path, 0o777)
+            return True
         except Exception as e:
             try:
                 target_path.unlink(missing_ok=True)
-            except Exception:
+            except:
                 pass
-            logger.exception(f"failed to save embed tensor file: {target_path} excetion {str(e)}")
-            raise e
+            logger.warning(f"failed to save embed tensor file: {target_path} tmp_path: {tmp_path} excetion {str(e)}")
+            return False
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except:
+                pass
 
-    def load_tensor_afs(self, name: str) -> torch.Tensor:
-        path = self._get_afs_path(name)
-        with open(path, "rb") as f:
-            return torch.load(f, weights_only=False)
+
+    def load_tensor_afs(self, name: str) -> Optional[torch.Tensor]:
+        try:
+            path = self._get_afs_path(name)
+            with open(path, "rb") as f:
+                return torch.load(f, weights_only=False)
+        except Exception as e:
+            logger.warning(f"fail to load afs file {name} error: {str(e)}")
+            return None
 
     def free_afs(self, name: str) -> None:
-        path = self._get_afs_path(name)
-        path.unlink(missing_ok=True)
+        try:
+            path = self._get_afs_path(name)
+            path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"free_afs name: {name} error: {str(e)}")
         return
+    
+    def _get_afs_path(self, name: str, uuid_tail_str: Optional[str] = None) -> Path:
+        if uuid_tail_str is None:
+            return Path(self.base_dir) / name
+        else:
+            return Path(self.base_dir) / f"{name}.{uuid_tail_str}"
 
 
 class SepEmbedManager:
