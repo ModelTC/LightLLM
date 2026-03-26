@@ -6,27 +6,25 @@ import socket
 import inspect
 from datetime import timedelta
 from typing import Dict, List, Tuple
+from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
-from transformers.configuration_utils import PretrainedConfig
-
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
-from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.llava.llava_visual import LlavaVisionModel
+from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
-from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
+from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
-from lightllm.server.embed_cache.utils import create_afs, get_shm_name_embed, tensor2bytes, save_tensor_afs
 from lightllm.server.visualserver import set_vit_att_backend
 
 
@@ -36,7 +34,6 @@ class VisualModelRpcServer(rpyc.Service):
         import torch
         import torch.distributed as dist
 
-        self.args = get_env_start_args()
         self.vit_dp = kvargs["vit_dp"]
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
@@ -44,11 +41,6 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_port = kvargs["cache_port"]
         weight_dir = kvargs["weight_dir"]
         self.vit_rank_id = kvargs["vit_rank_id"]
-        self.image_embed_dir = self.args.image_embed_dir
-        self.remote_vit = self.args.enable_remote_vit or self.args.run_mode in ["visual", "visual_only"]
-        if self.remote_vit and not self.image_embed_dir:
-            raise ValueError("remote vit mode requires image_embed_dir")
-
         self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.data_type = kvargs["data_type"]
@@ -64,7 +56,6 @@ class VisualModelRpcServer(rpyc.Service):
                 "quant_type": kvargs["quant_type"],
                 "quant_cfg": kvargs["quant_cfg"],
                 "max_batch_size": kvargs["max_batch_size"],
-                "remote_vit": self.remote_vit,
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
@@ -101,10 +92,10 @@ class VisualModelRpcServer(rpyc.Service):
                 )
             else:
                 raise Exception(f"can not support {self.model_type} now")
+
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
-            if not self.remote_vit:
-                self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+            self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -125,47 +116,33 @@ class VisualModelRpcServer(rpyc.Service):
     def exposed_encode(self, images: List[ImageItem]):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
+        all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
-        if self.tp_rank_id != 0:
-            return
-
-        ready_flags = obtain(self.cache_client.root.get_items_embed(uuids, True))
-        ids_to_set = []
-        cpu_embeds = None
-        if self.remote_vit:
-            cpu_embeds = all_img_embeds.to(torch.device("cpu"), non_blocking=True)
-
-        for i, ready in enumerate(ready_flags):
-            if ready:
-                continue
-            uid = uuids[i]
-            start, end = valid_ids[i]
-            image = images[i]
-            if self.remote_vit:
-                save_tensor_afs(get_shm_name_embed(uid), cpu_embeds[start:end], self.image_embed_dir)
-            else:
+        if self.tp_rank_id == 0:
+            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
+            ids_to_set = []
+            for i, ready in enumerate(ready_flags):
+                if ready:
+                    continue
+                uid = uuids[i]
+                start, end = valid_ids[i]
+                image = images[i]
                 self.cpu_embed_cache_client.copy_vision_to_cache(
-                    embed_tensor=all_img_embeds[start:end],
-                    start_index_in_cache=image.start_index_in_embed_cache,
+                    embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
                 )
-            ids_to_set.append(uid)
-
-        if ids_to_set:
-            self.cache_client.root.set_items_embed(ids_to_set)
-            if not self.remote_vit:
+                ids_to_set.append(uid)
+            if ids_to_set:
+                self.cache_client.root.set_items_embed(ids_to_set)
                 torch.cuda.current_stream().synchronize()
         return
 
 
 class VisualModelRpcClient:
-    def __init__(self, conn, vit_tp, rpc_server_process=None):
-        self.conn = conn
-        self.model: VisualModelRpcServer = conn.root
+    def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
+        self.model: VisualModelRpcServer = model_rpc
         self.vit_tp = vit_tp
         self.rpc_server_process = rpc_server_process
         self.use_rpc = True
-        self._bg = rpyc.BgServingThread(self.conn)
-
         if self.use_rpc:
 
             def async_wrap(f):
@@ -184,11 +161,14 @@ class VisualModelRpcClient:
         else:
             self._init_model = self.model.exposed_init_model
             self._encode = self.model.exposed_encode
+        return
 
     async def init_model(self, kvargs):
         ans: rpyc.AsyncResult = self._init_model(kvargs)
         if self.use_rpc:
             await ans
+            return
+        else:
             return
 
     async def encode(self, images: List[ImageItem]):
@@ -235,4 +215,4 @@ async def start_model_process(port, vit_tp, device_id):
         raise Exception("init rpc env error!")
 
     assert proc.is_alive()
-    return VisualModelRpcClient(con, vit_tp, rpc_server_process=proc)
+    return VisualModelRpcClient(con.root, vit_tp, rpc_server_process=proc)
