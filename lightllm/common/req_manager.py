@@ -111,7 +111,7 @@ class ReqSamplingParamsManager:
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_next_token_ids = torch.zeros(
-            (max_request_num + 1, 8),
+            (max_request_num + 1, 16),
             dtype=torch.int64,
             device="cuda",
         )

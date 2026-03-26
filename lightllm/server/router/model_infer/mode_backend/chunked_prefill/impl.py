@@ -1,3 +1,5 @@
+import random
+
 import torch
 import time
 from typing import List, Optional, Callable, Dict, Any
@@ -23,6 +25,7 @@ from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_toke
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
 )
+from lightllm.utils.infer_utils import calculate_time
 from lightllm.utils.log_utils import init_logger, print_rank0
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
@@ -34,7 +37,7 @@ tokenizer = AutoTokenizer.from_pretrained("/mtc/models/qwen3-8b", trust_remote_c
 
 
 def compute_dynamic_mtp_size(
-    probs: torch.Tensor,
+    main_probs: torch.Tensor,
     reqs: List[InferReq],
     max_mtp_size: int,
     draft_probs: Optional[List[torch.Tensor]] = None,
@@ -51,19 +54,22 @@ def compute_dynamic_mtp_size(
     Returns:
         List[int]: 每个请求的动态 MTP 验证长度
     """
-    # TODO: 实现更复杂的动态 MTP 长度计算逻辑
-    # 可以考虑以下因素：
-    # 1. 主模型 probs 的熵 - 熵越低表示置信度越高，可以增加验证长度
-    # 2. draft 模型和主模型的一致性 - 一致性越高，验证通过率可能越高
-    # 3. draft 模型 probs 的熵 - 评估 draft 模型的置信度
-    #
-    # 当前实现：随机返回一个 [1, max_mtp_size] 之间的值作为占位符
-    batch_size = probs.shape[0]
+    # 根据每一步的draft_probs进行概率采样，按照max(draft_probs[i])概率向后增加一位置，直到达到最大MTP长度或者采样结果为0
+    batch_size = len(main_probs)
     dynamic_mtp_sizes = []
     for i in range(batch_size):
-        # 随机生成一个 [1, max_mtp_size] 之间的值
-        dynamic_mtp_size = torch.randint(1, max_mtp_size + 1, (1,)).item()
-        dynamic_mtp_sizes.append(dynamic_mtp_size)
+        mtp_size = 0
+        for step in range(max_mtp_size):
+            if draft_probs is not None:
+                step_probs = draft_probs[step][i]  # 当前请求在当前step的概率分布
+                max_prob = torch.max(step_probs).item()
+                # print_rank0(max_prob)
+                r = random.random()
+                if r < max_prob or max_prob > 0.5:
+                    mtp_size += 1
+                else:
+                    break
+        dynamic_mtp_sizes.append(mtp_size)
     return dynamic_mtp_sizes
 
 
@@ -215,7 +221,8 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
-
+    
+    @calculate_time(show=True, min_cost_ms=10)
     def prefill_mtp(
         self,
         event_pack: OverlapEventPack,
@@ -273,7 +280,10 @@ class ChunkedPrefillBackend(ModeBackend):
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             b_mtp_index_cpu = model_input.b_mtp_index
-            model_output = self.model.forward(model_input)
+            @calculate_time(show=True, min_cost_ms=1)
+            def main_model_decode_forward_func(model_input):
+                return self.model.forward(model_input)
+            model_output = main_model_decode_forward_func(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
             b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
@@ -288,7 +298,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
-            print_rank0("mtp_accept_len:", mtp_accept_len)
+            # print_rank0("mtp_accept_len:", mtp_accept_len)
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,
@@ -318,16 +328,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 enable_dynamic_mtp=enable_dynamic_mtp,
             )
 
-            # 启用动态 MTP 验证时，根据主模型和 draft 模型的 probs 计算下一轮的动态验证长度
-            if enable_dynamic_mtp:
-                self._update_dynamic_mtp_size(
-                    main_model_logits=model_output.logits,
-                    run_reqs=run_reqs,
-                    b_mtp_index_cpu=b_mtp_index_cpu,
-                    decode_reqs=decode_reqs,
-                    draft_probs_list=draft_probs_list,
-                )
-
             g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
                 b_req_idx=model_input.b_req_idx,
                 next_token_ids=next_token_ids,
@@ -340,6 +340,18 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
         verify_event.synchronize()
         verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
+        # 启用动态 MTP 验证时，根据主模型和 draft 模型的 probs 计算下一轮的动态验证长度
+        if enable_dynamic_mtp:
+            verify_ok_draft_probs_list = []
+            for draft_probs in draft_probs_list:
+                verify_ok_draft_probs = draft_probs[accepted_index_cpu == 1]
+                verify_ok_draft_probs_list.append(verify_ok_draft_probs)
+            self._update_dynamic_mtp_size(
+                main_model_logits=[model_output.logits[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1],
+                verify_ok_reqs=verify_ok_reqs,
+                decode_reqs=decode_reqs,
+                draft_probs_list=verify_ok_draft_probs_list,
+            )
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
@@ -373,8 +385,7 @@ class ChunkedPrefillBackend(ModeBackend):
     def _update_dynamic_mtp_size(
         self,
         main_model_logits: torch.Tensor,
-        run_reqs: List[InferReq],
-        b_mtp_index_cpu: List[int],
+        verify_ok_reqs: List[InferReq],
         decode_reqs: List[InferReq],
         draft_probs_list: List[torch.Tensor],
     ):
@@ -388,45 +399,23 @@ class ChunkedPrefillBackend(ModeBackend):
             decode_reqs: 原始请求列表
             draft_probs_list: 每个 draft step 的 probs 列表，每个元素形状为 [batch_size, vocab_size]
         """
-        # 收集主模型和 draft 模型的 probs
-        # main_probs: 每个请求主 token 的 probs (mtp_index == 0)
-        # all_draft_probs: 每个请求每个 draft step 的 probs
-        main_probs = []
-        all_draft_probs = []  # [step][req_idx]
+        assert len(main_model_logits) == len(verify_ok_reqs)
+        assert len(draft_probs_list) == self.mtp_step
+        assert draft_probs_list[0].shape[0] == len(verify_ok_reqs)
+        
+        dynamic_mtp_sizes = compute_dynamic_mtp_size(
+            main_probs=main_model_logits,
+            reqs=verify_ok_reqs,
+            max_mtp_size=self.mtp_step,
+            draft_probs=draft_probs_list,
+        )
 
-        for i, mtp_index in enumerate(b_mtp_index_cpu):
-            probs = torch.softmax(main_model_logits[i], dim=-1)
-            if mtp_index == 0:
-                main_probs.append(probs)
-            else:
-                # 确保 all_draft_probs 列表足够长
-                while len(all_draft_probs) < mtp_index:
-                    all_draft_probs.append([])
-                all_draft_probs[mtp_index - 1].append(probs)
-
-        # 计算动态 MTP 大小
-        if len(main_probs) > 0:
-            main_probs = torch.stack(main_probs, dim=0)  # [num_reqs, vocab_size]
-
-            # 将 draft probs 也 stack 起来
-            draft_probs_stacked = []
-            for step_probs in all_draft_probs:
-                if len(step_probs) > 0:
-                    draft_probs_stacked.append(torch.stack(step_probs, dim=0))
-
-            # 使用 placeholder 逻辑计算动态 MTP 大小
-            # TODO: 实现更复杂的逻辑，结合 main_probs 和 draft_probs_stacked
-            dynamic_mtp_sizes = compute_dynamic_mtp_size(
-                probs=main_probs,
-                reqs=decode_reqs,
-                max_mtp_size=self.mtp_step,
-                draft_probs=draft_probs_stacked,
-            )
-
-            # 更新每个请求的 mtp_size
-            for req, mtp_size in zip(decode_reqs, dynamic_mtp_sizes):
-                req.mtp_size = mtp_size
-            print_rank0("Updated dynamic MTP sizes:", dynamic_mtp_sizes)
+        # 更新每个请求的 mtp_size
+        assert len(dynamic_mtp_sizes) == len(verify_ok_reqs)
+        for req, mtp_size in zip(verify_ok_reqs, dynamic_mtp_sizes):
+            req.mtp_size = mtp_size
+            req.shm_req._mtp_size = mtp_size
+        # print_rank0("Updated dynamic MTP sizes:", dynamic_mtp_sizes)
         return
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
@@ -499,6 +488,7 @@ class ChunkedPrefillBackend(ModeBackend):
         )
         return None, draft_probs_list
 
+    @calculate_time(show=True, min_cost_ms=1)
     def _draft_decode_eagle(
         self,
         main_model_input: ModelInput,
@@ -539,7 +529,7 @@ class ChunkedPrefillBackend(ModeBackend):
                     current_group_size += 1
             if current_group_size > 0:
                 mtp_group_sizes.append(current_group_size)
-            print_rank0(f"mtp_group_sizes: {mtp_group_sizes}")
+            # print_rank0(f"mtp_group_sizes: {mtp_group_sizes}")
         
         g_infer_state_lock.acquire()
         if g_infer_context.radix_cache is not None:
@@ -568,33 +558,33 @@ class ChunkedPrefillBackend(ModeBackend):
 
             # 收集 probs（如果需要）
             if enable_dynamic_mtp:
-                draft_logits = draft_model_output.logits
-                draft_probs = torch.softmax(draft_logits, dim=-1)
+                draft_next_token_ids, draft_probs = self._gen_argmax_token_ids_and_prob(draft_model_output)
                 draft_probs_list.append(draft_probs)
-
-            draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
+            else:
+                draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             draft_model_input.b_seq_len += 1
             draft_model_input.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
 
-            # draft_model_input.mem_indexes = torch.cat(
-            #     [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-            #     dim=1,
-            # ).view(-1)
-            # 1. 根据当前的 group_sizes 将原来的索引拆分成多个组
-            # 这里的 group_sizes 应该对应之前未处理前的每一组的大小
-            chunks = torch.split(draft_model_input.mem_indexes, mtp_group_sizes)
-            # 2. 对每一个 chunk 进行处理：去掉第一个元素 ([:, 1:])，并加上对应的 eagle_mem_indexes_i 元素
-            # 假设 eagle_mem_indexes_i 的形状是 (num_groups,)
-            new_chunks = []
-            for i, chunk in enumerate(chunks):
-                # chunk[1:] 模拟了原来的 [:, 1:] 操作
-                # eagle_mem_indexes_i[i:i+1] 确保拿出来的是一个长度为 1 的张量用于拼接
-                updated_chunk = torch.cat([chunk[1:], eagle_mem_indexes_i[i:i+1]], dim=0)
-                new_chunks.append(updated_chunk)
-            # 3. 重新合并回一维张量
-            draft_model_input.mem_indexes = torch.cat(new_chunks, dim=0)
-            
+            if enable_dynamic_mtp:
+                # 1. 根据当前的 group_sizes 将原来的索引拆分成多个组
+                # 这里的 group_sizes 应该对应之前未处理前的每一组的大小
+                chunks = torch.split(draft_model_input.mem_indexes, mtp_group_sizes)
+                # 2. 对每一个 chunk 进行处理：去掉第一个元素 ([:, 1:])，并加上对应的 eagle_mem_indexes_i 元素
+                # 假设 eagle_mem_indexes_i 的形状是 (num_groups,)
+                new_chunks = []
+                for i, chunk in enumerate(chunks):
+                    # chunk[1:] 模拟了原来的 [:, 1:] 操作
+                    # eagle_mem_indexes_i[i:i+1] 确保拿出来的是一个长度为 1 的张量用于拼接
+                    updated_chunk = torch.cat([chunk[1:], eagle_mem_indexes_i[i:i+1]], dim=0)
+                    new_chunks.append(updated_chunk)
+                # 3. 重新合并回一维张量
+                draft_model_input.mem_indexes = torch.cat(new_chunks, dim=0)
+            else: 
+                draft_model_input.mem_indexes = torch.cat(
+                    [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
+                    dim=1,
+                ).view(-1)
             all_next_token_ids.append(draft_next_token_ids)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]

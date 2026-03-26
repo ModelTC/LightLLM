@@ -32,7 +32,7 @@ from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel, enable_dynamic_mtp_verify
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.infer_utils import calculate_time, post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
 
@@ -141,12 +141,34 @@ class TpPartBaseModel:
             "eagle3"
         ]
         self.is_mtp_draft_model = kvargs.get("is_mtp_draft_model", False)
-        if "eagle3" in self.args.mtp_mode and not self.is_mtp_draft_model:
+        self.is_eagle3_mode = "eagle3" in self.args.mtp_mode
+        if self.is_eagle3_mode and not self.is_mtp_draft_model:
             self.eagle_hidden_layers = [1, self.config["n_layer"]//2-1, self.config["n_layer"]-4]
         elif self.is_mtp_mode:
             self.eagle_hidden_layers = [self.config["n_layer"]-1]
         else:
             self.eagle_hidden_layers = []
+        
+        if self.is_eagle3_mode:
+            # load the hidden_proj weight from the draft model path
+            draft_model_path = kvargs.get("mtp_draft_model_dir", None)
+            assert draft_model_path is not None, "mtp_draft_model_dir must be provided when eagle3 mode is enabled"
+            if os.path.exists(os.path.join(draft_model_path[0], "pytorch_model.bin")):
+                self.draft_model_weight_dict = torch.load(os.path.join(draft_model_path[0], "pytorch_model.bin"))
+                self.hidden_proj_weight = self.draft_model_weight_dict["fc.weight"].to("cuda")
+                del self.draft_model_weight_dict
+                gc.collect()
+            else:
+                try:
+                    from safetensors import safe_open
+                    with safe_open(os.path.join(draft_model_path[0], "model.safetensors"), framework="pt", device="cuda") as f:
+                        # Check if the key exists to avoid KeyError
+                        if "fc.weight" in f.keys():
+                            self.hidden_proj_weight = f.get_tensor("fc.weight").to("cuda")
+                except Exception as e:
+                    logger.warning(f"Failed to load hidden_proj_weight from safetensors with error: {e}")
+                    self.hidden_proj_weight = None
+
 
     def _wait_other_modules_ready(self):
         for event in self.wait_events:
@@ -401,6 +423,12 @@ class TpPartBaseModel:
                 new_model_input.b_mark_shared_group = F.pad(
                     new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
                 )
+            
+        if enable_dynamic_mtp_verify() and not self.is_mtp_draft_model:
+            if new_model_input.b_mark_shared_group is not None:
+                new_model_input.b_mark_shared_group = F.pad(
+                    new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=0
+                )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.mtp_draft_input_hiddens is not None:
@@ -594,6 +622,9 @@ class TpPartBaseModel:
                 if i in self.eagle_hidden_layers:
                     capture_hiddens.append(_input_embs.clone())
             capture_hidden = torch.cat(capture_hiddens, dim=-1) if len(capture_hiddens) > 0 else None
+            if self.is_eagle3_mode and not self.is_mtp_draft_model and capture_hidden is not None:
+                capture_hidden = self.hidden_proj_weight @ capture_hidden.transpose(0, 1)
+                capture_hidden = capture_hidden.transpose(0, 1)
             return [_input_embs, capture_hidden]
 
         handle_token_num = input_ids.shape[0]
@@ -648,6 +679,9 @@ class TpPartBaseModel:
                 capture_hiddens.append(input_embs.clone())
 
         capture_hidden = torch.cat(capture_hiddens, dim=-1) if len(capture_hiddens) > 0 else None
+        if self.is_eagle3_mode and not self.is_mtp_draft_model and capture_hidden is not None:
+            capture_hidden = self.hidden_proj_weight @ capture_hidden.transpose(0, 1)
+            capture_hidden = capture_hidden.transpose(0, 1)
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
         predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
 
@@ -1059,6 +1093,7 @@ class TpPartBaseModel:
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)
             or "Glm4MoeLiteMTPModel" in str(self.__class__)
+            or "Qwen3EagleModel" in str(self.__class__)
         )
         if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
@@ -1068,3 +1103,22 @@ class TpPartBaseModel:
             special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input
+
+"""
+tensor([[ 1.9100e+02,  4.0400e+02, -4.2400e+02,  ..., -3.3200e+02,
+         -2.9250e+01, -5.5000e+01],
+        [ 5.1875e+00,  9.5625e+00,  2.8516e-01,  ...,  3.8906e+00,
+          4.0625e+00, -3.1562e+00],
+        [-4.7461e-01, -9.1250e+00,  9.0000e+00,  ...,  6.0312e+00,
+          9.3750e+00,  6.4375e+00],
+        [-4.2500e+00, -3.8906e+00, -5.4297e-01,  ...,  3.4844e+00,
+          3.1719e+00,  9.5625e+00]], device='cuda:0', dtype=torch.bfloat16)
+tensor([[ 1.9100e+02,  4.0400e+02, -4.2400e+02,  ..., -3.3200e+02,
+         -2.9250e+01, -5.5000e+01],
+        [ 5.1875e+00,  9.5625e+00,  2.8516e-01,  ...,  3.8906e+00,
+          4.0625e+00, -3.1562e+00],
+        [-4.7461e-01, -9.1250e+00,  9.0000e+00,  ...,  6.0312e+00,
+          9.3750e+00,  6.4375e+00],
+        [-4.2500e+00, -3.8906e+00, -5.4297e-01,  ...,  3.4844e+00,
+          3.1719e+00,  9.5625e+00]], device='cuda:1', dtype=torch.bfloat16)
+"""

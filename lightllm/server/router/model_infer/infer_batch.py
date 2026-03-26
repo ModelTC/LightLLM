@@ -225,6 +225,8 @@ class InferenceContext:
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
+            # 将动态MTP大小重置为默认值
+            req.shm_req._mtp_size = req.shm_req._mtp_step  
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         if len(free_token_index) != 0:

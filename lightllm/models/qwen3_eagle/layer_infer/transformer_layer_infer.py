@@ -24,17 +24,13 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
         self, input, infer_state: InferStateInfo, 
         layer_weight: Qwen3EagleTransformerLayerWeight
     ) -> torch.Tensor:
-        return layer_weight.hidden_norm_weight_(
+        return layer_weight.hidden_norm_weight_._native_forward(
             input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
-        if infer_state.mtp_draft_input_hiddens is None:
-            # TODO: 因为在做pre check的时候必须要提供一个输入，所以这里会有一个全0的输入
-            tgt_hidden = torch.zeros(
-                input_embdings.shape[0], layer_weight.fc_weight_.in_dim, device=input_embdings.device, dtype=input_embdings.dtype
-            )
-        else:
-            tgt_hidden = infer_state.mtp_draft_input_hiddens
+        old_is_mtp_draft_model = infer_state.is_mtp_draft_model
+        infer_state.is_mtp_draft_model = True
+        tgt_hidden = infer_state.mtp_draft_input_hiddens
             
         # 只有当tgt_hidden的最后一个维度不等于hidden_size的时候才会过这个fc层
         if tgt_hidden.shape[-1] != input_embdings.shape[-1]:
@@ -69,17 +65,14 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         tgt_hidden.add_(ffn_out.view(-1, self.embed_dim_))
+        infer_state.is_mtp_draft_model = old_is_mtp_draft_model
         return tgt_hidden
         
         
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
-        if infer_state.mtp_draft_input_hiddens is None:
-            # TODO: 因为在做pre check的时候必须要提供一个输入，所以这里会有一个全0的输入
-            tgt_hidden = torch.zeros(
-                input_embdings.shape[0], layer_weight.fc_weight_.in_dim, device=input_embdings.device, dtype=input_embdings.dtype
-            )
-        else:
-            tgt_hidden = infer_state.mtp_draft_input_hiddens
+        old_is_mtp_draft_model = infer_state.is_mtp_draft_model
+        infer_state.is_mtp_draft_model = True
+        tgt_hidden = infer_state.mtp_draft_input_hiddens
         
         # 只有当tgt_hidden的最后一个维度不等于hidden_size的时候才会过这个fc层
         if tgt_hidden.shape[-1] != input_embdings.shape[-1]:
@@ -110,4 +103,5 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         tgt_hidden.add_(ffn_out.view(-1, self.embed_dim_))
+        infer_state.is_mtp_draft_model = old_is_mtp_draft_model
         return tgt_hidden

@@ -17,6 +17,8 @@ b_mark_shared_group 标记：
 """
 import torch
 import triton
+
+from lightllm.utils.infer_utils import calculate_time
 from .stage1_single_token import mtp_diverse_stage1_single_token
 from .stage2_single_token import mtp_diverse_stage2_single_token
 

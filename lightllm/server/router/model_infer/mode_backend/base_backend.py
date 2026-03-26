@@ -168,6 +168,7 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
             "wait_events": wait_events,
+            "mtp_draft_model_dir": self.args.mtp_draft_model_dir,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -325,6 +326,7 @@ class ModeBackend:
                 "is_mtp_draft_model": True,
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
+                "mtp_draft_model_dir":self.args.mtp_draft_model_dir,
             }
             
             # 对于eagle3模式，需要检查self.args.mtp_draft_model_dir[0]目录下面的model.safetensors或者pytorch_model.bin权重文件里是否有d2t和t2d
@@ -803,6 +805,17 @@ class ModeBackend:
             draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
         
         return draft_next_token_ids_gpu
+
+    def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        logits = model_output.logits
+        probs = torch.softmax(logits, dim=-1)
+        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        
+        # 如果self.d2t不为None，那么draft的token需要进行相应的转换，转换关系保存在self.d2t和self.t2d中
+        if hasattr(self, "d2t") and self.d2t is not None:
+            draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
+        
+        return draft_next_token_ids_gpu, probs
 
     def _sample_and_scatter_token(
         self,

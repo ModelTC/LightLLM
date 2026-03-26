@@ -129,7 +129,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
 
-            if args_mtp_step > 0 and enable_dynamic_mtp_verify():
+            if args_mtp_step > 0 and not self.infer_state.is_mtp_draft_model:
                 # MTP mode: use mtp diverse attention
                 assert q_head_num >= k_head_num, "MTP diverse attention requires q_head_num >= k_head_num"
                 return self._mtp_diverse_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
