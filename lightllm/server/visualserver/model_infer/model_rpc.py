@@ -26,6 +26,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
+from lightllm.server.embed_cache.afs_utils import SepEmbedManager
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -41,8 +42,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.cache_port = kvargs["cache_port"]
         weight_dir = kvargs["weight_dir"]
         self.vit_rank_id = kvargs["vit_rank_id"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
-        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.is_visual_only_mode = get_env_start_args().run_mode == "visual_only"
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
         set_vit_att_backend(self.vit_attn_backend)
@@ -95,7 +95,19 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
-            self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+            if not self.is_visual_only_mode:
+                # 独立部署vit模式下，不需要连接 cache_client
+                self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
+                self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+            else:
+                args = get_env_start_args()
+                self.redis_afs_client = SepEmbedManager(
+                    afs_embed_dir=args.afs_embed_dir,
+                    redis_host=args.config_server_host,
+                    redis_port=args.config_server_vit_redis_port,
+                    capacity=args.afs_embed_capacity,
+                )
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
