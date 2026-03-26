@@ -9,10 +9,14 @@ from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 from .deepseek2_mem_manager import Deepseek2MemoryManager
 
 
-class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
+class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
     flashmla_bytes_per_token = 656
     indexer_bytes_per_token = 132
     kv_head_dim = 576
+    kv_nope_dim = 512
+    kv_rope_dim = 64
+    quant_group_size = 128
+    quant_group_num = kv_nope_dim // quant_group_size
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         assert head_num == 1, "DeepSeek-V3.2 DSA FP8 path expects MQA-style head_num == 1"
@@ -22,8 +26,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
         )
 
     def get_cell_size(self):
-        prefill_bytes = self.kv_head_dim * torch._utils._element_size(self.prefill_dtype)
-        return self.layer_num * (self.flashmla_bytes_per_token + self.indexer_bytes_per_token + prefill_bytes)
+        return self.layer_num * (self.flashmla_bytes_per_token + self.indexer_bytes_per_token)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = torch.empty(
@@ -31,9 +34,6 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
         )
         self.indexer_k_buffer = torch.empty(
             (layer_num, size + 1, head_num, self.indexer_bytes_per_token), dtype=torch.uint8, device="cuda"
-        )
-        self.prefill_kv_buffer = torch.empty(
-            (layer_num, size + 1, head_num, self.kv_head_dim), dtype=self.prefill_dtype, device="cuda"
         )
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
@@ -56,7 +56,6 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
             o_scale,
             o_rope,
         )
-        self.prefill_kv_buffer[layer_index, mem_index, :, :] = kv
 
     def get_att_input_params(self, layer_index: int) -> Any:
         return self.get_flashmla_kv_cache(layer_index)
@@ -65,7 +64,23 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
         return self.kv_buffer[layer_index].view(-1, 1, 1, self.flashmla_bytes_per_token)
 
     def get_prefill_kv_cache(self, layer_index: int) -> torch.Tensor:
-        return self.prefill_kv_buffer[layer_index]
+        packed_kv = self.kv_buffer[layer_index]
+        kv_nope = packed_kv[:, :, : self.kv_nope_dim].view(torch.float8_e4m3fn)
+        kv_scale = packed_kv[:, :, self.kv_nope_dim : self.kv_nope_dim + self.quant_group_num * 4].view(torch.float32)
+        kv_rope = packed_kv[:, :, self.kv_nope_dim + self.quant_group_num * 4 :].view(torch.bfloat16)
+
+        kv_nope = kv_nope.view(-1, 1, self.quant_group_num, self.quant_group_size).to(self.prefill_dtype)
+        kv_scale = kv_scale.to(self.prefill_dtype).unsqueeze(-1)
+        kv_nope = (kv_nope * kv_scale).view(-1, 1, self.kv_nope_dim)
+
+        kv = torch.empty(
+            (packed_kv.shape[0], packed_kv.shape[1], self.kv_head_dim),
+            dtype=self.prefill_dtype,
+            device=packed_kv.device,
+        )
+        kv[:, :, : self.kv_nope_dim] = kv_nope
+        kv[:, :, self.kv_nope_dim :] = kv_rope.to(self.prefill_dtype)
+        return kv
 
     def get_indexer_k_buffer(self, layer_index: int) -> torch.Tensor:
         return self.indexer_k_buffer[layer_index]
@@ -103,7 +118,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
         mem_indexes: List[int],
         page_index: int,
         dp_index: int,
-        mem_managers: List["Deepseek3_2DSAFP8MemoryManager"],
+        mem_managers: List["FP8PerTokenGroupQuantDeepseek3_2MemoryManager"],
         dp_world_size: int,
     ):
         cur_page = self.kv_move_buffer[page_index]
@@ -125,7 +140,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
         mem_indexes: List[int],
         page_index: int,
         dp_index: int,
-        mem_managers: List["Deepseek3_2DSAFP8MemoryManager"],
+        mem_managers: List["FP8PerTokenGroupQuantDeepseek3_2MemoryManager"],
         dp_world_size: int,
     ):
         cur_page = self.kv_move_buffer[page_index]
@@ -146,7 +161,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
     def send_to_decode_node(
         self,
         move_tasks: List[KVMoveTask],
-        mem_managers: List["Deepseek3_2DSAFP8MemoryManager"],
+        mem_managers: List["FP8PerTokenGroupQuantDeepseek3_2MemoryManager"],
         dp_size_in_node: int,
         nccl_comm: PyNcclCommunicator,
     ):
@@ -164,7 +179,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
     def receive_from_prefill_node(
         self,
         move_tasks: List[KVMoveTask],
-        mem_managers: List["Deepseek3_2DSAFP8MemoryManager"],
+        mem_managers: List["FP8PerTokenGroupQuantDeepseek3_2MemoryManager"],
         dp_size_in_node: int,
         nccl_comm: PyNcclCommunicator,
     ):
@@ -204,7 +219,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
     def send_to_decode_node_p2p(
         self,
         move_tasks: List[KVMoveTask],
-        mem_managers: List["Deepseek3_2DSAFP8MemoryManager"],
+        mem_managers: List["FP8PerTokenGroupQuantDeepseek3_2MemoryManager"],
         dp_size_in_node: int,
         nccl_comm: PyNcclCommunicator,
     ):
@@ -223,7 +238,7 @@ class Deepseek3_2DSAFP8MemoryManager(Deepseek2MemoryManager):
     def receive_from_prefill_node_p2p(
         self,
         move_tasks: List[KVMoveTask],
-        mem_managers: List["Deepseek3_2DSAFP8MemoryManager"],
+        mem_managers: List["FP8PerTokenGroupQuantDeepseek3_2MemoryManager"],
         dp_size_in_node: int,
         nccl_comm: PyNcclCommunicator,
     ):

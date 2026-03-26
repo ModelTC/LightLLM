@@ -25,9 +25,9 @@ def select_mem_manager_class():
 
     if issubclass(model_class, Deepseek3_2TpPartModel):
         if get_env_start_args().llm_kv_type == "fp8kv_dsa":
-            from . import Deepseek3_2DSAFP8MemoryManager
+            from . import FP8PerTokenGroupQuantDeepseek3_2MemoryManager
 
-            mem_class = Deepseek3_2DSAFP8MemoryManager
+            mem_class = FP8PerTokenGroupQuantDeepseek3_2MemoryManager
         else:
             mem_class = Deepseek3_2MemoryManager
         logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
