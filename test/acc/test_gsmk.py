@@ -139,7 +139,7 @@ def parse_args():
     parser.add_argument("--host", type=str, default="http://127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--num-shots", type=int, default=5)
-    parser.add_argument("--num-questions", type=int, default=200)
+    parser.add_argument("--num-questions", type=int, default=1000)
     parser.add_argument("--result-file", type=str, default="result.jsonl")
     parser.add_argument("--data-path", type=str, default="test.jsonl")
     return parser.parse_args()

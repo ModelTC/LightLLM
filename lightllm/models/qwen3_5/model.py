@@ -9,8 +9,8 @@ from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import (
     Qwen3VLMultimodalPreLayerInfer,
 )
-from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import (
-    Qwen3VLPreAndPostLayerWeight,
+from lightllm.models.qwen3_5.layer_weights.pre_and_post_layer_weight import (
+    Qwen35PreAndPostLayerWeight,
 )
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import (
     Qwen35TransformerLayerInfer,
@@ -52,7 +52,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     """
 
     transformer_weight_class = Qwen35TransformerLayerWeight
-    pre_and_post_weight_class = Qwen3VLPreAndPostLayerWeight
+    pre_and_post_weight_class = Qwen35PreAndPostLayerWeight
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
@@ -71,30 +71,23 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
             if self.vision_config is None:
                 logger.warning("No vision_config found in checkpoint. " "Multimodal features may not work correctly.")
 
-        # Apply standard config repairs
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
 
-        # Qwen3.5 stores RoPE config under text_config.rope_parameters.
         rope_parameters = self.config.get("rope_parameters")
         if isinstance(rope_parameters, dict):
             if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
                 self.config["rope_theta"] = rope_parameters["rope_theta"]
             if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in self.config:
                 self.config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
-            # Preserve the richer RoPE metadata in the expected field when absent.
             if "rope_scaling" not in self.config:
                 self.config["rope_scaling"] = rope_parameters
 
         # MoE routing parameters - set defaults for Qwen3.5 compatibility
         if "norm_topk_prob" not in self.config:
-            self.config["norm_topk_prob"] = True  # Standard default for MoE models
+            self.config["norm_topk_prob"] = True
 
-        # Handle fine-tuning config if present
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
-
-        # Calculate num_kv_heads for KV cache memory management
-        # Required by parent class _init_mem_manager() in Qwen3NextTpPartModel
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)

@@ -27,12 +27,18 @@ data_type_to_backend = {
     },
     "int4kv": {
         "triton": Int4kvTritonAttBackend,
-        "fa3": Fp8Fa3AttBackend,
-        "flashinfer": Fp8FlashInferAttBackend,
+        # "fa3": Fp8Fa3AttBackend,
+        # "flashinfer": Fp8FlashInferAttBackend,
     },
     "int8kv": {
         "triton": Int8kvTritonAttBackend,
+        # "fa3": Fp8Fa3AttBackend,
+        # "flashinfer": Fp8FlashInferAttBackend,
+    },
+    "fp8kv_sph": {
         "fa3": Fp8Fa3AttBackend,
+    },
+    "fp8kv_spt": {
         "flashinfer": Fp8FlashInferAttBackend,
     },
 }
@@ -66,7 +72,7 @@ def _auto_select_backend(
     backend_map = kv_type_to_backend
 
     for backend_name in priority_list:
-        if validate(backend_name):
+        if backend_name in backend_map[llm_dtype] and validate(backend_name):
             logger.info(f"Auto-selected {backend_name} backend (validated)")
             return backend_map[llm_dtype][backend_name]
 

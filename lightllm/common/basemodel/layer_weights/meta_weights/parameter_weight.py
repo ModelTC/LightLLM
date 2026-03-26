@@ -1,6 +1,7 @@
 import torch
 from typing import Dict, Optional, Tuple
 from .base_weight import BaseWeightTpl
+from lightllm.utils.dist_utils import get_dp_world_size
 
 
 class ParameterWeight(BaseWeightTpl):
@@ -56,19 +57,28 @@ class TpParameterWeight(ParameterWeight):
         self,
         weight_name: str,
         data_type: torch.dtype,
-        split_n_embed: int,
         bias_name: Optional[str] = None,
         weight_shape: Optional[Tuple[int, ...]] = None,
         bias_shape: Optional[Tuple[int, ...]] = None,
+        dim: int = 0,  # the default split dimension is 0
     ):
-        self.split_n_embed = split_n_embed
-        # Calculate TP-split shapes if full shapes are provided
+
+        assert (
+            0 <= dim < len(weight_shape)
+        ), f"split dimension: {dim} must be less than the length of weight_shape: {weight_shape}"
+        n_embed = weight_shape[dim]
+        tp_world_size = get_dp_world_size()
+        assert (
+            n_embed % tp_world_size == 0
+        ), f"weight_shape[{dim}]={weight_shape[dim]} must be divisible by tp_world_size_: {tp_world_size}"
+        self.dim = dim
+        self.split_n_embed = n_embed // tp_world_size
         tp_weight_shape = None
         tp_bias_shape = None
         if weight_shape is not None:
-            tp_weight_shape = (split_n_embed,) + weight_shape[1:]
+            tp_weight_shape = weight_shape[:dim] + (self.split_n_embed,) + weight_shape[dim + 1 :]
         if bias_shape is not None:
-            tp_bias_shape = (split_n_embed,) + bias_shape[1:]
+            tp_bias_shape = bias_shape[:dim] + (self.split_n_embed,) + bias_shape[dim + 1 :]
         super().__init__(weight_name, data_type, tp_weight_shape, bias_name, tp_bias_shape)
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]) -> None:
@@ -76,12 +86,12 @@ class TpParameterWeight(ParameterWeight):
         end = self.split_n_embed * (self.tp_rank_ + 1)
 
         if self.weight_name in weights:
-            t_weight = weights[self.weight_name][start:end]
+            t_weight = weights[self.weight_name].narrow(self.dim, start, end - start)
             self.weight.copy_(t_weight.to(self.data_type_))
             self.weight.load_ok = True
             del weights[self.weight_name]
         if self.bias_name is not None and self.bias_name in weights:
-            t_bias = weights[self.bias_name][start:end]
+            t_bias = weights[self.bias_name].narrow(self.dim, start, end - start)
             self.bias.copy_(t_bias.to(self.data_type_))
             self.bias.load_ok = True
             del weights[self.bias_name]

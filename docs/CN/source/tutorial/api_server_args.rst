@@ -337,7 +337,10 @@ PD 分离模式参数
     
 .. option:: --llm_kv_type
 
-    推理后端使用什么类型的数据存储kv cache, 可选值为 "None", "int8kv", "int4kv", "fp8kv"
+    推理后端使用什么类型的数据存储kv cache, 可选值为 "None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"
+
+    - ``fp8kv_sph``: FP8 静态按 head 量化，对应 fa3 后端
+    - ``fp8kv_spt``: FP8 静态按 tensor 量化，对应 flashinfer 后端
 
 .. option:: --disable_cudagraph
 

@@ -88,6 +88,18 @@ def is_musa():
     return hasattr(torch.version, "musa") and torch.version.musa is not None
 
 
+@lru_cache(maxsize=1)
+def is_nvidia():
+    ans = (
+        torch.cuda.is_available()
+        and getattr(torch.version, "cuda", None) is not None
+        and getattr(torch.version, "hip", None) is None
+        and not is_musa()
+    )
+    logger.info(f"device is_nvidia : {ans}")
+    return ans
+
+
 @lru_cache(maxsize=None)
 def get_current_device_name():
     if torch.cuda.is_available() or is_musa():
@@ -262,19 +274,32 @@ def set_sm_limit(percent: int, gpu_index=0):
 
 
 @lru_cache(maxsize=None)
+def support_tma() -> bool:
+    # 5090 关闭 tma feature，实际测试开了没啥用
+    return is_nvidia() and torch.cuda.get_device_capability() >= (9, 0) and not is_5090_gpu()
+
+
+@lru_cache(maxsize=None)
 def triton_support_tensor_descriptor() -> bool:
+    if not support_tma():
+        logger.info(
+            "triton tensor_descriptor requires NVIDIA Hopper or newer GPU (compute capability >= 9.0) "
+            "and is not supported on 5090"
+        )
+        return False
+
     try:
         from triton.tools.tensor_descriptor import TensorDescriptor
 
-        support_tma = torch.cuda.get_device_capability() >= (9, 0)
-        if support_tma:
-            logger.info("triton support tensor_descriptor")
-            return True
-        else:
-            assert False
-    except:
-        logger.info("triton not support tensor_descriptor")
-        return False
+        _ = TensorDescriptor
+
+        logger.info("triton support tensor_descriptor")
+        return True
+    except Exception:
+        pass
+
+    logger.info("triton not support tensor_descriptor")
+    return False
 
 
 @lru_cache(maxsize=None)

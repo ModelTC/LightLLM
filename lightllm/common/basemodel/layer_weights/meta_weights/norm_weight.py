@@ -5,6 +5,7 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
+from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
 from .platform_op import PlatformAwareOp
 
 
@@ -79,6 +80,55 @@ class GEMMANormWeight(RMSNormWeight):
             self.weight += 1
             self.weight.load_ok = True
             del weights[self.weight_name]
+
+
+class GatedRMSNormWeight(RMSNormWeight):
+    def _triton_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        assert (
+            input.ndim in [2, 3] and self.weight.ndim == 1
+        ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
+        if out is None:
+            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        return gated_rmsnorm_forward(x=input, weight=self.weight, bias=None, eps=eps, z=gate_value, out=out)
+
+    def _cuda_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        # only triton implementation is supported for rmsnorm on cuda platform
+        return self._triton_forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
+
+    def _musa_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        # triton implementation is supported by musa.
+        return self._triton_forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
+
+    def __call__(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        return self._forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
 
 
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):

@@ -373,10 +373,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=["None", "int8kv", "int4kv"],
+        choices=["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"],
         default="None",
         help="""kv type used in llm, None for dtype that llm used in config.json.
-                fp8kv: not fully supported yet, will support in future""",
+                fp8kv_sph: use float8_e4m3fn to store kv cache for inference,
+                quant way is static per head kv quant.
+                fp8kv_spt: use float8_e4m3fn to store kv cache for inference,
+                quant way is static per tensor kv quant.
+                fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
+                to load pre-computed FP8 scales.
+                Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
+                may cause runtime issues). Install with: pip install flashinfer-python==0.6.5""",
     )
     parser.add_argument(
         "--llm_kv_quant_group_size",
