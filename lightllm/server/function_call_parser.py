@@ -1749,14 +1749,23 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self.bot_token = "<tool_call>"
         self.eot_token = "</tool_call>"
         self.tool_call_separator = "\n"
+        self.tool_call_start_token = "<tool_call>"
+        self.tool_call_end_token = "</tool_call>"
+        self.tool_call_prefix = "<function="
+        self.function_end_token = "</function>"
+        self.parameter_prefix = "<parameter="
+        self.parameter_end_token = "</parameter>"
 
-        # Regex patterns
         self.tool_call_block_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
         self.function_regex = re.compile(r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL)
         self.parameter_regex = re.compile(
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
         )
-        self._normal_text_buffer = ""
+        self.parsed_pos = 0
+        self.current_tool_param_count = 0
+        self.json_started = False
+        self.is_inside_tool_call = False
+        self.current_func_name: Optional[str] = None
 
     def has_tool_call(self, text: str) -> bool:
         return "<function=" in text or self.bot_token in text
@@ -1816,8 +1825,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             return None
 
         func_name = function_str[:end_index].strip()
-        tool_indices = self._get_tool_indices(tools)
-        if func_name not in tool_indices:
+        if func_name not in self._get_tool_indices(tools):
             logger.warning(f"Model attempted to call undefined function: {func_name}")
             return None
 
@@ -1841,7 +1849,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
 
         return ToolCallItem(
-            tool_index=tool_indices[func_name],
+            tool_index=-1,
             name=func_name,
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
@@ -1859,85 +1867,174 @@ class Qwen3CoderDetector(BaseFormatDetector):
             tool_call_blocks = [text]
 
         calls = []
+        tool_idx = 0
         for block in tool_call_blocks:
             func_matches = self.function_regex.findall(block)
             for match in func_matches:
                 func_str = match[0] if match[0] else match[1]
                 item = self._parse_function_call(func_str, tools)
                 if item:
+                    item.tool_index = tool_idx
                     calls.append(item)
+                    tool_idx += 1
 
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Streaming incremental parsing for Qwen3-Coder XML tool calls."""
         self._buffer += new_text
-        current_text = self._buffer
+        if not self._buffer:
+            return StreamingParseResult()
 
-        if not self.has_tool_call(current_text):
-            partial_len = self._ends_with_partial_token(current_text, self.bot_token)
-            if partial_len:
-                return StreamingParseResult()
-            self._buffer = ""
-            cleaned = new_text.replace(self.eot_token, "")
-            return StreamingParseResult(normal_text=cleaned)
-
-        # Check for complete tool call blocks
-        if self.eot_token in current_text:
-            result = self.detect_and_parse(current_text, tools)
-            last_end = current_text.rfind(self.eot_token)
-            if last_end != -1:
-                self._buffer = current_text[last_end + len(self.eot_token) :].lstrip()
-            else:
-                self._buffer = ""
-            self.current_tool_id = -1
-            self.current_tool_name_sent = False
-            return result
-
-        # Partial tool call - try to extract function name for early streaming
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
 
         calls = []
-        tool_call_start = current_text.find(self.bot_token)
-        if tool_call_start == -1:
-            return StreamingParseResult()
+        normal_text_chunks = []
 
-        content_after = current_text[tool_call_start + len(self.bot_token) :]
-        func_prefix = "<function="
-        func_pos = content_after.find(func_prefix)
-        if func_pos == -1:
-            return StreamingParseResult()
+        while True:
+            current_slice = self._buffer[self.parsed_pos :]
+            if not current_slice:
+                break
 
-        after_func = content_after[func_pos + len(func_prefix) :]
-        gt_pos = after_func.find(">")
-        if gt_pos == -1:
-            return StreamingParseResult()
+            if current_slice.startswith(self.tool_call_start_token):
+                self.parsed_pos += len(self.tool_call_start_token)
+                self.is_inside_tool_call = True
+                continue
 
-        func_name = after_func[:gt_pos].strip()
+            if current_slice.startswith(self.tool_call_prefix):
+                end_angle = current_slice.find(">")
+                if end_angle == -1:
+                    break
 
-        if self.current_tool_id == -1:
-            self.current_tool_id = 0
-            self.prev_tool_call_arr = []
-            self.streamed_args_for_tool = [""]
+                func_name = current_slice[len(self.tool_call_prefix) : end_angle]
+                if func_name not in self._tool_indices:
+                    logger.warning(f"Model attempted to call undefined function: {func_name}")
+                    self.parsed_pos += end_angle + 1
+                    continue
 
-        while len(self.prev_tool_call_arr) <= self.current_tool_id:
-            self.prev_tool_call_arr.append({})
-        while len(self.streamed_args_for_tool) <= self.current_tool_id:
-            self.streamed_args_for_tool.append("")
+                self.current_tool_id += 1
+                self.current_tool_name_sent = True
+                self.current_tool_param_count = 0
+                self.json_started = False
+                self.current_func_name = func_name
 
-        if func_name and func_name in self._tool_indices and not self.current_tool_name_sent:
-            calls.append(
-                ToolCallItem(
-                    tool_index=self.current_tool_id,
-                    name=func_name,
-                    parameters="",
+                while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                    self.prev_tool_call_arr.append({})
+                while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                    self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr[self.current_tool_id] = {"name": func_name, "arguments": {}}
+
+                calls.append(
+                    ToolCallItem(
+                        tool_index=self.current_tool_id,
+                        name=func_name,
+                        parameters="",
+                    )
                 )
-            )
-            self.current_tool_name_sent = True
-            self.prev_tool_call_arr[self.current_tool_id] = {"name": func_name, "arguments": {}}
 
-        return StreamingParseResult(normal_text="", calls=calls)
+                self.parsed_pos += end_angle + 1
+                continue
+
+            if current_slice.startswith(self.parameter_prefix):
+                name_end = current_slice.find(">")
+                if name_end == -1:
+                    break
+
+                value_start_idx = name_end + 1
+                rest_of_slice = current_slice[value_start_idx:]
+                cand_end_param = rest_of_slice.find(self.parameter_end_token)
+                cand_next_param = rest_of_slice.find(self.parameter_prefix)
+                cand_end_func = rest_of_slice.find(self.function_end_token)
+
+                candidates = []
+                if cand_end_param != -1:
+                    candidates.append((cand_end_param, len(self.parameter_end_token)))
+                if cand_next_param != -1:
+                    candidates.append((cand_next_param, 0))
+                if cand_end_func != -1:
+                    candidates.append((cand_end_func, 0))
+                if not candidates:
+                    break
+
+                end_pos, end_token_len = min(candidates, key=lambda x: x[0])
+                param_name = current_slice[len(self.parameter_prefix) : name_end]
+                raw_value = rest_of_slice[:end_pos]
+                if raw_value.startswith("\n"):
+                    raw_value = raw_value[1:]
+                if raw_value.endswith("\n"):
+                    raw_value = raw_value[:-1]
+
+                if not self.json_started:
+                    calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters="{"))
+                    self.streamed_args_for_tool[self.current_tool_id] += "{"
+                    self.json_started = True
+
+                param_config = self._get_param_config(self.current_func_name, tools)
+                converted_val = self._convert_param_value(raw_value, param_name, param_config, self.current_func_name)
+                json_key_val = f"{json.dumps(param_name)}: {json.dumps(converted_val, ensure_ascii=False)}"
+                fragment = f", {json_key_val}" if self.current_tool_param_count > 0 else json_key_val
+
+                calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters=fragment))
+                self.streamed_args_for_tool[self.current_tool_id] += fragment
+                self.prev_tool_call_arr[self.current_tool_id]["arguments"][param_name] = converted_val
+                self.current_tool_param_count += 1
+
+                total_len = (name_end + 1) + end_pos + end_token_len
+                self.parsed_pos += total_len
+                continue
+
+            if current_slice.startswith(self.function_end_token):
+                if not self.json_started:
+                    calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters="{"))
+                    self.streamed_args_for_tool[self.current_tool_id] += "{"
+                    self.json_started = True
+                calls.append(ToolCallItem(tool_index=self.current_tool_id, parameters="}"))
+                self.streamed_args_for_tool[self.current_tool_id] += "}"
+                self.parsed_pos += len(self.function_end_token)
+                self.current_func_name = None
+                self.current_tool_name_sent = False
+                continue
+
+            if current_slice.startswith(self.tool_call_end_token):
+                self.parsed_pos += len(self.tool_call_end_token)
+                self.is_inside_tool_call = False
+                continue
+
+            next_open_angle = current_slice.find("<")
+            if next_open_angle == -1:
+                if not self.is_inside_tool_call:
+                    normal_text_chunks.append(current_slice)
+                self.parsed_pos += len(current_slice)
+                continue
+
+            if next_open_angle == 0:
+                possible_tags = [
+                    self.tool_call_start_token,
+                    self.tool_call_end_token,
+                    self.tool_call_prefix,
+                    self.function_end_token,
+                    self.parameter_prefix,
+                    self.parameter_end_token,
+                ]
+                if any(tag.startswith(current_slice) for tag in possible_tags):
+                    break
+                if not self.is_inside_tool_call:
+                    normal_text_chunks.append("<")
+                self.parsed_pos += 1
+                continue
+
+            text_segment = current_slice[:next_open_angle]
+            if not self.is_inside_tool_call:
+                normal_text_chunks.append(text_segment)
+            self.parsed_pos += next_open_angle
+
+        if self.parsed_pos > 0:
+            self._buffer = self._buffer[self.parsed_pos :]
+            self.parsed_pos = 0
+
+        normal_text = "".join(normal_text_chunks) if normal_text_chunks else ""
+        return StreamingParseResult(calls=calls, normal_text=normal_text)
 
 
 class FunctionCallParser:

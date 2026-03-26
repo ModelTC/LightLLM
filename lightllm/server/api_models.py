@@ -34,6 +34,7 @@ class Function(BaseModel):
     description: Optional[str] = Field(default=None, examples=[None])
     parameters: Optional[dict] = None
     response: Optional[dict] = None
+    strict: Optional[bool] = None
 
 
 class Tool(BaseModel):

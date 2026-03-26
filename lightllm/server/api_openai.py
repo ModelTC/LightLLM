@@ -160,6 +160,28 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
     return normal_text, calls
 
 
+def _check_for_unstreamed_tool_args(parser: FunctionCallParser) -> Optional[str]:
+    detector = getattr(parser, "detector", None)
+    if detector is None:
+        return None
+    if not hasattr(detector, "prev_tool_call_arr") or not detector.prev_tool_call_arr:
+        return None
+    if not hasattr(detector, "streamed_args_for_tool") or not detector.streamed_args_for_tool:
+        return None
+
+    tool_index = len(detector.prev_tool_call_arr) - 1
+    if tool_index < 0 or tool_index >= len(detector.streamed_args_for_tool):
+        return None
+
+    expected_args = detector.prev_tool_call_arr[tool_index].get("arguments", {})
+    expected_call = json.dumps(expected_args, ensure_ascii=False)
+    actual_call = detector.streamed_args_for_tool[tool_index]
+    if actual_call not in expected_call:
+        return None
+    remaining_call = expected_call.replace(actual_call, "", 1)
+    return remaining_call or None
+
+
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -220,7 +242,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     tools = None
     if request.tools and request.tool_choice != "none":
-        # request.skip_special_tokens = False
         if not isinstance(request.tool_choice, str):
             tools = [
                 item.function.model_dump()
@@ -245,6 +266,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "add_special_tokens": False,
         "seed": request.seed,
     }
+    if request.tools and request.tool_choice != "none":
+        sampling_params_dict["skip_special_tokens"] = False
 
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
@@ -382,6 +405,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     async def stream_results() -> AsyncGenerator[bytes, None]:
         finish_reason = None
         has_emitted_tool_calls = False
+        last_index = None
+        last_group_request_id = None
         from .req_id_generator import convert_sub_id_to_group_id
 
         prompt_tokens = 0
@@ -391,6 +416,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             completion_tokens += 1
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             index = sub_req_id
+            last_index = index
+            last_group_request_id = group_request_id
             delta = request_output
             finish_reason = finish_status.get_finish_reason()
 
@@ -438,22 +465,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                 for call_item in calls:
                     has_emitted_tool_calls = True
-                    # transform call_item -> FunctionResponse + ToolCall
-                    if finish_reason == "stop":
-                        latest_delta_len = 0
-                        if isinstance(call_item.parameters, str):
-                            latest_delta_len = len(call_item.parameters)
-
-                        expected_call = json.dumps(
-                            parser.multi_format_parser.detectors[0].prev_tool_call_arr[index].get("arguments", {}),
-                            ensure_ascii=False,
-                        )
-                        actual_call = parser.multi_format_parser.detectors[0].streamed_args_for_tool[index]
-                        if latest_delta_len > 0:
-                            actual_call = actual_call[:-latest_delta_len]
-                        remaining_call = expected_call.replace(actual_call, "", 1)
-                        call_item.parameters = remaining_call
-
                     if call_item.name:
                         # First chunk: include ID and function name
                         tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
@@ -494,6 +505,37 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choices=[stream_choice],
                 )
                 yield f"data: {stream_resp.model_dump_json()}\n\n"
+
+        if (
+            has_emitted_tool_calls
+            and finish_reason == "stop"
+            and last_index is not None
+            and last_index in parser_dict
+            and last_group_request_id is not None
+        ):
+            remaining_call = _check_for_unstreamed_tool_args(parser_dict[last_index])
+            if remaining_call:
+                choice_data = ChatCompletionStreamResponseChoice(
+                    index=0,
+                    delta=DeltaMessage(
+                        role="assistant",
+                        tool_calls=[
+                            ToolCall(
+                                id=None,
+                                index=len(parser_dict[last_index].detector.prev_tool_call_arr) - 1,
+                                function=FunctionResponse(name=None, arguments=remaining_call),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+                chunk = ChatCompletionStreamResponse(
+                    id=last_group_request_id,
+                    created=created_time,
+                    choices=[choice_data],
+                    model=request.model,
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
 
         # Determine final finish_reason: override to "tool_calls" if tool calls were emitted
         if has_emitted_tool_calls and finish_reason == "stop":
