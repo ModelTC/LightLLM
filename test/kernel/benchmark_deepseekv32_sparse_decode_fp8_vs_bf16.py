@@ -7,10 +7,8 @@ import torch
 
 CUR_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str((CUR_DIR / "../../lightllm/models/deepseek3_2/triton_kernel").resolve()))
-sys.path.insert(0, str((CUR_DIR / "../../lightllm/utils").resolve()))
 
 from destindex_copy_kv_flashmla_fp8 import pack_kv_reference
-from flashmla_utils import import_flash_mla
 
 
 def _time_cuda(fn, warmup: int, iters: int) -> float:
@@ -73,7 +71,8 @@ def main():
 
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
-    flash_mla = import_flash_mla()
+    import flash_mla
+
     device = "cuda"
     dtype = torch.bfloat16
     sm_scale = 576 ** (-0.5)

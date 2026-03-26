@@ -6,10 +6,8 @@ import torch
 
 CUR_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str((CUR_DIR / "../../../lightllm/models/deepseek3_2/triton_kernel").resolve()))
-sys.path.insert(0, str((CUR_DIR / "../../../lightllm/utils").resolve()))
 
 from destindex_copy_kv_flashmla_fp8 import dequantize_kv_reference, pack_kv_reference
-from flashmla_utils import import_flash_mla
 
 
 def _manual_sparse_decode(
@@ -37,10 +35,7 @@ def _manual_sparse_decode(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_flashmla_fp8_sparse_decode_matches_manual_reference():
-    try:
-        flash_mla = import_flash_mla()
-    except ModuleNotFoundError as exc:
-        pytest.skip(str(exc))
+    import flash_mla
 
     batch = 2
     seq_q = 1
