@@ -27,6 +27,8 @@ class HybridRadixCache(RadixCache):
                 return
 
             self._evict_buffer(need_evict_buffer_num, release_buffer)
+            if len(release_buffers) > 0:
+                self.buffer_mem_manager.free(release_buffers)
         return
 
     def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback):
