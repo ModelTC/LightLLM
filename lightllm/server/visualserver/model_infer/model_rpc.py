@@ -148,6 +148,23 @@ class VisualModelRpcServer(rpyc.Service):
                 torch.cuda.current_stream().synchronize()
         return
 
+    def exposed_encode_visual_only(self, images: List[ImageItem]):
+        images = obtain(images)
+        all_img_embeds, uuids, valid_ids = self.forward(images)
+        all_img_embeds = all_img_embeds.detach().cpu()
+
+        if self.tp_rank_id == 0:
+            for i in range(len(uuids)):
+                # uid = uuids[i]
+                start, end = valid_ids[i]
+                image = images[i]
+                embed_tensor = all_img_embeds[start:end]
+                try:
+                    self.redis_afs_client.insert(image.md5, tensor=embed_tensor)
+                except:
+                    pass
+        return
+
 
 class VisualModelRpcClient:
     def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
