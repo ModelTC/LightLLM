@@ -21,7 +21,7 @@
 
 import dataclasses
 from datetime import timedelta
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads, safe_pickle_dumps
 import time
 from typing import Optional, Union, Dict, Deque, Tuple, Any
 from collections import deque
@@ -85,7 +85,7 @@ class StatelessP2PProcessGroup:
         """Send an object to a destination rank."""
         self.expire_data()
         key = f"send_to/{self.dest_id}/{self.send_dst_counter}"
-        self.store.set(key, pickle.dumps(obj))
+        self.store.set(key, safe_pickle_dumps(obj))
         self.send_dst_counter += 1
         self.entries.append((key, time.time()))
 
@@ -102,7 +102,7 @@ class StatelessP2PProcessGroup:
 
     def recv_obj(self) -> Any:
         """Receive an object from a source rank."""
-        obj = pickle.loads(self.store.get(f"send_to/{self.dest_id}/{self.recv_src_counter}"))
+        obj = safe_pickle_loads(self.store.get(f"send_to/{self.dest_id}/{self.recv_src_counter}"))
         self.recv_src_counter += 1
         return obj
 

@@ -5,7 +5,7 @@ import threading
 import torch.multiprocessing as mp
 import collections
 import queue
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
@@ -211,7 +211,7 @@ class _PrefillTransModule:
                 for _, _notify_list in notifies_dict.items():
                     for notify in _notify_list:
                         try:
-                            notify_obj = pickle.loads(notify)
+                            notify_obj = safe_pickle_loads(notify)
                         except:
                             notify_obj = None
 
