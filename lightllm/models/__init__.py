@@ -39,4 +39,6 @@ from lightllm.models.tarsier2.model import (
 )
 from lightllm.models.gpt_oss.model import GptOssTpPartModel
 from lightllm.models.qwen3_omni_moe_thinker.model import Qwen3OmniMOETpPartModel
+from lightllm.models.neo_chat_moe.model import NeoTpMOEPartModel
+from lightllm.models.neo_chat.model import NeoTpPartModel
 from .registry import get_model, get_model_class

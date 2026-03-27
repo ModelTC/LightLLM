@@ -20,6 +20,7 @@ from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerP
 from lightllm.models.qwen3_vl.qwen3_visual import Qwen3VisionTransformerPretrainedModel
 from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPretrainedModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
+from lightllm.models.neo_chat_moe.neo_visual import NeoVisionTransformerPretrainedModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.graceful_utils import graceful_registry
@@ -90,6 +91,8 @@ class VisualModelRpcServer(rpyc.Service):
                     .eval()
                     .bfloat16()
                 )
+            elif self.model_type == "neo_chat":
+                self.model = NeoVisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
             else:
                 raise Exception(f"can not support {self.model_type} now")
 
