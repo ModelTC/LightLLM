@@ -1,0 +1,7 @@
+{
+  "0": {
+    "BLOCK_D": 4096,
+    "num_stages": 2,
+    "num_warps": 2
+  }
+}

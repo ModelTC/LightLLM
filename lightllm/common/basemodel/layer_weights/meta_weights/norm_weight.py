@@ -5,6 +5,7 @@ from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
+from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
 from .platform_op import PlatformAwareOp
 
 
@@ -69,6 +70,63 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
+
+class GEMMANormWeight(RMSNormWeight):
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.weight_name in weights:
+            self.weight.copy_(weights[self.weight_name])
+            self.weight += 1
+            self.weight.load_ok = True
+
+
+class GatedRMSNormWeight(RMSNormWeight):
+    def _triton_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        assert (
+            input.ndim in [2, 3] and self.weight.ndim == 1
+        ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
+        if out is None:
+            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        return gated_rmsnorm_forward(x=input, weight=self.weight, bias=None, eps=eps, z=gate_value, out=out)
+
+    def _cuda_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        # only triton implementation is supported for rmsnorm on cuda platform
+        return self._triton_forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
+
+    def _musa_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        # triton implementation is supported by musa.
+        return self._triton_forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
+
+    def __call__(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        return self._forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
 
 
 class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
@@ -276,3 +334,23 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         eps: float,
     ) -> None:
         return self._forward(q=q, k=k, eps=eps)
+
+
+class QKGEMMANormWeight(QKRMSNORMWeight):
+    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
+        if self.q_weight_name in weights:
+            self.q_weight.copy_(weights[self.q_weight_name])
+            self.q_weight += 1
+            self.q_weight.load_ok = True
+        if self.k_weight_name in weights:
+            self.k_weight.copy_(weights[self.k_weight_name])
+            self.k_weight += 1
+            self.k_weight.load_ok = True
+
+    def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
+        assert q.ndim == 2 and self.q_weight.ndim == 1
+        assert k.ndim == 2 and self.k_weight.ndim == 1
+        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
+        # See https://github.com/huggingface/transformers/pull/29402
+        # So we need to set fp32_multiply to True here.
+        return qk_rmsnorm_fused_forward(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps, fp32_multiply=True)

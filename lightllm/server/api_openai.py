@@ -193,6 +193,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             multimodal_params_dict["images"].append({"type": "base64", "data": data})
                         else:
                             raise ValueError("Unrecognized image input.")
+                    elif img.startswith("file://"):
+                        # Local file path with file:// prefix
+                        file_path = img[7:]  # Remove "file://" prefix
+                        with open(file_path, "rb") as f:
+                            multimodal_params_dict["images"].append(
+                                {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
+                            )
                     else:
                         raise ValueError(
                             "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
@@ -322,8 +329,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             tool_choice = request.tool_choice
             tools = request.tools
             if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
-                if finish_reason == "stop":
-                    finish_reason = "tool_calls"
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
@@ -346,7 +351,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
-            if finish_reason == "tool_calls":
+            if tool_calls and finish_reason == "stop":
+                finish_reason = "tool_calls"
                 text = ""
             chat_message = ChatMessage(
                 role="assistant",

@@ -7,10 +7,11 @@ import pickle
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any
-from lightllm.common.req_manager import ReqManager
+from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
+from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
@@ -32,9 +33,11 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
+    mtp_step: int = 0
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
+    has_recurrent_state: bool = False  # for
 
     def register(
         self,
@@ -57,6 +60,10 @@ class InferenceContext:
         self.infer_req_ids = []
 
         self.vocab_size = vocab_size
+
+        self.mtp_step = get_env_start_args().mtp_step
+        self.has_recurrent_state = isinstance(self.req_manager, ReqManagerForMamba)
+
         return
 
     def init_cpu_embed_cache_client(self):
@@ -72,6 +79,27 @@ class InferenceContext:
         if self.cpu_kv_cache_stream is None:
             self.cpu_kv_cache_stream = torch.cuda.Stream()
         return self.cpu_kv_cache_stream
+
+    def _alloc_and_copy_req_buffers(
+        self, req_manager: ReqManagerForMamba, radix_cache: HybridRadixCache, req_objs: List["InferReq"]
+    ) -> None:
+        if not req_objs:
+            return
+
+        if radix_cache is not None:
+            radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
+
+        req_idx_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
+        req_manager.alloc_buffer_for_req(req_idx_gpu)
+
+        if radix_cache is not None:
+            fork_req_ids = [r.req_idx for r in req_objs if r.shared_kv_node is not None]
+            if fork_req_ids:
+                src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
+                req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
+                src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
+                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
+                req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -111,6 +139,9 @@ class InferenceContext:
                     slave_req: InferReq = slave_req
                     slave_req.related_master_req = master_req
 
+        if isinstance(self.req_manager, ReqManagerForMamba):
+            self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, req_objs)
+
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
@@ -122,13 +153,51 @@ class InferenceContext:
             # .cpu() 是 流内阻塞操作
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
 
-            prefix_len, _ = self.radix_cache.insert(key, value)
+            prefix_len, node = self.radix_cache.insert(key, value)
+
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.node_prefix_total_len <= prefix_len
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
+
+    def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
+        if self.radix_cache is None:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+        else:
+            input_token_ids = req.get_input_token_ids()
+            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+
+            prefix_len, node = self.radix_cache.insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+            if req.shared_kv_node is not None:
+                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
+
+            # 请求可能在排队时就被终止，导致node可能为None
+            if node is not None and node.buffer_idx is None:
+                req_to_buffer_index = self.req_manager.req_to_buffer_index
+                buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                self.radix_cache.add_buffer_idx_to_node(node, buffer_idx)
+                # 该请求的 buffer 已经被插入到 radix cache 中，不需要手动释放
+                return False
+        return True
+
+    def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
+        """释放请求的 KV cache 和 buffer 内存"""
+        if self.has_recurrent_state:
+            need_free_base_buffer = self.free_a_req_mem_for_mamba(free_token_index, req)
+            req_to_buffer_index = self.req_manager.req_to_buffer_index
+            if need_free_base_buffer:
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            elif self.mtp_step > 0:
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+        else:
+            self.free_a_req_mem(free_token_index, req)
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -151,19 +220,23 @@ class InferenceContext:
 
         free_req_index = []
         free_token_index = []
+        free_buffer_index = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-            self.free_a_req_mem(free_token_index, req)
-
+            self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
-        free_token_index = custom_cat(free_token_index)
-        self.req_manager.free(free_req_index, free_token_index)
+        if len(free_token_index) != 0:
+            free_token_index = custom_cat(free_token_index)
+            self.req_manager.free(free_req_index, free_token_index)
+
+        if len(free_buffer_index) != 0 and isinstance(self.req_manager, ReqManagerForMamba):
+            self.req_manager.free_buffer(free_buffer_index)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -191,12 +264,15 @@ class InferenceContext:
         if pause_reqs:
             g_infer_state_lock.acquire()
 
+            pause_req_indices = []
             free_token_index = []
+            free_buffer_index = []
             for req in pause_reqs:
+                pause_req_indices.append(req.req_idx)
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self.free_a_req_mem(free_token_index, req)
+                self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
@@ -210,13 +286,16 @@ class InferenceContext:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
 
+            if len(free_buffer_index) != 0 and isinstance(self.req_manager, ReqManagerForMamba):
+                self.req_manager.free_buffer(free_buffer_index)
+
             g_infer_state_lock.release()
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
             g_infer_state_lock.acquire()
-
+            revovered_reqs = []
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
@@ -228,7 +307,9 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
+                revovered_reqs.append(req)
 
+            self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, revovered_reqs)
             g_infer_state_lock.release()
         return
 
@@ -466,8 +547,8 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
     def get_chuncked_input_token_ids(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        # 复用 get_chuncked_input_token_len 的逻辑，保持一致性
+        chunked_end = self.get_chuncked_input_token_len()
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_len(self):
