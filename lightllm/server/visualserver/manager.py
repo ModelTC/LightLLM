@@ -74,7 +74,6 @@ class VisualManager:
                 kvargs = {
                     "weight_dir": self.model_weightdir,
                     "device_id": device_id,
-                    "trust_remote_code": self.args.trust_remote_code,
                     "vit_tp": self.vit_tp,
                     "cache_port": self.args.cache_port,
                     "tp_rank_id": tp_rank_id,

@@ -39,12 +39,26 @@ class VisualModelRpcServer(rpyc.Service):
         import torch
         import torch.distributed as dist
 
-        self.vit_dp = kvargs["vit_dp"]
+        # kvargs = {
+        #     "weight_dir": self.model_weightdir,
+        #     "device_id": device_id,
+        #     "vit_tp": self.vit_tp,
+        #     "cache_port": self.args.cache_port,
+        #     "tp_rank_id": tp_rank_id,
+        #     "dp_rank_id": dp_rank_id,
+        #     "data_type": self.args.data_type,
+        #     "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
+        #     "quant_type": self.args.vit_quant_type,
+        #     "quant_cfg": self.args.vit_quant_cfg,
+        #     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+        #     "vit_attn_backend": self.vit_attn_backend,
+        # }
+
+        weight_dir = kvargs["weight_dir"]
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
         self.cache_port = kvargs["cache_port"]
-        weight_dir = kvargs["weight_dir"]
         self.vit_rank_id = kvargs["vit_rank_id"]
         self.is_visual_only_mode = get_env_start_args().run_mode == "visual_only"
         self.data_type = kvargs["data_type"]
