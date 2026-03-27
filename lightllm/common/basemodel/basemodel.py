@@ -354,12 +354,12 @@ class TpPartBaseModel:
                 # 动态 MTP 验证模式下，也需要传递 b_mark_shared_group
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
                 # 将b_mark_shared_group pad到跟input_ids一样的长度，避免后续使用时出现形状不匹配的问题
-                infer_state.b_mark_shared_group = F.pad(
-                    infer_state.b_mark_shared_group,
-                    (0, infer_state.input_ids.shape[0] - infer_state.b_mark_shared_group.shape[0]),
-                    mode="constant",
-                    value=0,
-                )
+                # infer_state.b_mark_shared_group = F.pad(
+                #     infer_state.b_mark_shared_group,
+                #     (0, infer_state.input_ids.shape[0] - infer_state.b_mark_shared_group.shape[0]),
+                #     mode="constant",
+                #     value=0,
+                # )
 
         infer_state.multimodal_params = model_input.multimodal_params
 

@@ -9,6 +9,7 @@ from lightllm.utils.envs_utils import (
     get_diverse_max_batch_shared_group_size,
     enable_dynamic_mtp_verify,
 )
+from lightllm.utils.infer_utils import calculate_time
 
 
 def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> Tuple[ModelInput, List[InferReq]]:
@@ -225,18 +226,29 @@ def build_mtp_shared_group_infos(
         b_mark_shared_group: 标记请求组的数组，0 表示非组内最后一个请求，N>=1 表示 N 人组的最后一个请求
     """
     batch_size = b_mtp_index.shape[0]
-    b_mark_shared_group = [0] * batch_size
-
-    # 遍历 b_mtp_index，找到每个组的结束位置
-    # mtp_index=0 表示一个新组的开始，前一个组的结束位置的下一个位置
-    group_start = 0
-    for i in range(1, batch_size + 1):
-        # 到达数组末尾或者遇到新的组（mtp_index == 0）
-        if i == batch_size or b_mtp_index[i] == 0:
-            # 标记前一个组的结束位置
-            group_size = i - group_start
-            b_mark_shared_group[i - 1] = group_size
-            group_start = i
-
-    b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
-    return b_mark_shared_group
+    device = b_mtp_index.device
+    
+    # 1. 找到每个组的结束位置索引
+    # 情况 A: 下一个元素是 0 (新组开始)
+    # 情况 B: 当前元素是最后一个元素 (i == batch_size - 1)
+    
+    # 构造一个偏移数组，用来对比当前位和下一位
+    # 如果 b_mtp_index[i+1] == 0，则 i 是当前组的结尾
+    is_last_in_group = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    is_last_in_group[:-1] = (b_mtp_index[1:] == 0)
+    is_last_in_group[-1] = True  # 最后一个元素永远是最后一组的结尾
+    
+    # 2. 获取所有结尾处的索引
+    end_indices = torch.where(is_last_in_group)[0]
+    
+    # 3. 计算每个组的大小 (Group Sizes)
+    # 组大小 = 当前结尾索引 - 上一个结尾索引
+    # 我们在开头补一个 -1，方便统一计算第一个组的大小
+    shifted_indices = torch.cat([torch.tensor([-1], device=device), end_indices])
+    group_sizes = torch.diff(shifted_indices)
+    
+    # 4. 构建结果张量
+    res = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    res[end_indices] = group_sizes.to(torch.int32)
+    
+    return res

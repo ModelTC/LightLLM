@@ -62,7 +62,7 @@ class ModelInput:
         if not self.is_prefill and (enable_diverse_mode_gqa_decode_fast_kernel() or enable_dynamic_mtp_verify()):
             batch_size = len(self.b_req_idx)
             if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
+                self.b_mark_shared_group = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
             else:
                 self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
             # b_shared_seq_len 只在 diverse mode 下使用，动态 MTP mode 不需要
