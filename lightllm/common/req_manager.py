@@ -95,11 +95,6 @@ class ReqManager:
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
 
-    @property
-    def has_recurrent_state(self):
-        """Whether this model uses per-request recurrent state buffers (e.g. Mamba/linear attention)."""
-        return self.req_to_buffer_index is not None
-
 
 class ReqSamplingParamsManager:
     """

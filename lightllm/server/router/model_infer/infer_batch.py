@@ -23,9 +23,6 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 logger = init_logger(__name__)
 
-# Cache for mtp_range tensors to avoid repeated allocation
-_mtp_range_cache: Dict[int, torch.Tensor] = {}
-
 
 @dataclass
 class InferenceContext:
@@ -40,10 +37,7 @@ class InferenceContext:
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
-
-    @property
-    def has_recurrent_state(self):
-        return self.req_manager is not None and self.req_manager.has_recurrent_state
+    has_recurrent_state: bool = False  # for
 
     def register(
         self,
@@ -68,6 +62,7 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.mtp_step = get_env_start_args().mtp_step
+        self.has_recurrent_state = isinstance(self.req_manager, ReqManagerForMamba)
 
         return
 
@@ -103,11 +98,7 @@ class InferenceContext:
                 src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
                 req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
                 src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
-
-                mtp_step = req_manager.mtp_step
-                if mtp_step not in _mtp_range_cache:
-                    _mtp_range_cache[mtp_step] = torch.arange(0, mtp_step + 1, dtype=torch.int32, device="cuda")
-                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:, None], _mtp_range_cache[mtp_step][None, :]]
+                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:, None]]
                 req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
