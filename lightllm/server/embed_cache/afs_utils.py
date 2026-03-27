@@ -62,12 +62,22 @@ class AfsUtils:
     def free_afs(self, name: str) -> bool:
         try:
             path = self._get_afs_path(name)
+            if not path.exists():
+                return True
             path.unlink(missing_ok=True)
             return True
         except Exception as e:
             logger.warning(f"free_afs name: {name} error: {str(e)}")
             return False
         return
+
+    def exist_afs(self, name: str) -> bool:
+        try:
+            path = self._get_afs_path(name)
+            return path.exists()
+        except Exception as e:
+            logger.warning(f"exist_afs name: {name} error: {str(e)}")
+            return False
 
     def _get_afs_path(self, name: str, uuid_tail_str: Optional[str] = None) -> Path:
         if uuid_tail_str is None:
@@ -102,56 +112,45 @@ class SepEmbedManager:
             remove_size=self.remove_count, capcity=self.capacity
         )
         for obj in remove_objs:
-            _token = str(uuid.uuid4())
             try:
-                if self.redis_client.acquire_lock(md5=obj, token=_token, time_out=10):
-                    if self.redis_client.remove_ready(md5=obj, token=_token)[0]:
-                        self.afs_utils.free_afs(obj)
-                    self.redis_client.release_lock(md5=obj, token=_token)
+                if self.afs_utils.free_afs(obj):
+                    self.redis_client.remove([obj])
             except BaseException as e:
                 logger.warning(f"full_to_clean md5 {obj} error {str(e)}")
 
     def insert(self, md5: str, tensor: torch.Tensor) -> bool:
-        for _ in range(3):
-            if self._insert(md5, tensor):
-                return True
-            else:
-                time.sleep(30)
-        return False
-
-    def _insert(self, md5: str, tensor: torch.Tensor) -> bool:
         self.full_to_clean()
         try:
-            _token = str(uuid.uuid4())
-            if self.redis_client.acquire_lock(md5=md5, token=_token, time_out=30):
-                self.afs_utils.save_tensor_afs(md5, tensor)
-                ret = self.redis_client.mark_ready(md5=md5, token=_token)
-                if ret[0]:
-                    self.redis_client.release_lock(md5=md5, token=_token)
-                    return True
-                else:
-                    self.redis_client.release_lock(md5=md5, token=_token)
-                    logger.warning(f"insert {md5} failed error {ret[1]}")
-                    return False
+            # 保证一定会有清理的可能性
+            self.redis_client.update(md5)
+            self.afs_utils.save_tensor_afs(md5, tensor)
+            self.redis_client.update(md5)
         except:
             return False
 
-    def query_to_lock(self, md5: str) -> Optional[str]:
-        """
-        返回 None, 或者 token, 返回token代表可以去afs中读取数据了，
-        """
+    def load(self, md5: str) -> Optional[torch.Tensor]:
         try:
-            _token = str(uuid.uuid4())
-            if self.redis_client.acquire_lock(md5=md5, token=_token, time_out=60):
-                ret = self.redis_client.check_ready_and_touch(md5=md5, token=_token)
-                if ret[0]:
-                    return _token
-                else:
-                    logger.warning(f"query_to_lock {md5} failed  {ret[1]}")
-                    self.redis_client.release_lock(md5=md5, token=_token)
-        except:
-            try:
-                self.redis_client.release_lock(md5=md5, token=_token)
-            except:
-                pass
-        return None
+            ans = self.afs_utils.load_tensor_afs(md5)
+            if ans:
+                self.redis_client.update(md5)
+                return ans
+            else:
+                return None
+        except Exception as e:
+            logger.warning(f"load md5 {md5} error {str(e)}")
+            return None
+
+    def check_ready(self, md5_list: List[str]) -> List[bool]:
+        try:
+            tmp1 = self.redis_client.check_and_update(md5_list)
+            start = time.time()
+            tmp2 = [self.afs_utils.exist_afs(md5) for md5 in md5_list]
+            cost_time = time.time() - start
+            if cost_time > 0.05:
+                logger.warning(f"slow afs check exist {cost_time} seconds, md5_list size: {len(md5_list)}")
+            assert len(tmp1) == len(tmp2)
+            ans = [a and b for a, b in zip(tmp1, tmp2)]
+            return ans
+        except Exception as e:
+            logger.warning(f"check_ready error {str(e)}")
+            return [False] * len(md5_list)
