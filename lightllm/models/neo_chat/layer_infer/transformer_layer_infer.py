@@ -42,6 +42,7 @@ class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
         q_hw_2d = q_hw.reshape(q.shape[0], -1)
         k_t_2d = k_t.reshape(k.shape[0], -1)
         k_hw_2d = k_hw.reshape(k.shape[0], -1)
+
         layer_weight.qk_norm_weight_(q_t_2d, k_t_2d, eps=self.eps_)
         layer_weight.qk_hw_norm_weight_(q_hw_2d, k_hw_2d, eps=self.eps_)
 
