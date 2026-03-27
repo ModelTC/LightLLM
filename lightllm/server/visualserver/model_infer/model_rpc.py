@@ -36,8 +36,6 @@ from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 class VisualModelRpcServer(rpyc.Service):
     def exposed_init_model(self, kvargs):
         kvargs = obtain(kvargs)
-        import torch
-        import torch.distributed as dist
 
         # kvargs = {
         #     "weight_dir": self.model_weightdir,
@@ -148,6 +146,13 @@ class VisualModelRpcServer(rpyc.Service):
         all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
+        if not self.is_visual_only_mode:
+            self._not_visual_only_mode_handle(all_img_embeds, uuids, valid_ids, images)
+        else:
+            self._visual_only_mode_handle(all_img_embeds, uuids, valid_ids, images)
+        return
+
+    def _not_visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images):
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
             ids_to_set = []
@@ -164,7 +169,14 @@ class VisualModelRpcServer(rpyc.Service):
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)
                 torch.cuda.current_stream().synchronize()
-        return
+
+    def _visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images):
+        if self.tp_rank_id == 0:
+            all_img_embeds = all_img_embeds.detach().cpu()
+            for i in enumerate(len(images)):
+                start, end = valid_ids[i]
+                image = images[i]
+                self.redis_afs_client.insert(image.md5, all_img_embeds[start:end])
 
 
 class VisualModelRpcClient:
