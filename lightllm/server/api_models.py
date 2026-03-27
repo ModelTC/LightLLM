@@ -2,7 +2,7 @@ import time
 import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
+from typing import Any, Dict, List, Optional, Union, Literal, ClassVar, TypeAlias
 from transformers import GenerationConfig
 
 
@@ -261,7 +261,7 @@ class UsageInfo(BaseModel):
 
 class ChatMessage(BaseModel):
     role: Optional[str] = None
-    content: Optional[str] = None
+    content: Optional[Union[str, List[MessageContent]]] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
@@ -287,7 +287,7 @@ class ChatCompletionResponse(BaseModel):
 
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
-    content: Optional[str] = None
+    content: Optional[Union[str, List[MessageContent]]] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     reasoning_content: Optional[str] = None
 
@@ -356,3 +356,105 @@ class CompletionStreamResponse(BaseModel):
     @field_validator("id", mode="before")
     def ensure_id_is_str(cls, v):
         return str(v)
+
+
+class ChatCompletionStreamResponseV2(ChatCompletionStreamResponse):
+    pass
+
+
+class ChatCompletionResponseV2(ChatCompletionRequest):
+    pass
+
+
+# Supported values
+AspectRatio: TypeAlias = Literal[
+    "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
+    "9:16", "16:9", "21:9",
+]
+
+ImageSize: TypeAlias  = Literal["0.5K", "1K", "2K", "4K"]
+
+Modality: TypeAlias = Literal["text", "image", "audio"]
+
+ImageType: TypeAlias = Literal["png", "jpeg", "webp"]
+
+class ImageConfig(BaseModel):
+    aspect_ratio: AspectRatio = "1:1"
+    image_size: ImageSize = "1K"
+    image_type: ImageType = "jpeg"
+
+    # Mapping to actual resolutions (base resolution for 1K)
+    _aspect_ratio_to_resolution: ClassVar[dict] = {
+        "1:1": (1024, 1024),
+        "2:3": (832, 1248),
+        "3:2": (1248, 832),
+        "3:4": (864, 1184),
+        "4:3": (1184, 864),
+        "4:5": (896, 1152),
+        "5:4": (1152, 896),
+        "9:16": (768, 1344),
+        "16:9": (1344, 768),
+        "21:9": (1536, 672),
+    }
+
+    _size_multiplier: ClassVar[dict] = {
+        "0.5K": 0.5,
+        "1K": 1.0,
+        "2K": 2.0,
+        "4K": 4.0,
+    }
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls, v):
+        if v not in cls._aspect_ratio_to_resolution:
+            raise ValueError(f"Unsupported aspect ratio: {v}")
+        return v
+
+    @field_validator("image_size")
+    @classmethod
+    def validate_image_size(cls, v):
+        if v not in cls._size_multiplier:
+            raise ValueError(f"Unsupported image size: {v}")
+        return v
+
+    @field_validator("image_type")
+    @classmethod
+    def validate_image_type(cls, v):
+        if v not in ['jpeg', 'png', 'webp']:
+            raise ValueError(f"unsupported image type: {v}")
+        return v
+
+    def get_resolution(self):
+        """Return scaled resolution (width, height)"""
+        base = self._aspect_ratio_to_resolution[self.aspect_ratio]
+        if base is None:
+            return None  # extended ratios don't have fixed base
+
+        scale = self._size_multiplier[self.image_size]
+        w, h = base
+        return int(w * scale), int(h * scale)
+
+
+class ChatCompletionRequestV2(ChatCompletionRequest):
+    modalities: List[Modality] = ["text"]
+    image_config: Optional[ImageConfig] = None
+
+    @field_validator("modalities")
+    @classmethod
+    def validate_modalities(cls, v):
+        if "text" not in v:
+            raise ValueError("modalities must include 'text'")
+        if len(v) != len(set(v)):
+            raise ValueError("modalities must be unique")
+        return v
+
+    @model_validator(mode="after")
+    def validate_image_config(self):
+        if "image" in self.modalities:
+            if self.image_config is None:
+                self.image_config = ImageConfig()
+        else:
+            if self.image_config is not None:
+                raise ValueError("image_config provided but 'image' not in modalities")
+        return self

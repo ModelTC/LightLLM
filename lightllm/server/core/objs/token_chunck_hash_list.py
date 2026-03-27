@@ -77,8 +77,7 @@ class CpuCachePageList(ctypes.Structure):
         return self.size == LIGHTLLM_TOKEN_HASH_LIST_SIZE
 
     def fill(self, data: List[int]):
-        assert self.size == 0
-        assert len(data) <= LIGHTLLM_TOKEN_HASH_LIST_SIZE
+        assert len(data) <= LIGHTLLM_TOKEN_HASH_LIST_SIZE, f"data size is too large: {len(data)}"
         self.items[0 : len(data)] = data
         self.size = len(data)
         return

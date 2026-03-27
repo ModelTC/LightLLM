@@ -105,7 +105,7 @@ class X2IManager:
                     protocol=pickle.HIGHEST_PROTOCOL)
 
                 images = []
-                logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with x2i_param: {x2i_param}")
+                logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {x2i_param}")
                 if is_t2i:
                     images = await self.t2i_generate(past_kv_cache, past_kv_cache_text, x2i_param)
                 else:
