@@ -9,7 +9,7 @@ import os
 import torch.multiprocessing as mp
 import collections
 from datetime import timedelta
-from typing import Dict, List, Tuple, Deque
+from typing import Dict, List, Tuple, Deque, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.retry_utils import retry
 from rpyc.utils.classic import obtain, unix_connect
@@ -126,7 +126,7 @@ class VisualModelRpcServer(rpyc.Service):
                     redis_port=args.config_server_vit_redis_port,
                     capacity=args.afs_embed_capacity,
                 )
-                self.async_ret_handle_list: Deque[tuple] = collections.deque()
+                self.async_ret_handle_dict: Dict[str, tuple] = {}
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -144,15 +144,20 @@ class VisualModelRpcServer(rpyc.Service):
         return self.model.encode(images)
 
     # @calculate_time(show=False, min_cost_ms=300)
-    def exposed_encode(self, images: List[ImageItem]):
+    def exposed_encode(self, images: List[ImageItem], infer_uid: Optional[str] = None):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
         if not self.is_visual_only_mode:
-            self._not_visual_only_mode_handle(all_img_embeds, uuids, valid_ids, images)
+            assert infer_uid is None
+            self._not_visual_only_mode_handle(
+                all_img_embeds=all_img_embeds, uuids=uuids, valid_ids=valid_ids, images=images
+            )
         else:
-            self._visual_only_mode_handle(all_img_embeds, uuids, valid_ids, images)
+            self._visual_only_mode_handle(
+                all_img_embeds=all_img_embeds, uuids=uuids, valid_ids=valid_ids, images=images, infer_uid=infer_uid
+            )
         return
 
     def _not_visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images):
@@ -173,19 +178,20 @@ class VisualModelRpcServer(rpyc.Service):
                 self.cache_client.root.set_items_embed(ids_to_set)
                 torch.cuda.current_stream().synchronize()
 
-    def _visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images):
+    def _visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images, infer_uid):
         if self.tp_rank_id == 0:
             all_img_embeds = all_img_embeds.detach().cpu()
-            self.async_ret_handle_list.append((all_img_embeds, valid_ids, images))
+            self.async_ret_handle_dict[infer_uid] = (all_img_embeds, valid_ids, images)
 
-    def exposed_put_to_afs(self):
+    def exposed_put_to_afs(self, infer_uid: str):
         assert self.tp_rank_id == 0
-        assert len(self.async_ret_handle_list) > 0
-        all_img_embeds, valid_ids, images = self.async_ret_handle_list.popleft()
-        for i in enumerate(len(images)):
-            start, end = valid_ids[i]
-            image = images[i]
-            self.redis_afs_client.insert(image.md5, all_img_embeds[start:end])
+        ret = self.async_ret_handle_dict.pop(infer_uid, None)
+        if ret is not None:
+            all_img_embeds, valid_ids, images = ret
+            for i in enumerate(len(images)):
+                start, end = valid_ids[i]
+                image = images[i]
+                self.redis_afs_client.insert(image.md5, all_img_embeds[start:end])
 
 
 class VisualModelRpcClient:

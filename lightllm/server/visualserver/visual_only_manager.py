@@ -47,50 +47,48 @@ class VisualManager(rpyc.Service):
 
     async def wait_to_model_ready(self):
 
-        self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
-        self.model_rpcs_1: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
+        self.model_rpcs: List[List[VisualModelRpcClient]] = []
+        self.model_rpcs_1: List[List[VisualModelRpcClient]] = []
         self.vit_attn_backend = init_vit_att_backend(index=0)
-        for dp_rank_id in range(self.vit_dp):
-            for tp_rank_id in range(self.vit_tp):
-
-                rpc_model = await start_model_process()
-                self.model_rpcs[dp_rank_id].append(rpc_model[0])
-                self.model_rpcs_1[dp_rank_id].append(rpc_model[1])
+        for tp_rank_id in range(self.vit_tp):
+            rpc_model = await start_model_process()
+            self.model_rpcs.append(rpc_model[0])
+            self.model_rpcs_1.append(rpc_model[1])
 
         init_model_ret = []
-        for dp_rank_id in range(self.vit_dp):  # async init model process
-            for tp_rank_id in range(self.vit_tp):
-                device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
-                kvargs = {
-                    "weight_dir": self.model_weightdir,
-                    "device_id": device_id,
-                    "vit_tp": self.vit_tp,
-                    "cache_port": self.args.cache_port,
-                    "tp_rank_id": tp_rank_id,
-                    "dp_rank_id": dp_rank_id,
-                    "data_type": self.args.data_type,
-                    "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
-                    "quant_type": self.args.vit_quant_type,
-                    "quant_cfg": self.args.vit_quant_cfg,
-                    "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
-                    "vit_attn_backend": self.vit_attn_backend,
-                }
-                init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
+
+        for tp_rank_id in range(self.vit_tp):
+            device_id = self.args.visual_gpu_ids[tp_rank_id]
+            kvargs = {
+                "weight_dir": self.model_weightdir,
+                "device_id": device_id,
+                "vit_tp": self.vit_tp,
+                "cache_port": self.args.cache_port,
+                "tp_rank_id": tp_rank_id,
+                "dp_rank_id": 0,
+                "data_type": self.args.data_type,
+                "visual_nccl_port": self.args.visual_nccl_ports[0],
+                "quant_type": self.args.vit_quant_type,
+                "quant_cfg": self.args.vit_quant_cfg,
+                "max_batch_size": min(self.args.visual_infer_batch_size // self.vit_dp, 1),
+                "vit_attn_backend": self.vit_attn_backend,
+            }
+            init_model_ret.append(self.model_rpcs[tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
         return
 
-    async def infer_imgs(self, images: List[ImageItem], infer_uids: str):
+    async def infer_imgs(self, images: List[ImageItem], infer_uid: str):
         assert len(images) != 0
         tasks = []
         for vit_tp_rank in range(self.vit_tp):
-            task = asyncio.create_task(self.model_rpcs[0][vit_tp_rank].encode(images, infer_uids=infer_uids))
+            task = asyncio.create_task(self.model_rpcs[vit_tp_rank].encode(images, infer_uid=infer_uid))
             tasks.append(task)
 
         await asyncio.gather(*tasks)
         return
 
-    async def put_to_afs(self, infer_uids: str):
-        await self.model_rpcs_1[0][0].put_to_afs(infer_uids)
+    async def put_to_afs(self, infer_uid: str):
+        await self.model_rpcs_1[0].put_to_afs(infer_uid)
         return
 
     def _task_worker(self):
