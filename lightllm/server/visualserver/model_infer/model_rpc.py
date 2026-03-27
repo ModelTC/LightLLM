@@ -4,10 +4,14 @@ import rpyc
 import torch
 import socket
 import inspect
+import uuid
+import os
+import torch.multiprocessing as mp
 from datetime import timedelta
 from typing import Dict, List, Tuple
 from transformers.configuration_utils import PretrainedConfig
-from rpyc.utils.classic import obtain
+from lightllm.utils.retry_utils import retry
+from rpyc.utils.classic import obtain, unix_connect
 from rpyc.utils.server import ThreadedServer
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
@@ -26,7 +30,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
-from lightllm.server.embed_cache.afs_utils import SepEmbedManager
+from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -102,7 +106,7 @@ class VisualModelRpcServer(rpyc.Service):
                 self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
             else:
                 args = get_env_start_args()
-                self.redis_afs_client = SepEmbedManager(
+                self.redis_afs_client = SepEmbedHandler(
                     afs_embed_dir=args.afs_embed_dir,
                     redis_host=args.config_server_host,
                     redis_port=args.config_server_vit_redis_port,
@@ -148,100 +152,72 @@ class VisualModelRpcServer(rpyc.Service):
                 torch.cuda.current_stream().synchronize()
         return
 
-    def exposed_encode_visual_only(self, images: List[ImageItem]):
-        images = obtain(images)
-        all_img_embeds, uuids, valid_ids = self.forward(images)
-        all_img_embeds = all_img_embeds.detach().cpu()
-
-        if self.tp_rank_id == 0:
-            for i in range(len(uuids)):
-                # uid = uuids[i]
-                start, end = valid_ids[i]
-                image = images[i]
-                embed_tensor = all_img_embeds[start:end]
-                try:
-                    self.redis_afs_client.insert(image.md5, tensor=embed_tensor)
-                except:
-                    pass
-        return
-
 
 class VisualModelRpcClient:
-    def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
-        self.model: VisualModelRpcServer = model_rpc
-        self.vit_tp = vit_tp
-        self.rpc_server_process = rpc_server_process
-        self.use_rpc = True
-        if self.use_rpc:
+    def __init__(self, rpc_conn):
+        self.rpc_conn: VisualModelRpcServer = rpc_conn
 
-            def async_wrap(f):
-                f = rpyc.async_(f)
+        def async_wrap(f):
+            f = rpyc.async_(f)
 
-                async def _func(*args, **kwargs):
-                    ans = f(*args, **kwargs)
-                    await asyncio.to_thread(ans.wait)
-                    # raise if exception
-                    return ans.value
+            async def _func(*args, **kwargs):
+                ans = f(*args, **kwargs)
+                await asyncio.to_thread(ans.wait)
+                # raise if exception
+                return ans.value
 
-                return _func
+            return _func
 
-            self._init_model = async_wrap(self.model.init_model)
-            self._encode = async_wrap(self.model.encode)
-        else:
-            self._init_model = self.model.exposed_init_model
-            self._encode = self.model.exposed_encode
+        self._init_model = async_wrap(self.rpc_conn.init_model)
+        self._encode = async_wrap(self.rpc_conn.encode)
+
         return
 
     async def init_model(self, kvargs):
         ans: rpyc.AsyncResult = self._init_model(kvargs)
-        if self.use_rpc:
-            await ans
-            return
-        else:
-            return
+        await ans
+        return
 
     async def encode(self, images: List[ImageItem]):
         ans = self._encode(images)
-        if self.use_rpc:
-            return await ans
-        else:
-            return ans
+        return await ans
 
 
-def _init_env(port, device_id):
+def _init_env(scoket_path: str, success_event: "mp.Event"):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     import lightllm.utils.rpyc_fix_utils as _
 
-    t = ThreadedServer(VisualModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
+    t = ThreadedServer(VisualModelRpcServer(), socket_path=scoket_path, protocol_config={"allow_pickle": True})
+    success_event.set()
     t.start()
     return
 
 
-async def start_model_process(port, vit_tp, device_id):
-    import multiprocessing
+async def start_model_process():
+    socket_path = _generate_unix_socket_path()
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
 
-    proc = multiprocessing.Process(
+    success_event = mp.Event()
+    proc = mp.Process(
         target=_init_env,
         args=(
-            port,
-            device_id,
+            socket_path,
+            success_event,
         ),
     )
     proc.start()
-    await asyncio.sleep(2)
-    repeat_count = 0
-    while repeat_count < 20:
-        try:
-            con = rpyc.connect("localhost", port, config={"allow_pickle": True})
-            con._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            break
-        except BaseException:
-            await asyncio.sleep(1)
-        repeat_count += 1
-    if repeat_count == 20:
-        raise Exception("init rpc env error!")
+    await asyncio.to_thread(success_event.wait, timeout=40)
+
+    conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
 
     assert proc.is_alive()
-    return VisualModelRpcClient(con.root, vit_tp, rpc_server_process=proc)
+    return VisualModelRpcClient(conn.root)
+
+
+def _generate_unix_socket_path() -> str:
+    """Generate a random Unix socket path"""
+    unique_id = uuid.uuid4().hex[:8]
+    return f"/tmp/lightllm_model_infer_{unique_id}.sock"

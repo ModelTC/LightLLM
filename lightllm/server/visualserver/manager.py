@@ -31,6 +31,7 @@ class VisualManager:
         args: StartArgs,
         visual_model_rpc_ports,
     ):
+        self.args = args
         context = zmq.Context(2)
         enable_audio = not args.disable_audio
         if enable_audio:
@@ -48,15 +49,12 @@ class VisualManager:
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.cache_port = args.cache_port
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
-        self.tp_world_size = args.tp
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
+        # image 最大推理 batch size
         self.infer_batch_size = args.visual_infer_batch_size
-        self.trust_remote_code = args.trust_remote_code
-        self.args = args
         self.visual_model_rpc_ports = visual_model_rpc_ports
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
@@ -66,29 +64,25 @@ class VisualManager:
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
         self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
-            tp_ports_each_dp = self.visual_model_rpc_ports[dp_rank_id]
             for tp_rank_id in range(self.vit_tp):
-                device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
-                rpc_model = await start_model_process(
-                    port=tp_ports_each_dp[tp_rank_id], vit_tp=self.vit_tp, device_id=device_id
-                )
+
+                rpc_model = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
         for dp_rank_id in range(self.vit_dp):  # async init model process
             for tp_rank_id in range(self.vit_tp):
+                device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
                 kvargs = {
                     "weight_dir": self.model_weightdir,
-                    "trust_remote_code": self.trust_remote_code,
-                    "vit_dp": self.vit_dp,
+                    "device_id": device_id,
+                    "trust_remote_code": self.args.trust_remote_code,
                     "vit_tp": self.vit_tp,
-                    "cache_port": self.cache_port,
+                    "cache_port": self.args.cache_port,
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,
-                    "vit_rank_id": dp_rank_id * self.vit_tp + tp_rank_id,
                     "data_type": self.args.data_type,
                     "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
-                    "visual_gpu_ids": self.args.visual_gpu_ids,
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
@@ -203,10 +197,6 @@ class VisualManager:
             await asyncio.sleep(0.01)
 
     def clean_up(self):
-        for model_rpc in self.model_rpcs:
-            model_rpc.rpc_server_process.kill()
-        for model_rpc in self.model_rpcs:
-            model_rpc.rpc_server_process.join()
         return
 
 
