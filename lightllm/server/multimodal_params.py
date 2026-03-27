@@ -187,8 +187,6 @@ class MultimodalParams:
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
         return ret
-<<<<<<< HEAD
-=======
 
     def free(self):
         for image in self.images:
@@ -199,4 +197,3 @@ class MultimodalParams:
 
     def clone(self):
         return MultimodalParams(**self.to_origin_dict())
->>>>>>> 43a488a8 (add naive x2i backend.)

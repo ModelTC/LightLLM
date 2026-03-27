@@ -250,7 +250,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=12+ node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
+        num=12 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
