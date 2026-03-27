@@ -88,7 +88,7 @@ class UpStatusManager:
                             if pd_master_obj.node_id in self.id_to_handle_queue:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
                                 upkv_status: Union[UpKVStatus, NixlUpKVStatus] = await task_queue.get()
-                                await websocket.send(pickle.dumps(upkv_status))
+                                await websocket.send(json.dumps(upkv_status).encode())
                                 logger.info(f"up kv status: {upkv_status}")
                             else:
                                 await asyncio.sleep(3)
