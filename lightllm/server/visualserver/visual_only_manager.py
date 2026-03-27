@@ -6,6 +6,7 @@ import threading
 import queue
 import dataclasses
 import rpyc
+import uuid
 from typing import List, Any
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import StartArgs
@@ -35,9 +36,6 @@ class VisualManager(rpyc.Service):
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
         assert self.vit_dp == 1
-        # image 最大推理 batch size
-        self.infer_batch_size = args.visual_infer_batch_size
-        self.send_batch_size = args.visual_send_batch_size
 
         # 工作线程
         self.task_queue = queue.Queue()
@@ -81,19 +79,18 @@ class VisualManager(rpyc.Service):
         await asyncio.gather(*init_model_ret)
         return
 
-    async def infer_imgs(self, images: List[ImageItem]):
-        if len(images) == 0:
-            return
-
+    async def infer_imgs(self, images: List[ImageItem], infer_uids: str):
+        assert len(images) != 0
         tasks = []
-        for vit_dp_rank in range(self.vit_dp):
-            assigned_images = [images[i] for i in range(vit_dp_rank, len(images), self.vit_dp)]
-            if assigned_images:
-                for vit_tp_rank in range(self.vit_tp):
-                    task = asyncio.create_task(self.model_rpcs[vit_dp_rank][vit_tp_rank].encode(assigned_images))
-                    tasks.append(task)
+        for vit_tp_rank in range(self.vit_tp):
+            task = asyncio.create_task(self.model_rpcs[0][vit_tp_rank].encode(images, infer_uids=infer_uids))
+            tasks.append(task)
 
         await asyncio.gather(*tasks)
+        return
+
+    async def put_to_afs(self, infer_uids: str):
+        await self.model_rpcs_1[0][0].put_to_afs(infer_uids)
         return
 
     def _task_worker(self):
@@ -107,11 +104,7 @@ class VisualManager(rpyc.Service):
 
                 # 执行任务: 调用父类的forward方法处理图像
                 try:
-                    all_img_embeds, uuids, valid_ids = self.forward(task.images)
-                    all_img_embeds = all_img_embeds.detach().cpu()
-
-                    # 存储结果到task.ret
-                    task.ret = {"embeds": all_img_embeds, "valid_ids": valid_ids}
+                    asyncio.run(self.infer_imgs(task.images))
                 except Exception as e:
                     task.hasError = True
                     logger.exception(str(e))
@@ -135,21 +128,23 @@ class VisualManager(rpyc.Service):
         Returns:
             _Task: 任务对象, 包含ret和event
         """
-        images = obtain(images)
-        with self.sempare:
-            event = threading.Event()
-            task = _Task(images=images, ret=None, event=event)
-            self.task_queue.put(task)
-            task.event.wait(timeout=8888)
+        try:
+            images = obtain(images)
+            # 写入 shm, 然后
 
-        all_img_embeds = task.ret["embeds"]
-        valid_ids = task.ret["valid_ids"]
+            with self.sempare:
+                event = threading.Event()
+                task = _Task(images=images, infer_uid=uuid.uuid4().hex, vent=event)
+                self.task_queue.put(task)
+                task.event.wait(timeout=8888)
 
-        if self.tp_rank_id == 0:
-            for i in enumerate(len(images)):
-                start, end = valid_ids[i]
-                image = images[i]
-                self.afs_handler.insert(image.md5, all_img_embeds[start:end])
+            asyncio.run(self.put_to_afs(infer_uids=task.infer_uid))
+
+            # 将 shm 进行删除
+
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
         return
 
     def clean_up(self):
@@ -181,8 +176,8 @@ def start_visual_process(args, pipe_writer):
 @dataclasses.dataclass
 class _Task:
     images: List["ImageItem"]
-    ret: Any
     event: threading.Event
+    infer_uid: str
     hasError: bool = False
 
     def wait(self, timeout: float = None):
