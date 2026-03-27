@@ -1,22 +1,25 @@
 import asyncio
 import rpyc
+import socket
 import torch
-from typing import Dict, List, Tuple
+import inspect
+from typing import List
+from rpyc.utils.classic import obtain
+from rpyc.utils.server import ThreadedServer
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.models.whisper.whisper_audio import WhisperAudioModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_audio import Qwen3OmniMoeAudioEncoder
 from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.utils.graceful_utils import graceful_registry
 
 
 class AudioModelRpcServer(rpyc.Service):
     def exposed_init_model(self, kvargs):
-        # 注册graceful 退出的处理
-        from lightllm.utils.graceful_utils import graceful_registry
-        import inspect
-
-        graceful_registry(inspect.currentframe().f_code.co_name)
+        kvargs = obtain(kvargs)
+        self.dp_rank_id = kvargs["dp_rank_id"]
+        torch.cuda.set_device(self.dp_rank_id)
 
         weight_dir = kvargs["weight_dir"]
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
@@ -41,7 +44,7 @@ class AudioModelRpcServer(rpyc.Service):
             # CpuEmbedCacheClient 的初始化需要依赖这个设置的环境信息。
             from lightllm.utils.dist_utils import set_current_device_id
 
-            set_current_device_id(torch.cuda.current_device())
+            set_current_device_id(self.dp_rank_id)
 
             self.cpu_embed_cache_client = CpuEmbedCacheClient(
                 create_meta_data=False,
@@ -65,6 +68,8 @@ class AudioModelRpcServer(rpyc.Service):
 
     # @calculate_time(show=False, min_cost_ms=300)
     def exposed_encode(self, audios):
+        torch.cuda.set_device(self.dp_rank_id)
+        audios = obtain(audios)
         return self.forward(audios)
 
 
@@ -74,6 +79,7 @@ class AudioModelRpcClient:
         self.world_size = world_size
         self.rpc_server_process = rpc_server_process
         self.use_rpc = self.world_size != 1
+
         if self.use_rpc:
 
             def async_wrap(f):
@@ -82,7 +88,6 @@ class AudioModelRpcClient:
                 async def _func(*args, **kwargs):
                     ans = f(*args, **kwargs)
                     await asyncio.to_thread(ans.wait)
-                    # raise if exception
                     return ans.value
 
                 return _func
@@ -95,21 +100,52 @@ class AudioModelRpcClient:
         return
 
     async def init_model(self, kvargs):
-        ans: rpyc.AsyncResult = self._init_model(kvargs)
+        ans = self._init_model(kvargs)
         if self.use_rpc:
-            await ans
-            return
-        else:
-            return
+            return await ans
+        return ans
 
     async def encode(self, audios: List[AudioItem]):
         ans = self._encode(audios)
         if self.use_rpc:
             return await ans
-        else:
-            return ans
+        return ans
 
 
-async def start_model_process(world_size):
+def _init_env(port, device_id):
+    graceful_registry(inspect.currentframe().f_code.co_name)
+    torch.cuda.set_device(device_id)
+
+    from lightllm.utils.dist_utils import set_current_device_id
+    import lightllm.utils.rpyc_fix_utils as _
+
+    set_current_device_id(device_id)
+    t = ThreadedServer(AudioModelRpcServer(), port=port, protocol_config={"allow_pickle": True})
+    t.start()
+    return
+
+
+async def start_model_process(world_size, port=None, device_id=None):
     if world_size == 1:
         return AudioModelRpcClient(AudioModelRpcServer(), world_size)
+
+    import multiprocessing
+
+    proc = multiprocessing.Process(target=_init_env, args=(port, device_id))
+    proc.start()
+    await asyncio.sleep(2)
+    repeat_count = 0
+    while repeat_count < 20:
+        try:
+            con = rpyc.connect("localhost", port, config={"allow_pickle": True})
+            con._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            break
+        except BaseException:
+            await asyncio.sleep(1)
+        repeat_count += 1
+
+    if repeat_count == 20:
+        raise Exception("init rpc env error!")
+
+    assert proc.is_alive()
+    return AudioModelRpcClient(con.root, world_size, rpc_server_process=proc)

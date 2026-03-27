@@ -188,6 +188,9 @@ def normal_or_p_d_start(args):
     if args.visual_dp <= 0:
         raise ValueError("visual_dp must be a positive integer.")
 
+    if args.audio_dp <= 0:
+        raise ValueError("audio_dp must be a positive integer.")
+
     if args.visual_infer_batch_size is None:
         args.visual_infer_batch_size = args.visual_dp
 
@@ -196,6 +199,15 @@ def normal_or_p_d_start(args):
         raise ValueError(
             f"visual_infer_batch_size ({args.visual_infer_batch_size}) must be "
             f"a positive integer multiple of visual_dp ({args.visual_dp})"
+        )
+
+    if args.audio_infer_batch_size is None:
+        args.audio_infer_batch_size = args.audio_dp * 2
+
+    if args.audio_infer_batch_size // args.audio_dp < 1 or args.audio_infer_batch_size % args.audio_dp != 0:
+        raise ValueError(
+            f"audio_infer_batch_size ({args.audio_infer_batch_size}) must be "
+            f"a positive integer multiple of audio_dp ({args.audio_dp})"
         )
 
     if args.disable_chunked_prefill:
@@ -247,8 +259,10 @@ def normal_or_p_d_start(args):
     ports_locker.lock_port()
 
     node_world_size = args.tp // args.nnodes
+    audio_model_dp_ports_num = 0 if args.disable_audio else args.audio_dp
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1) + audio_model_dp_ports_num,
+        used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -273,6 +287,9 @@ def normal_or_p_d_start(args):
         can_use_ports = can_use_ports[args.visual_tp :]
         visual_nccl_ports.append(can_use_ports[0])
         can_use_ports = can_use_ports[1:]
+
+    audio_model_dp_ports = can_use_ports[0:audio_model_dp_ports_num]
+    can_use_ports = can_use_ports[audio_model_dp_ports_num:]
 
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
@@ -342,7 +359,7 @@ def normal_or_p_d_start(args):
                 start_audio_process,
             ],
             start_args=[
-                (args,),
+                (args, audio_model_dp_ports),
             ],
         )
 

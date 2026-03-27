@@ -26,7 +26,7 @@ class AudioManager:
     def __init__(
         self,
         args: StartArgs,
-        infer_batch_size=4,
+        audio_model_rpc_ports,
     ):
         context = zmq.asyncio.Context(2)
 
@@ -45,29 +45,32 @@ class AudioManager:
         self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
-        self.world_size = 1
-        self.infer_batch_size = infer_batch_size
+        self.audio_dp = args.audio_dp
+        self.infer_batch_size = args.audio_infer_batch_size
         self.trust_remote_code = args.trust_remote_code
         self.args = args
+        self.audio_model_rpc_ports = audio_model_rpc_ports or [None] * self.audio_dp
         self.shm_req_manager = ShmReqManager()
+        self.model_rpcs: List[AudioModelRpcClient] = []
 
     async def wait_to_model_ready(self):
-
-        self.model_rpcs: List[AudioModelRpcClient] = []
-        for rank_id in range(self.world_size):
-            rpc_model = await start_model_process(world_size=self.world_size)
+        self.model_rpcs = []
+        for dp_rank_id in range(self.audio_dp):
+            rpc_model = await start_model_process(
+                world_size=self.audio_dp, port=self.audio_model_rpc_ports[dp_rank_id], device_id=dp_rank_id
+            )
             self.model_rpcs.append(rpc_model)
 
         init_model_ret = []
-        for rank_id in range(self.world_size):
+        for dp_rank_id in range(self.audio_dp):
             kvargs = {
                 "weight_dir": self.model_weightdir,
                 "trust_remote_code": self.trust_remote_code,
-                "rank_id": rank_id,
+                "dp_rank_id": dp_rank_id,
                 "cache_port": self.cache_port,
                 "data_type": self.args.data_type,
             }
-            init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
+            init_model_ret.append(self.model_rpcs[dp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
         return
 
@@ -75,7 +78,11 @@ class AudioManager:
         if len(audios) == 0:
             return
 
-        rets = [self.model_rpcs[tp_rank].encode(audios) for tp_rank in range(self.world_size)]
+        rets = []
+        for dp_rank_id in range(self.audio_dp):
+            assigned_audios = [audios[i] for i in range(dp_rank_id, len(audios), self.audio_dp)]
+            if assigned_audios:
+                rets.append(self.model_rpcs[dp_rank_id].encode(assigned_audios))
         await asyncio.gather(*rets)
 
         return
@@ -148,19 +155,21 @@ class AudioManager:
 
     def clean_up(self):
         for model_rpc in self.model_rpcs:
-            model_rpc.rpc_server_process.kill()
+            if model_rpc.rpc_server_process is not None:
+                model_rpc.rpc_server_process.kill()
         for model_rpc in self.model_rpcs:
-            model_rpc.rpc_server_process.join()
+            if model_rpc.rpc_server_process is not None:
+                model_rpc.rpc_server_process.join()
         return
 
 
-def start_audio_process(args, pipe_writer):
+def start_audio_process(args, model_rpc_ports, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
 
+    audioserver = AudioManager(args=args, audio_model_rpc_ports=model_rpc_ports)
     try:
-        audioserver = AudioManager(args=args)
         asyncio.run(audioserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))
@@ -170,7 +179,7 @@ def start_audio_process(args, pipe_writer):
     pipe_writer.send("init ok")
 
     def handle_exception(loop, context):
-        logger.exception(f"VisualServer Caught exception: {str(context)}")
+        logger.exception(f"AudioServer Caught exception: {str(context)}")
 
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)

@@ -427,6 +427,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
     )
     parser.add_argument(
+        "--audio_infer_batch_size", type=int, default=None, help="number of audios to process in each inference batch"
+    )
+    parser.add_argument(
         "--visual_send_batch_size",
         type=int,
         default=1,
@@ -440,6 +443,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
+    parser.add_argument("--audio_dp", type=int, default=1, help="number of data parallel instances for audio encoder")
     parser.add_argument(
         "--visual_nccl_ports",
         nargs="+",

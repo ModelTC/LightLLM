@@ -99,10 +99,12 @@ class StartArgs:
     grouping_key: List[str] = field(default_factory=list)
     push_interval: int = field(default=10)
     visual_infer_batch_size: int = field(default=None)
+    audio_infer_batch_size: int = field(default=None)
     visual_send_batch_size: int = field(default=1)
     visual_gpu_ids: List[int] = field(default_factory=lambda: [0])
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
+    audio_dp: int = field(default=1)
     visual_nccl_ports: List[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
@@ -125,7 +127,9 @@ class StartArgs:
     vit_att_backend: List[str] = field(
         default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
-    llm_kv_type: str = field(default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"]})
+    llm_kv_type: str = field(
+        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"]}
+    )
     llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
     penalty_counter_mode: str = field(
