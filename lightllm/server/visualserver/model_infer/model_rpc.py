@@ -7,8 +7,9 @@ import inspect
 import uuid
 import os
 import torch.multiprocessing as mp
+import collections
 from datetime import timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Deque
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.retry_utils import retry
 from rpyc.utils.classic import obtain, unix_connect
@@ -118,12 +119,14 @@ class VisualModelRpcServer(rpyc.Service):
                 self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
             else:
                 args = get_env_start_args()
+                assert args.visual_dp == 1
                 self.redis_afs_client = SepEmbedHandler(
                     afs_embed_dir=args.afs_embed_dir,
                     redis_host=args.config_server_host,
                     redis_port=args.config_server_vit_redis_port,
                     capacity=args.afs_embed_capacity,
                 )
+                self.async_ret_handle_list: Deque[tuple] = collections.deque()
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -173,10 +176,16 @@ class VisualModelRpcServer(rpyc.Service):
     def _visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images):
         if self.tp_rank_id == 0:
             all_img_embeds = all_img_embeds.detach().cpu()
-            for i in enumerate(len(images)):
-                start, end = valid_ids[i]
-                image = images[i]
-                self.redis_afs_client.insert(image.md5, all_img_embeds[start:end])
+            self.async_ret_handle_list.append((all_img_embeds, valid_ids, images))
+
+    def exposed_put_to_afs(self):
+        assert self.tp_rank_id == 0
+        assert len(self.async_ret_handle_list) > 0
+        all_img_embeds, valid_ids, images = self.async_ret_handle_list.popleft()
+        for i in enumerate(len(images)):
+            start, end = valid_ids[i]
+            image = images[i]
+            self.redis_afs_client.insert(image.md5, all_img_embeds[start:end])
 
 
 class VisualModelRpcClient:
@@ -196,6 +205,7 @@ class VisualModelRpcClient:
 
         self._init_model = async_wrap(self.rpc_conn.init_model)
         self._encode = async_wrap(self.rpc_conn.encode)
+        self._put_to_afs = async_wrap(self.rpc_conn.put_to_afs)
 
         return
 
@@ -206,6 +216,10 @@ class VisualModelRpcClient:
 
     async def encode(self, images: List[ImageItem]):
         ans = self._encode(images)
+        return await ans
+
+    async def put_to_afs(self):
+        ans = self._put_to_afs()
         return await ans
 
 
@@ -237,10 +251,17 @@ async def start_model_process():
     proc.start()
     await asyncio.to_thread(success_event.wait, timeout=40)
 
-    conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
+    if get_env_start_args().run_mode != "visual_only":
+        conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
 
-    assert proc.is_alive()
-    return VisualModelRpcClient(conn.root)
+        assert proc.is_alive()
+        return VisualModelRpcClient(conn.root)
+    else:
+        conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
+        conn1 = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
+
+        assert proc.is_alive()
+        return VisualModelRpcClient(conn.root), VisualModelRpcClient(conn1.root)
 
 
 def _generate_unix_socket_path() -> str:
