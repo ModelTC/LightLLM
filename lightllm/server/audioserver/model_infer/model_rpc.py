@@ -1,8 +1,12 @@
 import asyncio
-import rpyc
-import socket
-import torch
 import inspect
+import io
+import socket
+import wave
+
+import numpy as np
+import rpyc
+import torch
 from typing import List
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
@@ -13,6 +17,21 @@ from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.log_utils import init_logger
+
+
+logger = init_logger(__name__)
+
+
+def _generate_silence_wav_bytes(sample_rate: int = 16000, num_samples: int = 16000) -> bytes:
+    samples = np.zeros(num_samples, dtype=np.int16)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(samples.tobytes())
+    return buffer.getvalue()
 
 
 class AudioModelRpcServer(rpyc.Service):
@@ -72,6 +91,13 @@ class AudioModelRpcServer(rpyc.Service):
         audios = obtain(audios)
         return self.forward(audios)
 
+    def exposed_warmup_model(self):
+        torch.cuda.set_device(self.dp_rank_id)
+        warmup_audio = _generate_silence_wav_bytes()
+        self.model.warmup(warmup_audio)
+        logger.info(f"audio model warmup finished on dp_rank_id:{self.dp_rank_id}")
+        return
+
 
 class AudioModelRpcClient:
     def __init__(self, model_rpc, world_size, rpc_server_process=None):
@@ -94,9 +120,11 @@ class AudioModelRpcClient:
 
             self._init_model = async_wrap(self.model.init_model)
             self._encode = async_wrap(self.model.encode)
+            self._warmup_model = async_wrap(self.model.warmup_model)
         else:
             self._init_model = self.model.exposed_init_model
             self._encode = self.model.exposed_encode
+            self._warmup_model = self.model.exposed_warmup_model
         return
 
     async def init_model(self, kvargs):
@@ -107,6 +135,12 @@ class AudioModelRpcClient:
 
     async def encode(self, audios: List[AudioItem]):
         ans = self._encode(audios)
+        if self.use_rpc:
+            return await ans
+        return ans
+
+    async def warmup_model(self):
+        ans = self._warmup_model()
         if self.use_rpc:
             return await ans
         return ans

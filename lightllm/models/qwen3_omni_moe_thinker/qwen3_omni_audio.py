@@ -389,3 +389,22 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         if ids_to_set:
             self.cache_client.root.set_items_embed(ids=ids_to_set)
             torch.cuda.current_stream().synchronize()
+
+    @torch.no_grad()
+    def warmup(self, audio_bytes: bytes):
+        audio = BytesIO(audio_bytes)
+        audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
+        input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
+        if feature_attention_mask is not None:
+            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+            input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
+        else:
+            audio_feature_lengths = None
+
+        feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+        _ = self.forward(
+            input_features,
+            feature_lens=feature_lens,
+        )
+        torch.cuda.current_stream().synchronize()
+        return

@@ -1,5 +1,7 @@
 """Multimodal parameters for text generation."""
 import os
+import wave
+import time
 import librosa
 import base64
 from typing import List
@@ -10,6 +12,17 @@ from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def generate_silence_wav_bytes(sample_rate: int = 16000, duration_seconds: float = 1.0) -> bytes:
+    num_samples = max(1, int(sample_rate * duration_seconds))
+    with BytesIO() as buffer:
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(b"\x00\x00" * num_samples)
+        return buffer.getvalue()
 
 
 class AudioItem:
@@ -32,6 +45,9 @@ class AudioItem:
 
     async def preload(self, request: Request):
         try:
+            req_id = getattr(getattr(request, "state", None), "lightllm_req_id", None)
+            preload_start = time.time()
+            source_ready_start = preload_start
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
                 proxy = os.getenv("REQUEST_PROXY", None)
@@ -40,13 +56,22 @@ class AudioItem:
                 audio_data = base64.b64decode(self._data)
             else:
                 raise ValueError(f"cannot read audio which type is {self._type}!")
+            source_ready_cost_ms = (time.time() - source_ready_start) * 1000.0
 
             # check if valid audio bytes
+            decode_start = time.time()
             audio_values, _ = librosa.load(BytesIO(audio_data), sr=16000)
+            decode_cost_ms = (time.time() - decode_start) * 1000.0
             from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
             self.audio_length = max(audio_values.shape[0], MIN_AUDIO_LEN)  # 如果音频过短，会被pad到480的长度
             self._preload_data = audio_data
+            logger.info(
+                f"lightllm_req_id:{req_id} stage:audio_preload_done "
+                f"elapsed_ms:{(time.time() - preload_start) * 1000.0:.3f} "
+                f"source_type:{self._type} source_ready_ms:{source_ready_cost_ms:.3f} "
+                f"decode_ms:{decode_cost_ms:.3f} audio_length:{self.audio_length}"
+            )
             return
 
         except Exception as e:
@@ -184,3 +209,13 @@ class MultimodalParams:
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
         return ret
+
+
+async def warmup_audio_preload():
+    warmup_audio = AudioItem(
+        type="base64",
+        data=base64.b64encode(generate_silence_wav_bytes()).decode("utf-8"),
+    )
+    await warmup_audio.preload(None)
+    warmup_audio.read()
+    return

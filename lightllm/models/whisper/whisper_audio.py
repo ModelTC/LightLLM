@@ -241,3 +241,21 @@ class WhisperAudioModel:
         if ids_to_set:
             self.cache_client.root.set_items_embed(ids=ids_to_set)
             torch.cuda.current_stream().synchronize()
+
+    @torch.no_grad()
+    def warmup(self, audio_bytes: bytes):
+        audio = BytesIO(audio_bytes)
+        audio, _ = librosa.load(audio, sr=16000)
+
+        from .defaults import MIN_AUDIO_LEN
+
+        if audio.shape[0] < MIN_AUDIO_LEN:
+            audio = np.pad(audio, (0, MIN_AUDIO_LEN - len(audio)), mode="constant", constant_values=0.0)
+
+        batch_audio_lens = np.array([min(audio.shape[0], self.max_length)], dtype=np.int32)
+        audios, audio_lens_after_cnn = self.audio_processor(
+            [audio], batch_audio_lens, sampling_rate=16000, return_tensors="pt"
+        )
+        _ = self.forward(audios, audio_lens_after_cnn)
+        torch.cuda.current_stream().synchronize()
+        return
