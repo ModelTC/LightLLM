@@ -100,7 +100,6 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
             if tokenizer.eos_token_id is not None:
                 return [int(tokenizer.eos_token_id)]
     except Exception:
-        # Fall back to config-based lookup below.
         pass
 
     eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
