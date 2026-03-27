@@ -32,7 +32,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     # infer class
     transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
-    post_layer_infer_class = Qwen3NextPostLayerInfer
 
     # infer state class
     infer_state_class = Qwen3NextInferStateInfo
