@@ -86,7 +86,7 @@ class AfsUtils:
             return Path(self.base_dir) / name[0:2] / f"{name}.{uuid_tail_str}"
 
 
-class SepEmbedManager:
+class SepEmbedHandler:
     def __init__(
         self,
         afs_embed_dir: str,
@@ -143,8 +143,9 @@ class SepEmbedManager:
     def check_ready(self, md5_list: List[str]) -> List[bool]:
         try:
             tmp1 = self.redis_client.check_and_update(md5_list)
+            assert len(tmp1) == len(md5_list)
             start = time.time()
-            tmp2 = [self.afs_utils.exist_afs(md5) for md5 in md5_list]
+            tmp2 = [exists and self.afs_utils.exist_afs(md5) for md5, exists in zip(md5_list, tmp1)]
             cost_time = time.time() - start
             if cost_time > 0.05:
                 logger.warning(f"slow afs check exist {cost_time} seconds, md5_list size: {len(md5_list)}")
