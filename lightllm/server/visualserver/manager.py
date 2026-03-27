@@ -29,7 +29,6 @@ class VisualManager:
     def __init__(
         self,
         args: StartArgs,
-        visual_model_rpc_ports,
     ):
         self.args = args
         context = zmq.Context(2)
@@ -55,7 +54,6 @@ class VisualManager:
         self.vit_tp = args.visual_tp
         # image 最大推理 batch size
         self.infer_batch_size = args.visual_infer_batch_size
-        self.visual_model_rpc_ports = visual_model_rpc_ports
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
 
@@ -200,13 +198,13 @@ class VisualManager:
         return
 
 
-def start_visual_process(args, model_rpc_ports, pipe_writer):
+def start_visual_process(args, pipe_writer):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
-        visualserver = VisualManager(args=args, visual_model_rpc_ports=model_rpc_ports)
+        visualserver = VisualManager(args=args)
         asyncio.run(visualserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

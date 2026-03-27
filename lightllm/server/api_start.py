@@ -525,12 +525,8 @@ def visual_start(args):
     ) = can_use_ports[0:5]
     can_use_ports = can_use_ports[5:]
 
-    visual_model_tp_ports = []
     visual_nccl_ports = []
     for _ in range(args.visual_dp):
-        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        visual_model_tp_ports.append(tp_ports_for_dp)
-        can_use_ports = can_use_ports[args.visual_tp :]
         if args.visual_nccl_ports is None:
             visual_nccl_ports.append(can_use_ports[0])
             can_use_ports = can_use_ports[1:]
@@ -564,7 +560,7 @@ def visual_start(args):
             start_visual_process,
         ],
         start_args=[
-            (args, visual_model_tp_ports),
+            (args,),
         ],
     )
     setup_signal_handlers(None, process_manager)
