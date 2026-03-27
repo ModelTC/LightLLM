@@ -49,7 +49,6 @@ from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from .past_kv_cache import PastKVCacheModule
 
-
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()

@@ -352,20 +352,20 @@ def normal_or_p_d_start(args):
             ],
         )
 
-        if args.enable_multimodal_x2i:
-            from .x2i_server.manager import start_x2i_process, setup_devices
-            origin_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-            setup_devices(args)
-            process_manager.start_submodule_processes(
-                start_funcs=[
-                    start_x2i_process,
-                ],
-                start_args=[
-                    (args,),
-                ],
-            )
-            if origin_devices:
-                os.environ["CUDA_VISIBLE_DEVICES"] = origin_devices
+    if args.enable_multimodal_x2i:
+        from .x2i_server.manager import start_x2i_process, setup_devices
+        origin_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        setup_devices(args)
+        process_manager.start_submodule_processes(
+            start_funcs=[
+                start_x2i_process,
+            ],
+            start_args=[
+                (args,),
+            ],
+        )
+        if origin_devices:
+            os.environ["CUDA_VISIBLE_DEVICES"] = origin_devices
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
