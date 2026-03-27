@@ -2,9 +2,10 @@ import os
 import time
 import torch
 import uuid
+import itertools
 from typing import List, Tuple, Optional
 from pathlib import Path
-from .redis_utils import RedisMetadataClient
+from .redis_utils import RedisMetadataLib
 
 from lightllm.utils.log_utils import init_logger
 
@@ -12,20 +13,26 @@ logger = init_logger(__name__)
 
 
 class AfsUtils:
-    def __init__(self, base_dir: str):
+    def __init__(self, base_dir: str, dir_depth: int = 2):
         self.base_dir = base_dir
         # 判断 base_dir 是否存在，不存在则创建并赋予777权限，让其他人也可以写入
         if not os.path.exists(base_dir):
-            os.makedirs(base_dir, exist_ok=True)
-            os.chmod(base_dir, 0o777)
+            os.makedirs(base_dir, mode=0o777, exist_ok=True)
+
+        # build sub dirs
+        parent_dir = Path(base_dir)
+        subdirs = ["".join(p) for p in itertools.product("0123456789abcdef", repeat=dir_depth)]
+        for sub in subdirs:
+            sub_dir_path = parent_dir / sub
+            os.makedirs(sub_dir_path, mode=0o777, exist_ok=True)
         return
 
     def save_tensor_afs(self, name: str, tensor: torch.Tensor) -> bool:
-        target_path = self._get_afs_path(name)
-        if target_path.exists():
-            return True
-        tmp_path = self._get_afs_path(name=name, uuid_tail_str=str(uuid.uuid4()))
         try:
+            target_path = self._get_afs_path(name)
+            if target_path.exists():
+                return True
+            tmp_path = self._get_afs_path(name=name, uuid_tail_str=str(uuid.uuid4()))
             with open(tmp_path, "wb") as f:
                 tensor = tensor.detach().cpu()
                 dest = torch.empty_like(tensor)
@@ -35,10 +42,6 @@ class AfsUtils:
             os.chmod(target_path, 0o777)
             return True
         except Exception as e:
-            try:
-                target_path.unlink(missing_ok=True)
-            except:
-                pass
             logger.warning(f"failed to save embed tensor file: {target_path} tmp_path: {tmp_path} excetion {str(e)}")
             return False
         finally:
@@ -46,7 +49,6 @@ class AfsUtils:
                 tmp_path.unlink(missing_ok=True)
             except:
                 pass
-
 
     def load_tensor_afs(self, name: str) -> Optional[torch.Tensor]:
         try:
@@ -57,19 +59,21 @@ class AfsUtils:
             logger.warning(f"fail to load afs file {name} error: {str(e)}")
             return None
 
-    def free_afs(self, name: str) -> None:
+    def free_afs(self, name: str) -> bool:
         try:
             path = self._get_afs_path(name)
             path.unlink(missing_ok=True)
+            return True
         except Exception as e:
             logger.warning(f"free_afs name: {name} error: {str(e)}")
+            return False
         return
-    
+
     def _get_afs_path(self, name: str, uuid_tail_str: Optional[str] = None) -> Path:
         if uuid_tail_str is None:
-            return Path(self.base_dir) / name
+            return Path(self.base_dir) / name[0:2] / name
         else:
-            return Path(self.base_dir) / f"{name}.{uuid_tail_str}"
+            return Path(self.base_dir) / name[0:2] / f"{name}.{uuid_tail_str}"
 
 
 class SepEmbedManager:
@@ -78,16 +82,16 @@ class SepEmbedManager:
         afs_embed_dir: str,
         redis_host: str,
         redis_port: int,
-        capacity: int = 50000,
+        capacity: int = 250000,
         evict_fraction: float = 0.1,
     ) -> None:
         if not (0.0 <= evict_fraction <= 1.0):
             raise ValueError("evict_fraction must be 0..1")
         if capacity < 1:
-            raise ValueError("capacity must be >=1")
+            raise ValueError("capacity must be >= 1")
 
         redis_url = f"redis://{redis_host}:{redis_port}/0"
-        self.redis_client = RedisMetadataClient(redis_url=redis_url)
+        self.redis_client = RedisMetadataLib(redis_url=redis_url)
         self.capacity = capacity
         self.remove_count = min(int(self.capacity * evict_fraction), 1000)  # full的时候，每次清理的数量
         self.afs_embed_dir = afs_embed_dir
