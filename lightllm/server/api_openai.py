@@ -25,6 +25,7 @@ from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
+from lightllm.server.core.objs.x2i_params import X2IParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
@@ -53,6 +54,9 @@ from .api_models import (
     DeltaMessage,
     ChatCompletionStreamResponse,
     ChatCompletionStreamResponseChoice,
+    ChatCompletionRequestV2,
+    MessageContent,
+    ImageURL,
 )
 
 logger = init_logger(__name__)
@@ -159,6 +163,54 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
     normal_text, calls = parser.parse_stream_chunk(delta)
     return normal_text, calls
 
+def _get_images_and_audios(request: ChatCompletionRequest):
+    images, audios = [], []
+    for message in request.messages:
+        if isinstance(message.content, list):
+            for content in message.content:
+                if content.type == "image_url" and content.image_url is not None:
+                    img = content.image_url.url
+                    if img.startswith("http://") or img.startswith("https://"):
+                        images.append({"type": "url", "data": img})
+                    elif img.startswith("data:image"):
+                        # "data:image/jpeg;base64,{base64_image}"
+                        data_str = img.split(";", 1)[1]
+                        if data_str.startswith("base64,"):
+                            data = data_str[7:]
+                            images.append({"type": "base64", "data": data})
+                        else:
+                            raise ValueError("Unrecognized image input.")
+                    else:
+                        raise ValueError(
+                            "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
+                        )
+                elif content.type == "audio_url" and content.audio_url is not None:
+                    audio = content.audio_url.url
+                    if audio.startswith("http://") or audio.startswith("https://"):
+                        audios.append({"type": "url", "data": audio})
+                    elif audio.startswith("data:audio"):
+                        data_str = audio.split(";", 1)[1]
+                        if data_str.startswith("base64,"):
+                            data = data_str[7:]
+                            audios.append({"type": "base64", "data": data})
+                        else:
+                            raise ValueError("Unrecognized audio input.")
+                    else:
+                        raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
+    return images, audios
+
+def _get_tools(request: ChatCompletionRequest):
+    if request.tools and request.tool_choice != "none":
+        # request.skip_special_tokens = False
+        if not isinstance(request.tool_choice, str):
+            tools = [
+                item.function.model_dump()
+                for item in request.tools
+                if item.function.name == request.tool_choice.function.name
+            ]
+        else:
+            tools = [item.function.model_dump() for item in request.tools]
+
 
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
@@ -174,54 +226,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     created_time = int(time.time())
 
-    multimodal_params_dict = {"images": [], "audios": []}
-    for message in request.messages:
-        if isinstance(message.content, list):
-            texts = []
-            for content in message.content:
-                if content.type == "text" and content.text:
-                    texts.append(content.text)
-                elif content.type == "image_url" and content.image_url is not None:
-                    img = content.image_url.url
-                    if img.startswith("http://") or img.startswith("https://"):
-                        multimodal_params_dict["images"].append({"type": "url", "data": img})
-                    elif img.startswith("data:image"):
-                        # "data:image/jpeg;base64,{base64_image}"
-                        data_str = img.split(";", 1)[1]
-                        if data_str.startswith("base64,"):
-                            data = data_str[7:]
-                            multimodal_params_dict["images"].append({"type": "base64", "data": data})
-                        else:
-                            raise ValueError("Unrecognized image input.")
-                    else:
-                        raise ValueError(
-                            "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
-                        )
-                elif content.type == "audio_url" and content.audio_url is not None:
-                    audio = content.audio_url.url
-                    if audio.startswith("http://") or audio.startswith("https://"):
-                        multimodal_params_dict["audios"].append({"type": "url", "data": audio})
-                    elif audio.startswith("data:audio"):
-                        data_str = audio.split(";", 1)[1]
-                        if data_str.startswith("base64,"):
-                            data = data_str[7:]
-                            multimodal_params_dict["audios"].append({"type": "base64", "data": data})
-                        else:
-                            raise ValueError("Unrecognized audio input.")
-                    else:
-                        raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
+    images, audios = _get_images_and_audios(request)
+    multimodal_params_dict = {"images": images, "audios": audios}
 
-    tools = None
-    if request.tools and request.tool_choice != "none":
-        # request.skip_special_tokens = False
-        if not isinstance(request.tool_choice, str):
-            tools = [
-                item.function.model_dump()
-                for item in request.tools
-                if item.function.name == request.tool_choice.function.name
-            ]
-        else:
-            tools = [item.function.model_dump() for item in request.tools]
+    tools = _get_tools(request)
 
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
@@ -524,6 +532,206 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+
+
+async def _get_text_generator_input(request: ChatCompletionRequest):
+    from .api_http import g_objs
+
+    images, audios = _get_images_and_audios(request)
+    multimodal_params_dict = {"images": images, "audios": audios}
+
+    tools = _get_tools(request)
+
+    prompt = await build_prompt(request, tools)
+
+    sampling_params_dict = {
+        "do_sample": request.do_sample,
+        "presence_penalty": request.presence_penalty,
+        "frequency_penalty": request.frequency_penalty,
+        "repetition_penalty": request.repetition_penalty,
+        "temperature": request.temperature,
+        "top_p": request.top_p,
+        "top_k": request.top_k,
+        "ignore_eos": request.ignore_eos,
+        "max_new_tokens": request.max_tokens,
+        "stop_sequences": request.stop,
+        "n": request.n,
+        "best_of": request.n,
+        "add_special_tokens": False,
+    }
+     # Structured output handling
+    if request.response_format:
+        if request.response_format.type == "json_schema":
+            obj = request.response_format.json_schema
+            if obj:
+                # guided_json takes str instead of dict obj
+                sampling_params_dict["guided_json"] = json.dumps(obj.json_schema)
+        elif request.response_format.type == "json_object":
+            sampling_params_dict["guided_grammar"] = "json"
+
+    sampling_params = SamplingParams()
+    sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
+
+    sampling_params.verify()
+    multimodal_params = MultimodalParams(**multimodal_params_dict)
+
+    logger.info(f"call text generator with prompt: {prompt} and {sampling_params_dict}")
+
+    return prompt, sampling_params, multimodal_params
+
+
+async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
+    from .api_http import g_objs
+
+    if request.logit_bias is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logit_bias parameter is not currently supported",
+        )
+
+    if request.function_call != "none":
+        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
+
+    if request.chat_template_kwargs is None:
+        request.chat_template_kwargs = {}
+    request.chat_template_kwargs.update({"enable_thinking": False})
+
+    chat_request: ChatCompletionRequest = ChatCompletionRequest(**request.model_dump())
+
+    logger.info(f"{type(chat_request)} and {type(request)} and {request.model_dump_json()} and {chat_request.model_dump_json()}")
+    if "image" not in request.modalities:
+        return await chat_completions_impl(chat_request, raw_request)
+
+    if not request.stream or request.n != 1:
+        return create_error_response(HTTPStatus.BAD_REQUEST, "image only support stream api with n = 1")
+
+    image_start_tag = g_objs.httpserver_manager.tokenizer.image_start_tag
+    image_tag = g_objs.httpserver_manager.tokenizer.image_tag
+
+    stop = chat_request.stop or []
+    if isinstance(stop, str): stop = [stop]
+    chat_request.stop = stop.append(image_start_tag)
+
+    created_time = int(time.time())
+
+
+    prompt, sampling_params, multimodal_params = await _get_text_generator_input(chat_request)
+
+    width, height = request.image_config.get_resolution()
+    x2i_params_dict = {
+        "width": width,
+        "height": height,
+    }
+
+    x2i_params = X2IParams()
+    x2i_params.init(**x2i_params_dict)
+
+    async def stream_result() -> AsyncGenerator[bytes, None]:
+        nonlocal prompt
+        from .req_id_generator import convert_sub_id_to_group_id
+        prompt_tokens = 0
+        completion_tokens = 0
+        finish_reason = None
+        group_request_id = None
+
+        while True:
+            need_call_x2i = False
+            text_generator = g_objs.httpserver_manager.generate(
+                prompt, sampling_params, multimodal_params.clone(), request=raw_request)
+
+            reasoning_parser_dict = {}
+            output_chunk = ""
+
+            async for sub_req_id, request_output, metadata, finish_status in text_generator:
+                prompt_tokens = metadata["prompt_tokens"]
+                completion_tokens += 1
+                if group_request_id is None:
+                    group_request_id = convert_sub_id_to_group_id(sub_req_id)
+
+                index = sub_req_id
+                delta = request_output
+                finish_reason = finish_status.get_finish_reason()
+                if delta == image_start_tag:
+                    need_call_x2i = True
+                    continue
+
+                output_chunk += delta
+
+                 # Handle reasoning content
+                if get_env_start_args().reasoning_parser and request.separate_reasoning:
+                    reasoning_text, delta = _process_reasoning_stream(
+                        index, delta, reasoning_parser_dict, request_output, request
+                    )
+                    if reasoning_text:
+                        choice_data = ChatCompletionStreamResponseChoice(
+                            index=0,
+                            delta=DeltaMessage(reasoning_content=reasoning_text),
+                            finish_reason=None,
+                        )
+                        chunk = ChatCompletionStreamResponse(
+                            id=group_request_id,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=request.model,
+                        )
+                        yield f"data: {chunk.model_dump_json()}\n\n"
+
+
+                delta_message = DeltaMessage(role="assistant", content=delta)
+                if finish_status.is_finished():
+                    finish_reason = finish_status.get_finish_reason()
+                stream_choice = ChatCompletionStreamResponseChoice(
+                    index=0, delta=delta_message, finish_reason=finish_reason
+                )
+                stream_resp = ChatCompletionStreamResponse(
+                    id=group_request_id,
+                    created=created_time,
+                    model=request.model,
+                    choices=[stream_choice],
+                )
+                yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+            if need_call_x2i:
+                prompt += output_chunk
+
+                images = await g_objs.httpserver_manager.generate_image(
+                    prompt, x2i_params, multimodal_params.clone(), request=raw_request)
+
+                delta_message = DeltaMessage(role="assistant", content=[])
+                for image in images:
+                    message_content = MessageContent(type="image_url", image_url=ImageURL(url=image))
+                    delta_message.content.append(message_content)
+                    prompt += image_tag
+                    multimodal_params.add_image({"type": "base64", "data": image})
+
+                stream_resp = ChatCompletionStreamResponse(
+                    id=group_request_id,
+                    created=created_time,
+                    model=request.model,
+                    choices=[ChatCompletionStreamResponseChoice(index=0, delta=delta_message)],
+                )
+                yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+
+            else:
+                break
+
+        if request.stream_options and request.stream_options.include_usage:
+            usage = UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            )
+            usage_chunk = ChatCompletionStreamResponse(
+                id=group_request_id,
+                created=created_time,
+                choices=[],
+                model=request.model,
+                usage=usage,
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
+    return StreamingResponse(stream_result(), media_type="text/event-stream", background=BackgroundTasks())
 
 
 async def completions_impl(request: CompletionRequest, raw_request: Request) -> Response:

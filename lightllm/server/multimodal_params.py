@@ -170,6 +170,9 @@ class MultimodalParams:
             await audio.preload(request)
         return
 
+    def add_image(self, image: dict):
+        self.images.append(ImageItem(**image))
+
     def to_dict(self):
         ret = {}
         ret["images"] = [i.to_dict() for i in self.images]

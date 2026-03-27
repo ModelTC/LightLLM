@@ -51,12 +51,13 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
-from .api_openai import chat_completions_impl, completions_impl
+from .api_openai import chat_completions_impl, completions_impl, chat_completions_impl_v2
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     CompletionRequest,
     CompletionResponse,
+    ChatCompletionRequestV2,
 )
 from .build_prompt import build_prompt, init_tokenizer
 
@@ -274,6 +275,15 @@ async def generate_image(request: Request) -> Response:
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
+@app.post("/v2/chat/completions", response_model=ChatCompletionResponse)
+async def completions_v2(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
+    resp = await chat_completions_impl_v2(request, raw_request)
+    return resp
 
 @app.get("/tokens")
 @app.post("/tokens")

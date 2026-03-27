@@ -477,7 +477,7 @@ class HttpServerManager:
                     generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
                     generation_wrapper(prompt_uncondition, sample_params, multimodal_params, request)])
                 generation_params.update_t2i(con_gen, uncon_gen)
-            # use the first reqeust id as the gen image request id
+            # use the first request id as the gen image request id
             x2i_req_id = generate_req_ids[0]
             generation_params.request_id = x2i_req_id
 
@@ -488,7 +488,6 @@ class HttpServerManager:
             await self.send_to_x2i.send_pyobj(generation_params, protocol=pickle.HIGHEST_PROTOCOL)
 
             await req_status.event.wait()
-
             assert req_status.response is not None
 
             self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
@@ -496,7 +495,7 @@ class HttpServerManager:
             return req_status.response.images
 
         except Exception as e:
-            logger.error(str(e))
+            logger.error(str(e), exc_info=e)
             return []
 
         finally:

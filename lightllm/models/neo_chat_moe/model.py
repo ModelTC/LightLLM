@@ -42,6 +42,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         self.image_start_id = tokenizer.convert_tokens_to_ids(self.image_start_tag)
         self.image_end_tag = IMG_END_TOKEN
         self.image_end_id = tokenizer.convert_tokens_to_ids(self.image_end_tag)
+        self.image_tag = IMG_TOKEN
         self.conversation_module = self.load_conversion_module(tokenizer.name_or_path)
         self.template = model_cfg.get("template", "neo1_0")
 
@@ -146,16 +147,19 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
 
     def get_query_for_it2i(self, prompt: str):
         image_len = prompt.count(IMG_TOKEN)
-        query_condition = self._build_t2i_query(prompt, thinking_content="<think>\n\n</think>\n\n")
+        # query_condition = self._build_t2i_query(prompt, thinking_content="<think>\n\n</think>\n\n")
+        query_condition = prompt + IMG_START_TOKEN if not prompt.endswith(IMG_START_TOKEN) else prompt
         query_text_uncondition = self._build_t2i_query(IMG_TOKEN * image_len)
         question_img_uncondition = self._build_t2i_query("")
         return query_condition, query_text_uncondition, question_img_uncondition
 
-    def get_query_for_t2i(self, prompt):
-        query_condition = self._build_t2i_query(
-            f"Please generate an image based on the following description: {prompt}",
-            thinking_content="<think>\n\n</think>\n\n")
-        query_uncondition = self._build_t2i_query(f"")
+    def get_query_for_t2i(self, prompt: str):
+        # prompt is already applied
+        query_condition = prompt + IMG_START_TOKEN if not prompt.endswith(IMG_START_TOKEN) else prompt
+        # query_condition = self._build_t2i_query(
+        #     f"Please generate an image based on the following description: {prompt}",
+        #     thinking_content="<think>\n\n</think>\n\n")
+        query_uncondition = self._build_t2i_query("")
         return query_condition, query_uncondition
 
 
