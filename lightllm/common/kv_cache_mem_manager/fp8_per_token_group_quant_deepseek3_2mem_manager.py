@@ -63,8 +63,7 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
     def get_flashmla_kv_cache(self, layer_index: int) -> torch.Tensor:
         return self.kv_buffer[layer_index].view(-1, 1, 1, self.flashmla_bytes_per_token)
 
-    def get_prefill_kv_cache(self, layer_index: int) -> torch.Tensor:
-        packed_kv = self.kv_buffer[layer_index]
+    def _dequantize_packed_kv(self, packed_kv: torch.Tensor) -> torch.Tensor:
         kv_nope = packed_kv[:, :, : self.kv_nope_dim].view(torch.float8_e4m3fn)
         kv_scale = packed_kv[:, :, self.kv_nope_dim : self.kv_nope_dim + self.quant_group_num * 4].view(torch.float32)
         kv_rope = packed_kv[:, :, self.kv_nope_dim + self.quant_group_num * 4 :].view(torch.bfloat16)
@@ -81,6 +80,39 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
         kv[:, :, : self.kv_nope_dim] = kv_nope
         kv[:, :, self.kv_nope_dim :] = kv_rope.to(self.prefill_dtype)
         return kv
+
+    def get_prefill_kv_cache(self, layer_index: int) -> torch.Tensor:
+        return self._dequantize_packed_kv(self.kv_buffer[layer_index])
+
+    def get_prefill_kv_cache_and_remap_indices(self, layer_index: int, topk_indices: torch.Tensor):
+        squeeze_h_kv = topk_indices.ndim == 2
+        if squeeze_h_kv:
+            topk_indices = topk_indices.unsqueeze(1)
+
+        valid_mask = topk_indices != -1
+        valid_indices = topk_indices[valid_mask]
+
+        if valid_indices.numel() == 0:
+            empty_kv = torch.empty(
+                (0, 1, self.kv_head_dim),
+                dtype=self.prefill_dtype,
+                device=topk_indices.device,
+            )
+            remapped = topk_indices.clone()
+            if squeeze_h_kv:
+                remapped = remapped.squeeze(1)
+            return empty_kv, remapped
+
+        unique_mem_index, inverse = torch.unique(valid_indices, sorted=False, return_inverse=True)
+        packed_kv = self.kv_buffer[layer_index].index_select(0, unique_mem_index.to(torch.int64))
+        compact_kv = self._dequantize_packed_kv(packed_kv)
+
+        remapped = torch.full_like(topk_indices, -1)
+        remapped[valid_mask] = inverse.to(remapped.dtype)
+
+        if squeeze_h_kv:
+            remapped = remapped.squeeze(1)
+        return compact_kv, remapped
 
     def get_indexer_k_buffer(self, layer_index: int) -> torch.Tensor:
         return self.indexer_k_buffer[layer_index]

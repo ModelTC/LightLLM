@@ -76,10 +76,20 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         nsa_dict = att_control.nsa_prefill_dict
         layer_index = nsa_dict["layer_index"]
         topk_indices = nsa_dict["topk_indices"]
+        topk_indices_local = nsa_dict["topk_indices_local"]
+        prefill_cache_kv = nsa_dict["prefill_cache_kv"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
 
-        kv = self.infer_state.mem_manager.get_prefill_kv_cache(layer_index)
+        if self.infer_state.prefix_total_token_num > 0:
+            kv, topk_indices = self.infer_state.mem_manager.get_prefill_kv_cache_and_remap_indices(
+                layer_index=layer_index,
+                topk_indices=topk_indices,
+            )
+        else:
+            kv = prefill_cache_kv
+            topk_indices = topk_indices_local
+
         if topk_indices.ndim == 2:
             topk_indices = topk_indices.unsqueeze(1)
 

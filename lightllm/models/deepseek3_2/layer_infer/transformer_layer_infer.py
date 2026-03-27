@@ -75,12 +75,13 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         # 计算 topk_indices
         att_state = infer_state.prefill_att_state
-        topk_indices = self.indexer.get_indices(
+        topk_indices_local, topk_indices = self.indexer.get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
             att_state=att_state,
             layer_weight=layer_weight,
+            return_local_index=True,
         )
         del infer_state.get_topk_indices_params
 
@@ -90,6 +91,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             nsa_prefill_dict={
                 "layer_index": self.layer_num_,
                 "topk_indices": topk_indices,
+                "topk_indices_local": topk_indices_local,
+                "prefill_cache_kv": kv,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
             },
@@ -171,6 +174,7 @@ class NsaInfer:
         infer_state: Deepseek2InferStateInfo,
         att_state: Any,
         layer_weight: Deepseek3_2TransformerLayerWeight,
+        return_local_index: bool = False,
     ) -> torch.Tensor:
 
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
@@ -234,15 +238,18 @@ class NsaInfer:
             row_starts=ks,
         )
         b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
+        local_topk_index = b_topk_index
         # 将 topk index 转化为 mem index
         from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
 
-        b_topk_index = trans_topk_index_to_mem_index(
-            topk_index=b_topk_index,
+        b_topk_mem_index = trans_topk_index_to_mem_index(
+            topk_index=local_topk_index,
             ragged_mem_index=att_state.ragged_mem_index,
         )
 
-        return b_topk_index
+        if return_local_index:
+            return local_topk_index, b_topk_mem_index
+        return b_topk_mem_index
 
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
