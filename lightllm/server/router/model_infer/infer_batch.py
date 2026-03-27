@@ -98,7 +98,7 @@ class InferenceContext:
                 src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
                 req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
                 src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
-                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:, None]]
+                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
                 req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
