@@ -3,6 +3,7 @@ import rpyc
 import inspect
 import uuid
 import os
+import multiprocessing
 from lightllm.utils.retry_utils import retry
 from rpyc.utils.factory import unix_connect
 from rpyc.utils.classic import obtain
@@ -26,7 +27,7 @@ def _init_env(socket_path: str, success_event):
 
 
 async def start_model_process():
-    import multiprocessing
+    import lightllm.utils.rpyc_fix_utils as _
 
     socket_path = _generate_unix_socket_path()
     if os.path.exists(socket_path):
