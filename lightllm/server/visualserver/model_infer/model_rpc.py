@@ -5,7 +5,6 @@ import torch.multiprocessing as mp
 import queue
 import threading
 import torch.distributed as dist
-import torch
 from typing import Dict, List, Tuple, Deque, Optional
 from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
@@ -26,9 +25,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
-from lightllm.server.multimodal_params import ImageItem
-from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
-from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 
@@ -36,7 +32,6 @@ logger = init_logger(__name__)
 
 
 class VisualModelRpcServer(rpyc.Service):
-
     def exposed_init_model(self, kvargs):
         kvargs = obtain(kvargs)
 
@@ -56,6 +51,7 @@ class VisualModelRpcServer(rpyc.Service):
         # }
 
         weight_dir = kvargs["weight_dir"]
+        self.device_id = kvargs["device_id"]
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
@@ -115,13 +111,19 @@ class VisualModelRpcServer(rpyc.Service):
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
             if not self.is_visual_only_mode:
-                # 独立部署vit模式下，不需要连接 cache_client
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
             else:
+                # 独立部署vit模式下，不需要连接 cache_client, 结果是写入 afs
                 args = get_env_start_args()
                 assert args.visual_dp == 1
+                self.afs_handler = SepEmbedHandler(
+                    afs_embed_dir=self.args.afs_embed_dir,
+                    redis_host=self.args.config_server_host,
+                    redis_port=self.args.config_server_vit_redis_port,
+                    capacity=self.args.afs_embed_capacity,
+                )
 
             self._init_taskes()
         except Exception as e:
@@ -134,7 +136,7 @@ class VisualModelRpcServer(rpyc.Service):
 
         set_random_seed(2147483647)
         return
-    
+
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:
             images = obtain(images)
@@ -146,29 +148,22 @@ class VisualModelRpcServer(rpyc.Service):
             logger.exception(str(e))
             raise e
         return
-    
+
     def _init_taskes(self):
+        self.args = get_env_start_args()
         # 控制每次的最大推理图片数量，防止爆显存
-        self.max_infer_batch_size = get_env_start_args().visual_infer_batch_size
+        self.max_infer_batch_size = self.args.visual_infer_batch_size
 
         # 异步队列, 用于接受任务
         self.infer_queue = queue.Queue()
-        self.infer_queue_lock = threading.Lock()
         # 将计算得到的结果放入 afs 或者 embed cache 的 queue
         self.store_queue = queue.Queue()
 
-        # 限制并发, 主要控制内存用量，防止过多造成内存OOM
+        # 限制并发, 主要是为了控制内存用量，防止过多造成内存OOM
         self.sempare = threading.Semaphore(self.max_infer_batch_size * 8)
 
         # 用于同步各个推理tp每次拿到一样的image数量建立的gloo通信组
         self.gloo_group = dist.new_group(ranks=list(range(self.vit_tp)), backend="gloo")
-
-        self.afs_handler = SepEmbedHandler(
-            afs_embed_dir=get_env_start_args().afs_embed_dir,
-            redis_host=get_env_start_args().config_server_host,
-            redis_port=get_env_start_args().config_server_vit_redis_port,
-            capacity=get_env_start_args().afs_embed_capacity,
-        )
 
         # 启动任务处理线程
         self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
@@ -176,13 +171,12 @@ class VisualModelRpcServer(rpyc.Service):
 
         self._store_thread = threading.Thread(target=self._store_worker, daemon=True)
         self._store_thread.start()
-        pass
+        return
 
     # @calculate_time(show=True, min_cost_ms=150)
     @torch.no_grad()
     def _forward(self, images: List[ImageItem]):
         return self.model.encode(images)
-
 
     def _get_image_items_from_infer_queue(self, max_num: int, force_same: bool = False) -> List[ImageItem]:
         """
@@ -192,8 +186,8 @@ class VisualModelRpcServer(rpyc.Service):
         # 至少获取一个任务，阻塞
         self.sempare.acquire()
         task = self.infer_queue.get(block=True)
-        tasks.append(task)  
-        
+        tasks.append(task)
+
         if not force_same:
             # 尝试继续获取更多任务，直到达到 max_num
             while len(tasks) < max_num:
@@ -211,7 +205,7 @@ class VisualModelRpcServer(rpyc.Service):
                 tasks.append(task)
 
         return tasks
-    
+
     def _get_image_items_from_store_queue(self, max_num: int) -> List[ImageItem]:
         """
         从队列中批量获取任务，直到达到 max_num 或队列为空。
@@ -219,8 +213,8 @@ class VisualModelRpcServer(rpyc.Service):
         tasks = []
         # 至少获取一个任务，阻塞
         task = self.store_queue.get(block=True)
-        tasks.append(task)  
-        
+        tasks.append(task)
+
         while len(tasks) < max_num:
             try:
                 task = self.store_queue.get(block=False)
@@ -229,7 +223,6 @@ class VisualModelRpcServer(rpyc.Service):
                 break
 
         return tasks
-    
 
     def _infer_worker(self):
         """
@@ -255,11 +248,11 @@ class VisualModelRpcServer(rpyc.Service):
                     self._store_to_afs(all_img_embeds, valid_ids, images)
                 else:
                     self._store_to_cpu_cache(all_img_embeds, valid_ids, images)
-                
+
             except Exception as e:
                 logger.exception(str(e))
                 raise e
-            
+
     def _store_to_cpu_cache(self, all_img_embeds, valid_ids, images):
         for i in range(len(images)):
             start, end = valid_ids[i]
@@ -280,7 +273,7 @@ class VisualModelRpcServer(rpyc.Service):
             gen_embed = all_img_embeds[start:end]
             image.gen_embed = gen_embed
             self.store_queue.put(image)
-        
+
     def _store_worker(self):
         """
         任务处理循环: 从队列中取出ImageItem和embed 放入 afs中, 执行完成后通知调用者
@@ -297,16 +290,17 @@ class VisualModelRpcServer(rpyc.Service):
 
                 for _ in images:
                     self.sempare.release()
+
             except Exception as e:
                 logger.exception(str(e))
                 raise e
-            
+
     def _commit_to_afs(self, images):
         if self.tp_rank_id == 0:
             for image in images:
                 self.afs_handler.insert(image.md5, image.gen_embed)
                 image.event.set()
-        
+
     def _commit_to_cpu_cache(self, images):
         if self.tp_rank_id == 0:
             for image in images:
