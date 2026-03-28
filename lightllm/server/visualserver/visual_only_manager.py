@@ -5,6 +5,7 @@ import inspect
 import setproctitle
 import threading
 import collections
+import uuid
 from typing import List
 from lightllm.server.core.objs import StartArgs
 
@@ -17,6 +18,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
+from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
 
 
 logger = init_logger(__name__)
@@ -114,7 +116,13 @@ class VisualManager(rpyc.Service):
     def exposed_infer_images(self, images: List[ImageItem], ref_event: threading.Event):
         try:
             images = obtain(images)
-            # 将 images 的内容写入到 shm 中，
+            # 将 images 的内容写入到 shm 中，这里修改了原始的uuid，主要是在远端的vit
+            # 本身不具有 embed cache 的引用保证，则新的唯一标识来进行推理，最终写入的
+            # 目标的 md5 一致即可，这样调用端一样可以拿到准确的数据。
+            for image in images:
+                image.uuid = str(uuid.uuid4())
+                create_shm(get_shm_name_data(image.uuid), image.data_bytes)
+                del image.data_bytes
 
             handle = asyncio.run_coroutine_threadsafe(self.handle_reqs(images_need_infer=images), loop=self.new_loop)
             handle.result()
@@ -125,7 +133,8 @@ class VisualManager(rpyc.Service):
             raise e
         finally:
             # 将 shm 进行删除
-            pass
+            for image in images:
+                free_shm(get_shm_name_data(image.uuid))
 
         return
 
