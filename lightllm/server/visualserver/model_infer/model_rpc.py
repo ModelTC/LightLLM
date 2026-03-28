@@ -1,19 +1,14 @@
-import asyncio
-import numpy as np
 import rpyc
 import torch
 import socket
-import inspect
-import uuid
-import os
 import torch.multiprocessing as mp
-import collections
-from datetime import timedelta
+import queue
+import threading
+import torch.distributed as dist
+import torch
 from typing import Dict, List, Tuple, Deque, Optional
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.utils.retry_utils import retry
-from rpyc.utils.classic import obtain, unix_connect
-from rpyc.utils.server import ThreadedServer
+from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.internvl.internvl_visual import InternVLVisionModel
@@ -27,14 +22,21 @@ from lightllm.models.tarsier2.tarsier2_visual import TarsierVisionTransformerPre
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMoeVisionTransformerPretrainedModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
-from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
+from lightllm.server.multimodal_params import ImageItem
+from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+
+
+logger = init_logger(__name__)
 
 
 class VisualModelRpcServer(rpyc.Service):
+
     def exposed_init_model(self, kvargs):
         kvargs = obtain(kvargs)
 
@@ -120,12 +122,8 @@ class VisualModelRpcServer(rpyc.Service):
             else:
                 args = get_env_start_args()
                 assert args.visual_dp == 1
-                self.redis_afs_client = SepEmbedHandler(
-                    afs_embed_dir=args.afs_embed_dir,
-                    redis_host=args.config_server_host,
-                    redis_port=args.config_server_vit_redis_port,
-                    capacity=args.afs_embed_capacity,
-                )
+
+            self._init_taskes()
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -136,8 +134,187 @@ class VisualModelRpcServer(rpyc.Service):
 
         set_random_seed(2147483647)
         return
+    
+    def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
+        try:
+            images = obtain(images)
+            for i in range(len(images)):
+                images[i].event = ref_event_list[i]
+                self.infer_queue.put(images[i])
+
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+        return
+    
+    def _init_taskes(self):
+        # 控制每次的最大推理图片数量，防止爆显存
+        self.max_infer_batch_size = get_env_start_args().visual_infer_batch_size
+
+        # 异步队列, 用于接受任务
+        self.infer_queue = queue.Queue()
+        self.infer_queue_lock = threading.Lock()
+        # 将计算得到的结果放入 afs 或者 embed cache 的 queue
+        self.store_queue = queue.Queue()
+
+        # 限制并发, 主要控制内存用量，防止过多造成内存OOM
+        self.sempare = threading.Semaphore(self.max_infer_batch_size * 8)
+
+        # 用于同步各个推理tp每次拿到一样的image数量建立的gloo通信组
+        self.gloo_group = dist.new_group(ranks=list(range(self.vit_tp)), backend="gloo")
+
+        self.afs_handler = SepEmbedHandler(
+            afs_embed_dir=get_env_start_args().afs_embed_dir,
+            redis_host=get_env_start_args().config_server_host,
+            redis_port=get_env_start_args().config_server_vit_redis_port,
+            capacity=get_env_start_args().afs_embed_capacity,
+        )
+
+        # 启动任务处理线程
+        self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
+        self._infer_thread.start()
+
+        self._store_thread = threading.Thread(target=self._store_worker, daemon=True)
+        self._store_thread.start()
+        pass
 
     # @calculate_time(show=True, min_cost_ms=150)
     @torch.no_grad()
-    def forward(self, images: List[ImageItem]):
+    def _forward(self, images: List[ImageItem]):
         return self.model.encode(images)
+
+
+    def _get_image_items_from_infer_queue(self, max_num: int, force_same: bool = False) -> List[ImageItem]:
+        """
+        从队列中批量获取任务，直到达到 max_num 或队列为空。
+        """
+        tasks = []
+        # 至少获取一个任务，阻塞
+        self.sempare.acquire()
+        task = self.infer_queue.get(block=True)
+        tasks.append(task)  
+        
+        if not force_same:
+            # 尝试继续获取更多任务，直到达到 max_num
+            while len(tasks) < max_num:
+                try:
+                    self.sempare.acquire()
+                    task = self.infer_queue.get(block=False)
+                    tasks.append(task)
+                except queue.Empty:
+                    self.sempare.release()
+                    break
+        else:
+            while len(tasks) < max_num:
+                self.sempare.acquire()
+                task = self.infer_queue.get(block=True)
+                tasks.append(task)
+
+        return tasks
+    
+    def _get_image_items_from_store_queue(self, max_num: int) -> List[ImageItem]:
+        """
+        从队列中批量获取任务，直到达到 max_num 或队列为空。
+        """
+        tasks = []
+        # 至少获取一个任务，阻塞
+        task = self.store_queue.get(block=True)
+        tasks.append(task)  
+        
+        while len(tasks) < max_num:
+            try:
+                task = self.store_queue.get(block=False)
+                tasks.append(task)
+            except queue.Empty:
+                break
+
+        return tasks
+    
+
+    def _infer_worker(self):
+        """
+        任务处理循环: 从队列中取出任务, 执行完成后通知调用者
+        """
+        torch.cuda.set_device(self.device_id)
+        while True:
+            try:
+                # 从队列获取任务, 阻塞等待
+                if self.tp_rank_id == 0:
+                    images = self._get_image_items_from_infer_queue(max_num=self.max_infer_batch_size)
+                    dist.broadcast_object_list([len(images)], src=0, group=self.gloo_group)
+                else:
+                    ans = [None]
+                    dist.broadcast_object_list(ans, src=0, group=self.gloo_group)
+                    images = self._get_image_items_from_infer_queue(max_num=ans[0], force_same=True)
+
+                # 执行任务: 调用父类的forward方法处理图像
+                all_img_embeds, uuids, valid_ids = self._forward(images)
+                all_img_embeds = all_img_embeds.to(torch.device("cuda"))
+
+                if self.is_visual_only_mode:
+                    self._store_to_afs(all_img_embeds, valid_ids, images)
+                else:
+                    self._store_to_cpu_cache(all_img_embeds, valid_ids, images)
+                
+            except Exception as e:
+                logger.exception(str(e))
+                raise e
+            
+    def _store_to_cpu_cache(self, all_img_embeds, valid_ids, images):
+        for i in range(len(images)):
+            start, end = valid_ids[i]
+            image = images[i]
+            if self.tp_rank_id == 0:
+                self.cpu_embed_cache_client.copy_vision_to_cache(
+                    embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
+                )
+            cuda_event = torch.cuda.Event()
+            cuda_event.record()
+            image.cuda_event = cuda_event
+            self.store_queue.put(image)
+
+    def _store_to_afs(self, all_img_embeds, valid_ids, images):
+        all_img_embeds = all_img_embeds.detach().cpu()
+        for image, valid_id in zip(images, valid_ids):
+            start, end = valid_id
+            gen_embed = all_img_embeds[start:end]
+            image.gen_embed = gen_embed
+            self.store_queue.put(image)
+        
+    def _store_worker(self):
+        """
+        任务处理循环: 从队列中取出ImageItem和embed 放入 afs中, 执行完成后通知调用者
+        """
+        while True:
+            try:
+                # 从队列获取任务, 阻塞等待
+                images: List[ImageItem] = self._get_image_items_from_store_queue(max_num=self.max_infer_batch_size)
+
+                if self.is_visual_only_mode:
+                    self._commit_to_afs(images=images)
+                else:
+                    self._commit_to_cpu_cache(images=images)
+
+                for _ in images:
+                    self.sempare.release()
+            except Exception as e:
+                logger.exception(str(e))
+                raise e
+            
+    def _commit_to_afs(self, images):
+        if self.tp_rank_id == 0:
+            for image in images:
+                self.afs_handler.insert(image.md5, image.gen_embed)
+                image.event.set()
+        
+    def _commit_to_cpu_cache(self, images):
+        if self.tp_rank_id == 0:
+            for image in images:
+                # 等待拷贝到cpu cache 完成。
+                image.cuda_event.synchronize()
+
+            uuids = [image.uuid for image in images]
+            self.cache_client.root.set_items_embed(uuids)
+
+            for image in images:
+                image.event.set()
