@@ -51,6 +51,7 @@ class VisualModelRpcServer(rpyc.Service):
         # }
 
         weight_dir = kvargs["weight_dir"]
+        self.infer_max_batch_size = kvargs["max_batch_size"]
         self.device_id = kvargs["device_id"]
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
@@ -151,8 +152,6 @@ class VisualModelRpcServer(rpyc.Service):
 
     def _init_taskes(self):
         self.args = get_env_start_args()
-        # 控制每次的最大推理图片数量，防止爆显存
-        self.max_infer_batch_size = self.args.visual_infer_batch_size
 
         # 异步队列, 用于接受任务
         self.infer_queue = queue.Queue()
@@ -160,7 +159,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.store_queue = queue.Queue()
 
         # 限制并发, 主要是为了控制内存用量，防止过多造成内存OOM
-        self.sempare = threading.Semaphore(self.max_infer_batch_size * 8)
+        self.sempare = threading.Semaphore(self.infer_max_batch_size * 8)
 
         # 用于同步各个推理tp每次拿到一样的image数量建立的gloo通信组
         self.gloo_group = dist.new_group(ranks=list(range(self.vit_tp)), backend="gloo")
