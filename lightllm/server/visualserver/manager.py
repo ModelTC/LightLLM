@@ -7,6 +7,8 @@ import socket
 import pickle
 import inspect
 import setproctitle
+import threading
+import collections
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -48,7 +50,6 @@ class VisualManager:
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
@@ -56,6 +57,8 @@ class VisualManager:
         self.infer_batch_size = args.visual_infer_batch_size
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
+        self.cur_dp_index = 0
+        self.lock = threading.Lock()
 
     async def wait_to_model_ready(self):
 
@@ -89,87 +92,70 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    async def infer_imgs(self, images: List[ImageItem]):
-        if len(images) == 0:
+    async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
+        shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
+        is_aborted = shm_req.is_aborted
+        disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
+        self.shm_req_manager.put_back_req_obj(shm_req)
+        # case 0
+        if is_aborted:
+            # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
+            # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
+            # 需要一些一致的流程来保证不出现异步问题。
+            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
 
-        tasks = []
-        for vit_dp_rank in range(self.vit_dp):
-            assigned_images = [images[i] for i in range(vit_dp_rank, len(images), self.vit_dp)]
-            if assigned_images:
-                for vit_tp_rank in range(self.vit_tp):
-                    task = asyncio.create_task(self.model_rpcs[vit_dp_rank][vit_tp_rank].encode(assigned_images))
-                    tasks.append(task)
+        multimodal_params = group_req_indexes.multimodal_params
+        img_uuids = [img.uuid for img in multimodal_params.images]
+        # disable prompt cache通常用来测试，需要也去掉image cache的影响
+        if disable_prompt_cache:
+            ready_image = [False] * len(img_uuids)
+        else:
+            if len(img_uuids) > 0:
+                ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
+            else:
+                ready_image = []
 
-        await asyncio.gather(*tasks)
+        images_need_infer = []
+        for img, ready in zip(multimodal_params.images, ready_image):
+            if not ready:
+                images_need_infer.append(img)
+
+        # case 1
+        if len(images_need_infer) == 0:
+            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+            return
+
+        # case 2
+        dp_to_handle_images = collections.defaultdict(list)
+        for image in images_need_infer:
+            self.cur_dp_index += 1
+            select_dp = self.cur_dp_index % self.vit_dp
+            dp_to_handle_images[select_dp].append((image, threading.Event()))
+
+        taskes = []
+        for dp_index in range(self.vit_dp):
+            _images = dp_to_handle_images[dp_index]
+            if _images:
+                taskes.extend(self.run_task(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images]))
+
+        with self.lock:
+            await asyncio.gather(*taskes)
+
+        for dp_index in range(self.vit_dp):
+            _images = dp_to_handle_images[dp_index]
+            if _images:
+                await asyncio.to_thread(_images[-1][1].wait)
+
+        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
-    async def loop_for_fwd(self):
-        while True:
-            if len(self.waiting_reqs) == 0:
-                await asyncio.sleep(0.01)  # 10ms
-            else:
-                processing_group_reqs = []
-                images_need_infer = []
-                ready_to_send = []
-
-                def flush_ready(force: bool = False):
-                    if not ready_to_send:
-                        return
-                    if not force and len(ready_to_send) < self.send_batch_size:
-                        return
-
-                    for group_req_indexes in ready_to_send:
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                    ready_to_send.clear()
-
-                while len(self.waiting_reqs) > 0:
-                    group_req_indexes = self.waiting_reqs.pop(0)
-                    shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
-                    is_aborted = shm_req.is_aborted
-                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
-                    self.shm_req_manager.put_back_req_obj(shm_req)
-                    if is_aborted:
-                        # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
-                        # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
-                        # 需要一些一致的流程来保证不出现异步问题。
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                        continue
-
-                    multimodal_params = group_req_indexes.multimodal_params
-
-                    img_uuids = [img.uuid for img in multimodal_params.images]
-                    # disable prompt cache通常用来测试，需要也去掉image cache的影响
-                    if disable_prompt_cache:
-                        ready_image = [False] * len(img_uuids)
-                    else:
-                        ready_image = obtain(self.cache_client.root.get_items_embed(img_uuids))
-
-                    for img, ready in zip(multimodal_params.images, ready_image):
-                        if not ready:
-                            images_need_infer.append(img)
-
-                        if len(images_need_infer) == self.infer_batch_size:
-                            await self.infer_imgs(images_need_infer)
-                            images_need_infer = []
-                            ready_to_send.extend(processing_group_reqs)
-                            processing_group_reqs = []
-                            flush_ready(force=False)
-
-                    if len(images_need_infer) == 0:
-                        ready_to_send.append(group_req_indexes)
-                        flush_ready(force=False)
-                    else:
-                        processing_group_reqs.append(group_req_indexes)
-
-                if len(images_need_infer) > 0:
-                    await self.infer_imgs(images_need_infer)
-                    images_need_infer = []
-
-                    # 这些处理完 image 的 group 也 ready 了
-                    ready_to_send.extend(processing_group_reqs)
-                    processing_group_reqs = []
-                flush_ready(force=True)
+    def run_task(self, dp_index: int, images, events):
+        taskes = []
+        for vit_tp_rank in range(self.vit_tp):
+            task = self.model_rpcs[dp_index][vit_tp_rank].run_task(images, events)
+            taskes.append(task)
+        return taskes
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
@@ -184,7 +170,7 @@ class VisualManager:
                             f"visual recv req id {recv_req.group_req_id} "
                             f"img count {len(recv_req.multimodal_params.images)}"
                         )
-                        self.waiting_reqs.append(recv_req)
+                        asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
                     else:
                         assert False, f"Error Req Inf {recv_req}"
                 self.visual_recv_max_count = int(min(self.visual_recv_max_count * 1.3, 256))
@@ -218,6 +204,5 @@ def start_visual_process(args, pipe_writer):
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    loop.create_task(visualserver.loop_for_fwd())
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return
