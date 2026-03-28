@@ -11,7 +11,7 @@ import threading
 import collections
 import base64
 import httpx
-from typing import List
+from typing import List, Dict
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 
@@ -23,6 +23,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
 from .manager import VisualManager
+from .objs import VIT_Obj
 
 logger = init_logger(__name__)
 
@@ -34,6 +35,8 @@ class ProxyVisualManager(VisualManager):
     ):
         super().__init__(args)
         assert self.vit_dp == 1 and self.vit_tp == 1
+        self.id_to_rpyc_conn: Dict[str, rpyc.Connection] = {}
+        self.conn_lock = threading.Lock()
 
     async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
         images_need_infer = self.get_need_infer_images(group_req_indexes)
@@ -74,46 +77,47 @@ class ProxyVisualManager(VisualManager):
             taskes.append(task)
         return taskes
 
-    async def loop_for_netio_req(self):
-        if not hasattr(self, "visual_recv_max_count"):
-            self.visual_recv_max_count = 64
-
-        while True:
-            try:
-                for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                    if isinstance(recv_req, GroupReqIndexes):
-                        logger.info(
-                            f"visual recv req id {recv_req.group_req_id} "
-                            f"img count {len(recv_req.multimodal_params.images)}"
-                        )
-                        asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
-                    else:
-                        assert False, f"Error Req Inf {recv_req}"
-                self.visual_recv_max_count = int(min(self.visual_recv_max_count * 1.3, 256))
-            except zmq.ZMQError:
-                # 当队列已经开始清空的时候，将一次接受数量下调
-                self.visual_recv_max_count = 64
-            await asyncio.sleep(0.01)
-
     async def loop_to_connect_remote_visual_server(self):
-        uri = f"http://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(uri)
-                if response.status_code == 200:
-                    base64data = response.json()["data"]
-                    id_to_vit_obj = pickle.loads(base64.b64decode(base64data))
-                    return id_to_vit_obj
-                else:
-                    logger.error(f"Failed to get VIT instances: {response.status_code}")
-                    return None
-        except Exception as e:
-            logger.exception(f"Error getting VIT instances: {e}")
-            return None
+        while True:
+            uri = f"http://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.get(uri)
+                    if response.status_code == 200:
+                        base64data = response.json()["data"]
+                        id_to_vit_obj = pickle.loads(base64.b64decode(base64data))
 
-    def clean_up(self):
-        return
+                        for node_id in list(self.id_to_rpyc_conn.keys()):
+                            if node_id not in id_to_vit_obj:
+                                with self.conn_lock:
+                                    self.id_to_rpyc_conn.pop(node_id).close()
+
+                            for node_id, vit_obj in id_to_vit_obj.items():
+                                vit_obj: VIT_Obj = vit_obj
+                                if node_id not in self.id_to_rpyc_conn:
+
+                                    def _connect():
+                                        conn = rpyc.connect(
+                                            vit_obj.host_ip, vit_obj.port, config={"allow_pickle": True}
+                                        )
+                                        conn._bg_thread = rpyc.BgServingThread(conn)
+                                        return conn
+
+                                    try:
+                                        with self.conn_lock:
+                                            self.id_to_rpyc_conn[node_id] = await asyncio.to_thread(_connect)
+                                    except Exception as e:
+                                        logger.exception(str(e))
+                    else:
+                        logger.error(f"Failed to get VIT instances: {response.status_code}")
+            except Exception as e:
+                logger.exception(f"Error getting VIT instances: {e}")
+
+            # 在没有连接的时候，高频率更新，有的时候降低更新频率
+            if len(self.id_to_rpyc_conn) == 0:
+                await asyncio.sleep(10)
+            else:
+                await asyncio.sleep(30)
 
 
 def start_visual_process(args, pipe_writer):
@@ -124,8 +128,7 @@ def start_visual_process(args, pipe_writer):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
-        visualserver = VisualManager(args=args)
-        asyncio.run(visualserver.wait_to_model_ready())
+        visualserver = ProxyVisualManager(args=args)
     except Exception as e:
         logger.exception(str(e))
         visualserver.clean_up()
@@ -139,5 +142,6 @@ def start_visual_process(args, pipe_writer):
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
+    loop.create_task(visualserver.loop_to_connect_remote_visual_server())
     loop.run_until_complete(visualserver.loop_for_netio_req())
     return
