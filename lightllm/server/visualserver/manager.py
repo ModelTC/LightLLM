@@ -13,7 +13,7 @@ from lightllm.server.core.objs import ShmReqManager, StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
-from .model_infer.model_rpc import start_model_process, VisualModelRpcClient
+from .model_infer import start_model_process, VisualModelRpcClient
 from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
