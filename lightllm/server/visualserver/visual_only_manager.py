@@ -69,7 +69,7 @@ class VisualManager(rpyc.Service):
                     sock = websocket.transport.get_extra_info("socket")
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                    vit_obj = VIT_Obj(node_id=args.visual_node_id, host_ip_port=f"{host_ip}:{args.visual_rpyc_port}")
+                    vit_obj = VIT_Obj(node_id=args.visual_node_id, host_ip=host_ip, port=args.visual_rpyc_port)
 
                     await websocket.send(pickle.dumps(vit_obj))
                     logger.info(f"Sent registration vit_obj: {vit_obj}")

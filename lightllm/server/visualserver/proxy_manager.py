@@ -9,6 +9,8 @@ import inspect
 import setproctitle
 import threading
 import collections
+import base64
+import httpx
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -93,6 +95,22 @@ class ProxyVisualManager(VisualManager):
                 # 当队列已经开始清空的时候，将一次接受数量下调
                 self.visual_recv_max_count = 64
             await asyncio.sleep(0.01)
+
+    async def loop_to_connect_remote_visual_server(self):
+        uri = f"http://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(uri)
+                if response.status_code == 200:
+                    base64data = response.json()["data"]
+                    id_to_vit_obj = pickle.loads(base64.b64decode(base64data))
+                    return id_to_vit_obj
+                else:
+                    logger.error(f"Failed to get VIT instances: {response.status_code}")
+                    return None
+        except Exception as e:
+            logger.exception(f"Error getting VIT instances: {e}")
+            return None
 
     def clean_up(self):
         return
