@@ -6,6 +6,11 @@ import setproctitle
 import threading
 import collections
 import uuid
+import pickle
+import websockets
+import socket
+from lightllm.utils.net_utils import get_hostname_ip
+from .vit_connect import VIT_Obj
 from typing import List
 from lightllm.server.core.objs import StartArgs
 
@@ -47,6 +52,37 @@ class VisualManager(rpyc.Service):
         asyncio.set_event_loop(loop)
         loop.run_forever()
         return
+
+    async def register_to_config_server_loop(self, args: StartArgs):
+        assert args.host not in ["127.0.0.1", "localhost"], "remote visual server must specify host ip"
+
+        if args.host in ["0.0.0.0"]:
+            host_ip = get_hostname_ip()
+        else:
+            host_ip = args.host
+
+        while True:
+            try:
+                uri = f"ws://{args.config_server_host}:{args.config_server_port}/visual_register"
+                async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
+
+                    sock = websocket.transport.get_extra_info("socket")
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+                    vit_obj = VIT_Obj(node_id=args.visual_node_id, host_ip_port=f"{host_ip}:{args.visual_rpyc_port}")
+
+                    await websocket.send(pickle.dumps(vit_obj))
+                    logger.info(f"Sent registration vit_obj: {vit_obj}")
+
+                    while True:
+                        await websocket.send("heartbeat")
+                        await asyncio.sleep(40)
+
+            except Exception as e:
+                logger.error("connetion to config_server has error")
+                logger.exception(str(e))
+                await asyncio.sleep(10)
+                logger.info("reconnection to config_server")
 
     async def wait_to_model_ready(self):
 
@@ -151,9 +187,10 @@ def start_visual_process(args: StartArgs, pipe_writer):
         visualserver = VisualManager(args=args)
         future = asyncio.run_coroutine_threadsafe(visualserver.wait_to_model_ready(), loop=visualserver.new_loop)
         future.result()
-        from .register_loop import register_loop
 
-        asyncio.run_coroutine_threadsafe(register_loop(args=args), loop=visualserver.new_loop)
+        asyncio.run_coroutine_threadsafe(
+            visualserver.register_to_config_server_loop(args=args), loop=visualserver.new_loop
+        )
         t = rpyc.ThreadedServer(visualserver, port=args.visual_rpyc_port, protocol_config={"allow_pickle": True})
     except Exception as e:
         logger.exception(str(e))
