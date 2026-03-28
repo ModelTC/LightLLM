@@ -126,7 +126,6 @@ class VisualModelRpcServer(rpyc.Service):
                     redis_port=args.config_server_vit_redis_port,
                     capacity=args.afs_embed_capacity,
                 )
-                self.async_ret_handle_dict: Dict[str, tuple] = {}
         except Exception as e:
             print("#" * 16)
             print("load model error:", str(e), e, type(e))
@@ -144,23 +143,18 @@ class VisualModelRpcServer(rpyc.Service):
         return self.model.encode(images)
 
     # @calculate_time(show=False, min_cost_ms=300)
-    def exposed_encode(self, images: List[ImageItem], infer_uid: Optional[str] = None):
+    def exposed_encode(self, images: List[ImageItem]):
         images = obtain(images)
         all_img_embeds, uuids, valid_ids = self.forward(images)
         all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
-        if not self.is_visual_only_mode:
-            assert infer_uid is None
-            self._not_visual_only_mode_handle(
-                all_img_embeds=all_img_embeds, uuids=uuids, valid_ids=valid_ids, images=images
-            )
-        else:
-            self._visual_only_mode_handle(
-                all_img_embeds=all_img_embeds, uuids=uuids, valid_ids=valid_ids, images=images, infer_uid=infer_uid
-            )
+        assert not self.is_visual_only_mode
+        self._put_image_embed_to_cpu_cache(
+            all_img_embeds=all_img_embeds, uuids=uuids, valid_ids=valid_ids, images=images
+        )
         return
 
-    def _not_visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images):
+    def _put_image_embed_to_cpu_cache(self, all_img_embeds, uuids, valid_ids, images):
         if self.tp_rank_id == 0:
             ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
             ids_to_set = []
@@ -177,100 +171,3 @@ class VisualModelRpcServer(rpyc.Service):
             if ids_to_set:
                 self.cache_client.root.set_items_embed(ids_to_set)
                 torch.cuda.current_stream().synchronize()
-
-    def _visual_only_mode_handle(self, all_img_embeds, uuids, valid_ids, images, infer_uid):
-        if self.tp_rank_id == 0:
-            all_img_embeds = all_img_embeds.detach().cpu()
-            self.async_ret_handle_dict[infer_uid] = (all_img_embeds, valid_ids, images)
-
-    def exposed_put_to_afs(self, infer_uid: str):
-        assert self.tp_rank_id == 0
-        ret = self.async_ret_handle_dict.pop(infer_uid, None)
-        if ret is not None:
-            all_img_embeds, valid_ids, images = ret
-            for i in enumerate(len(images)):
-                start, end = valid_ids[i]
-                image = images[i]
-                self.redis_afs_client.insert(image.md5, all_img_embeds[start:end])
-
-
-class VisualModelRpcClient:
-    def __init__(self, rpc_conn):
-        self.rpc_conn: VisualModelRpcServer = rpc_conn
-
-        def async_wrap(f):
-            f = rpyc.async_(f)
-
-            async def _func(*args, **kwargs):
-                ans = f(*args, **kwargs)
-                await asyncio.to_thread(ans.wait)
-                # raise if exception
-                return ans.value
-
-            return _func
-
-        self._init_model = async_wrap(self.rpc_conn.init_model)
-        self._encode = async_wrap(self.rpc_conn.encode)
-        self._put_to_afs = async_wrap(self.rpc_conn.put_to_afs)
-
-        return
-
-    async def init_model(self, kvargs):
-        ans: rpyc.AsyncResult = self._init_model(kvargs)
-        await ans
-        return
-
-    async def encode(self, images: List[ImageItem]):
-        ans = self._encode(images)
-        return await ans
-
-    async def put_to_afs(self):
-        ans = self._put_to_afs()
-        return await ans
-
-
-def _init_env(scoket_path: str, success_event: "mp.Event"):
-    # 注册graceful 退出的处理
-    graceful_registry(inspect.currentframe().f_code.co_name)
-
-    import lightllm.utils.rpyc_fix_utils as _
-
-    t = ThreadedServer(VisualModelRpcServer(), socket_path=scoket_path, protocol_config={"allow_pickle": True})
-    success_event.set()
-    t.start()
-    return
-
-
-async def start_model_process():
-    socket_path = _generate_unix_socket_path()
-    if os.path.exists(socket_path):
-        os.remove(socket_path)
-
-    success_event = mp.Event()
-    proc = mp.Process(
-        target=_init_env,
-        args=(
-            socket_path,
-            success_event,
-        ),
-    )
-    proc.start()
-    await asyncio.to_thread(success_event.wait, timeout=40)
-
-    if get_env_start_args().run_mode != "visual_only":
-        conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
-
-        assert proc.is_alive()
-        return VisualModelRpcClient(conn.root)
-    else:
-        conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
-        conn1 = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
-
-        assert proc.is_alive()
-        return VisualModelRpcClient(conn.root), VisualModelRpcClient(conn1.root)
-
-
-def _generate_unix_socket_path() -> str:
-    """Generate a random Unix socket path"""
-    unique_id = uuid.uuid4().hex[:8]
-    return f"/tmp/lightllm_model_infer_{unique_id}.sock"
