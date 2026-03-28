@@ -15,7 +15,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "nixl_decode",
             "pd_master",
             "config_server",
-            "only_visual_infer",
+            "visual_only",
         ],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
@@ -71,12 +71,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="The port number for the config server in config_server mode.",
     )
     parser.add_argument(
-        "--config_server_vit_redis_port",
+        "--config_server_visual_redis_port",
         type=int,
         default=None,
         help="""when run_mode is config_server, set this params will start a redis server,
         when a llm infer node start to set this params, the visual infer module will start a
-        proxy module use config server to find  remote vit infer nodes to infer img"""
+        proxy module use config server to find  remote vit infer nodes to infer img""",
     )
     parser.add_argument(
         "--nixl_pd_kv_page_num",
@@ -474,6 +474,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
+    )
+    parser.add_argument(
+        "--visual_rpyc_port",
+        type=int,
+        default=None,
+        help="""
+            when run_mode is visual_only, set this port, make others to call local visual infer to
+            transfer image to embed.
+            """,
     )
     parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"

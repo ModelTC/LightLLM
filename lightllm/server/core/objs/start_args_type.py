@@ -8,7 +8,9 @@ from typing import List, Optional, Tuple
 class StartArgs:
     run_mode: str = field(
         default="normal",
-        metadata={"choices": ["normal", "prefill", "decode", "pd_master", "nixl_prefill", "nixl_decode"]},
+        metadata={
+            "choices": ["normal", "prefill", "decode", "pd_master", "nixl_prefill", "nixl_decode", "visual_only"]
+        },
     )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
@@ -20,7 +22,7 @@ class StartArgs:
     pd_master_port: int = field(default=1212)
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
-    config_server_vit_redis_port: int = field(default=None)
+    config_server_visual_redis_port: int = field(default=None)
     afs_image_embed_dir: str = field(default=None)
     pd_decode_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(default=None)
@@ -107,6 +109,7 @@ class StartArgs:
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
     visual_nccl_ports: List[int] = field(default=None)
+    visual_rpyc_port: Optional[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
