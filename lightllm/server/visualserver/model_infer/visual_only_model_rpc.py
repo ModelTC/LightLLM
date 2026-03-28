@@ -140,19 +140,10 @@ class VisualOnlyModelRpcServer(VisualModelRpcServer):
                 all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
                 if self.is_visual_only_mode:
-                    all_img_embeds = all_img_embeds.detach().cpu()
-                    for image, valid_id in zip(images, valid_ids):
-                        start, end = valid_id
-                        gen_embed = all_img_embeds[start:end]
-                        image.gen_embed = gen_embed
-                        self.store_queue.put(image)
+                    self._store_to_afs(all_img_embeds, valid_ids, images)
                 else:
                     self._store_to_cpu_cache(all_img_embeds, valid_ids, images)
-                all_img_embeds = all_img_embeds.detach().cpu()
-                for image, valid_id in zip(images, valid_ids):
-                    start, end = valid_id
-                    self.put_afs_queue.put((image, all_img_embeds[start:end]))
-
+                
             except Exception as e:
                 logger.exception(str(e))
                 raise e
@@ -169,6 +160,14 @@ class VisualOnlyModelRpcServer(VisualModelRpcServer):
             cuda_event.record()
             image.cuda_event = cuda_event
             self.store_queue.put(image)
+
+    def _store_to_afs(self, all_img_embeds, valid_ids, images):
+        all_img_embeds = all_img_embeds.detach().cpu()
+        for image, valid_id in zip(images, valid_ids):
+            start, end = valid_id
+            gen_embed = all_img_embeds[start:end]
+            image.gen_embed = gen_embed
+            self.store_queue.put(image)
         
     def _store_worker(self):
         """
@@ -178,25 +177,32 @@ class VisualOnlyModelRpcServer(VisualModelRpcServer):
             try:
                 # 从队列获取任务, 阻塞等待
                 images: List[ImageItem] = self._get_image_items_from_store_queue(max_num=self.max_infer_batch_size)
-                # 只有 0 rank 执行真的写入操作。
-                if self.tp_rank_id == 0:
-                    if self.is_visual_only_mode:
-                        for image in images:
-                            self.afs_handler.insert(image.md5, image.gen_embed)
-                            image.event.set()
-                    else:
-                        for image in images:
-                            # 等待拷贝到cpu cache 完成。
-                            image.cuda_event.synchronize()
 
-                        uuids = [image.uuid for image in images]
-                        self.cache_client.root.set_items_embed(uuids)
+                if self.is_visual_only_mode:
+                    self._commit_to_afs(images=images)
+                else:
+                    self._commit_to_cpu_cache(images=images)
 
-                        for image in images:
-                            image.event.set()
-            
                 for _ in images:
                     self.sempare.release()
             except Exception as e:
                 logger.exception(str(e))
                 raise e
+            
+    def _commit_to_afs(self, images):
+        if self.tp_rank_id == 0:
+            for image in images:
+                self.afs_handler.insert(image.md5, image.gen_embed)
+                image.event.set()
+        
+    def _commit_to_cpu_cache(self, images):
+        if self.tp_rank_id == 0:
+            for image in images:
+                # 等待拷贝到cpu cache 完成。
+                image.cuda_event.synchronize()
+
+            uuids = [image.uuid for image in images]
+            self.cache_client.root.set_items_embed(uuids)
+
+            for image in images:
+                image.event.set()

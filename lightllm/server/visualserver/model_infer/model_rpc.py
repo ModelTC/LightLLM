@@ -141,33 +141,3 @@ class VisualModelRpcServer(rpyc.Service):
     @torch.no_grad()
     def forward(self, images: List[ImageItem]):
         return self.model.encode(images)
-
-    # @calculate_time(show=False, min_cost_ms=300)
-    def exposed_encode(self, images: List[ImageItem]):
-        images = obtain(images)
-        all_img_embeds, uuids, valid_ids = self.forward(images)
-        all_img_embeds = all_img_embeds.to(torch.device("cuda"))
-
-        assert not self.is_visual_only_mode
-        self._put_image_embed_to_cpu_cache(
-            all_img_embeds=all_img_embeds, uuids=uuids, valid_ids=valid_ids, images=images
-        )
-        return
-
-    def _put_image_embed_to_cpu_cache(self, all_img_embeds, uuids, valid_ids, images):
-        if self.tp_rank_id == 0:
-            ready_flags = obtain(self.cache_client.root.get_items_embed(uuids))
-            ids_to_set = []
-            for i, ready in enumerate(ready_flags):
-                if ready:
-                    continue
-                uid = uuids[i]
-                start, end = valid_ids[i]
-                image = images[i]
-                self.cpu_embed_cache_client.copy_vision_to_cache(
-                    embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
-                )
-                ids_to_set.append(uid)
-            if ids_to_set:
-                self.cache_client.root.set_items_embed(ids_to_set)
-                torch.cuda.current_stream().synchronize()
