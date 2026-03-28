@@ -1,15 +1,13 @@
 import os
 import queue
 import threading
-import dataclasses
-import rpyc
-import socket
 import asyncio
 import inspect
 import uuid
+import rpyc
 from lightllm.utils.retry_utils import retry
 from rpyc.utils.factory import unix_connect
-from typing import List, Any
+from typing import List, Any, Deque, Tuple
 from .model_rpc import VisualModelRpcServer, VisualModelRpcClient
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
@@ -20,18 +18,6 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
-
-
-@dataclasses.dataclass
-class _Task:
-    images: List["ImageItem"]
-    ret: Any
-    event: threading.Event
-    hasError: bool = False
-
-    def wait(self, timeout: float = None):
-        self.event.wait(timeout=timeout)
-
 
 class VisualOnlyModelRpcServer(VisualModelRpcServer):
     """
@@ -44,10 +30,16 @@ class VisualOnlyModelRpcServer(VisualModelRpcServer):
     def __init__(self):
         super().__init__()
 
+        # 控制每次的最大推理图片数量，防止爆显存
+        self.max_infer_batch_size = get_env_start_args().visual_infer_batch_size
+
         # 异步队列, 用于接受任务
-        self.task_queue = queue.Queue()
-        # 限制并发, 主要控制内存用量，防止过多照成爆炸。
-        self.sempare = threading.Semaphore(3)
+        self.infer_queue = queue.Queue()
+        # 将计算得到的结果放入 afs 的queue
+        self.put_afs_queue = queue.Queue()
+
+        # 限制并发, 主要控制内存用量，防止过多造成内存OOM
+        self.sempare = threading.Semaphore(self.max_infer_batch_size * 8)
 
         self.afs_handler = SepEmbedHandler(
             afs_embed_dir=get_env_start_args().afs_embed_dir,
@@ -57,67 +49,87 @@ class VisualOnlyModelRpcServer(VisualModelRpcServer):
         )
 
         # 启动任务处理线程
-        self.worker_thread = threading.Thread(target=self._task_worker, daemon=True)
-        self.worker_thread.start()
+        self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)
+        self._infer_thread.start()
 
-    def _task_worker(self):
+        self._put_afs_thread = threading.Thread(target=self._put_afs_worker, daemon=True)
+        self._put_afs_thread.start()
+
+    def exposed_run_task(self, images: List["ImageItem"], ref_event: threading.Event):
+        try:
+            images = obtain(images)
+            images[-1].event = ref_event
+
+            for image in images:
+                self.infer_queue.put(image)
+
+        except BaseException as e:
+            logger.exception(str(e))
+            raise e
+        return
+
+    def _get_image_items_from_queue(self, max_num: int) -> List[ImageItem]:
+        """
+        从队列中批量获取任务，直到达到 max_num 或队列为空。
+        """
+        tasks = []
+        # 至少获取一个任务，阻塞
+        self.sempare.acquire()
+        task = self.infer_queue.get(block=True)
+        tasks.append(task)  
+        
+        # 尝试继续获取更多任务，直到达到 max_num
+        while len(tasks) < max_num:
+            try:
+                self.sempare.acquire()
+                task = self.infer_queue.get(block=False)
+                tasks.append(task)
+            except queue.Empty:
+                self.sempare.release()
+                break
+
+        return tasks
+
+    def _infer_worker(self):
         """
         任务处理循环: 从队列中取出任务, 执行完成后通知调用者
         """
         while True:
             try:
                 # 从队列获取任务, 阻塞等待
-                task: _Task = self.task_queue.get()
+                images = self._get_image_items_from_queue(max_num=self.max_infer_batch_size)
 
                 # 执行任务: 调用父类的forward方法处理图像
-                try:
-                    all_img_embeds, uuids, valid_ids = self.forward(task.images)
-                    all_img_embeds = all_img_embeds.detach().cpu()
-
-                    # 存储结果到task.ret
-                    task.ret = {"embeds": all_img_embeds, "valid_ids": valid_ids}
-                except Exception as e:
-                    task.hasError = True
-                    logger.exception(str(e))
-                    raise e
-                finally:
-                    # 标记任务完成, 唤醒等待的调用者
-                    task.event.set()
-                    self.task_queue.task_done()
+                all_img_embeds, uuids, valid_ids = self.forward(images)
+                all_img_embeds = all_img_embeds.detach().cpu()
+                for image, valid_id in zip(images, valid_ids):
+                    start, end = valid_id
+                    self.put_afs_queue.put((image, all_img_embeds[start:end]))
 
             except Exception as e:
                 logger.exception(str(e))
                 raise e
-
-    def exposed_run_task(self, images: List["ImageItem"]):
+            
+    def _put_afs_worker(self):
         """
-        添加任务到队列
-
-        Args:
-            images: 要处理的图像列表
-
-        Returns:
-            _Task: 任务对象, 包含ret和event
+        任务处理循环: 从队列中取出ImageItem和embed 放入 afs中, 执行完成后通知调用者
         """
-        images = obtain(images)
-        with self.sempare:
-            event = threading.Event()
-            task = _Task(images=images, ret=None, event=event)
-            self.task_queue.put(task)
-            task.event.wait(timeout=8888)
-
-        all_img_embeds = task.ret["embeds"]
-        valid_ids = task.ret["valid_ids"]
-
-        if self.tp_rank_id == 0:
-            for i in enumerate(len(images)):
-                start, end = valid_ids[i]
-                image = images[i]
-                self.afs_handler.insert(image.md5, all_img_embeds[start:end])
-        return
+        while True:
+            try:
+                # 从队列获取任务, 阻塞等待
+                image, embed = self.put_afs_queue.get(block=True)
+                # 只有 0 rank 执行真的写入操作。
+                if self.tp_rank_id == 0:
+                    self.afs_handler.insert(image.md5, embed)
+                if hasattr(image, "event"):
+                    image.event.set()
+                self.sempare.release()
+            except Exception as e:
+                logger.exception(str(e))
+                raise e
 
 
-def _init_env(socket_path: str, device_id: int, success_event):
+def _init_env(socket_path: str, success_event):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
@@ -129,7 +141,7 @@ def _init_env(socket_path: str, device_id: int, success_event):
     return
 
 
-async def start_model_process(vit_tp, device_id):
+async def start_model_process():
     import multiprocessing
 
     socket_path = _generate_unix_socket_path()
@@ -141,7 +153,6 @@ async def start_model_process(vit_tp, device_id):
         target=_init_env,
         args=(
             socket_path,
-            device_id,
             success_event,
         ),
     )
@@ -151,7 +162,9 @@ async def start_model_process(vit_tp, device_id):
 
     conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config={"allow_pickle": True})
     assert proc.is_alive()
-    return VisualModelRpcClient(conn.root, vit_tp, rpc_server_process=proc)
+    # 服务端需要调用event所以，客户端需要一个后台线程进行相关的处理。
+    conn._bg_thread = rpyc.BgServingThread(conn)
+    return VisualModelRpcClient(conn.root)
 
 
 def _generate_unix_socket_path() -> str:
