@@ -184,6 +184,8 @@ class VisualManager:
 
 
 def start_visual_process(args, pipe_writer):
+    import lightllm.utils.rpyc_fix_utils as _
+
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
