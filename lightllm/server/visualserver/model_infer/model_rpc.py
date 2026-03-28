@@ -232,7 +232,7 @@ class VisualModelRpcServer(rpyc.Service):
             try:
                 # 从队列获取任务, 阻塞等待
                 if self.tp_rank_id == 0:
-                    images = self._get_image_items_from_infer_queue(max_num=self.max_infer_batch_size)
+                    images = self._get_image_items_from_infer_queue(max_num=self.infer_max_batch_size)
                     dist.broadcast_object_list([len(images)], src=0, group=self.gloo_group)
                 else:
                     ans = [None]
