@@ -139,7 +139,7 @@ class VisualManager(rpyc.Service):
         return
 
 
-def start_visual_process(args, pipe_writer):
+def start_visual_process(args: StartArgs, pipe_writer):
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
@@ -151,7 +151,10 @@ def start_visual_process(args, pipe_writer):
         visualserver = VisualManager(args=args)
         future = asyncio.run_coroutine_threadsafe(visualserver.wait_to_model_ready(), loop=visualserver.new_loop)
         future.result()
-        t = rpyc.ThreadedServer(visualserver, port=None, protocol_config={"allow_pickle": True})
+        from .register_loop import register_loop
+
+        asyncio.run_coroutine_threadsafe(register_loop(args=args), loop=visualserver.new_loop)
+        t = rpyc.ThreadedServer(visualserver, port=args.visual_rpyc_port, protocol_config={"allow_pickle": True})
     except Exception as e:
         logger.exception(str(e))
         visualserver.clean_up()
