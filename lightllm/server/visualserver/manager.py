@@ -92,7 +92,7 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
+    def get_need_infer_images(self, group_req_indexes: GroupReqIndexes) -> List[ImageItem]:
         shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
         is_aborted = shm_req.is_aborted
         disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
@@ -102,8 +102,7 @@ class VisualManager:
             # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
             # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
             # 需要一些一致的流程来保证不出现异步问题。
-            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-            return
+            return []
 
         multimodal_params = group_req_indexes.multimodal_params
         img_uuids = [img.uuid for img in multimodal_params.images]
@@ -121,7 +120,11 @@ class VisualManager:
             if not ready:
                 images_need_infer.append(img)
 
-        # case 1
+        return images_need_infer
+
+    async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
+        images_need_infer = self.get_need_infer_images(group_req_indexes)
+
         if len(images_need_infer) == 0:
             self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
@@ -142,6 +145,7 @@ class VisualManager:
         with self.lock:
             await asyncio.gather(*taskes)
 
+        # 等待推理通知已经 ok
         for dp_index in range(self.vit_dp):
             _images = dp_to_handle_images[dp_index]
             if _images:
