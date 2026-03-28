@@ -10,17 +10,15 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from .model_rpc_client import VisualModelRpcClient
 from .model_rpc import VisualModelRpcServer
-from .visual_only_model_rpc import VisualOnlyModelRpcServer
+
 
 def _init_env(socket_path: str, success_event):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
 
     import lightllm.utils.rpyc_fix_utils as _
-    if get_env_start_args().run_mode == "visual_only":
-        t = ThreadedServer(VisualOnlyModelRpcServer(), socket_path=socket_path, protocol_config={"allow_pickle": True})
-    else:
-        t = ThreadedServer(VisualModelRpcServer(), socket_path=socket_path, protocol_config={"allow_pickle": True})
+
+    t = ThreadedServer(VisualModelRpcServer(), socket_path=socket_path, protocol_config={"allow_pickle": True})
     success_event.set()
     t.start()
     return
@@ -50,7 +48,7 @@ async def start_model_process():
 
     # 服务端需要调用event所以，客户端需要一个后台线程进行相关的处理。
     conn._bg_thread = rpyc.BgServingThread(conn)
-    
+
     return VisualModelRpcClient(conn)
 
 
