@@ -119,12 +119,13 @@ class VisualModelRpcServer(rpyc.Service):
                 # 独立部署vit模式下，不需要连接 cache_client, 结果是写入 afs
                 args = get_env_start_args()
                 assert args.visual_dp == 1
-                self.afs_handler = SepEmbedHandler(
-                    afs_embed_dir=self.args.afs_embed_dir,
-                    redis_host=self.args.config_server_host,
-                    redis_port=self.args.config_server_vit_redis_port,
-                    capacity=self.args.afs_embed_capacity,
-                )
+                if self.tp_rank_id == 0:
+                    self.afs_handler = SepEmbedHandler(
+                        afs_embed_dir=self.args.afs_embed_dir,
+                        redis_host=self.args.config_server_host,
+                        redis_port=self.args.config_server_vit_redis_port,
+                        capacity=self.args.afs_embed_capacity,
+                    )
 
             self._init_taskes()
         except Exception as e:
