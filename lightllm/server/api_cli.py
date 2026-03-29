@@ -7,7 +7,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"],
+        choices=[
+            "normal",
+            "prefill",
+            "decode",
+            "nixl_prefill",
+            "nixl_decode",
+            "pd_master",
+            "config_server",
+            "visual_only",
+        ],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
@@ -60,6 +69,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="The port number for the config server in config_server mode.",
+    )
+    parser.add_argument(
+        "--config_server_visual_redis_port",
+        type=int,
+        default=None,
+        help="""when run_mode is config_server, set this params will start a redis server,
+        when a llm infer node start to set this params, the visual infer module will start a
+        proxy module use config server to find  remote vit infer nodes to infer img""",
     )
     parser.add_argument(
         "--nixl_pd_kv_page_num",
@@ -448,6 +465,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
     )
     parser.add_argument(
+        "--visual_rpyc_port",
+        type=int,
+        default=None,
+        help="""
+            when run_mode is visual_only, set this port, make others to call local visual infer to
+            transfer image to embed.
+            """,
+    )
+    parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
@@ -611,6 +637,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.03,
         help="""The interval of the schedule time, default is 30ms.""",
+    )
+    parser.add_argument(
+        "--afs_image_embed_dir",
+        type=str,
+        default=None,
+        help="path for vit embed, when use vit remote infer mode",
     )
     parser.add_argument(
         "--enable_cpu_cache",
