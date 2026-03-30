@@ -182,7 +182,10 @@ def start_visual_process(args: StartArgs, pipe_writer):
         asyncio.run_coroutine_threadsafe(
             visualserver.register_to_config_server_loop(args=args), loop=visualserver.new_loop
         )
-        t = rpyc.ThreadedServer(visualserver, port=args.visual_rpyc_port, protocol_config={"allow_pickle": True})
+
+        from .objs import rpyc_config
+
+        t = rpyc.ThreadedServer(visualserver, port=args.visual_rpyc_port, protocol_config=rpyc_config)
     except Exception as e:
         logger.exception(str(e))
         visualserver.clean_up()
