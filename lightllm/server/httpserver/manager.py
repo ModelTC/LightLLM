@@ -596,6 +596,9 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
+            if req_status.aborted:
+                raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
+
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise Exception(f"req_id {group_request_id} disconnected")
@@ -720,11 +723,16 @@ class HttpServerManager:
 
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
+                _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
+                    _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                if _is_aborted:
+                    req_status.aborted = True
+                    logger.debug(f"mark req_id {req_status.group_req_objs.group_req_id} aborted in recycle loop")
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
@@ -835,6 +843,7 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+        self.aborted = False
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:
