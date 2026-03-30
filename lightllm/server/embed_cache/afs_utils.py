@@ -131,7 +131,7 @@ class SepEmbedHandler:
     def load(self, md5: str) -> Optional[torch.Tensor]:
         try:
             ans = self.afs_utils.load_tensor_afs(md5)
-            if ans:
+            if ans is not None:
                 self.redis_client.update(md5)
                 return ans
             else:
