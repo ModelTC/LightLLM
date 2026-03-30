@@ -4,6 +4,8 @@ import wave
 import time
 import librosa
 import base64
+import hashlib
+import numpy as np
 from typing import List
 from io import BytesIO
 from PIL import Image
@@ -12,6 +14,9 @@ from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+RAW_AUDIO_SHM_FORMAT = "raw_audio_bytes"
+WAVEFORM_F32_SHM_FORMAT = "waveform_f32"
+AUDIO_SHM_USE_RAW_ENV = "LIGHTLLM_AUDIO_SHM_USE_RAW"
 
 
 def generate_silence_wav_bytes(sample_rate: int = 16000, duration_seconds: float = 1.0) -> bytes:
@@ -23,6 +28,22 @@ def generate_silence_wav_bytes(sample_rate: int = 16000, duration_seconds: float
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(b"\x00\x00" * num_samples)
         return buffer.getvalue()
+
+
+def load_audio_from_shm_payload(audio_data: bytes, extra_params: dict, sample_rate: int) -> np.ndarray:
+    audio_shm_format = extra_params.get("audio_shm_format", RAW_AUDIO_SHM_FORMAT)
+    if audio_shm_format == WAVEFORM_F32_SHM_FORMAT:
+        num_samples = int(extra_params.get("audio_num_samples", 0))
+        if num_samples > 0:
+            return np.frombuffer(audio_data, dtype=np.float32, count=num_samples)
+        return np.frombuffer(audio_data, dtype=np.float32)
+
+    audio, _ = librosa.load(BytesIO(audio_data), sr=sample_rate)
+    return np.asarray(audio, dtype=np.float32)
+
+
+def should_use_raw_audio_shm() -> bool:
+    return os.getenv(AUDIO_SHM_USE_RAW_ENV, "0") == "1"
 
 
 class AudioItem:
@@ -61,16 +82,28 @@ class AudioItem:
             # check if valid audio bytes
             decode_start = time.time()
             audio_values, _ = librosa.load(BytesIO(audio_data), sr=16000)
+            audio_values = np.asarray(audio_values, dtype=np.float32)
             decode_cost_ms = (time.time() - decode_start) * 1000.0
             from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
             self.audio_length = max(audio_values.shape[0], MIN_AUDIO_LEN)  # 如果音频过短，会被pad到480的长度
-            self._preload_data = audio_data
+            if should_use_raw_audio_shm():
+                self.extra_params["audio_shm_format"] = RAW_AUDIO_SHM_FORMAT
+                self.extra_params.pop("audio_sample_rate", None)
+                self.extra_params.pop("audio_num_samples", None)
+                self._preload_data = audio_data
+            else:
+                self.extra_params["audio_shm_format"] = WAVEFORM_F32_SHM_FORMAT
+                self.extra_params["audio_sample_rate"] = 16000
+                self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
+                self._preload_data = audio_values.tobytes()
+            self.extra_params["audio_payload_md5"] = hashlib.md5(self._preload_data).hexdigest()
             logger.info(
                 f"lightllm_req_id:{req_id} stage:audio_preload_done "
                 f"elapsed_ms:{(time.time() - preload_start) * 1000.0:.3f} "
                 f"source_type:{self._type} source_ready_ms:{source_ready_cost_ms:.3f} "
-                f"decode_ms:{decode_cost_ms:.3f} audio_length:{self.audio_length}"
+                f"decode_ms:{decode_cost_ms:.3f} audio_length:{self.audio_length} "
+                f"shm_format:{self.extra_params['audio_shm_format']}"
             )
             return
 

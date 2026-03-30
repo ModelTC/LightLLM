@@ -144,23 +144,17 @@ class HttpServerManager:
                 logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
                 raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
 
-            uid_list = []
-            for item, rec in zip(items, records):
+            update_data_ids = []
+            for item, rec, data in zip(items, records, datas):
                 item: Union[ImageItem, AudioItem] = item
                 item.uuid = rec["id"]
                 item.token_id = rec["token_id"]
                 item.token_num = rec["token_num"]
                 item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
 
-                uid_list.append(rec["id"])
-
-            ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
-            update_data_ids = []
-
-            for uid, ready, data in zip(uid_list, ready_flags, datas):
-                if not ready:
-                    create_shm(get_shm_name_data(uid), data)
-                    update_data_ids.append(uid)
+                if not rec["data_ready"]:
+                    create_shm(get_shm_name_data(rec["id"]), data)
+                    update_data_ids.append(rec["id"])
 
             if update_data_ids:
                 self.cache_client.root.set_items_data(update_data_ids)
@@ -188,7 +182,10 @@ class HttpServerManager:
                     self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                     data = audio.read()
                     token_num = self.tokenizer.get_audio_token_length(audio)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
+                    payload_md5 = audio.extra_params.get("audio_payload_md5")
+                    if payload_md5 is None:
+                        payload_md5 = hashlib.md5(data).hexdigest()
+                    md5sum = payload_md5 + "_" + str(hash(frozendict(audio.extra_params)))
                     md5sums.append(md5sum)
                     tokens_nums.append(token_num)
                     datas.append(data)

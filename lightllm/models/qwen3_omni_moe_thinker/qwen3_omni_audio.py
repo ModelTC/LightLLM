@@ -1,6 +1,7 @@
 import os
 import json
 import math
+import time
 import torch
 import rpyc
 import librosa
@@ -10,16 +11,18 @@ from torch import Tensor, nn
 from safetensors import safe_open
 from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
-from rpyc.utils.classic import obtain
-
 from transformers.activations import ACT2FN
 
-from lightllm.server.multimodal_params import AudioItem
+from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
+from lightllm.utils.log_utils import init_logger
+
+
+logger = init_logger(__name__)
 
 
 def _get_feat_extract_output_lengths(input_lengths):
@@ -338,6 +341,11 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         return hidden_states
 
     def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
+        encode_start = time.time()
+        load_shm_cost = 0.0
+        preprocess_cost = 0.0
+        forward_cost = 0.0
+        cache_copy_cost = 0.0
         uuids = []
         items: List[AudioItem] = []
         per_audio_features: List[torch.Tensor] = []
@@ -345,12 +353,14 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
+                load_start = time.time()
                 audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
+                audio = load_audio_from_shm_payload(audio_data, item.extra_params, self.processor.sampling_rate)
+                load_shm_cost += time.time() - load_start
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
+            preprocess_start = time.time()
             input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
             if feature_attention_mask is not None:
                 audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
@@ -361,22 +371,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             feature_lens = (
                 audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
             )
+            preprocess_cost += time.time() - preprocess_start
 
+            forward_start = time.time()
             audio_features = self.forward(
                 input_features,
                 feature_lens=feature_lens,
             )
+            forward_cost += time.time() - forward_start
             per_audio_features.append(audio_features)
 
-        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
-        ids_to_set = []
-        for i, ready in enumerate(ready_audio):
-            if ready:
-                continue
-
-            uid = uuids[i]
+        cache_copy_start = time.time()
+        for i, uid in enumerate(uuids):
             item = items[i]
-
             cur_embed = per_audio_features[i]
             cpu_embed_cache_client.copy_to_cache(
                 embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
@@ -384,11 +391,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             assert (
                 item.token_num == cur_embed.shape[0]
             ), f"audio token num not match {item.token_num} vs {cur_embed.shape[0]} "
-            ids_to_set.append(uid)
 
-        if ids_to_set:
-            self.cache_client.root.set_items_embed(ids=ids_to_set)
+        if uuids:
             torch.cuda.current_stream().synchronize()
+            self.cache_client.root.set_items_embed(ids=uuids)
+        cache_copy_cost += time.time() - cache_copy_start
+        logger.info(
+            f"audio_encode_batch_done audio_count:{len(audio_items)} "
+            f"load_shm_ms:{load_shm_cost * 1000.0:.3f} "
+            f"preprocess_ms:{preprocess_cost * 1000.0:.3f} "
+            f"forward_ms:{forward_cost * 1000.0:.3f} "
+            f"cache_ms:{cache_copy_cost * 1000.0:.3f} "
+            f"elapsed_ms:{(time.time() - encode_start) * 1000.0:.3f}"
+        )
 
     @torch.no_grad()
     def warmup(self, audio_bytes: bytes):

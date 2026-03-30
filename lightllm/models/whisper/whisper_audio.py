@@ -10,8 +10,7 @@ from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.server.multimodal_params import AudioItem
-from rpyc.utils.classic import obtain
+from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 # tokenizer_class removed
@@ -175,8 +174,7 @@ class WhisperAudioModel:
                 uuids.append(item.uuid)
                 items.append(item)
                 audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=16000)
+                audio = load_audio_from_shm_payload(audio_data, item.extra_params, 16000)
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
@@ -222,25 +220,17 @@ class WhisperAudioModel:
                 continue
             per_audio_embeds[owner].append(audios[chunk_idx][:token_len])
 
-        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
-        ids_to_set = []
-        for i, ready in enumerate(ready_audio):
-            if ready:
-                continue
-
-            uid = uuids[i]
+        for i, uid in enumerate(uuids):
             item = items[i]
-
             # 拼接该 audio 的所有 chunk embedding
             cur_embed = torch.cat(per_audio_embeds[i], dim=0)
             cpu_embed_cache_client.copy_to_cache(
                 embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
             )
-            ids_to_set.append(uid)
 
-        if ids_to_set:
-            self.cache_client.root.set_items_embed(ids=ids_to_set)
+        if uuids:
             torch.cuda.current_stream().synchronize()
+            self.cache_client.root.set_items_embed(ids=uuids)
 
     @torch.no_grad()
     def warmup(self, audio_bytes: bytes):
