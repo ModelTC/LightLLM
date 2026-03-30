@@ -132,7 +132,7 @@ class VisualOnlyManager(rpyc.Service):
     def clean_up(self):
         return
 
-    def exposed_infer_images(self, images: List[ImageItem], ref_event: threading.Event):
+    def exposed_remote_infer_images(self, images: List[ImageItem], ref_event: threading.Event):
         try:
             images = obtain(images)
             logger.info(
