@@ -57,7 +57,6 @@ class VisualModelRpcServer(rpyc.Service):
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
         self.cache_port = kvargs["cache_port"]
-        self.vit_rank_id = kvargs["vit_rank_id"]
         self.is_visual_only_mode = get_env_start_args().run_mode == "visual_only"
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
