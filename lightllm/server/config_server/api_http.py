@@ -9,7 +9,7 @@ from threading import Lock
 from typing import Dict, List
 from fastapi.responses import JSONResponse
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.visualserver.vit_connect import VIT_Obj
+from lightllm.server.visualserver.objs import VIT_Obj
 from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name

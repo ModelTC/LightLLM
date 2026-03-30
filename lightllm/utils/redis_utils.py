@@ -6,11 +6,9 @@ logger = init_logger(__name__)
 
 def start_redis_service(args):
     """launch redis service"""
-    if not hasattr(args, "start_redis") or not args.start_redis:
-        return None
 
     config_server_host = args.config_server_host
-    redis_port = args.redis_port
+    redis_port = args.config_server_visual_redis_port
     try:
         subprocess.run(
             ["redis-cli", "-h", config_server_host, "-p", str(redis_port), "FLUSHALL", "ASYNC"], check=False, timeout=2
