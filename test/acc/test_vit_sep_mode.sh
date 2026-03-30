@@ -1,4 +1,4 @@
-#  安装 redis
+#  安装 redis-server
 sudo apt-get update
 sudo apt-get install redis-server
 
@@ -40,3 +40,7 @@ CUDA_VISIBLE_DEVICES=6,7 python -m lightllm.server.api_server \
 --afs_embed_capacity 250000 \
 --visual_use_proxy_mode 
 
+
+
+# todo test
+1. 将 afs_embed_capacity 设置为一个较小的值，比如 100，这样可以更快地测试替换逻辑。
