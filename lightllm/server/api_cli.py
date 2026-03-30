@@ -490,7 +490,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""
         when run_mode is normal, set this params,
         will call remote visual infer to transfer image to embed,
-        need set --visual_rpyc_port, --config_server_host, --config_server_port,
+        need set --config_server_host, --config_server_port,
         --config_server_visual_redis_port""",
     )
     parser.add_argument(
