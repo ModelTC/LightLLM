@@ -326,16 +326,29 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
-        from .visualserver.manager import start_visual_process
 
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_visual_process,
-            ],
-            start_args=[
-                (args,),
-            ],
-        )
+        if not args.visual_use_proxy_mode:
+            from .visualserver.manager import start_visual_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
+        else:
+            from .visualserver.proxy_manager import start_visual_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
 
     if not args.disable_audio:
         from .audioserver.manager import start_audio_process

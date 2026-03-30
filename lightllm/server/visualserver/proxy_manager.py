@@ -172,7 +172,6 @@ def start_visual_process(args, pipe_writer):
         visualserver = ProxyVisualManager(args=args)
     except Exception as e:
         logger.exception(str(e))
-        visualserver.clean_up()
         raise e
 
     pipe_writer.send("init ok")
