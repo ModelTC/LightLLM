@@ -123,8 +123,9 @@ class SepEmbedHandler:
         try:
             # 保证一定会有清理的可能性
             self.redis_client.update(md5)
-            self.afs_utils.save_tensor_afs(md5, tensor)
+            ans = self.afs_utils.save_tensor_afs(md5, tensor)
             self.redis_client.update(md5)
+            return ans
         except:
             return False
 
