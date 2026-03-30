@@ -280,7 +280,7 @@ class VisualModelRpcServer(rpyc.Service):
         while True:
             try:
                 # 从队列获取任务, 阻塞等待
-                images: List[ImageItem] = self._get_image_items_from_store_queue(max_num=self.max_infer_batch_size)
+                images: List[ImageItem] = self._get_image_items_from_store_queue(max_num=self.infer_max_batch_size)
 
                 if self.is_visual_only_mode:
                     self._commit_to_afs(images=images)
