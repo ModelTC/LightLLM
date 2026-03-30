@@ -10,7 +10,7 @@ import pickle
 import websockets
 import socket
 from lightllm.utils.net_utils import get_hostname_ip
-from .vit_connect import VIT_Obj
+from .objs import VIT_Obj
 from typing import List
 from lightllm.server.core.objs import StartArgs
 
