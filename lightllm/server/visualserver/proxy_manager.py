@@ -118,6 +118,7 @@ class ProxyVisualManager(VisualManager):
         return
 
     async def loop_to_connect_remote_visual_server(self):
+        counter = 0
         while True:
             uri = f"http://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
             try:
@@ -127,29 +128,37 @@ class ProxyVisualManager(VisualManager):
                         base64data = response.json()["data"]
                         id_to_vit_obj = pickle.loads(base64.b64decode(base64data))
 
+                        counter += 1
+                        if counter % 6 == 0:
+                            logger.info(f"Got visual server info from config server: {id_to_vit_obj}")
+
                         for node_id in list(self.id_to_rpyc_conn.keys()):
                             if node_id not in id_to_vit_obj:
+                                logger.info(f"Visual server {node_id} is removed, closing connection")
                                 with self.conn_lock:
                                     self.id_to_rpyc_conn.pop(node_id).close()
 
-                            for node_id, vit_obj in id_to_vit_obj.items():
-                                vit_obj: VIT_Obj = vit_obj
-                                if node_id not in self.id_to_rpyc_conn:
+                        for node_id, vit_obj in id_to_vit_obj.items():
+                            vit_obj: VIT_Obj = vit_obj
+                            if node_id not in self.id_to_rpyc_conn:
 
-                                    def _connect():
-                                        from .objs import rpyc_config
+                                def _connect():
+                                    from .objs import rpyc_config
 
-                                        conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=rpyc_config)
-                                        conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                                        conn._bg_thread = rpyc.BgServingThread(conn)
-                                        return conn
+                                    conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=rpyc_config)
+                                    conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                                    conn._bg_thread = rpyc.BgServingThread(conn)
+                                    logger.info(
+                                        f"Connected to visual server {node_id} at {vit_obj.host_ip}:{vit_obj.port}"
+                                    )
+                                    return conn
 
-                                    try:
-                                        new_conn = await asyncio.to_thread(_connect)
-                                        with self.conn_lock:
-                                            self.id_to_rpyc_conn[node_id] = new_conn
-                                    except Exception as e:
-                                        logger.exception(str(e))
+                                try:
+                                    new_conn = await asyncio.to_thread(_connect)
+                                    with self.conn_lock:
+                                        self.id_to_rpyc_conn[node_id] = new_conn
+                                except Exception as e:
+                                    logger.exception(str(e))
                     else:
                         logger.error(f"Failed to get VIT instances: {response.status_code}")
             except Exception as e:
