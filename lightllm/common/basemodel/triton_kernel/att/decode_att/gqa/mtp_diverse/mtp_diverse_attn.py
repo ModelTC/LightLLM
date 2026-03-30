@@ -110,6 +110,7 @@ def token_decode_attention_mtp_diverse_single_token(
         B_Seqlen=b_seq_len,
         O=o_tensor,
         block_seq=block_seq,
+        max_kv_len=max_kv_len,
     )
 
     return o_tensor

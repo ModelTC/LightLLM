@@ -16,72 +16,37 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.kernel_config import KernelConfigs
-from frozendict import frozendict
-from functools import lru_cache
-from typing import Dict
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner
 
 
-class MTPDiverseStage1SingleTokenKernelConfig(KernelConfigs):
-    kernel_name: str = "_fwd_kernel_mtp_diverse_stage1_single_token:v1"
-
-    @classmethod
-    @lru_cache(maxsize=200)
-    def try_to_get_best_config(
-        cls,
-        batch_size: int,
-        max_kv_len: int,
-        gqa_group_size: int,
-        q_head_dim: int,
-        block_seq: int,
-        out_dtype: str,
-    ) -> dict:
-        key_params = {
-            "gqa_group_size": gqa_group_size,
-            "q_head_dim": q_head_dim,
-            "block_seq": block_seq,
-            "out_dtype": str(out_dtype),
-        }
-        key_params = frozendict(key_params)
-
-        finded_config = cls.get_the_config(key_params)
-
-        if finded_config:
-            batch_size_config: dict = finded_config[
-                min(
-                    finded_config.keys(),
-                    key=lambda x: abs(int(x) - max_kv_len),
+def get_test_configs():
+    configs = []
+    for block_n in [16, 32, 64, 128]:
+        for num_warps in [2, 4, 8, 16]:
+            for num_stages in [2, 4, 6]:
+                configs.append(
+                    {
+                        "BLOCK_N": block_n,
+                        "num_warps": num_warps,
+                        "num_stages": num_stages,
+                    }
                 )
-            ]
-            config = batch_size_config[min(batch_size_config.keys(), key=lambda x: abs(int(x) - batch_size))]
+    return configs
 
-            return config
-        else:
-            config = {
-                "BLOCK_N": 16,
-                "num_warps": 2,
-                "num_stages": 2,
-            }
-        return config
 
-    @classmethod
-    def save_config(
-        cls,
-        gqa_group_size: int,
-        q_head_dim: int,
-        block_seq: int,
-        out_dtype: str,
-        config_json: Dict[int, Dict[int, Dict]],
-    ):
-        key_params = {
-            "gqa_group_size": gqa_group_size,
-            "q_head_dim": q_head_dim,
-            "block_seq": block_seq,
-            "out_dtype": str(out_dtype),
-        }
-        key_params = frozendict(key_params)
+def get_static_key(q, k, block_seq):
+    key_params = {
+        "gqa_group_size": int(q.shape[1] // k.shape[1]),
+        "q_head_dim": int(q.shape[2]),
+        "block_seq": block_seq,
+        "out_dtype": str(q.dtype),
+    }
+    return key_params
 
-        return cls.store_config(key_params, config_json)
+
+def get_run_key(q, max_kv_len):
+    batch_size = q.shape[0]
+    return batch_size * 1000 * 1000 * 1000 + max_kv_len
 
 
 @triton.jit
@@ -272,6 +237,13 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
     return
 
 
+@autotune(
+    kernel_name="_fwd_kernel_mtp_diverse_stage1_single_token:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=get_run_key,
+    mutates_args=["mid_out", "mid_out_logsumexp"],
+)
 @torch.no_grad()
 def mtp_diverse_stage1_single_token(
     q: torch.Tensor,
@@ -294,14 +266,7 @@ def mtp_diverse_stage1_single_token(
     例如组内 [q1, q2, q3, q4] 对应 b_seq_len [2, 3, 4, 5]
     """
     if not run_config:
-        run_config = MTPDiverseStage1SingleTokenKernelConfig.try_to_get_best_config(
-            batch_size=int(b_seq_len.shape[0]),
-            max_kv_len=max_kv_len,
-            gqa_group_size=int(q.shape[1] // k.shape[1]),
-            q_head_dim=int(q.shape[2]),
-            block_seq=block_seq,
-            out_dtype=q.dtype,
-        )
+        run_config = {"BLOCK_N": 16, "num_warps": 2, "num_stages": 2}
 
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
@@ -364,3 +329,62 @@ def mtp_diverse_stage1_single_token(
         num_stages=num_stages,
     )
     return
+
+
+if __name__ == "__main__":
+    from lightllm.utils.envs_utils import get_triton_autotune_level
+
+    if get_triton_autotune_level() != 2:
+        raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
+
+    # static params
+    gqa_group_size = 4
+    q_head_dim = 128
+    block_seq = 128
+    out_dtype = torch.bfloat16
+
+    batch_sizes = [1, 8, 16, 32, 64, 128]
+    decode_lengths = [1024, 2048, 8192, 16384]
+
+    q_head_num = gqa_group_size
+
+    Autotuner.start_autotune_warmup()
+    # autotuing kernel
+    for batch_size in batch_sizes:
+        for length in decode_lengths:
+            # Setup test tensors
+            q = torch.randn(batch_size, q_head_num, q_head_dim, dtype=out_dtype, device="cuda")
+            k = torch.randn(batch_size * length, 1, q_head_dim, dtype=out_dtype, device="cuda")
+            v = torch.randn(batch_size * length, 1, q_head_dim, dtype=out_dtype, device="cuda")
+            Req_to_tokens = torch.arange(0, batch_size * length, dtype=torch.int32, device="cuda").view(
+                batch_size, length
+            )
+            B_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda")
+            B_seq_len = torch.full((batch_size,), length, dtype=torch.int32, device="cuda")
+            b_mark_shared_group = torch.arange(1, batch_size + 1, dtype=torch.int32, device="cuda")
+
+            if batch_size <= 16:
+                block_num = 128
+            elif batch_size <= 64:
+                block_num = 64
+            else:
+                block_num = 32
+
+            mid_out = torch.zeros(batch_size, q_head_num, block_num, q_head_dim, dtype=out_dtype, device="cuda")
+            mid_out_logsumexp = torch.zeros(batch_size, q_head_num, block_num, dtype=out_dtype, device="cuda")
+
+            mtp_diverse_stage1_single_token(
+                q=q,
+                k=k,
+                v=v,
+                Req_to_tokens=Req_to_tokens,
+                B_req_idx=B_req_idx,
+                b_seq_len=B_seq_len,
+                b_mark_shared_group=b_mark_shared_group,
+                max_kv_len=length,
+                mid_out=mid_out,
+                mid_out_logsumexp=mid_out_logsumexp,
+                block_seq=block_seq,
+            )
+
+    Autotuner.end_autotune_warmup()

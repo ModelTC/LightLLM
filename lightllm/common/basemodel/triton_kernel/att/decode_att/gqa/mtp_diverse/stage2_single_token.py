@@ -9,6 +9,35 @@ MTP Diverse Attention Stage2 Kernel - Single Token Per Request Mode
 import torch
 import triton
 import triton.language as tl
+from typing import Optional
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+
+
+def get_test_configs():
+    configs = []
+    for num_warps in [2, 4, 8, 16]:
+        for num_stages in [2, 4, 6]:
+            configs.append(
+                {
+                    "num_warps": num_warps,
+                    "num_stages": num_stages,
+                }
+            )
+    return configs
+
+
+def get_static_key(mid_out, block_seq):
+    key_params = {
+        "q_head_dim": int(mid_out.shape[-1]),
+        "block_seq": block_seq,
+        "out_dtype": str(mid_out.dtype),
+    }
+    return key_params
+
+
+def get_run_key(mid_out, max_kv_len):
+    batch_size = mid_out.shape[0]
+    return batch_size * 1000 * 1000 * 1000 + max_kv_len
 
 
 @triton.jit
@@ -83,6 +112,20 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
     return
 
 
+@autotune(
+    kernel_name="_fwd_kernel_mtp_diverse_stage2_single_token:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=get_run_key,
+    mutates_args=["O"],
+)
+@autotune(
+    kernel_name="_fwd_kernel_mtp_diverse_stage2_single_token:v1",
+    configs_gen_func=get_test_configs,
+    static_key_func=get_static_key,
+    run_key_func=get_run_key,
+    mutates_args=["O"],
+)
 @torch.no_grad()
 def mtp_diverse_stage2_single_token(
     mid_out: torch.Tensor,
@@ -90,6 +133,8 @@ def mtp_diverse_stage2_single_token(
     B_Seqlen: torch.Tensor,
     O: torch.Tensor,
     block_seq: int,
+    max_kv_len: int,
+    run_config: Optional[dict] = None,
 ):
     """
     MTP Diverse Attention Stage2 - Single Token Per Request Mode
@@ -100,7 +145,14 @@ def mtp_diverse_stage2_single_token(
     - B_Seqlen: [batch] - 每个请求的 seq_len
     - O: [batch, num_heads, head_dim] - 输出
     - block_seq: 块大小
+    - max_kv_len: 最大 kv 长度
     """
+    if not run_config:
+        run_config = {"num_warps": 4, "num_stages": 2}
+
+    num_warps = run_config["num_warps"]
+    num_stages = run_config["num_stages"]
+
     Lk = mid_out.shape[-1]
     assert Lk in {16, 32, 64, 128}
     batch, head_num = mid_out.shape[0], mid_out.shape[1]
@@ -123,7 +175,52 @@ def mtp_diverse_stage2_single_token(
         stride_od=O.stride(2),
         BLOCK_SEQ=block_seq,
         BLOCK_DMODEL=Lk,
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return
+
+
+if __name__ == "__main__":
+    from lightllm.utils.envs_utils import get_triton_autotune_level
+
+    if get_triton_autotune_level() != 2:
+        raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
+
+    # static params
+    q_head_dim = 128
+    block_seq = 128
+    out_dtype = torch.bfloat16
+
+    batch_sizes = [1, 8, 16, 32, 64, 128]
+    decode_lengths = [1024, 2048, 8192, 16384]
+
+    q_head_num = 4
+
+    Autotuner.start_autotune_warmup()
+    # autotuing kernel
+    for batch_size in batch_sizes:
+        for length in decode_lengths:
+            if batch_size <= 16:
+                block_num = 128
+            elif batch_size <= 64:
+                block_num = 64
+            else:
+                block_num = 32
+
+            # Setup test tensors
+            mid_out = torch.randn(batch_size, q_head_num, block_num, q_head_dim, dtype=out_dtype, device="cuda")
+            mid_out_logsumexp = torch.randn(batch_size, q_head_num, block_num, dtype=torch.float32, device="cuda")
+            B_Seqlen = torch.full((batch_size,), length, dtype=torch.int32, device="cuda")
+            O = torch.zeros(batch_size, q_head_num, q_head_dim, dtype=out_dtype, device="cuda")
+
+            mtp_diverse_stage2_single_token(
+                mid_out=mid_out,
+                mid_out_logsumexp=mid_out_logsumexp,
+                B_Seqlen=B_Seqlen,
+                O=O,
+                block_seq=block_seq,
+                max_kv_len=length,
+            )
+
+    Autotuner.end_autotune_warmup()
