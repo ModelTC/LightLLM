@@ -119,6 +119,7 @@ class ProxyVisualManager(VisualManager):
 
     async def loop_to_connect_remote_visual_server(self):
         counter = 0
+        error_counter = 0
         while True:
             uri = f"http://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
             try:
@@ -162,7 +163,22 @@ class ProxyVisualManager(VisualManager):
                     else:
                         logger.error(f"Failed to get VIT instances: {response.status_code}")
             except Exception as e:
-                logger.exception(f"Error getting VIT instances: {e}")
+                logger.error(f"Error occurred while connecting to config server: {e}")
+                error_counter += 1
+
+            if error_counter >= 6:
+                logger.error(
+                    "Failed to connect to config server for a long time, remove all connections to visual servers"
+                )
+                error_counter = 0
+                try:
+                    with self.conn_lock:
+                        for node_id, conn in self.id_to_rpyc_conn.items():
+                            logger.info(f"Closing connection to visual server {node_id}")
+                            conn.close()
+                        self.id_to_rpyc_conn.clear()
+                except Exception as e:
+                    logger.exception(str(e))
 
             # 在没有连接的时候，高频率更新，有的时候降低更新频率
             if len(self.id_to_rpyc_conn) == 0:
