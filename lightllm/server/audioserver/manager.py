@@ -55,6 +55,7 @@ class AudioManager:
         self.model_rpcs: List[AudioModelRpcClient] = []
         self.req_stage_times: Dict[int, Dict[str, float]] = {}
         self.next_module_port = args.multi_level_kv_cache_port if args.enable_cpu_cache else args.router_port
+        self.waiting_reqs_event = asyncio.Event()
 
     def _mark_req_stage(self, req_id: int, stage: str):
         now = time.time()
@@ -131,7 +132,10 @@ class AudioManager:
     async def loop_for_fwd(self):
         while True:
             if len(self.waiting_reqs) == 0:
-                await asyncio.sleep(0.01)  # 10ms
+                self.waiting_reqs_event.clear()
+                if len(self.waiting_reqs) == 0:
+                    await self.waiting_reqs_event.wait()
+                continue
             else:
                 processing_group_reqs = []
                 audios_need_infer = []
@@ -249,6 +253,7 @@ class AudioManager:
                     waiting_queue_size=len(self.waiting_reqs),
                 )
                 self.waiting_reqs.append(recv_req)
+                self.waiting_reqs_event.set()
             else:
                 assert False, f"Error Req Inf {recv_req}"
 
