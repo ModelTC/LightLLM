@@ -1,3 +1,7 @@
+#  安装 redis
+sudo apt-get update
+sudo apt-get install redis-server
+
 # 启动 config_server
 python -m lightllm.server.api_server \
 --run_mode config_server \
