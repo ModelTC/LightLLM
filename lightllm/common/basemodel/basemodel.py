@@ -53,6 +53,7 @@ class TpPartBaseModel:
 
     # infer state class
     infer_state_class = InferStateInfo
+    
 
     def get_radix_class(self):
         return RadixCache

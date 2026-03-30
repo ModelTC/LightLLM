@@ -109,7 +109,7 @@ class StartArgs:
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
     prefll_cudagraph_max_handle_token: int = field(default=512)
-    graph_max_batch_size: int = field(default=512)
+    graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
     graph_max_len_in_batch: int = field(default=0)
