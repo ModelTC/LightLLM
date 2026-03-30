@@ -506,6 +506,16 @@ def visual_only_start(args):
         used_ports=already_uesd_ports,
     )
 
+    if args.visual_gpu_ids is None:
+        args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
+    if args.visual_infer_batch_size is None:
+        args.visual_infer_batch_size = args.visual_dp
+    if args.data_type is None:
+        from lightllm.utils.config_utils import get_dtype
+
+        args.data_type = get_dtype(args.model_dir)
+        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+
     logger.info(f"alloced ports: {can_use_ports}")
 
     args.visual_nccl_ports = can_use_ports[: args.visual_dp]
