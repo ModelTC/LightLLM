@@ -56,7 +56,7 @@ class HybridRadixCache(RadixCache):
             if update_refs:
                 if tree_node.ref_counter == 1:
                     self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
-                tree_node.ref_counter -= 1  # 只减少当前节点，不递归
+                tree_node.ref_counter -= 1
 
             if tree_node.is_leaf() and tree_node.ref_counter == 0:
                 evict_token_list.append(tree_node.token_mem_index_value)

@@ -33,7 +33,6 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
-    mtp_step: int = 0
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -61,7 +60,6 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.mtp_step = get_env_start_args().mtp_step
         self.has_recurrent_state = isinstance(self.req_manager, ReqManagerForMamba)
 
         return
@@ -87,7 +85,7 @@ class InferenceContext:
             return
 
         if radix_cache is not None:
-            radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs) * (self.mtp_step + 1))
+            radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs))
 
         req_idx_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
         req_manager.alloc_buffer_for_req(req_idx_gpu)
@@ -194,8 +192,6 @@ class InferenceContext:
             req_to_buffer_index = self.req_manager.req_to_buffer_index
             if need_free_base_buffer:
                 free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-            elif self.mtp_step > 0:
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
         else:
             self.free_a_req_mem(free_token_index, req)
 
@@ -264,11 +260,9 @@ class InferenceContext:
         if pause_reqs:
             g_infer_state_lock.acquire()
 
-            pause_req_indices = []
             free_token_index = []
             free_buffer_index = []
             for req in pause_reqs:
-                pause_req_indices.append(req.req_idx)
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
@@ -547,8 +541,8 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
     def get_chuncked_input_token_ids(self):
-        # 复用 get_chuncked_input_token_len 的逻辑，保持一致性
-        chunked_end = self.get_chuncked_input_token_len()
+        chunked_start = self.cur_kv_len
+        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_len(self):
