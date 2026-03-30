@@ -109,7 +109,7 @@ class SepEmbedHandler:
 
     def full_to_clean(self):
         remove_objs: List[str] = self.redis_client.get_eviction_candidates(
-            remove_size=self.remove_count, capcity=self.capacity
+            remove_size=self.remove_count, capacity=self.capacity
         )
         for obj in remove_objs:
             try:
