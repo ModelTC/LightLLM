@@ -103,7 +103,7 @@ class ProxyVisualManager(VisualManager):
         # 将 bytes 从 shm 中读取出来，放到 image.data_bytes 中，供远端的 vit 进行推理使用。
         for image in images:
             image.data_bytes = read_shm(get_shm_name_data(image.uuid))
-        conn.root.infer_images(images, event)
+        conn.root.remote_infer_images(images, event)
         event.wait(timeout=600)
 
         for image in images:
