@@ -68,7 +68,6 @@ class ReqManager:
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
-        self.req_to_buffer_index = None
 
     def alloc(self):
         return self.req_list.alloc()

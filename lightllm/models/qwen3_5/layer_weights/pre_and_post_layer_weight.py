@@ -1,5 +1,3 @@
-from lightllm.common.basemodel import PreAndPostLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, GEMMANormWeight
 from lightllm.models.qwen3next.layer_weights.pre_and_post_layer_weight import Qwen3NextPreAndPostLayerWeight
 from lightllm.models.qwen3_vl.layer_weights.pre_and_post_layer_weight import rename_weight_keys
 

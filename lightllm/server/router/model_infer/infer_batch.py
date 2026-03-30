@@ -302,8 +302,8 @@ class InferenceContext:
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
                 recovered_reqs.append(req)
-
-            self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, recovered_reqs)
+            if isinstance(self.req_manager, ReqManagerForMamba):
+                self._alloc_and_copy_req_buffers(self.req_manager, self.radix_cache, recovered_reqs)
             g_infer_state_lock.release()
         return
 

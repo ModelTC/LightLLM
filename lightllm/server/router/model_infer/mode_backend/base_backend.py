@@ -172,7 +172,7 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
 
-        radix_cache_class = self.model.get_radix_class()
+        radix_cache_class = self.model.radix_cache_class
         self.radix_cache = (
             radix_cache_class(
                 get_unique_server_name(),

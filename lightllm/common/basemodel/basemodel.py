@@ -53,10 +53,9 @@ class TpPartBaseModel:
 
     # infer state class
     infer_state_class = InferStateInfo
-    
 
-    def get_radix_class(self):
-        return RadixCache
+    # radix cache class
+    radix_cache_class = RadixCache
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()

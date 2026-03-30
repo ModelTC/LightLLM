@@ -4,7 +4,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
     RMSNormWeight,
-    GEMMANormWeight,
+    NoTpGEMMANormWeight,
     GatedRMSNormWeight,
     TpParameterWeight,
     QKVROWNMMWeight,
@@ -62,12 +62,12 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _init_norm(self):
         hidden_size = self.network_config_["hidden_size"]
-        self.att_norm_weight_ = GEMMANormWeight(
+        self.att_norm_weight_ = NoTpGEMMANormWeight(
             dim=hidden_size,
             weight_name=self._att_norm_weight_name,
             data_type=self.data_type_,
         )
-        self.ffn_norm_weight_ = GEMMANormWeight(
+        self.ffn_norm_weight_ = NoTpGEMMANormWeight(
             dim=hidden_size,
             weight_name=self._ffn_norm_weight_name,
             data_type=self.data_type_,

@@ -72,14 +72,6 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
 
-class GEMMANormWeight(RMSNormWeight):
-    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name in weights:
-            self.weight.copy_(weights[self.weight_name])
-            self.weight += 1
-            self.weight.load_ok = True
-
-
 class GatedRMSNormWeight(RMSNormWeight):
     def _triton_forward(
         self,
@@ -251,6 +243,7 @@ class NoTpGEMMANormWeight(RMSNormWeight):
         if self.weight_name in weights:
             self.weight.copy_(weights[self.weight_name])
             self.weight += 1
+            self.weight.load_ok = True
 
 
 class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
