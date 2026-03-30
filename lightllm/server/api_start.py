@@ -485,60 +485,33 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
-def visual_start(args):
-    normal_or_p_d_start(args, only_prepare=True)
+def visual_only_start(args):
+    from lightllm.server.core.objs.start_args_type import StartArgs
 
-    already_uesd_ports = [args.remote_vit_port]
-    if args.nccl_port is not None:
-        already_uesd_ports.append(args.nccl_port)
-    if args.visual_nccl_ports is not None:
-        already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
+    args: StartArgs = args
+    if args.afs_image_embed_dir is not None:
+        os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
+        os.chmod(args.afs_image_embed_dir, 0o777)
 
-    need_visual_nccl_ports = 0 if args.visual_nccl_ports is not None else args.visual_dp
+    already_uesd_ports = []
+    already_uesd_ports.append(args.visual_rpyc_port)
     can_use_ports = alloc_can_use_network_port(
-        num=5 + args.visual_dp * args.visual_tp + need_visual_nccl_ports,
+        num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
         used_ports=already_uesd_ports,
     )
+
     logger.info(f"alloced ports: {can_use_ports}")
-    (
-        router_port,
-        visual_port,
-        audio_port,
-        cache_port,
-        metric_port,
-    ) = can_use_ports[0:5]
-    can_use_ports = can_use_ports[5:]
 
-    visual_nccl_ports = []
-    for _ in range(args.visual_dp):
-        if args.visual_nccl_ports is None:
-            visual_nccl_ports.append(can_use_ports[0])
-            can_use_ports = can_use_ports[1:]
-
-    if args.visual_nccl_ports is not None:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
-    else:
-        args.visual_nccl_ports = visual_nccl_ports
-
-    args.router_port = router_port
-    args.visual_port = visual_port
-    args.audio_port = audio_port
-    args.cache_port = cache_port
-    args.metric_port = metric_port
+    args.visual_nccl_ports = can_use_ports[: args.visual_dp]
+    can_use_ports = can_use_ports[args.visual_dp :]
     args.visual_node_id = uuid.uuid4().int
 
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
 
-    from .visualserver.manager import start_visual_process
+    from .visualserver.visual_only_manager import start_visual_process
 
-    process_manager.start_submodule_processes(
-        start_funcs=[
-            start_cache_manager,
-        ],
-        start_args=[(args,)],
-    )
     process_manager.start_submodule_processes(
         start_funcs=[
             start_visual_process,
