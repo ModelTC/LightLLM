@@ -121,6 +121,7 @@ class ProxyVisualManager(VisualManager):
                 raise Exception(f"Failed to load tensor from afs for image uuid {image.uuid} with md5 {image.md5}")
             start = image.start_index_in_embed_cache
             end = start + tensor.shape[0]
+            assert end - start == image.token_num
             self.cpu_embed_cache_client.cpu_embed_cache_tensor[start:end] = tensor
 
         self.cache_client.root.set_items_embed([image.uuid for image in images])
