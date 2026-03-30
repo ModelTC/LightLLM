@@ -33,7 +33,7 @@ class HybridRadixCache(RadixCache):
                 if tree_node.ref_counter == 1:
                     self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
                 tree_node.ref_counter -= 1
-
+            kv_len -= len(ans_value_list.pop())
             if tree_node.is_leaf():
                 self.evict_tree_set.add(tree_node)
             tree_node = tree_node.parent
