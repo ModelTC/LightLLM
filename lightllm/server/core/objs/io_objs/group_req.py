@@ -10,7 +10,6 @@ class GroupReqIndexes:
     multimodal_params: MultimodalParams
     shm_req_indexes: List[int]
     time_mark: float
-    has_error: bool = False
 
 
 @dataclass

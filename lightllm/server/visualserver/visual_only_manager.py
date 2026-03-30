@@ -24,12 +24,13 @@ from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
+from .manager import VisualManager
 
 
 logger = init_logger(__name__)
 
 
-class VisualManager(rpyc.Service):
+class VisualOnlyManager(rpyc.Service):
     def __init__(
         self,
         args: StartArgs,
@@ -45,13 +46,13 @@ class VisualManager(rpyc.Service):
         self.lock = threading.Lock()
 
         self.new_loop = asyncio.new_event_loop()
-        t = threading.Thread(target=self.event_loop, args=(self.new_loop,), daemon=True)
-        t.start()
 
-    def event_loop(self, loop: asyncio.AbstractEventLoop):
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
-        return
+        def _event_loop():
+            asyncio.set_event_loop(self.new_loop)
+            self.new_loop.run_forever()
+
+        t = threading.Thread(target=_event_loop, daemon=True)
+        t.start()
 
     async def register_to_config_server_loop(self, args: StartArgs):
         assert args.host not in ["127.0.0.1", "localhost"], "remote visual server must specify host ip"
@@ -116,35 +117,11 @@ class VisualManager(rpyc.Service):
         await asyncio.gather(*init_model_ret)
         return
 
-    async def handle_reqs(self, images_need_infer: List[ImageItem]):
-        # case 2
-        dp_to_handle_images = collections.defaultdict(list)
-        for image in images_need_infer:
-            self.cur_dp_index += 1
-            select_dp = self.cur_dp_index % self.vit_dp
-            dp_to_handle_images[select_dp].append((image, threading.Event()))
+    async def handle_images(self, images_need_infer: List[ImageItem]):
+        await VisualManager.handle_images(self, images_need_infer=images_need_infer)
 
-        taskes = []
-        for dp_index in range(self.vit_dp):
-            _images = dp_to_handle_images[dp_index]
-            if _images:
-                taskes.extend(self.run_task(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images]))
-
-        with self.lock:
-            await asyncio.gather(*taskes)
-
-        for dp_index in range(self.vit_dp):
-            _images = dp_to_handle_images[dp_index]
-            if _images:
-                await asyncio.to_thread(_images[-1][1].wait)
-        return
-
-    def run_task(self, dp_index: int, images, events):
-        taskes = []
-        for vit_tp_rank in range(self.vit_tp):
-            task = self.model_rpcs[dp_index][vit_tp_rank].run_task(images, events)
-            taskes.append(task)
-        return taskes
+    async def infer_images(self, dp_index: int, images, events):
+        await VisualManager.infer_images(self, dp_index=dp_index, images=images, events=events)
 
     def clean_up(self):
         return
@@ -160,7 +137,7 @@ class VisualManager(rpyc.Service):
                 create_shm(get_shm_name_data(image.uuid), image.data_bytes)
                 del image.data_bytes
 
-            handle = asyncio.run_coroutine_threadsafe(self.handle_reqs(images_need_infer=images), loop=self.new_loop)
+            handle = asyncio.run_coroutine_threadsafe(self.handle_images(images_need_infer=images), loop=self.new_loop)
             handle.result()
 
             ref_event.set()
@@ -171,7 +148,6 @@ class VisualManager(rpyc.Service):
             # 将 shm 进行删除
             for image in images:
                 free_shm(get_shm_name_data(image.uuid))
-
         return
 
 
@@ -184,7 +160,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
     start_parent_check_thread()
 
     try:
-        visualserver = VisualManager(args=args)
+        visualserver = VisualOnlyManager(args=args)
         future = asyncio.run_coroutine_threadsafe(visualserver.wait_to_model_ready(), loop=visualserver.new_loop)
         future.result()
 
