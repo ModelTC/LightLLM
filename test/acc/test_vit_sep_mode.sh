@@ -21,3 +21,18 @@ CUDA_VISIBLE_DEVICES=0 python -m lightllm.server.api_server \
 --afs_embed_capacity 250000 \
 --visual_rpyc_port 8091
 
+
+# 启动 llm 推理服务，normal 模式
+CUDA_VISIBLE_DEVICES=6,7 python -m lightllm.server.api_server \
+--run_mode normal \
+--model_dir /mtc/models/Qwen3-VL-8B-Instruct \
+--tp 2 \
+--port 8089 \
+--config_server_host 0.0.0.0 \
+--config_server_port 8090 \
+--config_server_visual_redis_port 6000 \
+--visual_dp 1 \
+--afs_image_embed_dir /mtc/afs/vit_embed_dir \
+--afs_embed_capacity 250000 \
+--visual_use_proxy_mode 
+

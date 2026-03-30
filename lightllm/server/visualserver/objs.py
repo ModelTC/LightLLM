@@ -3,6 +3,13 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+rpyc_config = {
+    "allow_pickle": True,
+    "allow_all_attrs": True,
+    "allow_getattr": True,
+    "allow_setattr": True,
+}
+
 
 @dataclass
 class VIT_Obj:

@@ -12,6 +12,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from .model_rpc_client import VisualModelRpcClient
 from .model_rpc import VisualModelRpcServer
+from ..objs import rpyc_config
 
 
 def _init_env(socket_path: str, success_event):
@@ -20,14 +21,7 @@ def _init_env(socket_path: str, success_event):
 
     import lightllm.utils.rpyc_fix_utils as _
 
-    config = {
-        "allow_pickle": True,
-        "allow_all_attrs": True,
-        "allow_getattr": True,
-        "allow_setattr": True,
-    }
-
-    t = ThreadedServer(VisualModelRpcServer(), socket_path=socket_path, protocol_config=config)
+    t = ThreadedServer(VisualModelRpcServer(), socket_path=socket_path, protocol_config=rpyc_config)
     success_event.set()
     t.start()
     return
@@ -52,14 +46,7 @@ async def start_model_process():
     await asyncio.to_thread(success_event.wait, timeout=40)
     assert proc.is_alive()
 
-    config = {
-        "allow_pickle": True,
-        "allow_all_attrs": True,
-        "allow_getattr": True,
-        "allow_setattr": True,
-    }
-
-    conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config=config)
+    conn = retry(max_attempts=20, wait_time=2)(unix_connect)(socket_path, config=rpyc_config)
     assert proc.is_alive()
 
     # 服务端需要调用客户端传入的event所以，客户端需要一个后台线程进行相关的处理。
