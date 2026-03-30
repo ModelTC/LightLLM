@@ -22,30 +22,6 @@ from lightllm.utils.config_utils import has_audio_module, has_vision_module
 logger = init_logger(__name__)
 
 
-def _ensure_remote_vit_embed_dir(image_embed_dir: str) -> None:
-    if os.path.exists(image_embed_dir):
-        if not os.path.isdir(image_embed_dir):
-            raise ValueError(f"image_embed_dir is not a directory: {image_embed_dir}")
-        return
-
-    os.makedirs(image_embed_dir, mode=0o777, exist_ok=True)
-    os.chmod(image_embed_dir, 0o777)
-
-
-def _prepare_remote_vit_embed_dir(args):
-    remote_vit_mode = args.enable_remote_vit or args.run_mode in ["visual", "visual_only"]
-    if not remote_vit_mode:
-        return
-
-    if not args.image_embed_dir:
-        raise ValueError("remote vit mode requires --image_embed_dir to be set")
-
-    args.image_embed_dir = os.path.abspath(args.image_embed_dir)
-    _ensure_remote_vit_embed_dir(args.image_embed_dir)
-
-    logger.info(f"using image_embed_dir: {args.image_embed_dir}")
-
-
 def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
@@ -87,7 +63,7 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def normal_or_p_d_start(args, only_prepare=False):
+def normal_or_p_d_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
@@ -99,7 +75,7 @@ def normal_or_p_d_start(args, only_prepare=False):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual", "visual_only"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -200,7 +176,10 @@ def normal_or_p_d_start(args, only_prepare=False):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
-    _prepare_remote_vit_embed_dir(args)
+    if args.afs_image_embed_dir is not None:
+        os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
+        os.chmod(args.afs_image_embed_dir, 0o777)
+
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -262,9 +241,6 @@ def normal_or_p_d_start(args, only_prepare=False):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    if only_prepare:
-        return
-
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
         already_uesd_ports.append(args.nccl_port)
@@ -279,9 +255,8 @@ def normal_or_p_d_start(args, only_prepare=False):
     ports_locker.lock_port()
 
     node_world_size = args.tp // args.nnodes
-    need_visual_nccl_ports = 0 if args.visual_nccl_ports is not None else args.visual_dp
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * args.visual_tp + need_visual_nccl_ports,
+        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp,
         used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
@@ -310,7 +285,7 @@ def normal_or_p_d_start(args, only_prepare=False):
             can_use_ports = can_use_ports[1:]
 
     if args.visual_nccl_ports is not None:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+        visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
@@ -360,7 +335,7 @@ def normal_or_p_d_start(args, only_prepare=False):
             start_args=[(args,)],
         )
 
-    if not args.disable_vision and not args.enable_remote_vit:
+    if not args.disable_vision:
         from .visualserver.manager import start_visual_process
 
         process_manager.start_submodule_processes(
