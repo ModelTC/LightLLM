@@ -57,24 +57,33 @@ class ProxyVisualManager(VisualManager):
             self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
 
-        # 将 images_need_infer 按照 self.infer_batch_size 切分成多个 batch，发送给不同的 visual server 进行推理，\
-        # 最后等待所有推理完成后再发送给下一个模块
-        images_batches = [
-            images_need_infer[i : i + self.infer_batch_size]
-            for i in range(0, len(images_need_infer), self.infer_batch_size)
-        ]
-
-        taskes = []
-        for images_batch in images_batches:
-            conn = self.select_vit_conn()
-
-            def _run_task():
-                self.run_task(conn, images_batch)
-
-            taskes.append(asyncio.to_thread(_run_task))
-
         try:
-            await asyncio.gather(*taskes)
+
+            def _get_not_afs_ready_images():
+                readys = self.afs_handler.check_ready([image.md5 for image in images_need_infer])
+                not_readys_images = [image for image, ready in zip(images_need_infer, readys) if not ready]
+                # 将 images_need_infer 按照 self.infer_batch_size 切分成多个 batch，发送给不同的 visual server 进行推理，\
+                # 最后等待所有推理完成后再发送给下一个模块
+                images_batches = [
+                    not_readys_images[i : i + self.infer_batch_size]
+                    for i in range(0, len(not_readys_images), self.infer_batch_size)
+                ]
+                return images_batches
+
+            images_batches = await asyncio.to_thread(_get_not_afs_ready_images)
+            taskes = []
+
+            for images_batch in images_batches:
+                conn = self.select_vit_conn()
+
+                def _run_task():
+                    self.run_task(conn, images_batch)
+
+                taskes.append(asyncio.to_thread(_run_task))
+
+            if len(taskes) > 0:
+
+                await asyncio.gather(*taskes)
         except Exception as e:
             # mark aborted
             for shm_req_index in group_req_indexes.shm_req_indexes:
