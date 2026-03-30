@@ -76,7 +76,12 @@ class ProxyVisualManager(VisualManager):
         try:
             await asyncio.gather(*taskes)
         except Exception as e:
-            group_req_indexes.has_error = True
+            # mark aborted
+            for shm_req_index in group_req_indexes.shm_req_indexes:
+                shm_req = self.shm_req_manager.get_req_obj_by_index(shm_req_index)
+                shm_req.is_aborted = True
+                self.shm_req_manager.put_back_req_obj(shm_req)
+
             logger.exception(str(e))
 
         self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)

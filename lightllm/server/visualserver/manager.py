@@ -57,7 +57,6 @@ class VisualManager:
         self.infer_batch_size = args.visual_infer_batch_size
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
-        self.cur_dp_index = 0
         self.lock = threading.Lock()
 
     async def wait_to_model_ready(self):
@@ -128,8 +127,15 @@ class VisualManager:
         if len(images_need_infer) == 0:
             self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
+        else:
+            await self.handle_images(images_need_infer)
+            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+            return
 
-        # case 2
+    async def handle_images(self, images_need_infer: List[ImageItem]):
+        if not hasattr(self, "cur_dp_index"):
+            self.cur_dp_index = 0
+
         dp_to_handle_images = collections.defaultdict(list)
         for image in images_need_infer:
             self.cur_dp_index += 1
@@ -140,26 +146,30 @@ class VisualManager:
         for dp_index in range(self.vit_dp):
             _images = dp_to_handle_images[dp_index]
             if _images:
-                taskes.extend(self.run_task(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images]))
+                taskes.extend(
+                    self.infer_images(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images])
+                )
 
         with self.lock:
-            await asyncio.gather(*taskes)
+            try:
+                await asyncio.gather(*taskes)
+            except BaseException as e:
+                logger.exception(str(e))
+                raise e
 
         # 等待推理通知已经 ok
         for dp_index in range(self.vit_dp):
             _images = dp_to_handle_images[dp_index]
             if _images:
                 await asyncio.to_thread(_images[-1][1].wait)
-
-        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
-    def run_task(self, dp_index: int, images, events):
+    async def infer_images(self, dp_index: int, images, events):
         taskes = []
         for vit_tp_rank in range(self.vit_tp):
             task = self.model_rpcs[dp_index][vit_tp_rank].run_task(images, events)
             taskes.append(task)
-        return taskes
+        await asyncio.gather(*taskes)
 
     async def loop_for_netio_req(self):
         if not hasattr(self, "visual_recv_max_count"):
