@@ -42,6 +42,11 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         self.sampling_rate = self.audio_processor.sampling_rate
         self.n_samples = self.audio_processor.n_samples
         self.hop_length = self.audio_processor.hop_length
+        self.audio_preload_config = {
+            "sampling_rate": int(self.sampling_rate),
+            "hop_length": int(self.hop_length),
+            "min_audio_len": int(MIN_AUDIO_LEN),
+        }
 
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]

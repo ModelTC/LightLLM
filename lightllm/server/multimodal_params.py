@@ -17,6 +17,8 @@ logger = init_logger(__name__)
 RAW_AUDIO_SHM_FORMAT = "raw_audio_bytes"
 WAVEFORM_F32_SHM_FORMAT = "waveform_f32"
 AUDIO_SHM_USE_RAW_ENV = "LIGHTLLM_AUDIO_SHM_USE_RAW"
+DEFAULT_AUDIO_SAMPLE_RATE = 16000
+DEFAULT_MIN_AUDIO_LEN = 480
 
 
 def generate_silence_wav_bytes(sample_rate: int = 16000, duration_seconds: float = 1.0) -> bytes:
@@ -64,7 +66,7 @@ class AudioItem:
         self._preload_data = None
         self.extra_params = {}
 
-    async def preload(self, request: Request):
+    async def preload(self, request: Request, audio_preload_config: dict = None):
         try:
             req_id = getattr(getattr(request, "state", None), "lightllm_req_id", None)
             preload_start = time.time()
@@ -79,14 +81,16 @@ class AudioItem:
                 raise ValueError(f"cannot read audio which type is {self._type}!")
             source_ready_cost_ms = (time.time() - source_ready_start) * 1000.0
 
+            audio_preload_config = audio_preload_config or {}
+            target_sample_rate = int(audio_preload_config.get("sampling_rate", DEFAULT_AUDIO_SAMPLE_RATE))
+            min_audio_len = int(audio_preload_config.get("min_audio_len", DEFAULT_MIN_AUDIO_LEN))
+
             # check if valid audio bytes
             decode_start = time.time()
-            audio_values, _ = librosa.load(BytesIO(audio_data), sr=16000)
+            audio_values, _ = librosa.load(BytesIO(audio_data), sr=target_sample_rate)
             audio_values = np.asarray(audio_values, dtype=np.float32)
             decode_cost_ms = (time.time() - decode_start) * 1000.0
-            from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
-
-            self.audio_length = max(audio_values.shape[0], MIN_AUDIO_LEN)  # 如果音频过短，会被pad到480的长度
+            self.audio_length = max(audio_values.shape[0], min_audio_len)
             if should_use_raw_audio_shm():
                 self.extra_params["audio_shm_format"] = RAW_AUDIO_SHM_FORMAT
                 self.extra_params.pop("audio_sample_rate", None)
@@ -94,7 +98,7 @@ class AudioItem:
                 self._preload_data = audio_data
             else:
                 self.extra_params["audio_shm_format"] = WAVEFORM_F32_SHM_FORMAT
-                self.extra_params["audio_sample_rate"] = 16000
+                self.extra_params["audio_sample_rate"] = target_sample_rate
                 self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
                 self._preload_data = audio_values.tobytes()
             self.extra_params["audio_payload_md5"] = hashlib.md5(self._preload_data).hexdigest()
@@ -221,11 +225,11 @@ class MultimodalParams:
         self.audios = [AudioItem(**a) for a in audios]
         return
 
-    async def verify_and_preload(self, request: Request):
+    async def verify_and_preload(self, request: Request, audio_preload_config: dict = None):
         for image in self.images:
             await image.preload(request)
         for audio in self.audios:
-            await audio.preload(request)
+            await audio.preload(request, audio_preload_config=audio_preload_config)
         return
 
     def to_dict(self):
