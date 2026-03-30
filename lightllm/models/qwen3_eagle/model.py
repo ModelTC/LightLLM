@@ -1,6 +1,7 @@
 from typing import List
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_eagle.layer_infer.transformer_layer_infer import Qwen3EagleTransformerLayerInfer
 from lightllm.models.qwen3_eagle.layer_weights.pre_and_post_layer_weight import Qwen3EaglePreAndPostLayerWeight
@@ -33,7 +34,14 @@ class Qwen3EagleModel(LlamaTpPartModel):
         return
 
     def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
+        self.mem_manager = select_mem_manager_class()(
+            self.max_total_token_num,
+            dtype=self.data_type,
+            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
+            head_dim=self.config["head_dim"],
+            layer_num=1,
+            mem_fraction=self.mem_fraction,
+        )
         return
 
     def _init_weights(self, start_layer_index=None):
@@ -64,9 +72,10 @@ class Qwen3EagleModel(LlamaTpPartModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
-        total_pre_layers_num = len(self.main_model.layers_infer)
-        total_pre_layers_num += sum(
-            [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
-        )
+        # total_pre_layers_num = len(self.main_model.layers_infer)
+        # total_pre_layers_num += sum(
+        #     [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
+        # )
+        total_pre_layers_num = 0
         super()._init_infer_layer(start_layer_index=total_pre_layers_num)
         return

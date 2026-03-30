@@ -155,7 +155,7 @@ class TpPartBaseModel:
             assert draft_model_path is not None, "mtp_draft_model_dir must be provided when eagle3 mode is enabled"
             if os.path.exists(os.path.join(draft_model_path[0], "pytorch_model.bin")):
                 self.draft_model_weight_dict = torch.load(os.path.join(draft_model_path[0], "pytorch_model.bin"))
-                self.hidden_proj_weight = self.draft_model_weight_dict["fc.weight"].to("cuda")
+                self.hidden_proj_weight = self.draft_model_weight_dict["fc.weight"].to(torch.bfloat16).to("cuda")
                 del self.draft_model_weight_dict
                 gc.collect()
             else:
@@ -164,7 +164,7 @@ class TpPartBaseModel:
                     with safe_open(os.path.join(draft_model_path[0], "model.safetensors"), framework="pt", device="cuda") as f:
                         # Check if the key exists to avoid KeyError
                         if "fc.weight" in f.keys():
-                            self.hidden_proj_weight = f.get_tensor("fc.weight").to("cuda")
+                            self.hidden_proj_weight = f.get_tensor("fc.weight").to(torch.bfloat16).to("cuda")
                 except Exception as e:
                     logger.warning(f"Failed to load hidden_proj_weight from safetensors with error: {e}")
                     self.hidden_proj_weight = None

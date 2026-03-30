@@ -26,6 +26,7 @@ def _rotary_kernel(
     BLOCK_HEAD: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
+    ACTUAL_HEAD_DIM: tl.constexpr,
 ):
     cur_head_index = tl.program_id(0)
     cur_seq_index = tl.program_id(1)
@@ -33,8 +34,13 @@ def _rotary_kernel(
     cur_head_range = cur_head_index * BLOCK_HEAD + tl.arange(0, BLOCK_HEAD)
     cur_seq_range = cur_seq_index * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)
 
+    # Use padded dimension for tl.arange (must be power of 2)
+    # ACTUAL_HEAD_DIM is the real head dimension, BLOCK_DMODEL is the padded power-of-2 size
     dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
     dim_range1 = tl.arange(BLOCK_DMODEL // 2, BLOCK_DMODEL)
+
+    # Create mask for actual head dimension
+    head_mask = dim_range0 < (ACTUAL_HEAD_DIM // 2)
 
     off_q0 = (
         cur_seq_range[:, None, None] * stride_qbs
@@ -51,12 +57,12 @@ def _rotary_kernel(
 
     q0 = tl.load(
         Q + off_q0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q),
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q) & head_mask[None, None, :],
         other=0.0,
     )
     q1 = tl.load(
         Q + off_q1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q),
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q) & head_mask[None, None, :],
         other=0.0,
     )
 
@@ -67,10 +73,10 @@ def _rotary_kernel(
     out1 = q0 * sin + q1 * cos
 
     tl.store(
-        Q + off_q0, out0, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q)
+        Q + off_q0, out0, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q) & head_mask[None, None, :]
     )
     tl.store(
-        Q + off_q1, out1, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q)
+        Q + off_q1, out1, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q) & head_mask[None, None, :]
     )
 
     off_k0 = (
@@ -88,12 +94,12 @@ def _rotary_kernel(
 
     k0 = tl.load(
         K + off_k0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K) & head_mask[None, None, :],
         other=0.0,
     )
     k1 = tl.load(
         K + off_k1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K) & head_mask[None, None, :],
         other=0.0,
     )
     cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
@@ -105,12 +111,12 @@ def _rotary_kernel(
     tl.store(
         K + off_k0,
         out_k0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K) & head_mask[None, None, :],
     )
     tl.store(
         K + off_k1,
         out_k1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K) & head_mask[None, None, :],
     )
     return
 
@@ -119,13 +125,16 @@ def _rotary_kernel(
 def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
-    head_dim = int(q.shape[2] * partial_rotary_factor)
+    actual_head_dim = int(q.shape[2] * partial_rotary_factor)
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
 
+    # Pad head_dim to power of 2 for tl.arange compatibility
+    BLOCK_DMODEL = triton.next_power_of_2(actual_head_dim)
+
     BLOCK_SEQ = 16
     BLOCK_HEAD = 4
-    if head_dim >= 128:
+    if BLOCK_DMODEL >= 128:
         num_warps = 8
     else:
         num_warps = 4
@@ -151,7 +160,8 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
         head_num_k,
         BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_SEQ=BLOCK_SEQ,
-        BLOCK_DMODEL=head_dim,
+        BLOCK_DMODEL=BLOCK_DMODEL,
+        ACTUAL_HEAD_DIM=actual_head_dim,
         num_warps=num_warps,
         num_stages=1,
     )
