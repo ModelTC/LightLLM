@@ -146,7 +146,7 @@ class VisualManager:
         for dp_index in range(self.vit_dp):
             _images = dp_to_handle_images[dp_index]
             if _images:
-                taskes.extend(
+                taskes.append(
                     self.infer_images(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images])
                 )
 
