@@ -4,11 +4,13 @@ import rpyc
 import inspect
 import setproctitle
 import threading
-import collections
 import uuid
 import pickle
 import websockets
 import socket
+import sys
+import os
+import signal
 from lightllm.utils.net_utils import get_hostname_ip
 from .objs import VIT_Obj
 from typing import List
@@ -55,7 +57,11 @@ class VisualOnlyManager(rpyc.Service):
         t.start()
 
     async def register_to_config_server_loop(self, args: StartArgs):
-        assert args.host not in ["127.0.0.1", "localhost"], "remote visual server must specify host ip"
+        if args.host in ["127.0.0.1", "localhost"]:
+            logger.error("remote visual server must specify host ip, can not be localhost or 127.0.0.1")
+            # kill father process to trigger graceful exit, avoid orphan process
+            os.kill(os.getppid(), signal.SIGTERM)
+            sys.exit(-1)
 
         if args.host in ["0.0.0.0"]:
             host_ip = get_hostname_ip()
@@ -164,6 +170,12 @@ def start_visual_process(args: StartArgs, pipe_writer):
 
     try:
         visualserver = VisualOnlyManager(args=args)
+
+        def handle_exception(loop, context):
+            logger.exception(f"VisualServer Caught exception: {str(context)}")
+
+        visualserver.new_loop.set_exception_handler(handle_exception)
+
         future = asyncio.run_coroutine_threadsafe(visualserver.wait_to_model_ready(), loop=visualserver.new_loop)
         future.result()
 
