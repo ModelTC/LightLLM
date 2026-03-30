@@ -54,7 +54,8 @@ def start_redis_service(args):
                 logger.info(f"Redis service started successfully on port {redis_port}")
                 del r
                 break
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error occurred while checking Redis service: {e}")
                 time.sleep(0.5)
                 if redis_process.poll() is not None:
                     logger.error("Redis service failed to start")
