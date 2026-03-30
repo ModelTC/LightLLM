@@ -467,6 +467,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
             """,
     )
     parser.add_argument(
+        "--visual_use_proxy_mode",
+        action="store_true",
+        help="""
+        when run_mode is normal, set this params,
+        will call remote visual infer to transfer image to embed,
+        need set --visual_rpyc_port, --config_server_host, --config_server_port,
+        --config_server_visual_redis_port""",
+    )
+    parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
@@ -636,6 +645,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="path for vit embed, when use vit remote infer mode",
+    )
+    parser.add_argument(
+        "--afs_embed_capacity",
+        type=int,
+        default=250000,
+        help="""
+        capacity for vit embed in remote infer mode,
+        it control how many image can be cached in afs,
+        when the cache is full, the least recently used
+        image embed will be removed""",
     )
     parser.add_argument(
         "--enable_cpu_cache",
