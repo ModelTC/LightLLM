@@ -354,14 +354,15 @@ class RadixCache:
 
     def _try_merge(self, child_node: TreeNode) -> Optional[TreeNode]:
         """
-        合并条件:
-        1. 父节点不是根节点。
-        2. 父节点的引用计数为 0。
-        3. 子节点的引用计数为 0。
-        4. 父节点只有一个子节点 (即 child_node)。
+        merge condition:
+        1. parent_node is not root node.
+        2. parent_node's ref_counter is 0, for hybrid attention models (e.g., Qwen35),
+           parent_node's buffer_idx is None.
+        3. child_node's ref_counter is 0.
+        4. parent_node has only one child node (i.e. child_node).
         """
         parent_node = child_node.parent
-        # 条件检查
+        # condition check
         if (
             parent_node is None
             or parent_node == self.root_node
