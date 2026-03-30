@@ -145,8 +145,9 @@ class ProxyVisualManager(VisualManager):
                                         return conn
 
                                     try:
+                                        new_conn = await asyncio.to_thread(_connect)
                                         with self.conn_lock:
-                                            self.id_to_rpyc_conn[node_id] = await asyncio.to_thread(_connect)
+                                            self.id_to_rpyc_conn[node_id] = new_conn
                                     except Exception as e:
                                         logger.exception(str(e))
                     else:
