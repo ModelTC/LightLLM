@@ -174,6 +174,7 @@ class HttpServerManager:
                     token_num = self.tokenizer.get_image_token_length(img)
                     md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                     md5sums.append(md5sum)
+                    img.md5 = md5sum
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(img)
@@ -183,6 +184,7 @@ class HttpServerManager:
                     token_num = self.tokenizer.get_audio_token_length(audio)
                     md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
                     md5sums.append(md5sum)
+                    audio.md5 = md5sum
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(audio)
