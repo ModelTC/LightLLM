@@ -2,41 +2,51 @@ import socket
 import subprocess
 import ipaddress
 import random
-import portpicker
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+BASE_PORT = 10000
+PORTS_PER_INSTANCE = 1000
+MAX_INSTANCE_ID = 7
 
-def alloc_can_use_network_port(num=3, used_nccl_ports=None, from_port_num=10000):
+
+def _is_port_available(port: int) -> bool:
+    """Check if a port is available by attempting to bind it."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", port))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def alloc_can_use_network_port(num=3, used_nccl_ports=None, instance_id=0):
     if used_nccl_ports is None:
         used_nccl_ports = []
 
-    port_list = []
-    max_attempts = num * 50  # Allow more attempts to find ports in range
+    range_start = BASE_PORT + instance_id * PORTS_PER_INSTANCE
+    range_end = range_start + PORTS_PER_INSTANCE
+    used_set = set(used_nccl_ports)
 
-    for _ in range(max_attempts):
+    port_list = []
+    for port in range(range_start, range_end):
         if len(port_list) >= num:
             break
-
-        try:
-            port = portpicker.pick_unused_port()
-
-            if port >= from_port_num and port not in used_nccl_ports:
-                port_list.append(port)
-                logger.debug(f"Allocated port: {port}")
-            else:
-                logger.debug(f"Port {port} is out of range or in used_nccl_ports, skipping")
-
-        except Exception as e:
-            logger.warning(f"Failed to allocate port: {e}")
+        if port in used_set:
             continue
+        if _is_port_available(port):
+            port_list.append(port)
 
     if len(port_list) < num:
-        logger.error(f"Failed to allocate {num} ports, only got {len(port_list)}")
-        return None
+        raise RuntimeError(
+            f"Failed to allocate {num} ports for instance {instance_id} "
+            f"in range [{range_start}, {range_end}), only got {len(port_list)}"
+        )
 
-    logger.info(f"Successfully allocated {len(port_list)} ports: {port_list}")
+    logger.info(f"Instance {instance_id}: allocated {len(port_list)} ports in [{range_start}, {range_end}): {port_list}")
     return port_list
 
 

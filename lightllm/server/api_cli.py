@@ -212,6 +212,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--nccl_port", type=int, default=None, help="the nccl_port to build a distributed environment for PyTorch"
     )
     parser.add_argument(
+        "--lightllm_instance_id",
+        type=int,
+        default=0,
+        help="Instance ID (0~7) for multi-instance port isolation. Each ID maps to a dedicated port range.",
+    )
+    parser.add_argument(
         "--use_config_server_to_init_nccl",
         action="store_true",
         help="""use tcp store server started by config_server to init nccl, default is False, when set to True,

@@ -5,7 +5,7 @@ import time
 import uuid
 import subprocess
 import signal
-from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
+from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker, MAX_INSTANCE_ID
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
@@ -229,6 +229,11 @@ def _launch_subprocesses(args: StartArgs):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
+    if args.lightllm_instance_id < 0 or args.lightllm_instance_id > MAX_INSTANCE_ID:
+        raise ValueError(
+            f"--lightllm_instance_id must be 0~{MAX_INSTANCE_ID}, got {args.lightllm_instance_id}"
+        )
+
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
         already_uesd_ports.append(args.nccl_port)
@@ -242,7 +247,9 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_nccl_ports=already_uesd_ports
+        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1),
+        used_nccl_ports=already_uesd_ports,
+        instance_id=args.lightllm_instance_id,
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -426,7 +433,9 @@ def pd_master_start(args: StartArgs):
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(num=1, used_nccl_ports=[args.nccl_port, args.port])
+    can_use_ports = alloc_can_use_network_port(
+        num=1, used_nccl_ports=[args.nccl_port, args.port], instance_id=args.lightllm_instance_id
+    )
     metric_port = can_use_ports[0]
 
     args.metric_port = metric_port
