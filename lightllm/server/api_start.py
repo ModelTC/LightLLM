@@ -92,7 +92,6 @@ def _set_envs_and_config(args: StartArgs):
 def _launch_subprocesses(args: StartArgs):
 
     _set_envs_and_config(args)
-    set_unique_server_name(args)
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
@@ -146,12 +145,6 @@ def _launch_subprocesses(args: StartArgs):
         check_recommended_shm_size(args)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
-    # 确保单机上多实列不冲突
-    if args.zmq_mode == "ipc:///tmp/":
-        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
-        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
-        args.zmq_mode = zmq_mode
-        logger.info(f"zmq mode head: {args.zmq_mode}")
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
@@ -280,6 +273,8 @@ def _launch_subprocesses(args: StartArgs):
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
         num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1),
+        used_nccl_ports=already_uesd_ports,
+        instance_id=args.lightllm_instance_id,
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -311,6 +306,16 @@ def _launch_subprocesses(args: StartArgs):
         args.nccl_port = nccl_port
     if args.pd_decode_rpyc_port is None:
         args.pd_decode_rpyc_port = pd_decode_rpyc_port
+
+    set_unique_server_name(args)
+
+    # 确保单机上多实列不冲突
+    if args.zmq_mode == "ipc:///tmp/":
+        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
+        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
+        args.zmq_mode = zmq_mode
+        logger.info(f"zmq mode head: {args.zmq_mode}")
+
     args.router_port = router_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
@@ -462,10 +467,7 @@ def pd_master_start(args: StartArgs):
     logger.info(f"all start args:{args}")
 
     can_use_ports = alloc_can_use_network_port(
-        num=1,
-        used_ports=[
-            args.port,
-        ],
+        num=1, used_nccl_ports=[args.nccl_port, args.port], instance_id=args.lightllm_instance_id
     )
     metric_port = can_use_ports[0]
 
