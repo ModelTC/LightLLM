@@ -1,3 +1,4 @@
+import time
 import asyncio
 import uvloop
 import rpyc
@@ -75,11 +76,7 @@ class ProxyVisualManager(VisualManager):
 
             for images_batch in images_batches:
                 conn = self.select_vit_conn()
-
-                def _run_task():
-                    self.run_task(conn, images_batch)
-
-                taskes.append(asyncio.to_thread(_run_task))
+                taskes.append(asyncio.to_thread(self.run_task, conn, images_batch))
 
             if len(taskes) > 0:
 
@@ -129,9 +126,16 @@ class ProxyVisualManager(VisualManager):
         # 将 bytes 从 shm 中读取出来，放到 image.data_bytes 中，供远端的 vit 进行推理使用。
         for image in images:
             image.data_bytes = read_shm(get_shm_name_data(image.uuid))
+        if self.args.detail_log:
+            start = time.time()
+            logger.info(f"Start to remote infer images {[image.md5 for image in images]}")
         conn.root.remote_infer_images(images, event)
         event.wait(timeout=600)
-
+        if self.args.detail_log:
+            logger.info(
+                f"Remote infer images done for images {[image.md5 for image in images]}"
+                f" cost time {time.time() - start} s"
+            )
         return
 
     async def loop_to_connect_remote_visual_server(self):
