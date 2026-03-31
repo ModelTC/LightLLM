@@ -135,10 +135,11 @@ def mrope_triton_fused(
     sin: torch.Tensor,
     mrope_section: torch.Tensor,
     is_interleaved: bool,
+    partial_rotary_factor: float = 1.0,
     run_config: Optional[dict] = None,
 ):
     head_num_q, head_num_k = q.shape[1], k.shape[1]
-    head_dim = int(q.shape[2])
+    head_dim = int(q.shape[2] * partial_rotary_factor)
     num_tokens = q.shape[0]
 
     if not run_config:

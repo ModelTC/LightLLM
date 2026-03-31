@@ -1,0 +1,18 @@
+{
+  "1024": {
+    "num_stages": 5,
+    "num_warps": 1
+  },
+  "16384": {
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "2048": {
+    "num_stages": 2,
+    "num_warps": 2
+  },
+  "4096": {
+    "num_stages": 3,
+    "num_warps": 2
+  }
+}

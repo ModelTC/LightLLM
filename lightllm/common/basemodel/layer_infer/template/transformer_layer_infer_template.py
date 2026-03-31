@@ -62,20 +62,21 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _tpsp_ffn(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
-        input1 = None
+    def context_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        q, cache_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-
         o = self._context_attention_wrapper_run(
             q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
         )
-
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        return o
+
+    def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        o = self.context_attention_forward(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
@@ -87,39 +88,42 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
-        input1 = None
+    def token_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        q, cache_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        return o
+
+    def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        o = self.token_attention_forward(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
-        input1 = None
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def tpsp_context_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        q, cache_kv = self._tpsp_get_qkv(input1, infer_state, layer_weight)
-        input1 = None
+    def tpsp_context_attention_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
+        q, cache_kv = self._tpsp_get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
-
         o = self._context_attention_wrapper_run(
             q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
         )
-
         q = None
         o = self._tpsp_get_o(o, infer_state, layer_weight)
+        return o
+
+    def tpsp_context_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        o = self.tpsp_context_attention_forward(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
@@ -129,14 +133,17 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def tpsp_token_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        q, cache_kv = self._tpsp_get_qkv(input1, infer_state, layer_weight)
-        input1 = None
+    def tpsp_token_attention_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
+        q, cache_kv = self._tpsp_get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._tpsp_get_o(o, infer_state, layer_weight)
+        return o
+
+    def tpsp_token_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        o = self.tpsp_token_attention_forward(input1, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
