@@ -6,7 +6,7 @@ import itertools
 from typing import List, Tuple, Optional
 from pathlib import Path
 from .redis_utils import RedisMetadataLib
-
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 class AfsUtils:
     def __init__(self, base_dir: str, dir_depth: int = 2):
+        self.args = get_env_start_args()
         self.base_dir = base_dir
         # 判断 base_dir 是否存在，不存在则创建并赋予777权限，让其他人也可以写入
         if not os.path.exists(base_dir):
@@ -39,6 +40,8 @@ class AfsUtils:
                 dest.copy_(tensor)
                 torch.save(dest, f, _use_new_zipfile_serialization=False, pickle_protocol=4)
             os.rename(tmp_path, target_path)
+            if self.args.detail_log:
+                logger.debug(f"save tensor to afs success, name: {name} target_path: {target_path}")
             os.chmod(target_path, 0o777)
             return True
         except Exception as e:
@@ -106,6 +109,7 @@ class SepEmbedHandler:
         self.remove_count = min(int(self.capacity * evict_fraction), 1000)  # full的时候，每次清理的数量
         self.afs_embed_dir = afs_embed_dir
         self.afs_utils = AfsUtils(self.afs_embed_dir)
+        self.args = get_env_start_args()
 
     def full_to_clean(self):
         remove_objs: List[str] = self.redis_client.get_eviction_candidates(
@@ -115,6 +119,8 @@ class SepEmbedHandler:
             try:
                 if self.afs_utils.free_afs(obj):
                     self.redis_client.remove([obj])
+                    if self.args.detail_log:
+                        logger.debug(f"full_to_clean remove md5 {obj} from redis and afs success")
             except BaseException as e:
                 logger.warning(f"full_to_clean md5 {obj} error {str(e)}")
 
