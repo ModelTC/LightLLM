@@ -96,4 +96,3 @@ websockets==15.0.1
 cupy-cuda12x==13.6.0
 nixl==0.8.0
 torch_memory_saver==0.0.9
-portpicker==1.6.0
