@@ -135,7 +135,8 @@ class VisualOnlyManager(rpyc.Service):
         try:
             images = obtain(images)
             logger.info(
-                f"Received infer_images request with {len(images)} images, uuids: {[img.uuid for img in images]}"
+                f"Received infer_images request with {len(images)} images, uuids: {[img.uuid for img in images]},"
+                f"md5s: {[img.md5 for img in images]}"
             )
             # 将 images 的内容写入到 shm 中，这里修改了原始的uuid，主要是在远端的vit
             # 本身不具有 embed cache 的引用保证，则新的唯一标识来进行推理，最终写入的
