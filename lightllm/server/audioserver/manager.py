@@ -167,6 +167,38 @@ class AudioManager:
                     else:
                         ready_audio = obtain(self.cache_client.root.get_items_embed(audio_uuids))
 
+                    pending_audios = [audio for audio, ready in zip(multimodal_params.audios, ready_audio) if not ready]
+                    if (
+                        pending_audios
+                        and len(processing_group_reqs) == 0
+                        and len(self.waiting_reqs) == 0
+                        and len(pending_audios) < self.infer_batch_size
+                    ):
+                        logger.info(
+                            f"audio_batch_ready req_ids:[{group_req_indexes.group_req_id}] "
+                            f"audio_count:{len(pending_audios)} infer_batch_size:{self.infer_batch_size} fast_path:1"
+                        )
+                        self._log_req_stage(
+                            group_req_indexes.group_req_id,
+                            "audio_infer_start",
+                            batch_audio_count=len(pending_audios),
+                        )
+                        await self.infer_audios(pending_audios)
+                        self._log_req_stage(
+                            group_req_indexes.group_req_id,
+                            "audio_infer_done",
+                            batch_audio_count=len(pending_audios),
+                        )
+                        self._log_req_stage(
+                            group_req_indexes.group_req_id,
+                            "audio_send_to_next_module",
+                            target_port=self.next_module_port,
+                            fast_path=1,
+                        )
+                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                        self._cleanup_req_stage(group_req_indexes.group_req_id)
+                        continue
+
                     current_req_has_pending_audio = False
                     for audio, ready in zip(multimodal_params.audios, ready_audio):
                         if not ready:
