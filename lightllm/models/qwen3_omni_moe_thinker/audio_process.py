@@ -105,6 +105,29 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
 
         return normed_input_values
 
+    def _preprocess_single_padded(
+        self,
+        raw_speech: np.ndarray,
+        num_frames: int,
+        device: Optional[str] = "cpu",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        waveform = np.asarray(raw_speech, dtype=np.float32)
+        if waveform.ndim != 1:
+            raise ValueError(f"single audio fast path expects 1D waveform, got shape={waveform.shape}")
+
+        extracted = self._torch_extract_fbank_features(waveform[None, :], device)
+        extracted = np.asarray(extracted, dtype=np.float32)
+        if extracted.ndim != 3:
+            raise ValueError(f"unexpected extracted feature shape={extracted.shape}")
+
+        if extracted.shape[-1] < num_frames:
+            raise ValueError(f"feature frames {extracted.shape[-1]} < requested num_frames {num_frames}")
+
+        compact_features = torch.from_numpy(extracted[:, :, :num_frames]).to(device="cuda", dtype=torch.bfloat16)
+        compact_features = compact_features[0].contiguous()
+        feature_lens = torch.tensor([num_frames], device="cuda", dtype=torch.long)
+        return compact_features, feature_lens
+
     def _preprocess(
         self,
         raw_speech: Union[np.ndarray, list[float], list[np.ndarray], list[list[float]]],

@@ -13,7 +13,7 @@ from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
 from transformers.activations import ACT2FN
 
-from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
+from lightllm.server.multimodal_params import AudioItem, WAVEFORM_F32_SHM_FORMAT, load_audio_from_shm_payload
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -356,21 +356,27 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 load_start = time.time()
                 audio_data = read_shm(get_shm_name_data(item.uuid))
                 audio = load_audio_from_shm_payload(audio_data, item.extra_params, self.processor.sampling_rate)
+                audio_num_frames = item.extra_params.get("audio_num_frames")
                 load_shm_cost += time.time() - load_start
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
             preprocess_start = time.time()
-            input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
-            if feature_attention_mask is not None:
-                audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-                input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
+            if audio_num_frames is not None and item.extra_params.get("audio_shm_format") == WAVEFORM_F32_SHM_FORMAT:
+                input_features, feature_lens = self.processor._preprocess_single_padded(
+                    audio, int(audio_num_frames), device="cpu"
+                )
             else:
-                audio_feature_lengths = None
+                input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
+                if feature_attention_mask is not None:
+                    audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+                    input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
+                else:
+                    audio_feature_lengths = None
 
-            feature_lens = (
-                audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
-            )
+                feature_lens = (
+                    audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+                )
             preprocess_cost += time.time() - preprocess_start
 
             forward_start = time.time()
@@ -409,14 +415,13 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     def warmup(self, audio_bytes: bytes):
         audio = BytesIO(audio_bytes)
         audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
-        input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
-        if feature_attention_mask is not None:
-            audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-            input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
-        else:
-            audio_feature_lengths = None
-
-        feature_lens = audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+        num_frames = (max(audio.shape[0], 480) + self.processor.hop_length - 1) // self.processor.hop_length
+        padded_len = ((max(audio.shape[0], 480) + self.processor.hop_length - 1) // self.processor.hop_length) * (
+            self.processor.hop_length
+        )
+        if padded_len > audio.shape[0]:
+            audio = np.pad(audio, (0, padded_len - audio.shape[0]), mode="constant", constant_values=0.0)
+        input_features, feature_lens = self.processor._preprocess_single_padded(audio, num_frames, device="cpu")
         _ = self.forward(
             input_features,
             feature_lens=feature_lens,

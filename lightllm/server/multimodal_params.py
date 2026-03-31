@@ -18,6 +18,7 @@ RAW_AUDIO_SHM_FORMAT = "raw_audio_bytes"
 WAVEFORM_F32_SHM_FORMAT = "waveform_f32"
 AUDIO_SHM_USE_RAW_ENV = "LIGHTLLM_AUDIO_SHM_USE_RAW"
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
+DEFAULT_AUDIO_HOP_LENGTH = 160
 DEFAULT_MIN_AUDIO_LEN = 480
 
 
@@ -83,6 +84,7 @@ class AudioItem:
 
             audio_preload_config = audio_preload_config or {}
             target_sample_rate = int(audio_preload_config.get("sampling_rate", DEFAULT_AUDIO_SAMPLE_RATE))
+            hop_length = int(audio_preload_config.get("hop_length", DEFAULT_AUDIO_HOP_LENGTH))
             min_audio_len = int(audio_preload_config.get("min_audio_len", DEFAULT_MIN_AUDIO_LEN))
 
             # check if valid audio bytes
@@ -90,16 +92,28 @@ class AudioItem:
             audio_values, _ = librosa.load(BytesIO(audio_data), sr=target_sample_rate)
             audio_values = np.asarray(audio_values, dtype=np.float32)
             decode_cost_ms = (time.time() - decode_start) * 1000.0
-            self.audio_length = max(audio_values.shape[0], min_audio_len)
+            effective_audio_len = max(audio_values.shape[0], min_audio_len)
+            padded_audio_len = ((effective_audio_len + hop_length - 1) // hop_length) * hop_length
+            if padded_audio_len > audio_values.shape[0]:
+                audio_values = np.pad(
+                    audio_values,
+                    (0, padded_audio_len - audio_values.shape[0]),
+                    mode="constant",
+                    constant_values=0.0,
+                )
+
+            self.audio_length = effective_audio_len
             if should_use_raw_audio_shm():
                 self.extra_params["audio_shm_format"] = RAW_AUDIO_SHM_FORMAT
                 self.extra_params.pop("audio_sample_rate", None)
                 self.extra_params.pop("audio_num_samples", None)
+                self.extra_params.pop("audio_num_frames", None)
                 self._preload_data = audio_data
             else:
                 self.extra_params["audio_shm_format"] = WAVEFORM_F32_SHM_FORMAT
                 self.extra_params["audio_sample_rate"] = target_sample_rate
                 self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
+                self.extra_params["audio_num_frames"] = int((effective_audio_len + hop_length - 1) // hop_length)
                 self._preload_data = audio_values.tobytes()
             self.extra_params["audio_payload_md5"] = hashlib.md5(self._preload_data).hexdigest()
             logger.info(
