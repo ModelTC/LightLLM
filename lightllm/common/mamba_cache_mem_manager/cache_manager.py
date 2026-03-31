@@ -198,10 +198,12 @@ class MambaCacheManager:
         self,
     ):
         start_args = get_env_start_args()
-        if self.size is not None:
+        if self.size is not None and not start_args.disable_dynamic_prompt_cache:
             assert self.size < start_args.running_max_req_size * 2, (
-                f"error mamba_cache_size {self.size} < running_max_req_size * 2 {start_args.running_max_req_size * 2}",
+                f"error mamba_cache_size({self.size}), ",
                 f"mamba_cache_size should be at least running_max_req_size * 2",
+                f"({start_args.running_max_req_size * 2}), ",
+                f"you can add `--disable_dynamic_prompt_cache` to avoid this error.",
             )
             return
         from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
