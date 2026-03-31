@@ -84,6 +84,23 @@ class ProxyVisualManager(VisualManager):
             if len(taskes) > 0:
 
                 await asyncio.gather(*taskes)
+
+            # 将需要处理的 image 从 afs 中写入到 cpu cache 中
+            def _load_to_cpu_cache():
+                for image in images_need_infer:
+                    tensor = self.afs_handler.load(md5=image.md5)
+                    if tensor is None:
+                        raise Exception(
+                            f"Failed to load tensor from afs for image uuid {image.uuid} with md5 {image.md5}"
+                        )
+                    start = image.start_index_in_embed_cache
+                    end = start + tensor.shape[0]
+                    assert end - start == image.token_num
+                    self.cpu_embed_cache_client.cpu_embed_cache_tensor[start:end].copy_(tensor)
+                self.cache_client.root.set_items_embed([image.uuid for image in images_need_infer])
+
+            await asyncio.to_thread(_load_to_cpu_cache)
+
         except Exception as e:
             # mark aborted
             for shm_req_index in group_req_indexes.shm_req_indexes:
@@ -115,16 +132,6 @@ class ProxyVisualManager(VisualManager):
         conn.root.remote_infer_images(images, event)
         event.wait(timeout=600)
 
-        for image in images:
-            tensor = self.afs_handler.load(md5=image.md5)
-            if tensor is None:
-                raise Exception(f"Failed to load tensor from afs for image uuid {image.uuid} with md5 {image.md5}")
-            start = image.start_index_in_embed_cache
-            end = start + tensor.shape[0]
-            assert end - start == image.token_num
-            self.cpu_embed_cache_client.cpu_embed_cache_tensor[start:end] = tensor
-
-        self.cache_client.root.set_items_embed([image.uuid for image in images])
         return
 
     async def loop_to_connect_remote_visual_server(self):
