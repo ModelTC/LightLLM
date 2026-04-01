@@ -1103,6 +1103,7 @@ class TpPartBaseModel:
         gc.collect()
         self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
         self.mem_manager.free_all()
+        self.req_manager.resume()
         torch.cuda.synchronize()
 
     def resume_graph(self):
