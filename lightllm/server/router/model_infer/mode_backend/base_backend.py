@@ -29,6 +29,7 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
+    enable_dynamic_mtp_verify,
 )
 from lightllm.distributed.communication_op import (
     dist_group_manager,
@@ -805,7 +806,11 @@ class ModeBackend:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
                 # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
-                current_mtp_size = max(0, req.shm_req._mtp_size)
+                # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的_mtp_size
+                if enable_dynamic_mtp_verify():
+                    current_mtp_size = max(0, req.shm_req._mtp_size)
+                else:
+                    current_mtp_size = self.mtp_step
                 req.update_mtp_verify_token_num(verify_token_num=1 + current_mtp_size)
         return
 

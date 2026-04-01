@@ -2,10 +2,10 @@
 # 默认值
 PORT=8088
 NUM_PROMPTS=1000
-TOKENIZER="/mtc/models/qwen3-8b"
-DATASET="/data/nvme0/chenjunyi/project/lightllm/datasets/gsm8k.json"
+TOKENIZER="/data/chenjunyi/models/qwen3-8b"
+DATASET="/data/chenjunyi/project/lightllm/datasets/gsm8k.json"
 HISTORY_TURNS=1
-CONCURRENCY=64
+CONCURRENCY=128
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 # 执行 Python 脚本
-python /data/nvme0/chenjunyi/project/lightllm/test/benchmark/service/benchmark_sharegpt.py \
+python /data/chenjunyi/project/lightllm/test/benchmark/service/benchmark_sharegpt.py \
     --port "$PORT" \
     --num-prompts "$NUM_PROMPTS" \
     --tokenizer "$TOKENIZER" \

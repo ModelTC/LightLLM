@@ -1,0 +1,326 @@
+{
+  "1000000032": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "1000000064": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 8
+  },
+  "1000000128": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "1000000256": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "1000000512": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "1000001024": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "1000002048": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "1000008192": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "1000016384": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "128000000032": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "128000000064": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 2,
+    "num_warps": 2
+  },
+  "128000000128": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 2
+  },
+  "128000000256": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "128000000512": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "128000001024": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "128000002048": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "128000008192": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "128000016384": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "16000000032": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "16000000064": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "16000000128": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "16000000256": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "16000000512": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "16000001024": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "16000002048": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "16000008192": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 2
+  },
+  "16000016384": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "32000000032": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "32000000064": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "32000000128": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "32000000256": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "32000000512": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "32000001024": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "32000002048": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "32000008192": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "32000016384": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000000032": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000000064": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "64000000128": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "64000000256": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000000512": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "64000001024": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "64000002048": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000008192": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000016384": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "8000000032": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 8
+  },
+  "8000000064": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "8000000128": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "8000000256": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 8
+  },
+  "8000000512": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 8
+  },
+  "8000001024": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "8000002048": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 32,
+    "num_stages": 3,
+    "num_warps": 4
+  },
+  "8000008192": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 16,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "8000016384": {
+    "BLOCK_BATCH": 4,
+    "BLOCK_N": 64,
+    "num_stages": 3,
+    "num_warps": 4
+  }
+}

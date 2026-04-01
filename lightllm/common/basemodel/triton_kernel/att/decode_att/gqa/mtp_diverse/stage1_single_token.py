@@ -21,16 +21,16 @@ from lightllm.common.triton_utils.autotuner import autotune, Autotuner
 
 def get_test_configs():
     configs = []
-    for block_n in [16, 32, 64, 128]:
-        for num_warps in [2, 4, 8, 16]:
-            for num_stages in [2, 4, 6]:
-                configs.append(
-                    {
+    for block_batch in [4, 8]:          # 把 BLOCK_BATCH 放进 autotune
+        for block_n in [16, 32, 64]:
+            for num_warps in [2, 4, 8]:
+                for num_stages in [2, 3, 4]:
+                    configs.append({
+                        "BLOCK_BATCH": block_batch,
                         "BLOCK_N": block_n,
                         "num_warps": num_warps,
                         "num_stages": num_stages,
-                    }
-                )
+                    })
     return configs
 
 
@@ -218,12 +218,12 @@ def mtp_diverse_stage1_single_token(
     例如组内 [q1, q2, q3, q4] 对应 b_seq_len [2, 3, 4, 5]
     """
     if not run_config:
-        run_config = {"BLOCK_N": 16, "num_warps": 2, "num_stages": 2}
+        run_config = {"BLOCK_N": 16, "num_warps": 2, "num_stages": 2, "BLOCK_BATCH": 4}  # 默认配置
 
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
-    BLOCK_BATCH = 4
+    BLOCK_BATCH = run_config["BLOCK_BATCH"]
 
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
     assert q.is_cuda and k.is_cuda and v.is_cuda

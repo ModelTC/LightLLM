@@ -1,109 +1,124 @@
-"""
-MTP Diverse Attention - Main Entry Point
-
-MTP (Multi-Token Prediction) Diverse Attention 的实现。
-
-特点：
-- 组内请求共享相同的 KV 前缀
-- 每个请求 1 个 Q token，但可见 KV 范围不同
-- 使用 BLOCK_BATCH 同时处理组内所有请求，一次加载 KV 服务多个 Q
-
-b_mark_shared_group 标记：
-- 0: 组内非最后一个请求（跳过）
-- N>=1: 一个 N 人组的最后一个请求（需要计算）
-  - N=1 表示独立请求
-
-输入 Q 的形状：[batch_size, num_heads, head_dim]
-"""
 import torch
 import triton
+import triton.language as tl
 
-from lightllm.utils.infer_utils import calculate_time
 from .stage1_single_token import mtp_diverse_stage1_single_token
 from .stage2_single_token import mtp_diverse_stage2_single_token
 
 
-def token_decode_attention_mtp_diverse_single_token(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    Req_to_tokens: torch.Tensor,
-    B_req_idx: torch.Tensor,
-    b_seq_len: torch.Tensor,
+@triton.jit
+def _split_shared_group_marks_kernel(
+    InMark,     # [B] int32, 原始 b_mark_shared_group
+    OutMark,    # [B] int32, 拆分后的 mark（需先 zero）
+    B,          # int32
+    BLOCK_BATCH: tl.constexpr,
+    MAX_CHUNKS: tl.constexpr,   # ceil(max_shared_group_size / BLOCK_BATCH)
+):
+    pid = tl.program_id(0)
+    if pid >= B:
+        return
+
+    g = tl.load(InMark + pid)   # 0 或 group_size（只在组尾非0）
+    is_end = g > 0
+    start = pid - g + 1         # 该组起点
+
+    for j in tl.static_range(0, MAX_CHUNKS):
+        off = j * BLOCK_BATCH
+        valid = is_end & (off < g)
+
+        c = tl.minimum(BLOCK_BATCH, g - off)      # 子组大小
+        sub_end = start + off + c - 1             # 子组尾位置
+        valid = valid & (sub_end >= 0) & (sub_end < B)
+
+        tl.store(OutMark + sub_end, c, mask=valid)
+
+
+@torch.no_grad()
+def _prepare_split_marks(
     b_mark_shared_group: torch.Tensor,
+    out_mark: torch.Tensor,
+    block_batch: int,
+    max_shared_group_size: int,
+):
+    B = b_mark_shared_group.shape[0]
+    out_mark.zero_()
+    max_chunks = (max_shared_group_size + block_batch - 1) // block_batch
+
+    _split_shared_group_marks_kernel[(B,)](
+        b_mark_shared_group,
+        out_mark,
+        B,
+        BLOCK_BATCH=block_batch,
+        MAX_CHUNKS=max_chunks,
+        num_warps=1,
+        num_stages=1,
+    )
+
+
+@torch.no_grad()
+def token_decode_attention_mtp_diverse_single_token(
+    q, k, v,
+    Req_to_tokens,
+    B_req_idx,                 # 保持原样传给 stage1
+    b_seq_len,
+    b_mark_shared_group,       # 原始 mark
     block_seq: int = 256,
+    max_shared_group_size: int = 16,
     out=None,
     alloc_tensor_func=torch.empty,
+    split_mark_buf=None,       # 可外部分配复用
+    stage1_run_config=None,    # 可选：固定 stage1 配置（含 BLOCK_BATCH）
 ):
-    """
-    MTP Diverse Attention 主入口 - 单 Q token 每请求模式
-
-    在静态 MTP 模式下，每个请求有 1 个 Q token，但第 i 个请求只能看到前 i+1 个 KV。
-    使用 BLOCK_BATCH 同时处理组内所有请求，一次加载 KV 服务多个 Q。
-
-    参数：
-    - q: [batch_size, num_heads, head_dim] - 每个请求 1 个 Q token
-    - k: [kv_pool_size, kv_head_num, head_dim] - Key tensor
-    - v: [kv_pool_size, kv_head_num, head_dim] - Value tensor
-    - Req_to_tokens: [batch, max_kv_len] - 每个 batch 的 KV 索引
-    - B_req_idx: [batch] - 每个 batch 的请求索引
-    - b_seq_len: [batch] - 每个请求可见的 KV 数量（也是组内位置 +1）
-    - b_mark_shared_group: [batch] - 组标记
-        - 0: 组内非最后一个请求
-        - N>=1: 一个 N 人组的最后一个请求（N=1 表示独立请求）
-    - block_seq: 块大小（默认 256）
-    - out: 输出 tensor（可选）
-    - alloc_tensor_func: tensor 分配函数
-
-    返回：
-    - o: [batch_size, num_heads, head_dim] - 输出（和输入 Q 形状相同）
-    """
     batch_size = b_seq_len.shape[0]
     num_heads = q.shape[1]
     head_dim = q.shape[2]
 
-    # 分配输出 tensor: [batch_size, num_heads, head_dim]
     if out is None:
         o_tensor = alloc_tensor_func(q.shape, dtype=q.dtype, device=q.device)
     else:
         o_tensor = out
 
-    # 从 Req_to_tokens 获取固定的 max_kv_len，保证 CUDA graph 兼容性
     max_kv_len = Req_to_tokens.shape[1]
-
-    # 计算 kv block 数量
     seq_block_num = triton.cdiv(max_kv_len, block_seq)
 
-    # 分配中间结果 buffer
-    # mid_o: [batch, head, seq_block_num, head_dim] - 每个 kv block 一个 slot
     mid_o = alloc_tensor_func(
-        [batch_size, num_heads, seq_block_num, head_dim],
-        dtype=torch.float32,
-        device=q.device,
+        [batch_size, num_heads, seq_block_num, head_dim], dtype=q.dtype, device=q.device
     )
     mid_o_logsumexp = alloc_tensor_func(
-        [batch_size, num_heads, seq_block_num],
-        dtype=torch.float32,
-        device=q.device,
+        [batch_size, num_heads, seq_block_num], dtype=torch.float32, device=q.device
     )
 
-    # Stage1: 计算每个 kv block 的中间结果
-    # 使用 BLOCK_BATCH 同时处理组内所有请求，一次加载 KV 服务多个 Q
-    mtp_diverse_stage1_single_token(
-        q=q,
-        k=k,
-        v=v,
-        Req_to_tokens=Req_to_tokens,
-        B_req_idx=B_req_idx,
-        b_seq_len=b_seq_len,
+    if split_mark_buf is None:
+        split_mark_buf = alloc_tensor_func(
+            [batch_size], dtype=b_mark_shared_group.dtype, device=b_mark_shared_group.device
+        )
+
+    # 关键：split 用一个“安全最小值”，保证 <= stage1 可能的 BLOCK_BATCH
+    # 若 stage1 autotune 配置是 [4, 8]，这里固定 4 最稳
+    split_block_batch = 4
+    if stage1_run_config is not None and "BLOCK_BATCH" in stage1_run_config:
+        split_block_batch = int(stage1_run_config["BLOCK_BATCH"])
+
+    _prepare_split_marks(
         b_mark_shared_group=b_mark_shared_group,
+        out_mark=split_mark_buf,
+        block_batch=split_block_batch,
+        max_shared_group_size=max_shared_group_size,
+    )
+
+    mtp_diverse_stage1_single_token(
+        q=q, k=k, v=v,
+        Req_to_tokens=Req_to_tokens,
+        B_req_idx=B_req_idx,                   # ✅ 原样
+        b_seq_len=b_seq_len,
+        b_mark_shared_group=split_mark_buf,    # ✅ 仅替换 mark
         max_kv_len=max_kv_len,
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logsumexp,
         block_seq=block_seq,
+        run_config=stage1_run_config,
     )
 
-    # Stage2: 将每个请求的中间结果按 seq_len 聚合
     mtp_diverse_stage2_single_token(
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logsumexp,
@@ -112,5 +127,4 @@ def token_decode_attention_mtp_diverse_single_token(
         block_seq=block_seq,
         max_kv_len=max_kv_len,
     )
-
     return o_tensor
