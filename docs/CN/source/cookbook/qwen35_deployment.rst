@@ -36,7 +36,7 @@ Qwen3.5 是新一代大语言模型，采用混合注意力架构，并可选支
 
 .. note::
 
-    纯文本部署时，使用相同的模型类型（``qwen3_5`` 或 ``qwen3_5_moe``），不添加 ``--enable_multimodal`` 标志即可。无需指定单独的纯文本模型类型。
+    Qwen3.5 模型默认注册为多模态模型，多模态支持自动启用。若需纯文本部署，添加 ``--disable_vision`` 以跳过视觉编码器的加载，减少显存占用和启动时间。
 
 推荐启动脚本
 --------------
@@ -56,6 +56,7 @@ Qwen3.5 是新一代大语言模型，采用混合注意力架构，并可选支
         --chunked_prefill_size 8192 \
         --graph_max_batch_size 256 \
         --reasoning_parser qwen3 \
+        --disable_vision \
         --host 0.0.0.0 \
         --port 8000
 
@@ -67,6 +68,7 @@ Qwen3.5 是新一代大语言模型，采用混合注意力架构，并可选支
 - ``--chunked_prefill_size 8192``: 预填充处理的分块大小，降低峰值显存占用
 - ``--graph_max_batch_size 256``: CUDA graph 最大批处理大小
 - ``--reasoning_parser qwen3``: 启用 Qwen3 推理解析器，支持思考模式
+- ``--disable_vision``: 禁用视觉编码器，用于纯文本部署，节省显存
 
 多模态稠密模型（带视觉能力）
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -83,14 +85,16 @@ Qwen3.5 是新一代大语言模型，采用混合注意力架构，并可选支
         --chunked_prefill_size 8192 \
         --graph_max_batch_size 256 \
         --reasoning_parser qwen3 \
-        --enable_multimodal \
         --host 0.0.0.0 \
         --port 8000
 
 **额外参数：**
 
-- ``--enable_multimodal``: 启用多模态（图像/视频）输入处理
 - ``--tp 2``: 多模态模型通常较大，建议使用多 GPU 张量并行
+
+.. note::
+
+    Qwen3.5 模型默认启用多模态支持，无需额外添加标志即可使用视觉能力。
 
 MoE 模型
 ~~~~~~~~~

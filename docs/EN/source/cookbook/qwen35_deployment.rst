@@ -36,7 +36,7 @@ Qwen3.5 is a next-generation large language model featuring a hybrid attention a
 
 .. note::
 
-    For text-only deployment, use the same model type (``qwen3_5`` or ``qwen3_5_moe``) without the ``--enable_multimodal`` flag. There is no need to specify a separate text-only model type.
+    Qwen3.5 models are registered as multimodal by default. Multimodal support is automatically enabled unless explicitly disabled. For text-only deployment, add ``--disable_vision`` to skip loading the vision encoder, which reduces memory usage and startup time.
 
 Recommended Launch Scripts
 --------------------------
@@ -56,6 +56,7 @@ For deploying the dense text-only variant on a single GPU:
         --chunked_prefill_size 8192 \
         --graph_max_batch_size 256 \
         --reasoning_parser qwen3 \
+        --disable_vision \
         --host 0.0.0.0 \
         --port 8000
 
@@ -67,6 +68,7 @@ For deploying the dense text-only variant on a single GPU:
 - ``--chunked_prefill_size 8192``: Chunk size for prefill processing, reduces peak memory usage
 - ``--graph_max_batch_size 256``: Maximum batch size for CUDA graph optimization
 - ``--reasoning_parser qwen3``: Enable Qwen3 reasoning parser for thinking mode support
+- ``--disable_vision``: Disable the vision encoder for text-only deployment, saving memory
 
 Multimodal Dense Model (with Vision)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -83,14 +85,16 @@ For deploying the multimodal variant with image/video understanding:
         --chunked_prefill_size 8192 \
         --graph_max_batch_size 256 \
         --reasoning_parser qwen3 \
-        --enable_multimodal \
         --host 0.0.0.0 \
         --port 8000
 
 **Additional Parameters:**
 
-- ``--enable_multimodal``: Enable multimodal (image/video) input processing
 - ``--tp 2``: Multimodal models are typically larger and benefit from multi-GPU tensor parallelism
+
+.. note::
+
+    Multimodal support is enabled by default for Qwen3.5 models. No additional flag is needed to enable vision capabilities.
 
 MoE Model
 ~~~~~~~~~~
