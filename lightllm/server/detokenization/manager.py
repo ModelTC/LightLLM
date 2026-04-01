@@ -79,7 +79,7 @@ class DeTokenizationManager:
                         try:
                             self._add_new_group_req_index(recv_obj=recv_obj)
                         except Exception as e:
-                            logger.error(f"add new group req index has exception: {str(e)}")
+                            logger.exception("add new group req index has exception")
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)
