@@ -63,6 +63,7 @@ Documentation List
    :caption: Cookbook
 
    GLM-4.7-Flash Deployment <cookbook/glm4_deployment>
+   Qwen3.5 Deployment <cookbook/qwen35_deployment>
 
 .. toctree::
    :maxdepth: 1

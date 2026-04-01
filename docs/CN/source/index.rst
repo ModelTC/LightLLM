@@ -64,6 +64,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    :caption: Cookbook
 
    GLM-4.7-Flash 部署 <cookbook/glm4_deployment>
+   Qwen3.5 部署 <cookbook/qwen35_deployment>
 
 .. toctree::
    :maxdepth: 1
