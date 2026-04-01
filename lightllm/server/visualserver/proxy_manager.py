@@ -87,9 +87,7 @@ class ProxyVisualManager(VisualManager):
                 for image in images_need_infer:
                     tensor = self.afs_handler.load(md5=image.md5)
                     if tensor is None:
-                        raise Exception(
-                            f"Failed to load tensor from afs for image uuid {image.uuid} with md5 {image.md5}"
-                        )
+                        raise Exception(f"Failed to load tensor from afs for image with md5 {image.md5}")
                     start = image.start_index_in_embed_cache
                     end = start + tensor.shape[0]
                     assert end - start == image.token_num
