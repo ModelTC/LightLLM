@@ -57,7 +57,7 @@ class VisualManager:
         self.infer_batch_size = args.visual_infer_batch_size
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
-        self.lock = threading.Lock()
+        self.lock = asyncio.Lock()
 
     async def wait_to_model_ready(self):
 
@@ -150,7 +150,7 @@ class VisualManager:
                     self.infer_images(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images])
                 )
 
-        with self.lock:
+        async with self.lock:
             try:
                 await asyncio.gather(*taskes)
             except BaseException as e:
