@@ -169,7 +169,7 @@ class ProxyVisualManager(VisualManager):
 
                                     conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=rpyc_config)
                                     conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                                    conn._bg_thread = rpyc.BgServingThread(conn)
+                                    conn._bg_thread = rpyc.BgServingThread(conn, sleep_interval=0.001)
                                     logger.info(
                                         f"Connected to visual server {node_id} at {vit_obj.host_ip}:{vit_obj.port}"
                                     )

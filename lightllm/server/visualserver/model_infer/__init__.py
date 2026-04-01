@@ -50,7 +50,7 @@ async def start_model_process():
     assert proc.is_alive()
 
     # 服务端需要调用客户端传入的event所以，客户端需要一个后台线程进行相关的处理。
-    conn._bg_thread = rpyc.BgServingThread(conn)
+    conn._bg_thread = rpyc.BgServingThread(conn, sleep_interval=0.001)
 
     return VisualModelRpcClient(conn)
 
