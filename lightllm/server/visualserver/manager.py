@@ -172,8 +172,8 @@ class VisualManager:
         await asyncio.gather(*taskes)
 
     async def loop_for_netio_req(self):
-        while True:
-            try:
+        try:
+            while True:
                 recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
                 if isinstance(recv_req, GroupReqIndexes):
                     logger.info(
@@ -183,10 +183,8 @@ class VisualManager:
                     asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
                 else:
                     assert False, f"Error Req Inf {recv_req}"
-            except Exception as e:
-                logger.exception(str(e))
-                await asyncio.sleep(0.1)
-                continue
+        except Exception as e:
+            logger.exception(str(e))
 
     def clean_up(self):
         return
