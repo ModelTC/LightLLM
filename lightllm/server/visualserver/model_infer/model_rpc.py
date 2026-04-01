@@ -4,6 +4,7 @@ import socket
 import torch.multiprocessing as mp
 import queue
 import threading
+import time
 import torch.distributed as dist
 from typing import Dict, List, Tuple, Deque, Optional
 from transformers.configuration_utils import PretrainedConfig
@@ -299,7 +300,13 @@ class VisualModelRpcServer(rpyc.Service):
         if self.tp_rank_id == 0:
             for image in images:
                 self.afs_handler.insert(image.md5, image.gen_embed)
+                start = time.time()
                 image.event.set()
+                if time.time() - start > 0.05:
+                    logger.info(
+                        f"set event for images {[image.md5 for image in images]}"
+                        f" with latency {time.time() - start} seconds"
+                    )
 
     def _commit_to_cpu_cache(self, images):
         if self.tp_rank_id == 0:
@@ -311,4 +318,10 @@ class VisualModelRpcServer(rpyc.Service):
             self.cache_client.root.set_items_embed(uuids)
 
             for image in images:
+                start = time.time()
                 image.event.set()
+                if time.time() - start > 0.05:
+                    logger.info(
+                        f"set event for images {[image.md5 for image in images]}"
+                        f" with latency {time.time() - start} seconds"
+                    )
