@@ -268,8 +268,8 @@ class ReqManagerForMamba(ReqManager):
             buffer_indexes = buffer_indexes.cuda()
         self.req_to_buffer_index[req_index] = buffer_indexes.view(num_reqs, num_buffers_per_req)
 
-    def resume(self, req_index: torch.Tensor):
+    def resume(self):
         # for rl kv cache resume
         self.req_to_buffer_index.zero_()
-        self.req_to_buffer_index[req_index] = self.buffer_mem_manager.HOLD_BUFFER_INDEX
+        self.req_to_buffer_index[self.HOLD_REQUEST_ID, :] = self.buffer_mem_manager.HOLD_BUFFER_INDEX
         return
