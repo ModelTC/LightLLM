@@ -172,26 +172,21 @@ class VisualManager:
         await asyncio.gather(*taskes)
 
     async def loop_for_netio_req(self):
-        if not hasattr(self, "visual_recv_max_count"):
-            self.visual_recv_max_count = 64
-
         while True:
             try:
-                for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                    if isinstance(recv_req, GroupReqIndexes):
-                        logger.info(
-                            f"visual recv req id {recv_req.group_req_id} "
-                            f"img count {len(recv_req.multimodal_params.images)}"
-                        )
-                        asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
-                    else:
-                        assert False, f"Error Req Inf {recv_req}"
-                self.visual_recv_max_count = int(min(self.visual_recv_max_count * 1.3, 256))
-            except zmq.ZMQError:
-                # 当队列已经开始清空的时候，将一次接受数量下调
-                self.visual_recv_max_count = 64
-            await asyncio.sleep(0.01)
+                recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
+                if isinstance(recv_req, GroupReqIndexes):
+                    logger.info(
+                        f"visual recv req id {recv_req.group_req_id} "
+                        f"img count {len(recv_req.multimodal_params.images)}"
+                    )
+                    asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
+                else:
+                    assert False, f"Error Req Inf {recv_req}"
+            except Exception as e:
+                logger.exception(str(e))
+                await asyncio.sleep(0.1)
+                continue
 
     def clean_up(self):
         return
