@@ -113,7 +113,7 @@ class AudioItem:
                 self.extra_params["audio_shm_format"] = WAVEFORM_F32_SHM_FORMAT
                 self.extra_params["audio_sample_rate"] = target_sample_rate
                 self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
-                self.extra_params["audio_num_frames"] = int((effective_audio_len + hop_length - 1) // hop_length)
+                self.extra_params["audio_num_frames"] = int(effective_audio_len // hop_length)
                 self._preload_data = audio_values.tobytes()
             self.extra_params["audio_payload_md5"] = hashlib.md5(self._preload_data).hexdigest()
             logger.info(

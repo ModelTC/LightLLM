@@ -415,7 +415,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     def warmup(self, audio_bytes: bytes):
         audio = BytesIO(audio_bytes)
         audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
-        num_frames = (max(audio.shape[0], 480) + self.processor.hop_length - 1) // self.processor.hop_length
+        num_frames = max(audio.shape[0], 480) // self.processor.hop_length
         padded_len = ((max(audio.shape[0], 480) + self.processor.hop_length - 1) // self.processor.hop_length) * (
             self.processor.hop_length
         )
