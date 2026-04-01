@@ -192,6 +192,31 @@ def get_diverse_max_batch_shared_group_size() -> int:
 
 
 @lru_cache(maxsize=None)
+def get_diverse_candidate_max_batch_shared_group_sizes() -> tuple[int, ...]:
+    raw_value = os.getenv("LIGHTLLM_DIVERSE_MAX_BATCH_SHARED_GROUP_SIZES", "1,2,4,8")
+    values = []
+    for item in raw_value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        value = int(item)
+        if value > 0:
+            values.append(value)
+    if not values:
+        values = [1, 2, 4, 8]
+    return tuple(sorted(set(values)))
+
+
+def select_diverse_max_batch_shared_group_size(batch_size: int) -> int:
+    max_group_size = min(batch_size, get_diverse_max_batch_shared_group_size())
+    candidates = get_diverse_candidate_max_batch_shared_group_sizes()
+    valid_candidates = [value for value in candidates if value <= max_group_size]
+    if valid_candidates:
+        return valid_candidates[-1]
+    return 1
+
+
+@lru_cache(maxsize=None)
 def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
     return get_env_start_args().diverse_mode and "int8kv" == get_env_start_args().llm_kv_type
 

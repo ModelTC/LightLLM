@@ -6,7 +6,7 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
-    get_diverse_max_batch_shared_group_size,
+    select_diverse_max_batch_shared_group_size,
 )
 
 
@@ -166,7 +166,7 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
     # b_mark_shared_group 中每一个不为0的位置都代表其与前面多少个请求形成一个共享前缀组。属于
     # 同一个共享前缀组的请求, 其在对应的 b_shared_seq_len 中的内容必然相同。某些模式可以利用这两个
     # 输入加速算子的运行。
-    max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
+    max_batch_shared_group_size = select_diverse_max_batch_shared_group_size(len(run_reqs))
     b_shared_seq_len = [req.get_radix_cache_shared_len() for req in run_reqs]
     b_mark_shared_group = []
     shared_nodes = [req.shared_kv_node for req in run_reqs]
