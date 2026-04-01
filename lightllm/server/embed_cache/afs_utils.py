@@ -96,17 +96,17 @@ class SepEmbedHandler:
         redis_host: str,
         redis_port: int,
         capacity: int = 250000,
-        evict_fraction: float = 0.1,
+        evict_fraction: float = 0.3,
     ) -> None:
         if not (0.0 <= evict_fraction <= 1.0):
             raise ValueError("evict_fraction must be 0..1")
-        if capacity < 1:
-            raise ValueError("capacity must be >= 1")
+        if capacity < 100:
+            raise ValueError("capacity must be >= 100")
 
         redis_url = f"redis://{redis_host}:{redis_port}/0"
         self.redis_client = RedisMetadataLib(redis_url=redis_url)
         self.capacity = capacity
-        self.remove_count = min(int(self.capacity * evict_fraction), 1000)  # full的时候，每次清理的数量
+        self.remove_count = int(self.capacity * evict_fraction)  # full的时候，每次清理的数量
         self.afs_embed_dir = afs_embed_dir
         self.afs_utils = AfsUtils(self.afs_embed_dir)
         self.args = get_env_start_args()
