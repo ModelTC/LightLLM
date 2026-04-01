@@ -18,7 +18,7 @@ Qwen3.5 is a next-generation large language model featuring a hybrid attention a
 - **Multi-head RoPE (MRoPE)**: Interleaved rotary position embeddings optimized for multimodal spatial/temporal positioning
 - **Thinking/Reasoning Mode**: Supports ``qwen3`` reasoning parser with ``<think>...</think>`` tags for chain-of-thought generation
 
-**Supported Model Types:**
+**Registered Model Types:**
 
 .. list-table::
    :header-rows: 1
@@ -33,12 +33,10 @@ Qwen3.5 is a next-generation large language model featuring a hybrid attention a
    * - ``qwen3_5_moe``
      - MoE + Multimodal
      - Mixture-of-Experts with vision encoder
-   * - ``qwen3_5_text``
-     - Dense + Text-only
-     - Dense MLP without vision encoder
-   * - ``qwen3_5_moe_text``
-     - MoE + Text-only
-     - Mixture-of-Experts without vision encoder
+
+.. note::
+
+    For text-only deployment, use the same model type (``qwen3_5`` or ``qwen3_5_moe``) without the ``--enable_multimodal`` flag. There is no need to specify a separate text-only model type.
 
 Recommended Launch Scripts
 --------------------------
