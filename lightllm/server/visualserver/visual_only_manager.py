@@ -44,7 +44,7 @@ class VisualOnlyManager(rpyc.Service):
         self.vit_tp = args.visual_tp
         # image 最大推理 batch size
         self.infer_batch_size = args.visual_infer_batch_size
-        self.lock = threading.Lock()
+        self.lock = asyncio.Lock()
 
         self.new_loop = asyncio.new_event_loop()
 
