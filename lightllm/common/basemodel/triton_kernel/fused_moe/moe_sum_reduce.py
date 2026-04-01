@@ -2,6 +2,9 @@ import torch
 import triton
 import triton.language as tl
 from typing import Dict
+
+from lightllm.utils.profiler import PerfCounter
+from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.common.triton_utils.autotuner import autotune
 
 
@@ -60,6 +63,7 @@ def _get_moe_sum_reduce_configs():
     ]
 
 
+@PerfCounter("moe_sum_reduce", type="OTHER_OP")
 @autotune(
     kernel_name="moe_sum_reduce:v1",
     configs_gen_func=_get_moe_sum_reduce_configs,

@@ -7,7 +7,7 @@ import socket
 import pickle
 import inspect
 import setproctitle
-from typing import List
+from typing import List, Union
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 
@@ -19,6 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 from rpyc.utils.classic import obtain
 
 
@@ -60,6 +61,8 @@ class VisualManager:
         self.visual_model_rpc_ports = visual_model_rpc_ports
         self.send_batch_size = args.visual_send_batch_size
         self.shm_req_manager = ShmReqManager()
+        prof_mode = args.enable_profiling
+        self.profiler = ProcessProfiler(prof_mode, name="lightllm-visual_server") if prof_mode else None
 
     async def wait_to_model_ready(self):
 
@@ -187,13 +190,21 @@ class VisualManager:
         while True:
             try:
                 for _ in range(self.visual_recv_max_count):
-                    recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                    recv_req: GroupReqIndexes | ProfilerCmd = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                     if isinstance(recv_req, GroupReqIndexes):
                         logger.info(
                             f"visual recv req id {recv_req.group_req_id} "
                             f"img count {len(recv_req.multimodal_params.images)}"
                         )
                         self.waiting_reqs.append(recv_req)
+                    elif isinstance(recv_req, ProfilerCmd):
+                        self.profiler.cmd(recv_req)
+                        tasks = []
+                        for dp in range(self.vit_dp):
+                            for tp in range(self.vit_tp):
+                                task = asyncio.create_task(self.model_rpcs[dp][tp].profiler_cmd(recv_req))
+                                tasks.append(task)
+                        await asyncio.gather(*tasks)
                     else:
                         assert False, f"Error Req Inf {recv_req}"
                 self.visual_recv_max_count = int(min(self.visual_recv_max_count * 1.3, 256))

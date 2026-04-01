@@ -26,6 +26,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
+from lightllm.utils.profiler import ProcessProfiler
 
 
 class VisualModelRpcServer(rpyc.Service):
@@ -46,6 +47,10 @@ class VisualModelRpcServer(rpyc.Service):
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
         set_vit_att_backend(self.vit_attn_backend)
+
+        prof_mode = get_env_start_args().enable_profiling
+        prof_name = f"lightllm-visual-vit_dp{self.dp_rank_id}_tp{self.tp_rank_id}"
+        self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name) if prof_mode else None
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
@@ -136,6 +141,10 @@ class VisualModelRpcServer(rpyc.Service):
                 torch.cuda.current_stream().synchronize()
         return
 
+    def exposed_profiler_cmd(self, cmd_obj):
+        cmd_obj = obtain(cmd_obj)
+        self.profiler.cmd(cmd_obj)
+
 
 class VisualModelRpcClient:
     def __init__(self, model_rpc, vit_tp, rpc_server_process=None):
@@ -158,9 +167,11 @@ class VisualModelRpcClient:
 
             self._init_model = async_wrap(self.model.init_model)
             self._encode = async_wrap(self.model.encode)
+            self._profiler_cmd = async_wrap(self.model.profiler_cmd)
         else:
             self._init_model = self.model.exposed_init_model
             self._encode = self.model.exposed_encode
+            self._profiler_cmd = self.model.exposed_profiler_cmd
         return
 
     async def init_model(self, kvargs):
@@ -177,6 +188,14 @@ class VisualModelRpcClient:
             return await ans
         else:
             return ans
+
+    async def profiler_cmd(self, cmd_obj):
+        ans: rpyc.AsyncResult = self._profiler_cmd(cmd_obj)
+        if self.use_rpc:
+            await ans
+            return
+        else:
+            return
 
 
 def _init_env(port, device_id):

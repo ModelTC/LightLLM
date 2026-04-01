@@ -2,6 +2,8 @@ import torch
 
 import triton
 import triton.language as tl
+
+from lightllm.utils.profiler import PerfCounter
 from lightllm.common.triton_utils.autotuner import autotune
 
 
@@ -98,6 +100,7 @@ def _get_silu_and_mul_static_key(input: torch.Tensor, output: torch.Tensor):
     return {"N": input.shape[-1] // 2, "out_dtype": str(output.dtype)}
 
 
+@PerfCounter(type="ACT_OP", name="silu_and_mul_fwd")
 @autotune(
     kernel_name="silu_and_mul_fwd:v1",
     configs_gen_func=_get_silu_and_mul_configs,

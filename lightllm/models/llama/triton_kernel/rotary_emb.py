@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.utils.profiler import PerfCounter
+
 
 @triton.jit
 def _rotary_kernel(
@@ -115,11 +117,13 @@ def _rotary_kernel(
     return
 
 
+@PerfCounter(type="OTHER_OP")
 @torch.no_grad()
 def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
     total_len = q.shape[0]
     head_num_q, head_num_k = q.shape[1], k.shape[1]
     head_dim = int(q.shape[2] * partial_rotary_factor)
+    rotary_emb_fwd.record_shape(seqlen=total_len, q_heads=head_num_q, k_heads=head_num_k, head_dim=head_dim)
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
     assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
 

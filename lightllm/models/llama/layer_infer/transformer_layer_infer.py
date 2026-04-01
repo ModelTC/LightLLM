@@ -9,6 +9,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.profiler import PerfCounter
 
 logger = init_logger(__name__)
 
@@ -37,6 +38,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self._ffn_norm = partial(LlamaTransformerLayerInfer._ffn_norm, self)
         return
 
+    @PerfCounter(type="BLOCK")
     def _context_attention_kernel(
         self,
         q: torch.Tensor,
@@ -46,15 +48,18 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            alloc_func=self.alloc_tensor,
-        )
+        with PerfCounter(type="ATTN_OP", name=infer_state.prefill_att_state.prefill_att.__name__) as p:
+            p.record_shape(seqlen=q.size(0), bs=infer_state.batch_size)
+            o_tensor = infer_state.prefill_att_state.prefill_att(
+                q=_q,
+                k=_k,
+                v=_v,
+                alloc_func=self.alloc_tensor,
+            )
         o_tensor = o_tensor.view(q.shape)
         return o_tensor
 
+    @PerfCounter(type="BLOCK")
     def _token_attention_kernel(
         self,
         q: torch.Tensor,
@@ -63,19 +68,24 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
+        with PerfCounter(type="ATTN_OP", name=infer_state.decode_att_state.decode_att.__name__) as p:
+            p.record_shape(seqlen=q.size(0), bs=infer_state.batch_size)
+            o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
+    @PerfCounter(type="BLOCK")
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
+    @PerfCounter(type="BLOCK")
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
+    @PerfCounter(type="BLOCK")
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
@@ -90,6 +100,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         )
         return q, cache_kv
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
@@ -117,6 +128,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
         return q, cache_kv
 
+    @PerfCounter(type="BLOCK")
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
@@ -124,6 +136,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         o_tensor = layer_weight.o_proj.mm(input)
         return o_tensor
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
@@ -152,6 +165,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
         return o_tensor
 
+    @PerfCounter(type="BLOCK")
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
@@ -163,6 +177,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         ffn1_out = None
         return ffn2_out
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_ffn(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
@@ -205,6 +220,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     #     gate_out, up_out = None, None
     #     return ffn2_out
 
+    @PerfCounter(type="LAYER")
     def overlap_tpsp_token_forward(
         self,
         input_embdings: torch.Tensor,
@@ -217,6 +233,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         input_embdings1 = self.tpsp_token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
         return input_embdings, input_embdings1
 
+    @PerfCounter(type="LAYER")
     def overlap_tpsp_context_forward(
         self,
         input_embdings: torch.Tensor,

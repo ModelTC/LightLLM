@@ -5,6 +5,7 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.profiler import PerfCounter
 
 logger = init_logger(__name__)
 
@@ -15,6 +16,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.head_dim_ = network_config["head_dim"]
         return
 
+    @PerfCounter(type="BLOCK")
     def _get_qkv(
         self,
         input: torch.Tensor,

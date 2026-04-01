@@ -35,6 +35,7 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
+from lightllm.utils.profiler import GlobalPerfContext
 
 logger = init_logger(__name__)
 
@@ -255,6 +256,7 @@ class TpPartBaseModel:
         self.decode_att_backend1: BaseAttBackend = None
         return
 
+    @GlobalPerfContext.disable()
     def _init_cudagraph(self):
         self.graph = (
             None if self.disable_cudagraph else CudaGraph(self.graph_max_batch_size, self.graph_max_len_in_batch)
@@ -552,6 +554,7 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
+        GlobalPerfContext.begin_with_sample_rate(sample_rate=1)
         run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
@@ -602,10 +605,13 @@ class TpPartBaseModel:
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
         dist_group_manager.clear_deepep_buffer()
+        rank = torch.cuda.current_device()
+        GlobalPerfContext.finalize_async(marker=f"_context_forward_{rank}", save_jsonl=True, save_log=True)
         return model_output
 
     @final
     def _token_forward(self, infer_state: InferStateInfo):
+        GlobalPerfContext.begin_with_sample_rate(sample_rate=0.05)
         run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
@@ -632,6 +638,13 @@ class TpPartBaseModel:
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
 
+        rank = torch.cuda.current_device()
+        GlobalPerfContext.finalize_async(marker=f"_token_forward_{rank}", save_jsonl=True, save_log=True)
+
+        # import time
+        # ts = time.time()
+        # PerfCounterContext.finalize_print(marker=f"_token_forward_{rank}", save=f"_token_forward_{rank}.jsonl")
+        # print(f"PerfCounterContext.finalize_print took {(time.time() - ts) * 1000:.3f} ms")
         return model_output
 
     @torch.no_grad()

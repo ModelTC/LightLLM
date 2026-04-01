@@ -23,6 +23,7 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.profiler import PerfCounter
 from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
 from .moe_silu_and_mul import silu_and_mul_fwd
@@ -267,6 +268,7 @@ def _get_moe_align_fused_configs():
     ]
 
 
+@PerfCounter("moe_align_fused", type="OTHER_OP")
 @autotune(
     kernel_name="moe_align_fused:v1",
     configs_gen_func=_get_moe_align_fused_configs,
@@ -670,6 +672,7 @@ def _get_grouped_matmul_configs():
     ]
 
 
+@PerfCounter("grouped_matmul", type="GEMM_OP")
 @autotune(
     kernel_name="grouped_matmul:v1",
     configs_gen_func=_get_grouped_matmul_configs,
@@ -715,6 +718,9 @@ def grouped_matmul(
     assert expert_to_token_num.is_contiguous()
     assert expert_to_weights.is_contiguous()
     assert expert_weights.is_contiguous()
+
+    m_total = int(expert_to_token_num.sum().item())
+    grouped_matmul.record_shape(m=m_total, k=k, n=n)
 
     # for deepseek_v3 block-wise quant
     block_size_n = 0
@@ -1157,6 +1163,7 @@ direct_register_custom_op(
 )
 
 
+@PerfCounter(type="BLOCK")
 def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,

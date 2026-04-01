@@ -16,6 +16,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.profiler import PerfCounter
 
 logger = init_logger(__name__)
 
@@ -54,6 +55,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
             self._tpsp_ffn = self._tpsp_ffn_tp
 
+    @PerfCounter(type="BLOCK")
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -79,6 +81,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return q, cache_kv
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_get_qkv(
         self,
         input: torch.Tensor,
@@ -116,6 +119,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         return q, cache_kv
 
+    @PerfCounter(type="BLOCK")
     def _moe_ffn(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
@@ -134,6 +138,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         return hidden_states.view(num_tokens, hidden_dim)
 
+    @PerfCounter(type="BLOCK")
     def _moe_ffn_edp(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
@@ -156,11 +161,13 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_ffn(
         self, input: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ):
         raise Exception("need bind to real impl")
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_ffn_tp(
         self, input: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
@@ -186,6 +193,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             ffn2_out = reduce_o_tensor
         return ffn2_out
 
+    @PerfCounter(type="BLOCK")
     def _tpsp_ffn_ep(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
@@ -195,6 +203,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         return ffn2_out
 
+    @PerfCounter(type="BLOCK")
     def overlap_tpsp_token_forward(
         self,
         input_embdings: torch.Tensor,
@@ -307,6 +316,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         return input_embdings, input_embdings1
 
+    @PerfCounter(type="BLOCK")
     def overlap_tpsp_context_forward(
         self,
         input_embdings: torch.Tensor,

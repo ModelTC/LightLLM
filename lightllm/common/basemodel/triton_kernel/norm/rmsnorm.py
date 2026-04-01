@@ -4,6 +4,8 @@ import triton
 import triton.language as tl
 import os
 
+from lightllm.utils.profiler import PerfCounter
+
 rmsnorm_num_warps = int(os.getenv("RMSNORM_WARPS", "8"))
 
 
@@ -44,6 +46,7 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
+@PerfCounter(type="ACT_OP")
 def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
     # allocate output
     y = torch.empty_like(x) if out is None else out
@@ -53,6 +56,7 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
     assert x_arg.shape[-1] == weight.shape[0] and x_arg.shape == y_arg.shape
     assert y.data_ptr() == y_arg.data_ptr()
     M, N = x_arg.shape
+    rmsnorm_forward.record_shape(m=M, n=N)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))

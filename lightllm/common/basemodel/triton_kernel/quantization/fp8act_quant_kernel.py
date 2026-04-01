@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 
 from lightllm.common.kernel_config import KernelConfigs
+from lightllm.utils.profiler import PerfCounter
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 from frozendict import frozendict
 from functools import lru_cache
@@ -113,6 +114,7 @@ def lightllm_per_token_group_quant_fp8(
     return
 
 
+@PerfCounter(type="QUANT_OP")
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -213,6 +215,7 @@ def _tma_align_input_scale_kernel(
         tl.store(output_offset, input_data, mask=k_offsets < k_div_block_size)
 
 
+@PerfCounter(type="QUANT_OP")
 def tma_align_input_scale(input_scale: torch.Tensor):
     assert input_scale.dim() == 2
     m, k_div_block_size = input_scale.shape

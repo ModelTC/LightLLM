@@ -19,6 +19,8 @@ from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_ran
 from lightllm.common.triton_utils.autotuner import Autotuner
 import numpy as np
 
+from lightllm.utils.profiler import PerfCounter
+
 logger = init_logger(__name__)
 
 try:
@@ -31,6 +33,7 @@ except:
     HAS_DEEPGEMM = False
 
 
+@PerfCounter(type="BLOCK")
 def masked_group_gemm(
     recv_x: Tuple[torch.Tensor, torch.Tensor],
     masked_m: torch.Tensor,
@@ -59,6 +62,7 @@ def masked_group_gemm(
     return gemm_out_b
 
 
+@PerfCounter(type="BLOCK")
 def fused_experts_impl(
     hidden_states: torch.Tensor,  # [M, K]
     w1: torch.Tensor,  # [group, N, K]
@@ -116,6 +120,8 @@ def fused_experts_impl(
         # recv_topk_idx [recive_num_tokens, topk_num]
         # recv_topk_weights [recive_num_tokens, topk_num]
         # num_recv_tokens_per_expert_list list [cur_node_expert_num] padding with expert_alignment=128
+        p = PerfCounter(type="COMM_OP", name="deepep_buffer.dispatch")
+        p.start()
         recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = buffer.dispatch(
             (qinput_tensor, input_scale),
             topk_idx=topk_idx,
@@ -129,6 +135,24 @@ def fused_experts_impl(
             allocate_on_comm_stream=False,
             expert_alignment=128,
         )
+        # 单卡通信量：本卡实际接收的数据字节数（激活+scale+topk元数据）
+        _comm_size = (
+            recv_x[0].element_size() * recv_x[0].numel()
+            + recv_x[1].element_size() * recv_x[1].numel()
+            + recv_topk_idx.element_size() * recv_topk_idx.numel()
+            + recv_topk_weights.element_size() * recv_topk_weights.numel()
+        )
+        p.record_shape(
+            size=_comm_size,
+            hidden_size=K,
+            num_experts=num_experts,
+            topk_num=topk_idx.shape[1],
+            recv_x_shape_0=recv_x[0].shape,
+            recv_x_shape_1=recv_x[1].shape,
+            recv_topk_idx_shape=recv_topk_idx.shape,
+            recv_topk_weights_shape=recv_topk_weights.shape,
+        )
+        p.stop()
 
         # scatter
         all_tokens = sum(num_recv_tokens_per_expert_list)  # calcu padding all nums.
@@ -198,6 +222,9 @@ def fused_experts_impl(
                 _gemm_out_a, _silu_out = None, None
 
         # normal combine
+        p = PerfCounter(type="COMM_OP", name="deepep_buffer.combine")
+        p.record_shape(size=gather_out.element_size() * gather_out.numel(), hidden_size=K, num_experts=num_experts, topk_num=topk_idx.shape[1], gather_out_shape=gather_out.shape)
+        p.start()
         combined_x, _, event = buffer.combine(
             gather_out,
             handle,
@@ -206,10 +233,13 @@ def fused_experts_impl(
             previous_event=previous_event,
             allocate_on_comm_stream=False,
         )
+        p.stop()
     else:
         # low latency dispatch
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
         expected_m = triton.cdiv(hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1], num_experts)
+        p = PerfCounter(type="COMM_OP", name="deepep_buffer.low_latency_dispatch")
+        p.start()
         recv_x, masked_m, handle, event, hook = buffer.low_latency_dispatch(
             hidden_states,
             topk_idx,
@@ -219,21 +249,69 @@ def fused_experts_impl(
             async_finish=False,
             return_recv_hook=False,
         )
+        # 单卡通信量：本卡在低时延调度中接收的数据字节数（激活+scale）
+        _comm_size_ll = recv_x[0].element_size() * recv_x[0].numel() + recv_x[1].element_size() * recv_x[1].numel()
+        p.record_shape(
+            size=_comm_size_ll,
+            hidden_size=K,
+            num_experts=num_experts,
+            topk_num=topk_idx.shape[1],
+            recv_x_shape_0=recv_x[0].shape,
+            recv_x_shape_1=recv_x[1].shape,
+            masked_m_shape=masked_m.shape,
+        )
+        p.stop()
         # deepgemm
         gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
         # low latency combine
+        p = PerfCounter(type="COMM_OP", name="deepep_buffer.low_latency_combine")
+        p.record_shape(size=gemm_out_b.element_size() * gemm_out_b.numel(), hidden_size=K, num_experts=num_experts, topk_num=topk_idx.shape[1], gemm_out_b_shape=gemm_out_b.shape)
+        p.start()
         combined_x, event_overlap, hook = buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
         )
+        p.stop()
     return combined_x
 
 
+@PerfCounter(type="GEMM_OP")
 def _deepgemm_grouped_fp8_nt_contiguous(
     input_tuple: Tuple[torch.Tensor, torch.Tensor],
     w_tuple: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
     m_indices: torch.Tensor,
 ):
+    # record GEMM shapes and FLOPs for contiguous layout
+    if _deepgemm_grouped_fp8_nt_contiguous.is_perf_counter_active():
+        try:
+            E = int(w_tuple[0].shape[0])
+            # input activations are [all_tokens, K_in] or [all_tokens, N/2]
+            K_in = int(input_tuple[0].shape[-1])
+            w = w_tuple[0]
+            # determine output N_out from weight shape relative to K_in
+            if int(w.shape[2]) == K_in:
+                N_out = int(w.shape[1])
+            elif int(w.shape[1]) == K_in:
+                N_out = int(w.shape[2])
+            else:
+                N_out = int(out.shape[-1])
+            # m_indices maps tokens -> expert id; count per expert
+            m_counts = torch.bincount(m_indices, minlength=E)
+            total_m = int(m_counts.sum().item())
+            total_flops = int(2 * total_m * K_in * N_out)
+            _deepgemm_grouped_fp8_nt_contiguous.record_shape(
+                experts=E,
+                k=K_in,
+                n=N_out,
+                total_m=total_m,
+                # m_per_expert=m_counts.tolist(),
+                flops=total_flops,
+                input_dtype=str(input_tuple[0].dtype),
+                weight_dtype=str(w_tuple[0].dtype),
+                out_dtype=str(out.dtype),
+            )
+        except Exception:
+            pass
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous"):
             return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(input_tuple, w_tuple, out, m_indices)
@@ -242,6 +320,7 @@ def _deepgemm_grouped_fp8_nt_contiguous(
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
 
 
+@PerfCounter(type="GEMM_OP")
 def _deepgemm_grouped_fp8_nt_masked(
     input_tuple: Tuple[torch.Tensor, torch.Tensor],
     w_tuple: Tuple[torch.Tensor, torch.Tensor],
@@ -249,6 +328,35 @@ def _deepgemm_grouped_fp8_nt_masked(
     masked_m: torch.Tensor,
     expected_m: int,
 ):
+    # record GEMM shapes and FLOPs for masked layout
+    if _deepgemm_grouped_fp8_nt_masked.is_perf_counter_active():
+        try:
+            E = int(w_tuple[0].shape[0])
+            # masked_m holds active rows per expert
+            total_m = int(masked_m.sum().item())
+            K_in = int(input_tuple[0].shape[-1])
+            w = w_tuple[0]
+            # determine output N_out from weight shape relative to K_in
+            if int(w.shape[2]) == K_in:
+                N_out = int(w.shape[1])
+            elif int(w.shape[1]) == K_in:
+                N_out = int(w.shape[2])
+            else:
+                N_out = int(out.shape[-1])
+            total_flops = int(2 * total_m * K_in * N_out)
+            _deepgemm_grouped_fp8_nt_masked.record_shape(
+                experts=E,
+                k=K_in,
+                n=N_out,
+                total_m=total_m,
+                expected_m=int(expected_m),
+                flops=total_flops,
+                input_dtype=str(input_tuple[0].dtype),
+                weight_dtype=str(w_tuple[0].dtype),
+                out_dtype=str(out.dtype),
+            )
+        except Exception:
+            pass
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
             return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)

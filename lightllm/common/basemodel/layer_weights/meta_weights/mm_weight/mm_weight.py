@@ -11,6 +11,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.no_quant import NoQuantization
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.profiler import PerfCounter
 from .mm_slicer import SliceMixinTpl
 
 logger = init_logger(__name__)
@@ -53,9 +54,11 @@ class MMWeightTpl(BaseWeightTpl):
         self._create_weight()
         self.gen_weight_quant_param_names()
 
+    @PerfCounter(type="GEMM_OP")
     def mm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:
+        self.mm.record_shape(m=input_tensor.shape[0], k=input_tensor.shape[1], n=self.mm_param.weight.shape[1])
         return self.quant_method.apply(
             input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
         )
@@ -215,6 +218,7 @@ class BMMWeightTpl(BaseWeightTpl):
     def verify_load(self):
         return self.weight.load_ok
 
+    @PerfCounter(type="GEMM_OP")
     def bmm(
         self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
     ) -> torch.Tensor:

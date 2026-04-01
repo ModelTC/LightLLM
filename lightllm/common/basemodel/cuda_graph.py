@@ -7,6 +7,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.utils.profiler import GlobalPerfContext
 from .infer_struct import InferStateInfo
 
 
@@ -45,7 +46,8 @@ class CudaGraph:
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
     def can_run(self, batch_size, max_len_in_batch):
-        return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
+        do_profile = GlobalPerfContext.cudagraph_helper(sample_rate=0.05)
+        return not do_profile and batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
     def need_capture(self, batch_size):
         find_batch_size = self.find_closest_graph_batch_size(batch_size)

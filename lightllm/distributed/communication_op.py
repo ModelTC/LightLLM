@@ -39,6 +39,7 @@ from lightllm.utils.dist_utils import (
     create_dp_special_inter_group,
 )
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.profiler import GlobalPerfContext, PerfCounter
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL
 from contextlib import nullcontext, contextmanager
@@ -183,6 +184,7 @@ class DistributeGroupManager:
             self.ep_buffer.clean_low_latency_buffer(self.ll_num_tokens, self.ll_hidden, self.ll_num_experts)
 
 
+@PerfCounter(type="COMM_OP")
 def all_reduce(
     input_: torch.Tensor,
     group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
@@ -191,12 +193,14 @@ def all_reduce(
 ) -> None:
     if _is_single_group(group=group):
         return
+    all_reduce.record_shape(size=input_.element_size() * input_.nelement())
     if isinstance(group, CustomProcessGroup):
         return group.all_reduce(input_)
     else:
         return dist.all_reduce(input_, op, group, async_op)
 
 
+@PerfCounter(type="COMM_OP")
 def all_gather_into_tensor(
     output_: torch.Tensor,
     input_: torch.Tensor,
@@ -206,12 +210,14 @@ def all_gather_into_tensor(
     if _is_single_group(group=group):
         output_.copy_(input_)
         return
+    all_gather_into_tensor.record_shape(size=input_.element_size() * input_.nelement())
     if isinstance(group, CustomProcessGroup):
         return group.all_gather_into_tensor(output_, input_)
     else:
         return dist.all_gather_into_tensor(output_, input_, group, async_op)
 
 
+@PerfCounter(type="COMM_OP")
 def all_gather(
     output_: List[torch.Tensor],
     input_: torch.Tensor,
@@ -223,12 +229,14 @@ def all_gather(
             output_[0].copy_(input_)
         return
     # todo 目前还没有定制算子的支持。
+    all_gather.record_shape(size=input_.element_size() * input_.nelement())
     if isinstance(group, CustomProcessGroup):
         return dist.all_gather(output_, input_, group.device_group, async_op)
     else:
         return dist.all_gather(output_, input_, group, async_op)
 
 
+@PerfCounter(type="COMM_OP")
 def reduce_scatter_tensor(
     output: torch.Tensor,
     input: torch.Tensor,
@@ -240,6 +248,7 @@ def reduce_scatter_tensor(
         output.copy_(input)
         return
     # 目前还没有定制算子实现。
+    reduce_scatter_tensor.record_shape(size=input.element_size() * input.nelement())
     if isinstance(group, CustomProcessGroup):
         return dist.reduce_scatter_tensor(output, input, op=op, group=group.device_group, async_op=async_op)
     else:

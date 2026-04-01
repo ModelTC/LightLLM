@@ -19,6 +19,7 @@
 
 import os
 import torch
+from lightllm.utils.profiler import PerfCounter
 from lightllm.utils.sgl_utils import sgl_ops
 from lightllm.utils.light_utils import light_ops
 from typing import Callable, List, Optional, Tuple
@@ -28,6 +29,7 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
 
 
+@PerfCounter(type="OTHER_OP")
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -128,6 +130,7 @@ def biased_grouped_topk(
 
 
 # This is used by the Deepseek-V2 model
+@PerfCounter(type="OTHER_OP")
 def cuda_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -165,6 +168,7 @@ def cuda_grouped_topk(
     return topk_weights, topk_indices
 
 
+@PerfCounter(type="BLOCK")
 def select_experts(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -218,6 +222,8 @@ def select_experts(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
         )
     else:
+        p = PerfCounter(type="OTHER_OP", name="custom_routing_function")
+        p.start()
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
         )

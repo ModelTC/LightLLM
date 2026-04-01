@@ -5,6 +5,8 @@ import triton
 import triton.language as tl
 from typing import Dict
 
+from lightllm.utils.profiler import PerfCounter
+
 
 @triton.jit
 def _fwd_kernel_ep_scatter_1(
@@ -87,6 +89,7 @@ def _fwd_kernel_ep_scatter_2(
                 tl.store(output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s)
 
 
+@PerfCounter(type="COMM_OP")
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
@@ -104,6 +107,7 @@ def ep_scatter(
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]  # 获取num_recv_tokens_per_expert的元素个数
     hidden_size = recv_x.shape[1]
+    ep_scatter.record_shape(size=recv_x.element_size() * recv_x.numel(), hidden_size=hidden_size, num_experts=num_experts, recv_x_shape=recv_x.shape, output_tensor_shape=output_tensor.shape)
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
 
@@ -194,6 +198,7 @@ def _fwd_kernel_ep_gather(
         )
 
 
+@PerfCounter(type="COMM_OP")
 @torch.no_grad()
 def ep_gather(
     input_tensor: torch.Tensor,
@@ -206,6 +211,7 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
+    ep_gather.record_shape(size=input_tensor.element_size() * input_tensor.numel(), hidden_size=hidden_size, num_tokens=num_tokens, input_tensor_shape=input_tensor.shape, output_tensor_shape=output_tensor.shape)
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](

@@ -4,6 +4,8 @@ import triton
 import triton.language as tl
 from triton.language.standard import _log2, sum, zeros_like
 
+from lightllm.utils.profiler import PerfCounter
+
 
 @triton.jit
 def _compare_and_swap(x, x_1, ids, flip, i: tl.core.constexpr, n_dims: tl.core.constexpr):
@@ -202,6 +204,7 @@ def grouped_topk_kernel(
     return
 
 
+@PerfCounter(type="OTHER_OP")
 def triton_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,

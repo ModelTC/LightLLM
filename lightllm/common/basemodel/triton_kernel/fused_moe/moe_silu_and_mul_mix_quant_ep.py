@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.utils.profiler import PerfCounter
+
 
 @triton.jit
 def _silu_and_mul_post_quant_kernel(
@@ -65,6 +67,7 @@ def _silu_and_mul_post_quant_kernel(
         )
 
 
+@PerfCounter(type="ACT_OP")
 def silu_and_mul_masked_post_quant_fwd(
     input: torch.Tensor, output: torch.Tensor, output_scale: torch.Tensor, quant_group_size: int, masked_m: torch.Tensor
 ):
