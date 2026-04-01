@@ -145,12 +145,19 @@ class VisualModelRpcServer(rpyc.Service):
             images = obtain(images)
             for i in range(len(images)):
                 images[i].event = ref_event_list[i]
+                images[i].start_time = time.time()
                 self.infer_queue.put(images[i])
 
         except BaseException as e:
             logger.exception(str(e))
             raise e
         return
+
+    def _log_latency(self, image: ImageItem, stage: str):
+        latency = time.time() - image.start_time
+        if latency > 0.02:
+            logger.info(f"{stage} latency {latency:.4f} seconds for image with md5 {image.md5}")
+        image.start_time = time.time()
 
     def _init_taskes(self):
         self.args = get_env_start_args()
@@ -270,6 +277,7 @@ class VisualModelRpcServer(rpyc.Service):
     def _store_to_afs(self, all_img_embeds, valid_ids, images):
         all_img_embeds = all_img_embeds.detach().cpu()
         for image, valid_id in zip(images, valid_ids):
+            self._log_latency(image, stage="inference")
             start, end = valid_id
             gen_embed = all_img_embeds[start:end]
             image.gen_embed = gen_embed
@@ -300,28 +308,23 @@ class VisualModelRpcServer(rpyc.Service):
         if self.tp_rank_id == 0:
             for image in images:
                 self.afs_handler.insert(image.md5, image.gen_embed)
-                start = time.time()
+                self._log_latency(image, stage="store_to_afs")
                 image.event.set()
-                if time.time() - start > 0.05:
-                    logger.info(
-                        f"set event for images {[image.md5 for image in images]}"
-                        f" with latency {time.time() - start} seconds"
-                    )
+                self._log_latency(image, stage="set_event")
 
     def _commit_to_cpu_cache(self, images):
         if self.tp_rank_id == 0:
             for image in images:
                 # 等待拷贝到cpu cache 完成。
                 image.cuda_event.synchronize()
+                self._log_latency(image, stage="inference")
 
             uuids = [image.uuid for image in images]
             self.cache_client.root.set_items_embed(uuids)
 
             for image in images:
-                start = time.time()
+                self._log_latency(image, stage="set_items_embed")
+
+            for image in images:
                 image.event.set()
-                if time.time() - start > 0.05:
-                    logger.info(
-                        f"set event for images {[image.md5 for image in images]}"
-                        f" with latency {time.time() - start} seconds"
-                    )
+                self._log_latency(image, stage="set_event")
