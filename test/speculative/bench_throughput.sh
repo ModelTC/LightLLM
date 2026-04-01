@@ -5,6 +5,7 @@ NUM_PROMPTS=1000
 TOKENIZER="/mtc/models/qwen3-8b"
 DATASET="/data/nvme0/chenjunyi/project/lightllm/datasets/gsm8k.json"
 HISTORY_TURNS=1
+CONCURRENCY=64
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
             HISTORY_TURNS="$2"
             shift 2
             ;;
+        -c|--concurrency)
+            CONCURRENCY="$2"
+            shift 2
+            ;;
         *)
             echo "未知参数: $1"
             exit 1
@@ -40,4 +45,5 @@ python /data/nvme0/chenjunyi/project/lightllm/test/benchmark/service/benchmark_s
     --num-prompts "$NUM_PROMPTS" \
     --tokenizer "$TOKENIZER" \
     --dataset "$DATASET" \
-    --history-turns "$HISTORY_TURNS"
+    --history-turns "$HISTORY_TURNS" \
+    --concurrency "$CONCURRENCY"

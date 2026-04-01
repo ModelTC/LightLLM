@@ -119,13 +119,6 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
     run_key_func=get_run_key,
     mutates_args=["O"],
 )
-@autotune(
-    kernel_name="_fwd_kernel_mtp_diverse_stage2_single_token:v1",
-    configs_gen_func=get_test_configs,
-    static_key_func=get_static_key,
-    run_key_func=get_run_key,
-    mutates_args=["O"],
-)
 @torch.no_grad()
 def mtp_diverse_stage2_single_token(
     mid_out: torch.Tensor,
@@ -188,14 +181,15 @@ if __name__ == "__main__":
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
     # static params
+    gqa_group_size = 4
     q_head_dim = 128
-    block_seq = 128
-    out_dtype = torch.bfloat16
+    block_seq = 256
+    out_dtype = torch.float32
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
     decode_lengths = [1024, 2048, 8192, 16384]
 
-    q_head_num = 4
+    q_head_num = 32
 
     Autotuner.start_autotune_warmup()
     # autotuing kernel

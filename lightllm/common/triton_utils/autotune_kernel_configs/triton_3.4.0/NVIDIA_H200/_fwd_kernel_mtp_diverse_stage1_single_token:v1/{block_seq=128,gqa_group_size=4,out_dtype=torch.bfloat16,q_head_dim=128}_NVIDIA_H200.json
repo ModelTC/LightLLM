@@ -1,7 +1,122 @@
 {
+  "1000001024": {
+    "BLOCK_N": 128,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "1000002048": {
+    "BLOCK_N": 128,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "1000008192": {
+    "BLOCK_N": 128,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "1000016384": {
+    "BLOCK_N": 128,
+    "num_stages": 4,
+    "num_warps": 4
+  },
+  "128000001024": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "128000002048": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "128000008192": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "128000016384": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "16000001024": {
+    "BLOCK_N": 128,
+    "num_stages": 6,
+    "num_warps": 4
+  },
+  "16000002048": {
+    "BLOCK_N": 128,
+    "num_stages": 6,
+    "num_warps": 4
+  },
+  "16000008192": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "16000016384": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "32000001024": {
+    "BLOCK_N": 128,
+    "num_stages": 6,
+    "num_warps": 4
+  },
+  "32000002048": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "32000008192": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "32000016384": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000001024": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000002048": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000008192": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "64000016384": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
   "8000001024": {
     "BLOCK_N": 128,
     "num_stages": 4,
     "num_warps": 4
+  },
+  "8000002048": {
+    "BLOCK_N": 128,
+    "num_stages": 6,
+    "num_warps": 4
+  },
+  "8000008192": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
+  },
+  "8000016384": {
+    "BLOCK_N": 32,
+    "num_stages": 4,
+    "num_warps": 2
   }
 }

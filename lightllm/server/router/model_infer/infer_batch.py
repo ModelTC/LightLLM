@@ -565,6 +565,10 @@ class InferReq:
         # 用于统计 mtp 的接受率
         self.shm_req.mtp_accepted_token_num += accept_token_num
 
+    def update_mtp_verify_token_num(self, verify_token_num: int):
+        # 用于统计 mtp 验证时发送给主模型的 token 总数
+        self.shm_req.mtp_verify_token_num += verify_token_num
+
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
 

@@ -52,189 +52,141 @@ def get_run_key(q, max_kv_len):
 @triton.jit
 def _fwd_kernel_mtp_diverse_stage1_single_token(
     Q,
-    stride_qb,
-    stride_qh,
-    stride_qd,
+    stride_qb, stride_qh, stride_qd,
     K,
-    stride_kbs,
-    stride_kh,
-    stride_kd,
+    stride_kbs, stride_kh, stride_kd,
     V,
-    stride_vbs,
-    stride_vh,
-    stride_vd,
+    stride_vbs, stride_vh, stride_vd,
     sm_scale,
     Req_to_tokens,
-    stride_req_to_tokens_b,
-    stride_req_to_tokens_s,
+    stride_req_to_tokens_b, stride_req_to_tokens_s,
     B_req_idx,
     b_seq_len,
     b_mark_shared_group,
-    Mid_O,  # [batch, head, seq_block_num, head_dim] - 每个 kv block 的中间结果
-    stride_mid_ob,
-    stride_mid_oh,
-    stride_mid_os,
-    stride_mid_od,
-    Mid_O_LogExpSum,  # [batch, head, seq_block_num]
-    stride_mid_o_eb,
-    stride_mid_o_eh,
-    stride_mid_o_es,
+    Mid_O,
+    stride_mid_ob, stride_mid_oh, stride_mid_os, stride_mid_od,
+    Mid_O_LogExpSum,
+    stride_mid_o_eb, stride_mid_o_eh, stride_mid_o_es,
     gqa_group_size,
     BLOCK_HEAD: tl.constexpr,
+    BLOCK_BATCH: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    """
-    MTP Diverse Stage1 Kernel - Single Token Per Request Mode
-
-    使用 BLOCK_BATCH 同时处理组内所有请求，一次加载 KV 服务多个 Q。
-    只由组内最后一个请求（b_mark_shared_group != 0）触发计算。
-    中间结果按 kv block 存储，供 Stage2 聚合。
-    """
     cur_batch = tl.program_id(0)
-    shared_batch_group_size = tl.load(b_mark_shared_group + cur_batch)
-
-    # 如果不是组内最后一个请求，跳过
-    if shared_batch_group_size == 0:
-        return
-
-    # 计算组的起始位置
-    cur_batch_end = cur_batch + 1
-    cur_batch_start = cur_batch - (shared_batch_group_size - 1)
-
     cur_kv_head = tl.program_id(1)
     seq_start_block = tl.program_id(2)
 
-    # 使用固定的 BLOCK_BATCH = 16，避免 CUDA graph 动态形状问题
-    BLOCK_BATCH: tl.constexpr = 16
+    shared_batch_group_size = tl.load(b_mark_shared_group + cur_batch)
+    if shared_batch_group_size == 0:
+        return
 
-    # Q head range - 使用实际的 gqa_group_size 作为 BLOCK_HEAD 的上限
-    cur_q_head_range = cur_kv_head * gqa_group_size + tl.arange(0, BLOCK_HEAD)
-    q_head_end_index = (cur_kv_head + 1) * gqa_group_size
-    cur_q_head_range = tl.where(cur_q_head_range < q_head_end_index, cur_q_head_range, cur_kv_head * gqa_group_size)
+    cur_batch_start = cur_batch - (shared_batch_group_size - 1)
+
+    # ---- batch lane: 不再回卷索引，使用mask ----
+    offs_b = tl.arange(0, BLOCK_BATCH)
+    valid_b = offs_b < shared_batch_group_size
+    batch_idx = cur_batch_start + offs_b
+
+    # ---- head lane: 不再next_pow2回卷，使用mask ----
+    offs_h = tl.arange(0, BLOCK_HEAD)
+    valid_h = offs_h < gqa_group_size
+    q_head_idx = cur_kv_head * gqa_group_size + offs_h
 
     offs_d = tl.arange(0, BLOCK_HEADDIM)
 
-    # 加载组内所有请求的 b_seq_len 和 b_req_idx
-    offs_batch = cur_batch_start + tl.arange(0, BLOCK_BATCH)
-    offs_batch = tl.where(offs_batch < cur_batch_end, offs_batch, cur_batch_start)
+    # load seq len
+    batch_seq_lens = tl.load(b_seq_len + batch_idx, mask=valid_b, other=0)
+    max_seq_len = tl.max(batch_seq_lens, axis=0)
 
-    batch_seq_lens = tl.load(b_seq_len + offs_batch)  # [BLOCK_BATCH] - 每个请求的 seq_len
-    batch_req_idxs = tl.load(B_req_idx + offs_batch)  # [BLOCK_BATCH] - 每个请求的 req_idx
-
-    # 当前 block 处理的 KV 范围 [kv_start, kv_end)
     kv_start = seq_start_block * BLOCK_SEQ
-    # 使用组内最大的 seq_len 来决定需要处理多少 KV
-    max_seq_len = tl.max(batch_seq_lens)
+    if kv_start >= max_seq_len:
+        return
     kv_end = tl.minimum(max_seq_len, kv_start + BLOCK_SEQ)
 
-    off_q = offs_batch[:, None, None] * stride_qb + cur_q_head_range[None, :, None] * stride_qh + offs_d[None, None, :]
-
-    block_n_size = tl.cdiv(
-        tl.where(kv_end - kv_start <= 0, 0, kv_end - kv_start),
-        BLOCK_N,
+    # load Q (masked)
+    off_q = (
+        batch_idx[:, None, None] * stride_qb
+        + q_head_idx[None, :, None] * stride_qh
+        + offs_d[None, None, :] * stride_qd
     )
+    q_mask = valid_b[:, None, None] & valid_h[None, :, None]
+    q = tl.load(Q + off_q, mask=q_mask, other=0.0)
 
-    if block_n_size == 0:
-        return
+    # P1: 循环外提不变量
+    q_flat = tl.reshape(q, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_HEADDIM))
 
-    offs_n = kv_start + tl.arange(0, BLOCK_N)
-
-    # 加载 Q - 保持 3D 形状用于 broadcasting
-    q = tl.load(Q + off_q)  # [BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM]
-
-    # 初始化 accumulator - 保持 3D 形状
     sum_exp = tl.zeros([BLOCK_BATCH, BLOCK_HEAD], dtype=tl.float32)
-    max_logic = tl.zeros([BLOCK_BATCH, BLOCK_HEAD], dtype=tl.float32) - float("inf")
+    max_logic = tl.full([BLOCK_BATCH, BLOCK_HEAD], float("-inf"), dtype=tl.float32)
     acc = tl.zeros([BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM], dtype=tl.float32)
 
-    # 使用组内最后一个请求的 KV 索引（因为它的 seq_len 最大，所有位置都有效）
-    # 组内最后一个请求的索引是 cur_batch（因为 cur_batch_end = cur_batch + 1）
     cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
+    offs_n_base = kv_start + tl.arange(0, BLOCK_N)
 
-    for start_n in range(0, block_n_size, 1):
-        offs_n_new = start_n * BLOCK_N + offs_n
+    # P1: 固定循环次数
+    NUM_SUBBLOCK: tl.constexpr = BLOCK_SEQ // BLOCK_N
+    for i in range(NUM_SUBBLOCK):
+        offs_n_new = offs_n_base + i * BLOCK_N
         n_mask = offs_n_new < kv_end
 
-        # 加载 KV 索引（使用组内最后一个请求的索引，因为它有最大的 seq_len）
         k_loc = tl.load(
-            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new,
+            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new * stride_req_to_tokens_s,
             mask=n_mask,
             other=0,
         ).to(tl.int64)
 
-        # 加载 K: [BLOCK_N, BLOCK_HEADDIM]
-        off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :]
-        k = tl.load(K + off_k, mask=n_mask[:, None], other=0.0)
+        off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :] * stride_kd
+        off_v = k_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
 
-        # 加载 V: [BLOCK_N, BLOCK_HEADDIM]
-        off_v = k_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :]
+        k = tl.load(K + off_k, mask=n_mask[:, None], other=0.0)
         v = tl.load(V + off_v, mask=n_mask[:, None], other=0.0)
 
-        # QK^T: [BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM] @ [BLOCK_N, BLOCK_HEADDIM]^T
-        # 使用 tl.dot 需要 reshape
-        q_flat = tl.reshape(q, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_HEADDIM))
-        k_flat = tl.reshape(k, (BLOCK_N, BLOCK_HEADDIM))
-        att_value_flat = tl.dot(q_flat, tl.trans(k_flat))  # [BLOCK_BATCH * BLOCK_HEAD, BLOCK_N]
-        att_value = tl.reshape(att_value_flat, (BLOCK_BATCH, BLOCK_HEAD, BLOCK_N))
-        att_value *= sm_scale
+        att_flat = tl.dot(q_flat, tl.trans(k))
+        att = tl.reshape(att_flat, (BLOCK_BATCH, BLOCK_HEAD, BLOCK_N))
+        att *= sm_scale
 
-        # 每个请求有自己的可见性检查
-        # batch_seq_lens: [BLOCK_BATCH], offs_n_new: [BLOCK_N]
-        # visible_mask: [BLOCK_BATCH, BLOCK_N] - 每个请求对每个 KV 位置的可见性
-        kv_positions = offs_n_new[None, :]  # [1, BLOCK_N]
-        batch_seq_lens_expanded = batch_seq_lens[:, None]  # [BLOCK_BATCH, 1]
-        visible_mask = kv_positions < batch_seq_lens_expanded  # [BLOCK_BATCH, BLOCK_N]
+        visible_mask = offs_n_new[None, :] < batch_seq_lens[:, None]         # [B,N]
+        combined_bn = valid_b[:, None] & n_mask[None, :] & visible_mask      # [B,N]
+        combined = combined_bn[:, None, :] & valid_h[None, :, None]          # [B,H,N]
+        att = tl.where(combined, att, float("-inf"))
 
-        # combined_mask: 同时考虑 KV 边界和 seq_len 可见性
-        combined_mask = n_mask[None, :] & visible_mask
-        combined_mask_expanded = combined_mask[:, None, :]  # [BLOCK_BATCH, 1, BLOCK_N]
+        cur_max = tl.max(att, axis=2)
+        new_max = tl.maximum(cur_max, max_logic)
 
-        att_value = tl.where(combined_mask_expanded, att_value, float("-inf"))
+        exp_logic = tl.exp(att - new_max[:, :, None])
+        logic_scale = tl.exp(max_logic - new_max)
 
-        # Flash attention update - 3D 版本
-        cur_max_logic = tl.max(att_value, axis=2)  # [BLOCK_BATCH, BLOCK_HEAD]
-        new_max_logic = tl.maximum(cur_max_logic, max_logic)
-
-        exp_logic = tl.exp(att_value - new_max_logic[:, :, None])  # [BLOCK_BATCH, BLOCK_HEAD, BLOCK_N]
-        logic_scale = tl.exp(max_logic - new_max_logic)  # [BLOCK_BATCH, BLOCK_HEAD]
-        acc *= logic_scale[:, :, None]  # [BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM]
-
-        # tl.dot 需要 2D @ 2D
-        exp_logic_flat = tl.reshape(exp_logic, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_N))
+        acc *= logic_scale[:, :, None]
+        exp_flat = tl.reshape(exp_logic, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_N))
         acc_flat = tl.reshape(acc, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_HEADDIM))
-        acc_flat += tl.dot(exp_logic_flat.to(q.dtype), v)
+        acc_flat += tl.dot(exp_flat.to(q.dtype), v)
         acc = tl.reshape(acc_flat, (BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM))
 
-        sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=2)  # [BLOCK_BATCH, BLOCK_HEAD]
-        max_logic = new_max_logic
+        sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=2)
+        max_logic = new_max
 
-    # 存储中间结果：每个 kv block 存储一次，包含组内所有请求的结果
+    # safe normalize
+    safe_sum = tl.where(sum_exp > 0, sum_exp, 1.0)
+    mid_o_val = acc / safe_sum[:, :, None]
+    mid_lse_val = tl.where(sum_exp > 0, max_logic + tl.log(sum_exp), float("-inf"))
+
     off_mid_o = (
-        offs_batch[:, None, None] * stride_mid_ob
-        + cur_q_head_range[None, :, None] * stride_mid_oh
+        batch_idx[:, None, None] * stride_mid_ob
+        + q_head_idx[None, :, None] * stride_mid_oh
         + seq_start_block * stride_mid_os
-        + offs_d[None, None, :]
+        + offs_d[None, None, :] * stride_mid_od
     )
-    off_mid_o_logexpsum = (
-        offs_batch[:, None] * stride_mid_o_eb + cur_q_head_range[None, :] * stride_mid_o_eh + seq_start_block
-    )
-
-    # 归一化并存储
-    mid_o_val = acc / sum_exp[:, :, None]
-    mid_logic_val = max_logic + tl.log(sum_exp)
-
-    tl.store(
-        Mid_O + off_mid_o,
-        mid_o_val,
-    )
-    tl.store(
-        Mid_O_LogExpSum + off_mid_o_logexpsum,
-        mid_logic_val,
+    off_mid_lse = (
+        batch_idx[:, None] * stride_mid_o_eb
+        + q_head_idx[None, :] * stride_mid_o_eh
+        + seq_start_block * stride_mid_o_es
     )
 
-    return
+    store_o_mask = valid_b[:, None, None] & valid_h[None, :, None]
+    store_lse_mask = valid_b[:, None] & valid_h[None, :]
+    tl.store(Mid_O + off_mid_o, mid_o_val, mask=store_o_mask)
+    tl.store(Mid_O_LogExpSum + off_mid_lse, mid_lse_val, mask=store_lse_mask)
 
 
 @autotune(
@@ -271,26 +223,27 @@ def mtp_diverse_stage1_single_token(
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
+    BLOCK_BATCH = 4
 
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
-    BLOCK_SEQ = block_seq
+    assert q.is_cuda and k.is_cuda and v.is_cuda
+    assert Req_to_tokens.is_cuda and B_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
+    assert mid_out.is_cuda and mid_out_logsumexp.is_cuda
+    BLOCK_SEQ = int(block_seq)
     assert BLOCK_SEQ % BLOCK_N == 0
-    Lq, Lk = q.shape[2], k.shape[2]
+    Lq, Lk = int(q.shape[2]), int(k.shape[2])
     assert Lq == Lk
     assert Lk in {16, 32, 64, 128}
-    sm_scale = 1.0 / (Lk**0.5)
-    batch, kv_head_num = B_req_idx.shape[0], k.shape[1]
+    batch = int(B_req_idx.shape[0])
+    kv_head_num = int(k.shape[1])
+    q_head_num = int(q.shape[1])
+    assert q_head_num % kv_head_num == 0
+    gqa_group_size = q_head_num // kv_head_num
+    BLOCK_HEAD = gqa_group_size  # P1: 不再 next_power_of_2 回卷
+    
+    sm_scale = 1.0 / (Lk ** 0.5)
+    # 固定 grid（graph friendly）
     grid = (batch, kv_head_num, triton.cdiv(max_kv_len, BLOCK_SEQ))
-    gqa_group_size = q.shape[1] // k.shape[1]
-    assert triton.next_power_of_2(Lk) == Lk
-
-    # BLOCK_HEAD 设置为 gqa_group_size 向上取整到 2 的幂
-    BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
-    # 使用固定的 BLOCK_BATCH = 16，避免 CUDA graph 捕获时的动态形状问题
-    BLOCK_BATCH = 16
-
-    assert k.stride() == v.stride()
-
     _fwd_kernel_mtp_diverse_stage1_single_token[grid](
         Q=q,
         stride_qb=q.stride(0),
@@ -322,7 +275,8 @@ def mtp_diverse_stage1_single_token(
         stride_mid_o_es=mid_out_logsumexp.stride(2),
         gqa_group_size=gqa_group_size,
         BLOCK_HEAD=BLOCK_HEAD,
-        BLOCK_SEQ=block_seq,
+        BLOCK_BATCH=BLOCK_BATCH,
+        BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_HEADDIM=Lk,
         BLOCK_N=BLOCK_N,
         num_warps=num_warps,
@@ -340,13 +294,14 @@ if __name__ == "__main__":
     # static params
     gqa_group_size = 4
     q_head_dim = 128
-    block_seq = 128
+    block_seq = 256
     out_dtype = torch.bfloat16
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
-    decode_lengths = [1024, 2048, 8192, 16384]
+    decode_lengths = [32, 64, 128, 256, 512, 1024, 2048, 8192, 16384]
 
-    q_head_num = gqa_group_size
+    q_head_num = 32
+    k_head_num = q_head_num // gqa_group_size
 
     Autotuner.start_autotune_warmup()
     # autotuing kernel
@@ -354,8 +309,8 @@ if __name__ == "__main__":
         for length in decode_lengths:
             # Setup test tensors
             q = torch.randn(batch_size, q_head_num, q_head_dim, dtype=out_dtype, device="cuda")
-            k = torch.randn(batch_size * length, 1, q_head_dim, dtype=out_dtype, device="cuda")
-            v = torch.randn(batch_size * length, 1, q_head_dim, dtype=out_dtype, device="cuda")
+            k = torch.randn(batch_size * length, k_head_num, q_head_dim, dtype=out_dtype, device="cuda")
+            v = torch.randn(batch_size * length, k_head_num, q_head_dim, dtype=out_dtype, device="cuda")
             Req_to_tokens = torch.arange(0, batch_size * length, dtype=torch.int32, device="cuda").view(
                 batch_size, length
             )

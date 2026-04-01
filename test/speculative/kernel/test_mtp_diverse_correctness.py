@@ -130,8 +130,8 @@ def test_mtp_diverse_correctness():
     print("=" * 80)
 
     kv_len = 5  # Small for easy verification
-    group_size = 4  # 4 requests per group: [q1, q2, q3, q4] with seq_len [1, 2, 3, 4]
-    batch_groups = 2  # Single group for simplicity
+    group_size = 2  # 2 requests per group: [q1, q2] with seq_len [1, 2]
+    batch_groups = 4  # 4 groups for simplicity
 
     q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group = setup_mtp_test_data(
         kv_len, group_size, batch_groups, test_dtype=torch.float32, device="cuda", seed=42
@@ -162,8 +162,6 @@ def test_mtp_diverse_correctness():
         B_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mark_shared_group=b_mark_shared_group,
-        max_batch_group_size=group_size,
-        max_kv_len=max_kv_len,
         block_seq=block_seq,
     )
 

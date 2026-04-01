@@ -804,6 +804,9 @@ class ModeBackend:
         if self.is_master_in_dp:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
+                # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
+                current_mtp_size = max(0, req.shm_req._mtp_size)
+                req.update_mtp_verify_token_num(verify_token_num=1 + current_mtp_size)
         return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
