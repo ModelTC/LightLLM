@@ -3,20 +3,21 @@
 Qwen3.5 模型部署指南
 =====================
 
-LightLLM 支持 Qwen3.5 模型系列的部署，包括稠密型（``qwen3_5``）和混合专家型（``qwen3_5_moe``）两种变体。本文档提供纯文本和多模态（视觉）模式的详细部署配置、思考/推理模式支持以及推荐的启动参数。
+LightLLM 支持 Qwen3.5 模型系列的部署。本指南以 `Qwen3.5-397B-A17B <https://huggingface.co/Qwen/Qwen3.5-397B-A17B>`_ 为例，介绍部署配置、思考/推理模式、多模态输入及推荐启动参数。
 
 模型概述
 --------
 
-Qwen3.5 是新一代大语言模型，采用混合注意力架构，并可选支持多模态能力。
+Qwen3.5-397B-A17B 是一个多模态混合专家模型，总参数量 397B，每个 token 激活 17B 参数。原生支持文本、图像和视频理解。
 
 **主要特性：**
 
-- **混合注意力架构**：交替使用全注意力和门控 Delta 网络（线性注意力），通过 ``full_attention_interval`` 控制
-- **多模态支持**：通过视觉编码器实现图像和视频理解（继承自 Qwen3VL）
-- **稠密和 MoE 变体**：``qwen3_5`` 为稠密 MLP，``qwen3_5_moe`` 为混合专家模型
-- **多头旋转位置编码（MRoPE）**：针对多模态空间/时间定位优化的交错旋转位置编码
-- **思考/推理模式**：支持 ``qwen3`` 推理解析器，使用 ``<think>...</think>`` 标签进行思维链生成
+- **混合注意力架构**：60 层排列为 15 个重复组 ``[3 × (Gated DeltaNet → MoE) → 1 × (Gated Attention → MoE)]``，交替使用线性注意力与全注意力（通过 ``full_attention_interval`` 控制）
+- **稀疏 MoE**：共 512 个专家，每个 token 激活 10 个路由专家 + 1 个共享专家
+- **原生多模态**：内置视觉编码器，支持图像和视频理解，无需单独的 "-VL" 变体
+- **长上下文**：原生支持 262K 上下文，通过 YaRN 缩放可扩展至 1M+ tokens
+- **多头旋转位置编码（MRoPE）**：交错旋转位置编码，``mrope_section=[11, 11, 10]``，用于空间/时间定位
+- **思考/推理模式**：支持 ``qwen3`` 推理解析器，使用 ``<think>...</think>`` 标签（默认启用）
 
 **已注册的模型类型：**
 
@@ -41,113 +42,65 @@ Qwen3.5 是新一代大语言模型，采用混合注意力架构，并可选支
 推荐启动脚本
 --------------
 
-纯文本稠密模型
-~~~~~~~~~~~~~~~
-
-在单 GPU 上部署稠密纯文本变体：
-
-.. code-block:: bash
-
-    LOADWORKER=18 \
-    python -m lightllm.server.api_server \
-        --model_dir /path/to/Qwen3.5/ \
-        --tp 1 \
-        --max_req_total_len 32768 \
-        --chunked_prefill_size 8192 \
-        --graph_max_batch_size 256 \
-        --reasoning_parser qwen3 \
-        --disable_vision \
-        --host 0.0.0.0 \
-        --port 8000
-
-**参数说明：**
-
-- ``LOADWORKER=18``: 模型加载线程数，加快权重加载速度
-- ``--tp 1``: 张量并行度（小模型使用单 GPU；大模型需增加）
-- ``--max_req_total_len 32768``: 最大请求总长度（输入 + 输出 token 数）
-- ``--chunked_prefill_size 8192``: 预填充处理的分块大小，降低峰值显存占用
-- ``--graph_max_batch_size 256``: CUDA graph 最大批处理大小
-- ``--reasoning_parser qwen3``: 启用 Qwen3 推理解析器，支持思考模式
-- ``--disable_vision``: 禁用视觉编码器，用于纯文本部署，节省显存
-
-多模态稠密模型（带视觉能力）
+Qwen3.5-397B-A17B（8×H200）
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-部署支持图像/视频理解的多模态变体：
-
-.. code-block:: bash
-
-    LOADWORKER=18 \
-    python -m lightllm.server.api_server \
-        --model_dir /path/to/Qwen3.5-VL/ \
-        --tp 2 \
-        --max_req_total_len 32768 \
-        --chunked_prefill_size 8192 \
-        --graph_max_batch_size 256 \
-        --reasoning_parser qwen3 \
-        --host 0.0.0.0 \
-        --port 8000
-
-**额外参数：**
-
-- ``--tp 2``: 多模态模型通常较大，建议使用多 GPU 张量并行
-
-.. note::
-
-    Qwen3.5 模型默认启用多模态支持，无需额外添加标志即可使用视觉能力。
-
-MoE 模型
-~~~~~~~~~
-
-使用多 GPU 部署 MoE 变体：
-
-.. code-block:: bash
-
-    LOADWORKER=18 \
-    python -m lightllm.server.api_server \
-        --model_dir /path/to/Qwen3.5-MoE/ \
-        --tp 4 \
-        --max_req_total_len 32768 \
-        --chunked_prefill_size 8192 \
-        --graph_max_batch_size 128 \
-        --reasoning_parser qwen3 \
-        --host 0.0.0.0 \
-        --port 8000
-
-.. note::
-
-    MoE 模型总参数量更大，但每个 token 仅激活部分专家。建议使用较高的张量并行度（``--tp 4`` 或 ``--tp 8``）以将专家权重分布到多个 GPU。如遇到显存不足，可减小 ``--graph_max_batch_size``。
-
-高性能启动（H200）
-~~~~~~~~~~~~~~~~~~~
-
-在 H200 GPU 上使用 FlashAttention3 获得最佳性能：
+在 8 张 GPU 上部署完整的多模态 MoE 模型：
 
 .. code-block:: bash
 
     LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 LOADWORKER=18 \
     python -m lightllm.server.api_server \
-        --model_dir /path/to/Qwen3.5/ \
-        --tp 1 \
-        --max_req_total_len 32768 \
+        --model_dir /path/to/Qwen3.5-397B-A17B/ \
+        --tp 8 \
+        --max_req_total_len 262144 \
         --chunked_prefill_size 8192 \
         --llm_prefill_att_backend fa3 \
         --llm_decode_att_backend flashinfer \
-        --graph_max_batch_size 256 \
+        --graph_max_batch_size 128 \
         --reasoning_parser qwen3 \
         --host 0.0.0.0 \
         --port 8000
 
-**性能调优参数：**
+**参数说明：**
 
 - ``LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1``: 启用 Triton 自动调优以获得最佳内核性能
+- ``LOADWORKER=18``: 模型加载线程数，加快权重加载速度
+- ``--tp 8``: 8 卡张量并行（397B 参数模型必需）
+- ``--max_req_total_len 262144``: 最大请求总长度，与模型原生 262K 上下文匹配
+- ``--chunked_prefill_size 8192``: 预填充处理的分块大小，降低峰值显存占用
 - ``--llm_prefill_att_backend fa3``: 预填充阶段使用 FlashAttention3（推荐 H200）
 - ``--llm_decode_att_backend flashinfer``: 解码阶段使用 FlashInfer
+- ``--graph_max_batch_size 128``: CUDA graph 最大批处理大小（显存不足时可减小）
+- ``--reasoning_parser qwen3``: 启用 Qwen3 推理解析器，支持思考模式
+
+纯文本模式（节省显存）
+~~~~~~~~~~~~~~~~~~~~~~~
+
+跳过视觉编码器加载以减少显存占用：
+
+.. code-block:: bash
+
+    LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 LOADWORKER=18 \
+    python -m lightllm.server.api_server \
+        --model_dir /path/to/Qwen3.5-397B-A17B/ \
+        --tp 8 \
+        --max_req_total_len 262144 \
+        --chunked_prefill_size 8192 \
+        --llm_prefill_att_backend fa3 \
+        --llm_decode_att_backend flashinfer \
+        --graph_max_batch_size 128 \
+        --reasoning_parser qwen3 \
+        --disable_vision \
+        --host 0.0.0.0 \
+        --port 8000
+
+唯一区别是 ``--disable_vision``，阻止加载视觉编码器。此模式下模型仅接受文本输入。
 
 思考/推理模式
 -------------
 
-Qwen3.5 支持思考模式，模型在生成最终答案之前，会在 ``<think>...</think>`` 标签内生成思维链推理过程。
+Qwen3.5 默认启用思考模式。模型在生成最终答案之前，会在 ``<think>...</think>`` 标签内生成思维链推理过程。
 
 **启用推理模式：**
 
@@ -158,7 +111,7 @@ Qwen3.5 支持思考模式，模型在生成最终答案之前，会在 ``<think
     curl http://localhost:8000/v1/chat/completions \
          -H "Content-Type: application/json" \
          -d '{
-               "model": "Qwen3.5",
+               "model": "Qwen3.5-397B-A17B",
                "messages": [{"role": "user", "content": "请逐步求解：23 * 47 等于多少？"}],
                "max_tokens": 500,
                "separate_reasoning": true
@@ -175,24 +128,38 @@ Qwen3.5 支持思考模式，模型在生成最终答案之前，会在 ``<think
     curl http://localhost:8000/v1/chat/completions \
          -H "Content-Type: application/json" \
          -d '{
-               "model": "Qwen3.5",
+               "model": "Qwen3.5-397B-A17B",
                "messages": [{"role": "user", "content": "你好"}],
                "max_tokens": 100,
                "enable_thinking": false
               }'
 
+**推荐采样参数：**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - 参数
+     - 思考模式
+     - 非思考模式
+   * - temperature
+     - 0.6
+     - 0.7
+   * - top_p
+     - 0.95
+     - 0.8
+   * - top_k
+     - 20
+     - 20
+   * - presence_penalty
+     - 0.0
+     - 1.5
+
 FP8 KV 缓存量化
 -----------------
 
-Qwen3.5 支持 FP8 KV 缓存量化以减少显存占用。创建校准配置：
-
-.. code-block:: json
-
-    {
-        "kv_quant_type": "fp8_e4m3"
-    }
-
-然后在启动命令中添加以下参数：
+Qwen3.5 支持 FP8 KV 缓存量化以减少显存占用。在启动命令中添加以下参数：
 
 .. code-block:: bash
 
@@ -226,9 +193,12 @@ OpenAI 兼容聊天接口
     curl http://localhost:8000/v1/chat/completions \
          -H "Content-Type: application/json" \
          -d '{
-               "model": "Qwen3.5",
+               "model": "Qwen3.5-397B-A17B",
                "messages": [{"role": "user", "content": "你好"}],
-               "max_tokens": 100
+               "max_tokens": 100,
+               "temperature": 0.7,
+               "top_p": 0.8,
+               "enable_thinking": false
               }'
 
 多模态测试（图像输入）
@@ -239,7 +209,7 @@ OpenAI 兼容聊天接口
     curl http://localhost:8000/v1/chat/completions \
          -H "Content-Type: application/json" \
          -d '{
-               "model": "Qwen3.5",
+               "model": "Qwen3.5-397B-A17B",
                "messages": [
                  {
                    "role": "user",
@@ -255,33 +225,10 @@ OpenAI 兼容聊天接口
 硬件要求
 --------
 
-**推荐配置：**
+**Qwen3.5-397B-A17B：**
 
-.. list-table::
-   :header-rows: 1
-   :widths: 30 20 25 25
-
-   * - 变体
-     - TP
-     - GPU 显存
-     - 推荐 GPU
-   * - 稠密型（小）
-     - 1
-     - 80GB+
-     - 1× H100/H200
-   * - 稠密型（大）
-     - 2-4
-     - 每卡 80GB+
-     - 2-4× H100/H200
-   * - MoE
-     - 4-8
-     - 每卡 80GB+
-     - 4-8× H100/H200
-   * - 多模态
-     - 2+
-     - 每卡 80GB+
-     - 2+× H100/H200
-
-.. note::
-
-    实际 GPU 显存需求取决于模型大小、序列长度和批处理大小。可通过 ``--graph_max_batch_size`` 和 ``--max_req_total_len`` 控制显存占用。MoE 模型总参数量更大，但每个 token 仅激活部分参数，因此显存需求主要取决于专家总数。
+- 总参数量 397B，每个 token 激活 17B（512 个专家，10 路由 + 1 共享）
+- **最低要求**：8× NVIDIA H100/H200 GPU（每卡 80GB HBM），需 NVLink 互联
+- 必须使用 ``--tp 8`` 以将模型权重分布到各 GPU
+- 如遇到显存不足，可减小 ``--max_req_total_len`` 或 ``--graph_max_batch_size``
+- 使用 ``--data_type fp8_e4m3`` 进行 FP8 KV 量化可进一步降低显存压力
