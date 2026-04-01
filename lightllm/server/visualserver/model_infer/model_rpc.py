@@ -248,6 +248,9 @@ class VisualModelRpcServer(rpyc.Service):
                     dist.broadcast_object_list(ans, src=0, group=self.gloo_group)
                     images = self._get_image_items_from_infer_queue(max_num=ans[0], force_same=True)
 
+                for image in images:
+                    self._log_latency(image, stage="queue_cost_time")
+
                 # 执行任务: 调用父类的forward方法处理图像
                 all_img_embeds, uuids, valid_ids = self._forward(images)
                 all_img_embeds = all_img_embeds.to(torch.device("cuda"))
