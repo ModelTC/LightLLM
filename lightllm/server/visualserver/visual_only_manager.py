@@ -131,9 +131,10 @@ class VisualOnlyManager(rpyc.Service):
     def clean_up(self):
         return
 
-    def exposed_remote_infer_images(self, images: List[ImageItem], ref_event: threading.Event):
+    def exposed_remote_infer_images(self, images: bytes, ref_event: threading.Event):
         try:
             images = obtain(images)
+            images: List[ImageItem] = pickle.loads(images)
             logger.info(
                 f"Received infer_images request with {len(images)} images, uuids: {[img.uuid for img in images]},"
                 f"md5s: {[img.md5 for img in images]}"
@@ -147,16 +148,24 @@ class VisualOnlyManager(rpyc.Service):
                 del image.data_bytes
 
             handle = asyncio.run_coroutine_threadsafe(self.handle_images(images_need_infer=images), loop=self.new_loop)
-            handle.result()
 
-            ref_event.set()
+            def _callback(fut):
+                ref_event.set()
+                # 清理资源
+                for image in images:
+                    free_shm(get_shm_name_data(image.uuid))
+                logger.info(
+                    f"Finished infer_images request for images {[image.md5 for image in images]}"
+                    f" and cleaned up shm resources"
+                )
+
+            handle.add_done_callback(_callback)
         except BaseException as e:
             logger.exception(str(e))
-            raise e
-        finally:
-            # 将 shm 进行删除
+            # 清理资源
             for image in images:
                 free_shm(get_shm_name_data(image.uuid))
+            raise e
         return
 
 
