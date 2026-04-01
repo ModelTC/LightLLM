@@ -129,7 +129,8 @@ class ProxyVisualManager(VisualManager):
         if self.args.detail_log:
             start = time.time()
             logger.info(f"Start to remote infer images {[image.md5 for image in images]}")
-        conn.root.remote_infer_images(images, event)
+        # 打包成一个bytes,可以减轻服务端 obtain 时候的代价。
+        conn.root.remote_infer_images(pickle.dumps(images), event)
         event.wait(timeout=600)
         if self.args.detail_log:
             logger.info(
