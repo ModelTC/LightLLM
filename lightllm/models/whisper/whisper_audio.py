@@ -12,7 +12,6 @@ from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import AudioItem
 from rpyc.utils.classic import obtain
-from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -89,8 +88,6 @@ class WhisperAudioModel:
         self.max_seconds = 30
         self.sampling_rate = 16000
         self.max_length = self.max_seconds * self.sampling_rate
-        self.cache_port = kvargs["cache_port"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         data_type = kvargs["data_type"]
         if data_type in ["bf16", "bfloat16"]:
             self.data_type = torch.bfloat16
@@ -162,7 +159,7 @@ class WhisperAudioModel:
         x = F.linear(x, weight=self.projector_weights["mlp2.3.weight"], bias=self.projector_weights["mlp2.3.bias"])
         return x
 
-    def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
+    def encode(self, audio_items: List[AudioItem]):
         # 每个元素是一个chunk
         batch_audios = []
         batch_audio_lens = []
@@ -222,22 +219,13 @@ class WhisperAudioModel:
                 continue
             per_audio_embeds[owner].append(audios[chunk_idx][:token_len])
 
-        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
-        ids_to_set = []
-        for i, ready in enumerate(ready_audio):
-            if ready:
-                continue
+        ans_embeds = []
+        for i in range(len(uuids)):
 
-            uid = uuids[i]
             item = items[i]
 
             # 拼接该 audio 的所有 chunk embedding
             cur_embed = torch.cat(per_audio_embeds[i], dim=0)
-            cpu_embed_cache_client.copy_to_cache(
-                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
-            )
-            ids_to_set.append(uid)
+            ans_embeds.append(cur_embed)
 
-        if ids_to_set:
-            self.cache_client.root.set_items_embed(ids=ids_to_set)
-            torch.cuda.current_stream().synchronize()
+        return ans_embeds, audio_items
