@@ -87,7 +87,7 @@ class ToolCall(BaseModel):
 
     id: Optional[str] = None
     index: Optional[int] = None
-    type: Literal["function"] = "function"
+    type: Optional[Literal["function"]] = None
     function: FunctionResponse
 
 

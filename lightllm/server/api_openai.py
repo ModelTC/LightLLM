@@ -160,6 +160,22 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
     return normal_text, calls
 
 
+def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
+    """Split a complete JSON argument string into OpenAI-style deltas."""
+    if not arguments:
+        return []
+    if len(arguments) <= 2:
+        return [arguments]
+    if arguments[0] in "{[" and arguments[-1] in "}]":
+        middle = arguments[1:-1]
+        chunks = [arguments[0]]
+        if middle:
+            chunks.append(middle)
+        chunks.append(arguments[-1])
+        return [chunk for chunk in chunks if chunk]
+    return [arguments]
+
+
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -342,6 +358,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             ToolCall(
                                 id=tool_id,
                                 index=getattr(call_info, "tool_index", None),
+                                type="function",
                                 function=FunctionResponse(name=call_info.name, arguments=call_info.parameters),
                             )
                         )
@@ -408,7 +425,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
             if request.tool_choice != "none" and request.tools:
                 # parse_increment => returns (normal_text, calls)
@@ -417,7 +434,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 )
 
                 # 1) if there's normal_text, output it as normal content
-                if normal_text:
+                if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=choice_index,
                         delta=DeltaMessage(role="assistant", content=normal_text),
@@ -429,7 +446,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
@@ -456,7 +473,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             call_item.parameters = remaining_call
 
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
-                    id_key = (choice_index, call_item.tool_index)
+                    stream_index = getattr(call_item, "tool_index", None)
+                    id_key = (choice_index, stream_index)
                     if call_item.name:
                         if id_key not in stream_tool_call_ids:
                             stream_tool_call_ids[id_key] = _process_tool_call_id(
@@ -468,26 +486,74 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         tool_call_id = stream_tool_call_ids.get(id_key)
                         function_name = None
 
-                    tool_call = ToolCall(
-                        id=tool_call_id,
-                        index=getattr(call_item, "tool_index", None),
-                        function=FunctionResponse(
-                            name=function_name,
-                            arguments=call_item.parameters,
-                        ),
-                    )
-                    choice_data = ChatCompletionStreamResponseChoice(
-                        index=choice_index,
-                        delta=DeltaMessage(role="assistant", tool_calls=[tool_call]),
-                        finish_reason=None,
-                    )
-                    chunk = ChatCompletionStreamResponse(
-                        id=group_request_id,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=request.model,
-                    )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    is_tool_head = call_item.name is not None
+
+                    if is_tool_head and call_item.parameters:
+                        head_tool_call = ToolCall(
+                            id=tool_call_id,
+                            index=stream_index,
+                            type="function",
+                            function=FunctionResponse(
+                                name=function_name,
+                                arguments="",
+                            ),
+                        )
+                        head_choice = ChatCompletionStreamResponseChoice(
+                            index=choice_index,
+                            delta=DeltaMessage(tool_calls=[head_tool_call]),
+                            finish_reason=None,
+                        )
+                        head_chunk = ChatCompletionStreamResponse(
+                            id=group_request_id,
+                            created=created_time,
+                            choices=[head_choice],
+                            model=request.model,
+                        )
+                        yield f"data: {head_chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                        for arg_delta in _split_tool_argument_delta(call_item.parameters):
+                            arg_tool_call = ToolCall(
+                                index=stream_index,
+                                function=FunctionResponse(arguments=arg_delta),
+                            )
+                            arg_choice = ChatCompletionStreamResponseChoice(
+                                index=choice_index,
+                                delta=DeltaMessage(tool_calls=[arg_tool_call]),
+                                finish_reason=None,
+                            )
+                            arg_chunk = ChatCompletionStreamResponse(
+                                id=group_request_id,
+                                created=created_time,
+                                choices=[arg_choice],
+                                model=request.model,
+                            )
+                            yield f"data: {arg_chunk.model_dump_json(exclude_none=True)}\n\n"
+                    else:
+                        tool_call = ToolCall(
+                            id=tool_call_id if is_tool_head else None,
+                            index=stream_index,
+                            type="function" if is_tool_head else None,
+                            function=FunctionResponse(
+                                name=function_name,
+                                arguments=(
+                                    (call_item.parameters if call_item.parameters is not None else "")
+                                    if is_tool_head
+                                    else call_item.parameters
+                                ),
+                            ),
+                        )
+                        choice_data = ChatCompletionStreamResponseChoice(
+                            index=choice_index,
+                            delta=DeltaMessage(tool_calls=[tool_call]),
+                            finish_reason=None,
+                        )
+                        chunk = ChatCompletionStreamResponse(
+                            id=group_request_id,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=request.model,
+                        )
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
             else:
                 delta_message = DeltaMessage(role="assistant", content=delta)
                 stream_choice = ChatCompletionStreamResponseChoice(
@@ -499,7 +565,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     model=request.model,
                     choices=[stream_choice],
                 )
-                yield f"data: {stream_resp.model_dump_json()}\n\n"
+                yield f"data: {stream_resp.model_dump_json(exclude_none=True)}\n\n"
 
             # Emit a per-choice final empty chunk with finish_reason.
             if current_finish_reason is not None:
@@ -516,7 +582,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     model=request.model,
                     choices=[final_choice],
                 )
-                yield f"data: {final_chunk.model_dump_json()}\n\n"
+                yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
         if request.stream_options and request.stream_options.include_usage:
             usage = UsageInfo(
@@ -531,7 +597,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 model=request.model,
                 usage=usage,
             )
-            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
