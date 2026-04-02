@@ -64,8 +64,8 @@ class InferenceContext:
 
         return
 
-    def init_cpu_embed_cache_client(self):
-        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+    def init_cpu_embed_cache_client(self, init_shm_data: bool = False):
+        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=init_shm_data)
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:

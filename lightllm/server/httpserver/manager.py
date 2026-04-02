@@ -82,14 +82,14 @@ class HttpServerManager:
         if self.enable_multimodal:
             self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if not self.args.disable_vision:
+                from lightllm.server.visualserver.vit_connect import VITConnectionManager
 
-        if not self.args.disable_vision:
-            self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+                self.vit_manager = VITConnectionManager(args, context, args.visual_port, self.cache_client)
 
-        if not self.args.disable_audio:
-            self.send_to_audio = context.socket(zmq.PUSH)
-            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+            if not self.args.disable_audio:
+                self.send_to_audio = context.socket(zmq.PUSH)
+                self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
 
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
@@ -124,10 +124,10 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
-    async def _alloc_resource(self, items, md5sums, token_nums, datas):
+    async def _alloc_resource(self, items, uuids, token_nums, datas):
 
         while True:
-            records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+            records = obtain(self.cache_client.root.alloc(uuids, token_nums))
 
             if records is None:
                 await asyncio.sleep(0.1)
@@ -146,6 +146,12 @@ class HttpServerManager:
                 item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
 
                 uid_list.append(rec["id"])
+
+            # # If enable the vit/audio-llm disaggregation, no need to cache the data in the memory of the server
+            if self.args.enable_remote_vit:
+                # 避免远端lru被逐出
+                self.cache_client.root.get_items_embed(uid_list, False)
+                return
 
             ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
             update_data_ids = []
@@ -166,14 +172,15 @@ class HttpServerManager:
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
-                items, md5sums, tokens_nums, datas = [], [], [], []
+                items, uuids, tokens_nums, datas = [], [], [], []
                 for img in multimodal_params.images:
                     self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                     data = img.read()
                     # must after init_imageitem_extral_params
                     token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-                    md5sums.append(md5sum)
+                    md5sum = "{}_{}".format(hashlib.md5(data).hexdigest(), img.patch_num)
+                    uuid = int(md5sum, 16)
+                    uuids.append(uuid)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(img)
@@ -181,13 +188,17 @@ class HttpServerManager:
                     self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                     data = audio.read()
                     token_num = self.tokenizer.get_audio_token_length(audio)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
-                    md5sums.append(md5sum)
+                    md5sum = "{}_{}".format(
+                        hashlib.md5(data).hexdigest(),
+                        hashlib.md5(pickle.dumps(audio.extra_params, protocol=4)).hexdigest(),
+                    )
+                    uuid = int(md5sum, 16)
+                    uuids.append(uuid)
                     tokens_nums.append(token_num)
                     datas.append(data)
                     items.append(audio)
 
-                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+                await self._alloc_resource(items, uuids, tokens_nums, datas)
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
@@ -408,6 +419,48 @@ class HttpServerManager:
             raise e
         return
 
+    async def get_image_embeding(
+        self,
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        is_health_req: bool = False,
+    ) -> Tuple[int, str, dict, FinishStatus]:
+        start_time = time.time()
+        request_headers = request.headers if request is not None else {}
+        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+
+        try:
+            original_multimodal_params = None
+            if self.is_multinode_tp_master:
+                original_multimodal_params = copy.deepcopy(multimodal_params)
+
+            await multimodal_params.verify_and_preload(request)
+            image_count = len(multimodal_params.images)
+            # 记录请求到达的相关信息
+
+            await self._log_req_header(request_headers, group_request_id)
+            logger.info(f"image_count:{image_count}")
+            assert (
+                len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+            ), "too many multimodal items!"
+
+            await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+
+            visual_req_status = GroupReqObjs(group_request_id, multimodal_params, None, start_time)
+
+            await self.transfer_to_next_module_or_node(
+                None, sampling_params, original_multimodal_params, visual_req_status
+            )
+            await self._release_multimodal_resources(multimodal_params)
+
+        except Exception as e:
+            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            await self._release_multimodal_resources(multimodal_params)
+            await self.abort(group_request_id)
+            raise e
+        return
+
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
         audio_tokens = 0
@@ -538,23 +591,37 @@ class HttpServerManager:
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
-            if not self.args.disable_vision:
-                self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
-                return
+            group_req_index = group_req_objs.to_group_req_index()
+            has_images = len(group_req_index.multimodal_params.images) > 0
+            has_audios = len(group_req_index.multimodal_params.audios) > 0
 
-            if not self.args.disable_audio:
-                self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
+            if has_images and not self.args.disable_vision:
+                free_mode = "all"
+                if self.args.enable_remote_vit and has_audios and not self.args.disable_audio:
+                    free_mode = "images"
+
+                await self.vit_manager.send_to_vit(
+                    group_req_index, protocol=pickle.HIGHEST_PROTOCOL, free_mode=free_mode
+                )
+
+                if not self.args.enable_remote_vit:
+                    return
+
+            if has_audios and not self.args.disable_audio:
+                self.send_to_audio.send_pyobj(group_req_index, protocol=pickle.HIGHEST_PROTOCOL)
+                if self.args.enable_remote_vit:
+                    group_req_index.multimodal_params.free()
                 return
 
             if self.args.enable_cpu_cache:
                 self.send_to_multi_level_kv_cache.send_pyobj(
-                    group_req_objs.to_group_req_index(),
+                    group_req_index,
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
                 return
 
             self.send_to_router.send_pyobj(
-                group_req_objs.to_group_req_index(),
+                group_req_index,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
@@ -752,6 +819,9 @@ class HttpServerManager:
             from lightllm.server.httpserver.pd_loop import pd_handle_loop
 
             asyncio.create_task(pd_handle_loop(self))
+
+        if hasattr(self, "vit_manager"):
+            asyncio.create_task(self.vit_manager.vit_handle_loop())
 
         while True:
             try:

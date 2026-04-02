@@ -167,7 +167,7 @@ try:
         head_dim = q.shape[-1]
         softmax_scale = head_dim ** -0.5
         window_size = (-1, -1)
-        torch.ops.sgl_kernel.fwd.default(
+        o = flash_attn_varlen_func(
             q,
             k,
             v,
@@ -204,8 +204,7 @@ try:
             sm_margin=0,
             sinks=None,
         )
-
-        return
+        return o
 
 except ImportError:
     print("Failed to import _flash_attn_forward from hopper.flash_attn_interface.")
