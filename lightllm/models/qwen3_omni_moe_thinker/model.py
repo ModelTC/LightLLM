@@ -1,6 +1,7 @@
 import os
 import json
 import librosa
+from collections import OrderedDict
 from io import BytesIO
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
@@ -30,6 +31,8 @@ MIN_AUDIO_LEN = 480
 class QWen3OmniTokenizer(QWen3VLTokenizer):
     def __init__(self, tokenizer=None, processor=None, **kwargs):
         self.tokenizer = tokenizer
+        self._prompt_encode_cache = OrderedDict()
+        self._prompt_encode_cache_capacity = 64
         # image
         self.image_processor = processor.image_processor
         self.min_pixel = self.image_processor.min_pixels
@@ -71,6 +74,18 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         # print(f"token_num is {token_num}  n_samples is {self.n_samples} hop_length is {self.hop_length}")
         return token_num
 
+    def _encode_prompt_text(self, prompt: str):
+        cached_ids = self._prompt_encode_cache.get(prompt)
+        if cached_ids is not None:
+            self._prompt_encode_cache.move_to_end(prompt)
+            return list(cached_ids)
+
+        origin_ids = self.tokenizer.encode(prompt)
+        self._prompt_encode_cache[prompt] = tuple(origin_ids)
+        if len(self._prompt_encode_cache) > self._prompt_encode_cache_capacity:
+            self._prompt_encode_cache.popitem(last=False)
+        return origin_ids
+
     def _caclu_audio_token_num(self, input_audio_len: int):
         _mel_len = input_audio_len // int(self.hop_length)
         input_lengths_leave = _mel_len % 100
@@ -79,7 +94,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return output_lengths
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
-        origin_ids = self.tokenizer.encode(prompt)
+        origin_ids = self._encode_prompt_text(prompt)
 
         # <img><image_pad></img> -> <img></img>
         origin_ids = [token for token in origin_ids if token not in (self.image_token_id, self.audio_token_id)]
