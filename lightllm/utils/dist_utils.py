@@ -55,14 +55,29 @@ def get_environ(environ_name):
 
 
 def init_vision_distributed_env(kvargs):
+    """
+    # kvargs = {
+    #     "weight_dir": self.model_weightdir,
+    #     "device_id": device_id,
+    #     "vit_tp": self.vit_tp,
+    #     "cache_port": self.args.cache_port,
+    #     "tp_rank_id": tp_rank_id,
+    #     "dp_rank_id": dp_rank_id,
+    #     "data_type": self.args.data_type,
+    #     "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
+    #     "quant_type": self.args.vit_quant_type,
+    #     "quant_cfg": self.args.vit_quant_cfg,
+    #     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+    #     "vit_attn_backend": self.vit_attn_backend,
+    # }
+    """
     tp_world_size = kvargs["vit_tp"]
     dp_size = 1
     tp_rank_id = kvargs["tp_rank_id"]
     set_dp_size(dp_size)
     set_dp_world_size(tp_world_size)
     set_current_rank_in_dp(tp_rank_id)
-    visual_gpu_ids = kvargs["visual_gpu_ids"]
-    device_id = visual_gpu_ids[kvargs["vit_rank_id"]]
+    device_id = kvargs["device_id"]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
     dist.init_process_group(

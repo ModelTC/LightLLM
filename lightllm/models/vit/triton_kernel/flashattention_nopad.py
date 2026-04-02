@@ -204,8 +204,7 @@ try:
             sm_margin=0,
             sinks=None,
         )
-
-        return
+        return o
 
 except ImportError:
     print("Failed to import _flash_attn_forward from hopper.flash_attn_interface.")

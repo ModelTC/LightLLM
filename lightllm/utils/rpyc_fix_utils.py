@@ -9,7 +9,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
-_BUFF_SIZE = 4 * 1024 * 1024
+_BUFF_SIZE = 8 * 1024 * 1024
 
 
 def _fix_connect(

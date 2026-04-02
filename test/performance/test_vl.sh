@@ -1,0 +1,1 @@
+python ./multimodal_test.py --num_clients 2 --tokenizer_path /mtc/models/Qwen3-VL-8B-Instruct --input_num 500 --output_len 128 --num_images 1 --input_len 1024 --url http://localhost:8089/v1/chat/completions --server_api openai --input_qps 500 --seed 1234 
