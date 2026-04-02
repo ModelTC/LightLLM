@@ -193,7 +193,6 @@ class AudioModelRpcServer(rpyc.Service):
 
             for audio in audios:
                 audio.event.set()
-                self.sempare.release()
                 self._log_latency(audio, stage="set_event")
 
             self.cache_client.root.set_items_embed([audio.uuid for audio in audios])
@@ -207,6 +206,8 @@ class AudioModelRpcServer(rpyc.Service):
             try:
                 audios: List[AudioItem] = self._get_audio_items_from_store_queue(max_num=self.infer_max_batch_size)
                 self._commit_to_cpu_cache(audios=audios)
+                for _ in audios:
+                    self.sempare.release()
 
             except Exception as e:
                 logger.exception(str(e))
