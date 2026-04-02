@@ -204,6 +204,32 @@ def normal_or_p_d_start(args):
             f"a positive integer multiple of visual_dp ({args.visual_dp})"
         )
 
+    if not args.disable_audio:
+        if args.audio_tp != 1:
+            raise ValueError(
+                "audio_tp > 1 is not supported for the audio encoder yet; use --audio_dp for multi-GPU data parallel."
+            )
+        if args.audio_gpu_ids is None:
+            args.audio_gpu_ids = list(range(args.audio_dp * args.audio_tp))
+        total_audio_gpus = args.audio_dp * args.audio_tp
+        if len(args.audio_gpu_ids) < total_audio_gpus:
+            raise ValueError(
+                f"Not enough audio GPUs specified. Need at least {total_audio_gpus}, "
+                f"but got {len(args.audio_gpu_ids)}."
+            )
+        args.audio_gpu_ids = args.audio_gpu_ids[:total_audio_gpus]
+        if args.audio_dp <= 0:
+            raise ValueError("audio_dp must be a positive integer.")
+        if args.audio_infer_batch_size is None:
+            args.audio_infer_batch_size = args.audio_dp * 4
+        if args.audio_infer_batch_size < 1:
+            raise ValueError("audio_infer_batch_size must be >= 1.")
+        if args.audio_infer_batch_size // args.audio_dp < 1 or args.audio_infer_batch_size % args.audio_dp != 0:
+            raise ValueError(
+                f"audio_infer_batch_size ({args.audio_infer_batch_size}) must be "
+                f"a positive integer multiple of audio_dp ({args.audio_dp})."
+            )
+
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len
         # 普通模式下
@@ -248,6 +274,8 @@ def normal_or_p_d_start(args):
         already_uesd_ports.append(args.pd_decode_rpyc_port)
     if args.visual_nccl_ports is not None:
         already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
+    if not args.disable_audio and args.audio_nccl_ports is not None:
+        already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -256,7 +284,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp,
+        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
         used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
@@ -274,14 +302,17 @@ def normal_or_p_d_start(args):
     ) = can_use_ports[0:10]
     can_use_ports = can_use_ports[10:]
 
-    visual_nccl_ports = []
-    for _ in range(args.visual_dp):
-        if args.visual_nccl_ports is None:
-            visual_nccl_ports.append(can_use_ports[0])
-            can_use_ports = can_use_ports[1:]
+    if args.visual_nccl_ports is None:
+        args.visual_nccl_ports = can_use_ports[: args.visual_dp]
+        can_use_ports = can_use_ports[args.visual_dp :]
+    else:
+        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
-    if args.visual_nccl_ports is not None:
-        visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+    if args.audio_nccl_ports is None:
+        args.audio_nccl_ports = can_use_ports[: args.audio_dp]
+        can_use_ports = can_use_ports[args.audio_dp :]
+    else:
+        args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
 
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
@@ -296,7 +327,6 @@ def normal_or_p_d_start(args):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    args.visual_nccl_ports = visual_nccl_ports
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
