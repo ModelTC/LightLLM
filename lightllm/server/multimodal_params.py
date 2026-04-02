@@ -1,4 +1,5 @@
 """Multimodal parameters for text generation."""
+import asyncio
 import os
 import wave
 import time
@@ -240,10 +241,12 @@ class MultimodalParams:
         return
 
     async def verify_and_preload(self, request: Request, audio_preload_config: dict = None):
-        for image in self.images:
-            await image.preload(request)
-        for audio in self.audios:
-            await audio.preload(request, audio_preload_config=audio_preload_config)
+        preload_coroutines = [image.preload(request) for image in self.images]
+        preload_coroutines.extend(
+            audio.preload(request, audio_preload_config=audio_preload_config) for audio in self.audios
+        )
+        if preload_coroutines:
+            await asyncio.gather(*preload_coroutines)
         return
 
     def to_dict(self):
