@@ -1,6 +1,7 @@
 import redis
 from typing import List, Tuple, Union, Optional
 
+
 class RedisMetadataLib:
     """
     # 代码任务
@@ -14,6 +15,7 @@ class RedisMetadataLib:
     (5) 输入为(remove_size, capcity), 当时间排序队列中的元素数量大于等于capcity， 返回时间排序队列中排在前面的 remove_size 个元素,其内容为 md5。
     (6) 所有操作都使用lua 脚本，以实现原子化操作，同时返回的错误要能区分具体错误的原因，注意lua脚本的可读性，和相关函数的输入输出测试。时间错为server端s级别的参数。
     """
+
     def __init__(self, redis_url: str = "redis://localhost:6379/0", prefix: str = "meta"):
         # decode_responses=True 确保返回的是字符串而非字节
         self.r = redis.Redis.from_url(redis_url, decode_responses=True)
@@ -25,7 +27,8 @@ class RedisMetadataLib:
 
         # (1) & (2) 更新/插入：支持传入单个或多个 MD5
         # 逻辑：获取服务器时间，循环执行 ZADD
-        self._lua_update = self.r.register_script("""
+        self._lua_update = self.r.register_script(
+            """
             local lru_key = KEYS[1]
             local now = redis.call('TIME')[1]
             local count = 0
@@ -34,20 +37,24 @@ class RedisMetadataLib:
                 count = count + 1
             end
             return count
-        """)
+        """
+        )
 
         # (3) 删除：从队列中移除指定的 MD5
-        self._lua_remove = self.r.register_script("""
+        self._lua_remove = self.r.register_script(
+            """
             local lru_key = KEYS[1]
             local count = 0
             for i, md5 in ipairs(ARGV) do
                 count = count + redis.call('ZREM', lru_key, md5)
             end
             return count
-        """)
+        """
+        )
 
         # (4) 检查并更新：判断是否存在，存在则刷新时间，返回 bool 状态列表
-        self._lua_check_update = self.r.register_script("""
+        self._lua_check_update = self.r.register_script(
+            """
             local lru_key = KEYS[1]
             local now = redis.call('TIME')[1]
             local results = {}
@@ -60,10 +67,12 @@ class RedisMetadataLib:
                 end
             end
             return results
-        """)
+        """
+        )
 
         # (5) 容量清理：检查容量并获取候选列表
-        self._lua_evict = self.r.register_script("""
+        self._lua_evict = self.r.register_script(
+            """
             local lru_key = KEYS[1]
             local remove_size = tonumber(ARGV[1])
             local capacity = tonumber(ARGV[2])
@@ -75,7 +84,8 @@ class RedisMetadataLib:
             else
                 return {}
             end
-        """)
+        """
+        )
 
     def _to_list(self, data: Union[str, List[str]]) -> List[str]:
         """内部工具：将输入统一转为列表形式"""
@@ -89,7 +99,8 @@ class RedisMetadataLib:
         支持传入单个字符串或字符串列表。
         """
         items = self._to_list(md5_list)
-        if not items: return 0
+        if not items:
+            return 0
         return self._lua_update(keys=[self.lru_key], args=items)
 
     def remove(self, md5_list: Union[str, List[str]]) -> int:
@@ -98,7 +109,8 @@ class RedisMetadataLib:
         支持传入单个字符串或字符串列表。
         """
         items = self._to_list(md5_list)
-        if not items: return 0
+        if not items:
+            return 0
         return self._lua_remove(keys=[self.lru_key], args=items)
 
     def check_and_update(self, md5_list: List[str]) -> List[bool]:
@@ -106,7 +118,8 @@ class RedisMetadataLib:
         功能 (4)：返回 md5_list 中每个 md5 是否在队列中存在。
         对存在的 md5 会同时更新时间戳到最新。
         """
-        if not md5_list: return []
+        if not md5_list:
+            return []
         raw_res = self._lua_check_update(keys=[self.lru_key], args=md5_list)
         return [res == 1 for res in raw_res]
 
@@ -116,7 +129,9 @@ class RedisMetadataLib:
         """
         return self._lua_evict(keys=[self.lru_key], args=[remove_size, capacity])
 
+
 # ---------------- 功能测试 ----------------
+
 
 def test_meta_lib():
     lib = RedisMetadataLib(prefix="test_service")
@@ -143,9 +158,10 @@ def test_meta_lib():
     print("\n4. 测试删除 (remove)")
     removed_count = lib.remove(["file_0", "file_1"])
     print(f"成功移除数量: {removed_count}")
-    
+
     final_check = lib.check_and_update(["file_1", "file_2"])
     print(f"最终检查 [file_1, file_2]: {final_check}")
+
 
 if __name__ == "__main__":
     test_meta_lib()
