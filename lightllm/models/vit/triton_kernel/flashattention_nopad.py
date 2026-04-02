@@ -167,7 +167,7 @@ try:
         head_dim = q.shape[-1]
         softmax_scale = head_dim ** -0.5
         window_size = (-1, -1)
-        o = flash_attn_varlen_func(
+        torch.ops.sgl_kernel.fwd.default(
             q,
             k,
             v,
