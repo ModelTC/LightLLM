@@ -190,9 +190,14 @@ class AudioModelRpcServer(rpyc.Service):
             for audio in audios:
                 audio.cuda_event.synchronize()
                 self._log_latency(audio, stage="inference")
+
+            for audio in audios:
                 audio.event.set()
-                self._log_latency(audio, stage="set_event")
                 self.sempare.release()
+                self._log_latency(audio, stage="set_event")
+
+            self.cache_client.root.set_items_embed(uuids=[audio.uuid for audio in audios])
+            self._log_latency(audios[0], "set_items_embed")
 
     def _store_worker(self):
         """
