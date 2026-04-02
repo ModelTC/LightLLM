@@ -9,6 +9,7 @@ import inspect
 import setproctitle
 import threading
 import collections
+import multiprocessing
 from typing import List
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -62,12 +63,14 @@ class VisualManager:
     async def wait_to_model_ready(self):
 
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
+        self.model_procs: List[multiprocessing.Process] = []
         self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
             for tp_rank_id in range(self.vit_tp):
 
-                rpc_model = await start_model_process()
+                rpc_model, proc = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
+                self.model_procs.append(proc)
 
         init_model_ret = []
         for dp_rank_id in range(self.vit_dp):  # async init model process
@@ -187,7 +190,11 @@ class VisualManager:
             logger.exception(str(e))
 
     def clean_up(self):
-        return
+        for proc in getattr(self, "model_procs", []):
+            if proc.is_alive():
+                logger.info(f"Killing VIT model process {proc.pid}")
+                proc.kill()
+                proc.join(timeout=5)
 
 
 def start_visual_process(args, pipe_writer):
