@@ -187,7 +187,7 @@ class CompletionRequest(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str
+    model: str = "default"
     messages: List[ChatCompletionMessageParam]
     function_call: Optional[str] = "none"
     temperature: Optional[float] = 1
