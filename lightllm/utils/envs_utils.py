@@ -193,7 +193,14 @@ def get_diverse_max_batch_shared_group_size() -> int:
 
 @lru_cache(maxsize=None)
 def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
-    return get_env_start_args().diverse_mode and "int8kv" == get_env_start_args().llm_kv_type
+    return "int8kv" == get_env_start_args().llm_kv_type and get_env_start_args().diverse_mode
+
+
+@lru_cache(maxsize=None)
+def enable_gqa_diverse_decode_fast_kernel() -> bool:
+    return enable_diverse_mode_gqa_decode_fast_kernel() or enable_env_vars(
+        "LIGHTLLM_ENABLE_GQA_DIVERSE_DECODE_FAST_KERNEL"
+    )
 
 
 @lru_cache(maxsize=None)

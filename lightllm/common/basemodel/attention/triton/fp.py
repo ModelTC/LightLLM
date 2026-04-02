@@ -2,6 +2,7 @@ import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
+from lightllm.utils.envs_utils import enable_gqa_diverse_decode_fast_kernel
 
 
 class TritonAttBackend(BaseAttBackend):
@@ -104,6 +105,8 @@ class TritonDecodeAttState(BaseDecodeAttState):
             if q_head_num == k_head_num:
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
+                if enable_gqa_diverse_decode_fast_kernel():
+                    return self._diverse_decode_gqa_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
                 return self._normal_decode_gqa_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             else:
                 raise NotImplementedError("error")
@@ -180,6 +183,28 @@ class TritonDecodeAttState(BaseDecodeAttState):
             alloc_tensor_func=alloc_func,
         )
 
+        return out
+
+    def _diverse_decode_gqa_flash_decoding_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        alloc_func=torch.empty,
+    ):
+        from ...triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding_diverse import (
+            gqa_token_decode_attention_flash_decoding_diverse,
+        )
+
+        out = alloc_func(q.shape, q.dtype)
+        gqa_token_decode_attention_flash_decoding_diverse(
+            q=q,
+            infer_state=self.infer_state,
+            cache_k=k,
+            cache_v=v,
+            out=out,
+            alloc_tensor_func=alloc_func,
+        )
         return out
 
     def _normal_decode_gqa_flash_decoding_att_vsm(
