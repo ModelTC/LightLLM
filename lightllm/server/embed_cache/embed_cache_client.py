@@ -20,7 +20,6 @@ class CpuEmbedCacheClient(object):
         # to do here need calcu from from settings.
         self.embed_cache_tensor_meta = calcu_embed_cache_meta()
         self.token_num: int = self.embed_cache_tensor_meta.token_num
-        self.pin_shm = pin_shm
 
         if create_meta_data:
             self.token_index_manager = MemoryManager(total_size=self.token_num)
@@ -38,7 +37,7 @@ class CpuEmbedCacheClient(object):
         cache_tensor_creator = CpuCacheCreator(tensor_spec=cache_tensor_spec)
         self.cpu_embed_cache_tensor, _ = cache_tensor_creator.create_or_attach(
             init_shm_data=init_shm_data,
-            pin=not init_shm_data,
+            pin=pin_shm,
             pin_no_blocking=False,
         )
         return
