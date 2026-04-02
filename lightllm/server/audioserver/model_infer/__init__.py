@@ -4,16 +4,19 @@ import inspect
 import uuid
 import os
 import multiprocessing
+import setproctitle
 from lightllm.utils.retry_utils import retry
 from rpyc.utils.factory import unix_connect
 from lightllm.utils.graceful_utils import graceful_registry
 from .model_rpc_client import AudioModelRpcClient
 from .model_rpc import AudioModelRpcServer
 from ..objs import rpyc_config
+from lightllm.utils.envs_utils import get_unique_server_name
 
 
 def _init_env(socket_path: str, success_event):
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_model_infer")
 
     import lightllm.utils.rpyc_fix_utils as _
 
