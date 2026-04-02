@@ -8,6 +8,7 @@ import socket
 import inspect
 import setproctitle
 import time
+from collections import deque
 from typing import Dict, List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -43,7 +44,7 @@ class AudioManager:
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.cache_port = args.cache_port
-        self.waiting_reqs: List[GroupReqIndexes] = []
+        self.waiting_reqs = deque()
         self.model_weightdir = args.model_dir
         self.tp_world_size = args.tp
         self.audio_dp = args.audio_dp
@@ -140,7 +141,7 @@ class AudioManager:
                 processing_group_reqs = []
                 audios_need_infer = []
                 while len(self.waiting_reqs) > 0:
-                    group_req_indexes = self.waiting_reqs.pop(0)
+                    group_req_indexes = self.waiting_reqs.popleft()
                     self._log_req_stage(
                         group_req_indexes.group_req_id,
                         "audio_queue_picked",
@@ -174,7 +175,7 @@ class AudioManager:
                         and len(self.waiting_reqs) == 0
                         and len(pending_audios) < self.infer_batch_size
                     ):
-                        logger.info(
+                        logger.debug(
                             f"audio_batch_ready req_ids:[{group_req_indexes.group_req_id}] "
                             f"audio_count:{len(pending_audios)} infer_batch_size:{self.infer_batch_size} fast_path:1"
                         )
@@ -210,7 +211,7 @@ class AudioManager:
                                 [group_req_indexes] if current_req_has_pending_audio else []
                             )
                             batch_req_ids = [req.group_req_id for req in batch_reqs]
-                            logger.info(
+                            logger.debug(
                                 f"audio_batch_ready req_ids:{batch_req_ids} "
                                 f"audio_count:{len(audios_need_infer)} infer_batch_size:{self.infer_batch_size}"
                             )
@@ -250,7 +251,7 @@ class AudioManager:
 
                 if len(audios_need_infer) > 0:
                     batch_req_ids = [req.group_req_id for req in processing_group_reqs]
-                    logger.info(
+                    logger.debug(
                         f"audio_batch_ready req_ids:{batch_req_ids} "
                         f"audio_count:{len(audios_need_infer)} infer_batch_size:{self.infer_batch_size}"
                     )
@@ -274,7 +275,7 @@ class AudioManager:
         while True:
             recv_req: GroupReqIndexes = await self.zmq_recv_socket.recv_pyobj()
             if isinstance(recv_req, GroupReqIndexes):
-                logger.info(
+                logger.debug(
                     f"audio recv req id {recv_req.group_req_id} "
                     f"audio count {len(recv_req.multimodal_params.audios)}"
                 )
