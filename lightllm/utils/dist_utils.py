@@ -93,6 +93,37 @@ def init_vision_distributed_env(kvargs):
     del _a
 
 
+def init_audio_distributed_env(kvargs):
+    """
+    Per audio DP group, tensor-parallel ranks share one NCCL group (same layout as ViT).
+
+    # kvargs = {
+    #     "device_id": device_id,
+    #     "audio_tp": self.audio_tp,
+    #     "tp_rank_id": tp_rank_id,
+    #     "audio_nccl_port": self.args.audio_nccl_ports[dp_rank_id],
+    # }
+    """
+    tp_world_size = kvargs["audio_tp"]
+    tp_rank_id = kvargs["tp_rank_id"]
+    set_dp_size(1)
+    set_dp_world_size(tp_world_size)
+    set_current_rank_in_dp(tp_rank_id)
+    device_id = kvargs["device_id"]
+    set_current_device_id(device_id)
+    torch.cuda.set_device(device_id)
+    dist.init_process_group(
+        "nccl",
+        init_method=f'tcp://127.0.0.1:{kvargs["audio_nccl_port"]}',
+        rank=tp_rank_id,
+        world_size=tp_world_size,
+        device_id=torch.device(f"cuda:{device_id}"),
+    )
+    _a = torch.zeros([1]).to(f"cuda:{device_id}")
+    dist.all_reduce(_a)
+    del _a
+
+
 def init_distributed_env(kvargs):
     assert kvargs["world_size"] % kvargs["args"].nnodes == 0, "world_size should be divided by nnodes"
     node_world_size = kvargs["world_size"] // kvargs["args"].nnodes

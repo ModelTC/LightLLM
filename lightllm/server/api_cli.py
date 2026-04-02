@@ -485,6 +485,32 @@ def make_argument_parser() -> argparse.ArgumentParser:
             """,
     )
     parser.add_argument(
+        "--audio_gpu_ids", nargs="+", type=int, default=None, help="GPU IDs for audio encoder, e.g., 0 1 2"
+    )
+    parser.add_argument(
+        "--audio_tp",
+        type=int,
+        default=1,
+        help="Tensor parallel size for audio encoder (only 1 is supported; use audio_dp to scale)",
+    )
+    parser.add_argument("--audio_dp", type=int, default=1, help="Data parallel replicas for audio encoder")
+    parser.add_argument(
+        "--audio_nccl_ports",
+        nargs="+",
+        type=int,
+        default=None,
+        help="NCCL ports per audio DP group; if omitted, auto-allocated in api_start (reserved until audio_tp>1)",
+    )
+    parser.add_argument(
+        "--audio_infer_batch_size",
+        type=int,
+        default=None,
+        help="""
+        Max audio items per GPU infer batch in audio worker (default: max(4, audio_dp),
+        must be multiple of audio_dp)
+        """,
+    )
+    parser.add_argument(
         "--visual_use_proxy_mode",
         action="store_true",
         help="""
