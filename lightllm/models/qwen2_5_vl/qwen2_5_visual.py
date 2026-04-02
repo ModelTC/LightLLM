@@ -16,6 +16,9 @@ from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -157,6 +160,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         super().__init__()
         self.weight_dir = kvargs["weight_dir"]
         self.data_type = kvargs.get("data_type", "bfloat16")
+        self.max_batch_size = kvargs.get("max_batch_size", 1)
 
         self.depth = depth
         self.hidden_size = hidden_size
@@ -223,6 +227,12 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         else:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
         return
+
+    @torch.no_grad()
+    def _check_max_len_infer(self):
+        from lightllm.models.qwen2_vl.vision_process import qwen_vl_check_max_len_infer
+
+        qwen_vl_check_max_len_infer(self, self.max_batch_size)
 
     def rot_pos_emb(self, grid_thw):
         pos_ids = []

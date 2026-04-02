@@ -29,6 +29,9 @@ from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class Qwen3OmniMoeVisionMLP(nn.Module):
@@ -140,6 +143,7 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
     ):
         super().__init__()
         self.data_type = kvargs.get("data_type", "bfloat16")
+        self.max_batch_size = kvargs.get("max_batch_size", 1)
 
         self.depth = depth
         self.out_hidden_size = out_hidden_size
@@ -206,6 +210,12 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         else:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
         return
+
+    @torch.no_grad()
+    def _check_max_len_infer(self):
+        from lightllm.models.qwen2_vl.vision_process import qwen_vl_check_max_len_infer
+
+        qwen_vl_check_max_len_infer(self, self.max_batch_size)
 
     def concat_img_embed_and_deepstack_features(self, image_embed, deepstack_feature_lists, valid_ids):
         all_chunks = []

@@ -53,7 +53,6 @@ class VisionTransformer:
         self._init_quant()
         self._init_weights()
         self._init_infer_layer()
-        self._check_max_len_infer()
         return
 
     @final
@@ -73,7 +72,8 @@ class VisionTransformer:
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
             exception_str = (
-                "Vit check max len infer fail, you can try:" "1.Set the --visual_infer_batch_size to a smaller value."
+                "Vit check max len infer fail, you can try: "
+                "1.Set the --visual_infer_batch_size to a smaller value."
             )
             logger.error(exception_str)
             raise Exception(exception_str)
@@ -85,16 +85,27 @@ class VisionTransformer:
             self.select_layer = self.config["select_layer"]
             self.config["vision_config"]["llm_hidden_size"] = self.config["llm_config"]["hidden_size"]
             self.config["vision_config"]["downsample_ratio"] = self.config["downsample_ratio"]
+
+            # Derive worst-case image dimensions from model config
+            image_size = self.config.get("force_image_size", self.config["vision_config"]["image_size"])
+            max_dynamic_patch = self.config.get("max_dynamic_patch", 12)
+            use_thumbnail = self.config.get("use_thumbnail", True)
+            dynamic_image_size = self.config.get("dynamic_image_size", True)
+
             self.config = self.config["vision_config"]
+
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         self.layers_num = self.config["num_hidden_layers"]
 
-        # infer info
-        self.IMAGE_H = int(os.getenv("IMAGE_H", 448))
-        self.IMAGE_W = int(os.getenv("IMAGE_W", 448))
-        self.MAX_PATH_NUM = os.getenv("MAX_PATH_NUM", 13)
+        # infer info — computed from config, not env vars
+        self.IMAGE_H = image_size
+        self.IMAGE_W = image_size
+        max_num = max_dynamic_patch if dynamic_image_size else 1
+        if use_thumbnail and max_num != 1:
+            max_num += 1
+        self.MAX_PATH_NUM = max_num
         return
 
     def _padding_hidden_size(self):
