@@ -282,7 +282,7 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         if self.k_weight_name in weights:
             self.k_weight.copy_(weights[self.k_weight_name])
             self.k_weight.load_ok = True
-            del weights[self.q_weight_name]
+            del weights[self.k_weight_name]
 
     def verify_load(self):
         return self.q_weight.load_ok and self.k_weight.load_ok
