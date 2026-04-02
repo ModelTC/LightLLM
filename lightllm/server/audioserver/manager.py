@@ -31,7 +31,7 @@ class AudioManager:
         args: StartArgs,
     ):
         self.args = args
-        context = zmq.asyncio.Context(2)
+        context = zmq.Context(2)
 
         if args.enable_cpu_cache:
             self.send_to_next_module = context.socket(zmq.PUSH)
