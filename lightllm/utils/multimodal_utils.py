@@ -1,3 +1,4 @@
+import inspect
 import time
 import base64
 import httpx
@@ -7,6 +8,22 @@ from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def _httpx_async_client_proxy_kwargs(proxy) -> dict:
+    """
+    httpx 0.28+ 使用 AsyncClient(proxy=...)；更早版本使用 proxies=...
+    用签名检测避免写死版本号。
+    """
+    if proxy is None:
+        return {}
+    params = inspect.signature(httpx.AsyncClient.__init__).parameters
+
+    if "proxy" in params:
+        return {"proxy": proxy}
+    if "proxies" in params:
+        return {"proxies": proxy}
+    return {}
 
 
 def image2base64(img_str: str):
@@ -21,7 +38,7 @@ def image2base64(img_str: str):
 async def fetch_resource(url, request: Request, timeout, proxy=None):
     logger.info(f"Begin to download resource from url: {url}")
     start_time = time.time()
-    async with httpx.AsyncClient(proxy=proxy) as client:
+    async with httpx.AsyncClient(**_httpx_async_client_proxy_kwargs(proxy)) as client:
         async with client.stream("GET", url, timeout=timeout) as response:
             response.raise_for_status()
             ans_bytes = []
