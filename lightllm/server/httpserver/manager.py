@@ -131,6 +131,36 @@ class HttpServerManager:
         logger.info(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
         return
 
+    def _prepare_multimodal_resource_inputs(
+        self, multimodal_params: MultimodalParams, sampling_params: SamplingParams
+    ) -> Tuple[List[Union[ImageItem, AudioItem]], List[str], List[int], List[bytes]]:
+        items, md5sums, tokens_nums, datas = [], [], [], []
+
+        for img in multimodal_params.images:
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+            data = img.read()
+            token_num = self.tokenizer.get_image_token_length(img)
+            md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+            md5sums.append(md5sum)
+            tokens_nums.append(token_num)
+            datas.append(data)
+            items.append(img)
+
+        for audio in multimodal_params.audios:
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+            data = audio.read()
+            token_num = self.tokenizer.get_audio_token_length(audio)
+            payload_md5 = audio.extra_params.get("audio_payload_md5")
+            if payload_md5 is None:
+                payload_md5 = hashlib.md5(data).hexdigest()
+            md5sum = payload_md5 + "_" + str(hash(frozendict(audio.extra_params)))
+            md5sums.append(md5sum)
+            tokens_nums.append(token_num)
+            datas.append(data)
+            items.append(audio)
+
+        return items, md5sums, tokens_nums, datas
+
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
 
         while True:
@@ -163,34 +193,16 @@ class HttpServerManager:
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
+            items, md5sums, tokens_nums, datas = self._prepare_multimodal_resource_inputs(
+                multimodal_params, sampling_params
+            )
+            if len(items) <= 1:
+                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+                return
             # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
-                items, md5sums, tokens_nums, datas = [], [], [], []
-                for img in multimodal_params.images:
-                    self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-                    data = img.read()
-                    # must after init_imageitem_extral_params
-                    token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-                    md5sums.append(md5sum)
-                    tokens_nums.append(token_num)
-                    datas.append(data)
-                    items.append(img)
-                for audio in multimodal_params.audios:
-                    self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-                    data = audio.read()
-                    token_num = self.tokenizer.get_audio_token_length(audio)
-                    payload_md5 = audio.extra_params.get("audio_payload_md5")
-                    if payload_md5 is None:
-                        payload_md5 = hashlib.md5(data).hexdigest()
-                    md5sum = payload_md5 + "_" + str(hash(frozendict(audio.extra_params)))
-                    md5sums.append(md5sum)
-                    tokens_nums.append(token_num)
-                    datas.append(data)
-                    items.append(audio)
-
                 await self._alloc_resource(items, md5sums, tokens_nums, datas)
         return
 
@@ -295,6 +307,13 @@ class HttpServerManager:
             request.state.lightllm_req_id = group_request_id
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
+        self._log_stage_timing(
+            group_request_id,
+            start_time,
+            "received",
+            has_audio=audio_count > 0,
+            has_image=image_count > 0,
+        )
 
         try:
             original_multimodal_params = None
@@ -316,7 +335,7 @@ class HttpServerManager:
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # encode
-            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params, start_time=start_time)
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -481,7 +500,11 @@ class HttpServerManager:
         return
 
     async def _encode(
-        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
+        self,
+        prompt: Union[str, List[int]],
+        multimodal_params: MultimodalParams,
+        sampling_params: SamplingParams,
+        start_time: Optional[float] = None,
     ):
         if isinstance(prompt, str):
             if self.enable_multimodal:
@@ -490,15 +513,23 @@ class HttpServerManager:
                 ), "too many multimodal items!"
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
-                encode_start_time = time.time()
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 log_req_id = getattr(sampling_params, "group_request_id", None)
-                logger.info(
-                    f"lightllm_req_id:{log_req_id} "
-                    f"stage:alloc_multimodal_resources_done "
-                    f"elapsed_ms:{(time.time() - encode_start_time) * 1000.0:.3f} "
-                    f"audio_count:{len(multimodal_params.audios)} image_count:{len(multimodal_params.images)}"
-                )
+                if start_time is None:
+                    logger.info(
+                        f"lightllm_req_id:{log_req_id} "
+                        f"stage:alloc_multimodal_resources_done "
+                        f"elapsed_ms:0.000 "
+                        f"audio_count:{len(multimodal_params.audios)} image_count:{len(multimodal_params.images)}"
+                    )
+                else:
+                    self._log_stage_timing(
+                        log_req_id,
+                        start_time,
+                        "alloc_multimodal_resources_done",
+                        audio_count=len(multimodal_params.audios),
+                        image_count=len(multimodal_params.images),
+                    )
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
@@ -592,7 +623,7 @@ class HttpServerManager:
 
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
-                logger.info(
+                logger.debug(
                     f"lightllm_req_id:{group_req_objs.group_req_id} "
                     f"stage:transfer_to_visual "
                     f"target_port:{self.args.visual_port}"
@@ -601,7 +632,7 @@ class HttpServerManager:
                 return
 
             if not self.args.disable_audio:
-                logger.info(
+                logger.debug(
                     f"lightllm_req_id:{group_req_objs.group_req_id} "
                     f"stage:transfer_to_audio "
                     f"target_port:{self.args.audio_port}"
@@ -610,7 +641,7 @@ class HttpServerManager:
                 return
 
             if self.args.enable_cpu_cache:
-                logger.info(
+                logger.debug(
                     f"lightllm_req_id:{group_req_objs.group_req_id} "
                     f"stage:transfer_to_multi_level_kv_cache target_port:{self.args.multi_level_kv_cache_port}"
                 )
@@ -620,7 +651,7 @@ class HttpServerManager:
                 )
                 return
 
-            logger.info(
+            logger.debug(
                 f"lightllm_req_id:{group_req_objs.group_req_id} "
                 f"stage:transfer_to_router "
                 f"target_port:{self.args.router_port}"
@@ -633,7 +664,7 @@ class HttpServerManager:
 
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
-            logger.info(
+            logger.debug(
                 f"lightllm_req_id:{group_req_objs.group_req_id} "
                 f"stage:transfer_to_router_from_decode "
                 f"target_port:{self.args.router_port}"
