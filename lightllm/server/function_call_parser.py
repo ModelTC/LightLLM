@@ -1846,6 +1846,48 @@ class Qwen3CoderDetector(BaseFormatDetector):
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
 
+    def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
+        """Build the current argument JSON from a partial XML tool-call body."""
+        param_matches = self.parameter_regex.findall(partial_body)
+        if not param_matches:
+            return None
+
+        param_config = self._get_param_config(func_name, tools)
+        param_dict = {}
+        has_visible_value = False
+
+        for match in param_matches:
+            try:
+                idx = match.index(">")
+            except ValueError:
+                continue
+
+            param_name = match[:idx].strip()
+            param_value = match[idx + 1 :]
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            if param_value.strip():
+                has_visible_value = True
+            elif (
+                f"<parameter={param_name}>" in partial_body
+                and f"<parameter={param_name}>{param_value}</parameter>" in partial_body
+            ):
+                # Closed empty-string parameter. We can safely emit it.
+                has_visible_value = True
+            else:
+                # Parameter tag is present but its value has not started streaming yet.
+                continue
+
+            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+
+        if not param_dict and not has_visible_value:
+            return None
+
+        return json.dumps(param_dict, ensure_ascii=False)
+
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         idx = text.find(self.bot_token)
         normal_text = text[:idx].strip() if idx != -1 else text
@@ -1865,6 +1907,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 func_str = match[0] if match[0] else match[1]
                 item = self._parse_function_call(func_str, tools)
                 if item:
+                    item.tool_index = len(calls)
                     calls.append(item)
 
         return StreamingParseResult(normal_text=normal_text, calls=calls)
@@ -1872,72 +1915,49 @@ class Qwen3CoderDetector(BaseFormatDetector):
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Streaming incremental parsing for Qwen3-Coder XML tool calls."""
         self._buffer += new_text
-        current_text = self._buffer
-
-        if not self.has_tool_call(current_text):
-            partial_len = self._ends_with_partial_token(current_text, self.bot_token)
-            if partial_len:
-                return StreamingParseResult()
-            self._buffer = ""
-            cleaned = new_text.replace(self.eot_token, "")
-            return StreamingParseResult(normal_text=cleaned)
-
-        # Check for complete tool call blocks
-        if self.eot_token in current_text:
-            result = self.detect_and_parse(current_text, tools)
-            last_end = current_text.rfind(self.eot_token)
-            if last_end != -1:
-                self._buffer = current_text[last_end + len(self.eot_token) :].lstrip()
-            else:
-                self._buffer = ""
-            self.current_tool_id = -1
-            self.current_tool_name_sent = False
-            return result
-
-        # Partial tool call - try to extract function name for early streaming
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
 
-        calls = []
-        tool_call_start = current_text.find(self.bot_token)
-        if tool_call_start == -1:
-            return StreamingParseResult()
+        normal_text = ""
+        calls: List[ToolCallItem] = []
 
-        content_after = current_text[tool_call_start + len(self.bot_token) :]
-        func_prefix = "<function="
-        func_pos = content_after.find(func_prefix)
-        if func_pos == -1:
-            return StreamingParseResult()
+        while True:
+            current_text = self._buffer
+            tool_call_start = current_text.find(self.bot_token)
 
-        after_func = content_after[func_pos + len(func_prefix) :]
-        gt_pos = after_func.find(">")
-        if gt_pos == -1:
-            return StreamingParseResult()
+            if tool_call_start == -1:
+                partial_len = self._ends_with_partial_token(current_text, self.bot_token)
+                if partial_len:
+                    return StreamingParseResult(normal_text=normal_text, calls=calls)
+                if current_text:
+                    normal_text += current_text.replace(self.eot_token, "")
+                    self._buffer = ""
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
 
-        func_name = after_func[:gt_pos].strip()
+            if tool_call_start > 0:
+                normal_text += current_text[:tool_call_start]
+                self._buffer = current_text[tool_call_start:]
+                current_text = self._buffer
 
-        if self.current_tool_id == -1:
-            self.current_tool_id = 0
-            self.prev_tool_call_arr = []
-            self.streamed_args_for_tool = [""]
+            eot_pos = current_text.find(self.eot_token)
+            if eot_pos == -1:
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
 
-        while len(self.prev_tool_call_arr) <= self.current_tool_id:
-            self.prev_tool_call_arr.append({})
-        while len(self.streamed_args_for_tool) <= self.current_tool_id:
-            self.streamed_args_for_tool.append("")
+            complete_block = current_text[: eot_pos + len(self.eot_token)]
+            func_matches = self.function_regex.findall(complete_block)
 
-        if func_name and func_name in self._tool_indices and not self.current_tool_name_sent:
-            calls.append(
-                ToolCallItem(
-                    tool_index=self.current_tool_id,
-                    name=func_name,
-                    parameters="",
-                )
-            )
-            self.current_tool_name_sent = True
-            self.prev_tool_call_arr[self.current_tool_id] = {"name": func_name, "arguments": {}}
+            if self.current_tool_id == -1:
+                self.current_tool_id = 0
 
-        return StreamingParseResult(normal_text="", calls=calls)
+            for match in func_matches:
+                func_str = match[0] if match[0] else match[1]
+                item = self._parse_function_call(func_str, tools)
+                if item:
+                    item.tool_index = self.current_tool_id
+                    calls.append(item)
+                    self.current_tool_id += 1
+
+            self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 
 class FunctionCallParser:

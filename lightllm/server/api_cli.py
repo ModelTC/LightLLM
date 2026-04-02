@@ -98,6 +98,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default="default_model_name",
         help="just help to distinguish internal model name, use 'host:port/get_model_name' to get",
     )
+    parser.add_argument(
+        "--model_owner",
+        type=str,
+        default=None,
+        help="the model owner, if not set, will use lightllm",
+    )
 
     parser.add_argument(
         "--model_dir",
