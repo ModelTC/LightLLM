@@ -15,11 +15,12 @@ class CpuEmbedCacheClient(object):
     This class is responsible for handling cpu kv cache meta data.
     """
 
-    def __init__(self, create_meta_data: bool, init_shm_data: bool):
+    def __init__(self, create_meta_data: bool, init_shm_data: bool, pin_shm: bool = True):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
         self.embed_cache_tensor_meta = calcu_embed_cache_meta()
         self.token_num: int = self.embed_cache_tensor_meta.token_num
+        self.pin_shm = pin_shm
 
         if create_meta_data:
             self.token_index_manager = MemoryManager(total_size=self.token_num)
@@ -67,8 +68,6 @@ class CpuEmbedCacheClient(object):
             cache_tensor=self.cpu_embed_cache_tensor,
             start_index_in_cache=start_index_in_cache,
         )
-        return
-
         return
 
 

@@ -1,5 +1,3 @@
-import zmq
-import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
@@ -8,20 +6,24 @@ import pickle
 import inspect
 import setproctitle
 import threading
-import collections
 import base64
 import httpx
-from typing import List, Dict
+import random
+import copy
+from typing import List, Dict, Optional
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
+from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from .manager import VisualManager
 from .objs import VIT_Obj
 
@@ -38,6 +40,15 @@ class ProxyVisualManager(VisualManager):
         self.id_to_rpyc_conn: Dict[str, rpyc.Connection] = {}
         self.conn_lock = threading.Lock()
 
+        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False, pin_shm=False)
+
+        self.afs_handler = SepEmbedHandler(
+            afs_embed_dir=self.args.afs_embed_dir,
+            redis_host=self.args.config_server_host,
+            redis_port=self.args.config_server_visual_redis_port,
+            capacity=self.args.afs_embed_capacity,
+        )
+
     async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
         images_need_infer = self.get_need_infer_images(group_req_indexes)
 
@@ -46,36 +57,60 @@ class ProxyVisualManager(VisualManager):
             self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
 
-        # case 2
-        dp_to_handle_images = collections.defaultdict(list)
-        for image in images_need_infer:
-            self.cur_dp_index += 1
-            select_dp = self.cur_dp_index % self.vit_dp
-            dp_to_handle_images[select_dp].append((image, threading.Event()))
+        # 将 images_need_infer 按照 self.infer_batch_size 切分成多个 batch，发送给不同的 visual server 进行推理，\
+        # 最后等待所有推理完成后再发送给下一个模块
+        images_batches = [
+            images_need_infer[i : i + self.infer_batch_size]
+            for i in range(0, len(images_need_infer), self.infer_batch_size)
+        ]
 
         taskes = []
-        for dp_index in range(self.vit_dp):
-            _images = dp_to_handle_images[dp_index]
-            if _images:
-                taskes.extend(self.run_task(dp_index, images=[e[0] for e in _images], events=[e[1] for e in _images]))
+        for images_batch in images_batches:
+            conn = self.select_vit_conn()
 
-        with self.lock:
+            def _run_task():
+                self.run_task(conn, images_batch)
+
+            taskes.append(asyncio.to_thread(_run_task))
+
+        try:
             await asyncio.gather(*taskes)
-
-        for dp_index in range(self.vit_dp):
-            _images = dp_to_handle_images[dp_index]
-            if _images:
-                await asyncio.to_thread(_images[-1][1].wait)
+        except Exception as e:
+            group_req_indexes.has_error = True
+            logger.exception(str(e))
 
         self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
-    def run_task(self, dp_index: int, images, events):
-        taskes = []
-        for vit_tp_rank in range(self.vit_tp):
-            task = self.model_rpcs[dp_index][vit_tp_rank].run_task(images, events)
-            taskes.append(task)
-        return taskes
+    def select_vit_conn(self) -> Optional[rpyc.Connection]:
+        with self.conn_lock:
+            if not self.id_to_rpyc_conn:
+                return None
+            ids = list(self.id_to_rpyc_conn.keys())
+            id = random.choice(ids)
+            return self.id_to_rpyc_conn[id]
+
+    def run_task(self, conn: rpyc.Connection, images: List[ImageItem]):
+        event = threading.Event()
+        # 避免修改原始的 image 对象，主要是为了避免在后续的流程中出现问题，因为后续的流程可能会对 image 对象进行访问，
+        # 尤其是一些 cache 的逻辑，如果直接修改了原始的 image 对象，可能会导致一些不可预期的问题。
+        images = copy.deepcopy(images)
+        # 将 bytes 从 shm 中读取出来，放到 image.data_bytes 中，供远端的 vit 进行推理使用。
+        for image in images:
+            image.data_bytes = read_shm(get_shm_name_data(image.uuid))
+        conn.root.infer_images(images, event)
+        event.wait(timeout=600)
+
+        for image in images:
+            tensor = self.afs_handler.load(md5=image.md5)
+            if tensor is None:
+                raise Exception(f"Failed to load tensor from afs for image uuid {image.uuid} with md5 {image.md5}")
+            start = image.start_index_in_embed_cache
+            end = start + tensor.shape[0]
+            self.cpu_embed_cache_client.cpu_embed_cache_tensor[start:end] = tensor
+
+        self.cache_client.root.set_items_embed([image.uuid for image in images])
+        return
 
     async def loop_to_connect_remote_visual_server(self):
         while True:
@@ -100,6 +135,7 @@ class ProxyVisualManager(VisualManager):
                                         conn = rpyc.connect(
                                             vit_obj.host_ip, vit_obj.port, config={"allow_pickle": True}
                                         )
+                                        conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                                         conn._bg_thread = rpyc.BgServingThread(conn)
                                         return conn
 
