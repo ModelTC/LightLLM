@@ -1,23 +1,26 @@
-import pickle
 import zmq
-import zmq.asyncio
 import asyncio
 import uvloop
 import rpyc
 import socket
+import pickle
 import inspect
 import setproctitle
+import threading
+import collections
 from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
-from lightllm.server.core.objs.shm_req_manager import ShmReqManager, StartArgs
+from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.multimodal_params import AudioItem
-from .model_infer.model_rpc import start_model_process, AudioModelRpcClient
+from .model_infer import start_model_process, AudioModelRpcClient
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from rpyc.utils.classic import obtain
+
 
 logger = init_logger(__name__)
 
@@ -26,8 +29,8 @@ class AudioManager:
     def __init__(
         self,
         args: StartArgs,
-        infer_batch_size=4,
     ):
+        self.args = args
         context = zmq.asyncio.Context(2)
 
         if args.enable_cpu_cache:
@@ -41,124 +44,137 @@ class AudioManager:
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.cache_port = args.cache_port
-        self.waiting_reqs: List[GroupReqIndexes] = []
         self.model_weightdir = args.model_dir
-        self.tp_world_size = args.tp
-        self.world_size = 1
-        self.infer_batch_size = infer_batch_size
-        self.trust_remote_code = args.trust_remote_code
-        self.args = args
+        self.audio_dp = args.audio_dp
+        self.audio_tp = args.audio_tp
+        self.infer_batch_size = args.audio_infer_batch_size
         self.shm_req_manager = ShmReqManager()
+        self.lock = asyncio.Lock()
 
     async def wait_to_model_ready(self):
-
-        self.model_rpcs: List[AudioModelRpcClient] = []
-        for rank_id in range(self.world_size):
-            rpc_model = await start_model_process(world_size=self.world_size)
-            self.model_rpcs.append(rpc_model)
+        self.model_rpcs: List[List[AudioModelRpcClient]] = [[] for _ in range(self.audio_dp)]
+        for dp_rank_id in range(self.audio_dp):
+            for tp_rank_id in range(self.audio_tp):
+                rpc_model = await start_model_process()
+                self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
-        for rank_id in range(self.world_size):
-            kvargs = {
-                "weight_dir": self.model_weightdir,
-                "trust_remote_code": self.trust_remote_code,
-                "rank_id": rank_id,
-                "cache_port": self.cache_port,
-                "data_type": self.args.data_type,
-            }
-            init_model_ret.append(self.model_rpcs[rank_id].init_model(kvargs))
+        for dp_rank_id in range(self.audio_dp):
+            for tp_rank_id in range(self.audio_tp):
+                device_id = self.args.audio_gpu_ids[dp_rank_id * self.audio_tp + tp_rank_id]
+                kvargs = {
+                    "weight_dir": self.model_weightdir,
+                    "device_id": device_id,
+                    "audio_tp": self.audio_tp,
+                    "cache_port": self.args.cache_port,
+                    "tp_rank_id": tp_rank_id,
+                    "dp_rank_id": dp_rank_id,
+                    "data_type": self.args.data_type,
+                    "audio_nccl_port": self.args.audio_nccl_ports[dp_rank_id],
+                    "max_batch_size": max(self.infer_batch_size // self.audio_dp, 1),
+                }
+                init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
         await asyncio.gather(*init_model_ret)
         return
 
-    async def infer_audios(self, audios: List[AudioItem]):
-        if len(audios) == 0:
+    def get_need_infer_audios(self, group_req_indexes: GroupReqIndexes) -> List[AudioItem]:
+        shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
+        is_aborted = shm_req.is_aborted
+        disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
+        self.shm_req_manager.put_back_req_obj(shm_req)
+        if is_aborted:
+            return []
+
+        multimodal_params = group_req_indexes.multimodal_params
+        audio_uuids = [audio.uuid for audio in multimodal_params.audios]
+        if disable_prompt_cache:
+            ready_audio = [False] * len(audio_uuids)
+        else:
+            if len(audio_uuids) > 0:
+                ready_audio = obtain(self.cache_client.root.get_items_embed(audio_uuids))
+            else:
+                ready_audio = []
+
+        audios_need_infer = []
+        for audio, ready in zip(multimodal_params.audios, ready_audio):
+            if not ready:
+                audios_need_infer.append(audio)
+
+        return audios_need_infer
+
+    async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
+        audios_need_infer = self.get_need_infer_audios(group_req_indexes)
+
+        if len(audios_need_infer) == 0:
+            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
             return
-
-        rets = [self.model_rpcs[tp_rank].encode(audios) for tp_rank in range(self.world_size)]
-        await asyncio.gather(*rets)
-
+        await self.handle_audios(audios_need_infer)
+        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
 
-    async def loop_for_fwd(self):
-        while True:
-            if len(self.waiting_reqs) == 0:
-                await asyncio.sleep(0.01)  # 10ms
-            else:
-                processing_group_reqs = []
-                audios_need_infer = []
-                while len(self.waiting_reqs) > 0:
-                    group_req_indexes = self.waiting_reqs.pop(0)
-                    shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
-                    disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
-                    is_aborted = shm_req.is_aborted
-                    self.shm_req_manager.put_back_req_obj(shm_req)
-                    if is_aborted:
-                        # 因为连接断开 aborted 掉的请求也需要传输到后续的模块进行处理
-                        # 因为采用 shm 来映射所有的 req 对象以后，引用管理情况复杂了
-                        # 需要一些一致的流程来保证不出现异步问题。
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                        continue
+    async def handle_audios(self, audios_need_infer: List[AudioItem]):
+        if not hasattr(self, "cur_dp_index"):
+            self.cur_dp_index = 0
 
-                    multimodal_params = group_req_indexes.multimodal_params
+        dp_to_handle_audios = collections.defaultdict(list)
+        for audio in audios_need_infer:
+            self.cur_dp_index += 1
+            select_dp = self.cur_dp_index % self.audio_dp
+            dp_to_handle_audios[select_dp].append((audio, threading.Event()))
 
-                    audio_uuids = [audio.uuid for audio in multimodal_params.audios]
-                    # disable prompt cache通常用来测试，需要也去掉audio cache的影响
-                    if disable_prompt_cache:
-                        ready_audio = [False] * len(audio_uuids)
-                    else:
-                        ready_audio = obtain(self.cache_client.root.get_items_embed(audio_uuids))
+        taskes = []
+        for dp_index in range(self.audio_dp):
+            _audios = dp_to_handle_audios[dp_index]
+            if _audios:
+                taskes.append(
+                    self.infer_audios(dp_index, audios=[e[0] for e in _audios], events=[e[1] for e in _audios])
+                )
 
-                    for audio, ready in zip(multimodal_params.audios, ready_audio):
-                        if not ready:
-                            audios_need_infer.append(audio)
+        async with self.lock:
+            try:
+                await asyncio.gather(*taskes)
+            except BaseException as e:
+                logger.exception(str(e))
+                raise e
 
-                        if len(audios_need_infer) == self.infer_batch_size:
-                            await self.infer_audios(audios_need_infer)
-                            audios_need_infer = []
-                            for _group_req_indexes in processing_group_reqs:
-                                self.send_to_next_module.send_pyobj(
-                                    _group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL
-                                )
-                            processing_group_reqs = []
+        for dp_index in range(self.audio_dp):
+            _audios = dp_to_handle_audios[dp_index]
+            if _audios:
+                await asyncio.to_thread(_audios[-1][1].wait)
+        return
 
-                    if len(audios_need_infer) == 0:
-                        self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                    else:
-                        processing_group_reqs.append(group_req_indexes)
-
-                if len(audios_need_infer) > 0:
-                    await self.infer_audios(audios_need_infer)
-                    for _group_req_indexes in processing_group_reqs:
-                        self.send_to_next_module.send_pyobj(_group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-                    processing_group_reqs = []
-                    audios_need_infer = []
+    async def infer_audios(self, dp_index: int, audios, events):
+        taskes = []
+        for audio_tp_rank in range(self.audio_tp):
+            task = self.model_rpcs[dp_index][audio_tp_rank].run_task(audios, events)
+            taskes.append(task)
+        await asyncio.gather(*taskes)
 
     async def loop_for_netio_req(self):
-        while True:
-            recv_req: GroupReqIndexes = await self.zmq_recv_socket.recv_pyobj()
-            if isinstance(recv_req, GroupReqIndexes):
-                logger.info(
-                    f"audio recv req id {recv_req.group_req_id} "
-                    f"audio count {len(recv_req.multimodal_params.audios)}"
-                )
-                self.waiting_reqs.append(recv_req)
-            else:
-                assert False, f"Error Req Inf {recv_req}"
+        try:
+            while True:
+                recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
+                if isinstance(recv_req, GroupReqIndexes):
+                    logger.info(
+                        f"audio recv req id {recv_req.group_req_id} "
+                        f"audio count {len(recv_req.multimodal_params.audios)}"
+                    )
+                    asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
+                else:
+                    assert False, f"Error Req Inf {recv_req}"
+        except Exception as e:
+            logger.exception(str(e))
 
     def clean_up(self):
-        for model_rpc in self.model_rpcs:
-            model_rpc.rpc_server_process.kill()
-        for model_rpc in self.model_rpcs:
-            model_rpc.rpc_server_process.join()
         return
 
 
 def start_audio_process(args, pipe_writer):
-    # 注册graceful 退出的处理
+    import lightllm.utils.rpyc_fix_utils as _
+
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
-
+    start_parent_check_thread()
     try:
         audioserver = AudioManager(args=args)
         asyncio.run(audioserver.wait_to_model_ready())
@@ -170,11 +186,10 @@ def start_audio_process(args, pipe_writer):
     pipe_writer.send("init ok")
 
     def handle_exception(loop, context):
-        logger.exception(f"VisualServer Caught exception: {str(context)}")
+        logger.exception(f"AudioServer Caught exception: {str(context)}")
 
     loop = asyncio.new_event_loop()
     loop.set_exception_handler(handle_exception)
     asyncio.set_event_loop(loop)
-    loop.create_task(audioserver.loop_for_fwd())
     loop.run_until_complete(audioserver.loop_for_netio_req())
     return
