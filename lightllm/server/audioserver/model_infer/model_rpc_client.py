@@ -7,9 +7,8 @@ from .model_rpc import AudioModelRpcServer
 
 
 class AudioModelRpcClient:
-    def __init__(self, rpc_conn, rpc_server_process=None):
+    def __init__(self, rpc_conn):
         self.rpc_conn: AudioModelRpcServer = rpc_conn
-        self.rpc_server_process = rpc_server_process
 
         def async_wrap(f):
             f = rpyc.async_(f)
