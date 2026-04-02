@@ -19,8 +19,6 @@ def gqa_token_decode_attention_flash_decoding_diverse(
     alloc_tensor_func=torch.empty,
     shared_streams_dict={},
     max_batch_group_size=None,
-    stage1_run_config=None,
-    stage2_run_config=None,
 ):
     if "stream1" not in shared_streams_dict:
         shared_streams_dict["stream1"] = torch.cuda.Stream()
@@ -67,7 +65,6 @@ def gqa_token_decode_attention_flash_decoding_diverse(
             mid_out_logsumexp=mid_o_logexpsum,
             block_seq=BLOCK_SEQ,
             max_batch_group_size=max_batch_group_size,
-            run_config=stage1_run_config,
         )
 
     stream2.wait_stream(current_stream)
@@ -84,7 +81,6 @@ def gqa_token_decode_attention_flash_decoding_diverse(
             mid_out=mid_o,
             mid_out_logsumexp=mid_o_logexpsum,
             block_seq=BLOCK_SEQ,
-            run_config=stage2_run_config,
         )
 
     current_stream.wait_stream(stream1)

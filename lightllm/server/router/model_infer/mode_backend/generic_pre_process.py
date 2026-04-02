@@ -5,7 +5,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_con
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.utils.envs_utils import (
-    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_gqa_diverse_decode_fast_kernel,
     select_diverse_max_batch_shared_group_size,
 )
 
@@ -126,7 +126,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
 
-    if enable_diverse_mode_gqa_decode_fast_kernel():
+    if enable_gqa_diverse_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
     else:
         b_shared_seq_len = None
