@@ -196,7 +196,7 @@ class AudioModelRpcServer(rpyc.Service):
                 self.sempare.release()
                 self._log_latency(audio, stage="set_event")
 
-            self.cache_client.root.set_items_embed(uuids=[audio.uuid for audio in audios])
+            self.cache_client.root.set_items_embed([audio.uuid for audio in audios])
             self._log_latency(audios[0], "set_items_embed")
 
     def _store_worker(self):
