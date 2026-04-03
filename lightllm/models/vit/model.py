@@ -72,8 +72,7 @@ class VisionTransformer:
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
             exception_str = (
-                "Vit check max len infer fail, you can try: "
-                "1.Set the --visual_infer_batch_size to a smaller value."
+                "Vit check max len infer fail, you can try: 1.Set the --visual_infer_batch_size to a smaller value."
             )
             logger.error(exception_str)
             raise Exception(exception_str)
