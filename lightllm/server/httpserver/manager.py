@@ -124,8 +124,46 @@ class HttpServerManager:
         self.latest_success_infer_time_mark.set_value(int(time.time()))
         return
 
-    async def _alloc_resource(self, items, md5sums, token_nums, datas):
+    def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
+        cost_ms = (time.time() - start_time) * 1000.0
+        extras = " ".join(f"{k}:{v}" for k, v in kwargs.items())
+        suffix = f" {extras}" if extras else ""
+        logger.info(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
+        return
 
+    def _prepare_multimodal_resource_inputs(
+        self, multimodal_params: MultimodalParams, sampling_params: SamplingParams
+    ) -> Tuple[List[Union[ImageItem, AudioItem]], List[str], List[int], List[bytes]]:
+        items, md5sums, tokens_nums, datas = [], [], [], []
+
+        for img in multimodal_params.images:
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+            data = img.read()
+            token_num = self.tokenizer.get_image_token_length(img)
+            md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+            img.md5 = md5sum
+            md5sums.append(md5sum)
+            tokens_nums.append(token_num)
+            datas.append(data)
+            items.append(img)
+
+        for audio in multimodal_params.audios:
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+            data = audio.read()
+            token_num = self.tokenizer.get_audio_token_length(audio)
+            payload_md5 = audio.extra_params.get("audio_payload_md5")
+            if payload_md5 is None:
+                payload_md5 = hashlib.md5(data).hexdigest()
+            md5sum = payload_md5 + "_" + str(hash(frozendict(audio.extra_params)))
+            audio.md5 = md5sum
+            md5sums.append(md5sum)
+            tokens_nums.append(token_num)
+            datas.append(data)
+            items.append(audio)
+
+        return items, md5sums, tokens_nums, datas
+
+    async def _alloc_resource(self, items, md5sums, token_nums, datas):
         while True:
             records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
 
@@ -137,23 +175,17 @@ class HttpServerManager:
                 logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
                 raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
 
-            uid_list = []
-            for item, rec in zip(items, records):
+            update_data_ids = []
+            for item, rec, data in zip(items, records, datas):
                 item: Union[ImageItem, AudioItem] = item
                 item.uuid = rec["id"]
                 item.token_id = rec["token_id"]
                 item.token_num = rec["token_num"]
                 item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
 
-                uid_list.append(rec["id"])
-
-            ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
-            update_data_ids = []
-
-            for uid, ready, data in zip(uid_list, ready_flags, datas):
-                if not ready:
-                    create_shm(get_shm_name_data(uid), data)
-                    update_data_ids.append(uid)
+                if not rec["data_ready"]:
+                    create_shm(get_shm_name_data(rec["id"]), data)
+                    update_data_ids.append(rec["id"])
 
             if update_data_ids:
                 self.cache_client.root.set_items_data(update_data_ids)
@@ -162,33 +194,16 @@ class HttpServerManager:
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
+            items, md5sums, tokens_nums, datas = self._prepare_multimodal_resource_inputs(
+                multimodal_params, sampling_params
+            )
+            if len(items) <= 1:
+                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+                return
             # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
-                items, md5sums, tokens_nums, datas = [], [], [], []
-                for img in multimodal_params.images:
-                    self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-                    data = img.read()
-                    # must after init_imageitem_extral_params
-                    token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-                    md5sums.append(md5sum)
-                    img.md5 = md5sum
-                    tokens_nums.append(token_num)
-                    datas.append(data)
-                    items.append(img)
-                for audio in multimodal_params.audios:
-                    self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-                    data = audio.read()
-                    token_num = self.tokenizer.get_audio_token_length(audio)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
-                    md5sums.append(md5sum)
-                    audio.md5 = md5sum
-                    tokens_nums.append(token_num)
-                    datas.append(data)
-                    items.append(audio)
-
                 await self._alloc_resource(items, md5sums, tokens_nums, datas)
         return
 
@@ -289,6 +304,17 @@ class HttpServerManager:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+        if request is not None:
+            request.state.lightllm_req_id = group_request_id
+        audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
+        image_count = len(multimodal_params.images) if multimodal_params is not None else 0
+        self._log_stage_timing(
+            group_request_id,
+            start_time,
+            "received",
+            has_audio=audio_count > 0,
+            has_image=image_count > 0,
+        )
 
         try:
             original_multimodal_params = None
@@ -296,12 +322,29 @@ class HttpServerManager:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
 
             if self.pd_mode.is_P_or_NORMAL():
-                await multimodal_params.verify_and_preload(request)
+                await multimodal_params.verify_and_preload(
+                    request, audio_preload_config=getattr(self.tokenizer, "audio_preload_config", None)
+                )
+                self._log_stage_timing(
+                    group_request_id,
+                    start_time,
+                    "verify_and_preload_done",
+                    audio_count=audio_count,
+                    image_count=image_count,
+                )
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # encode
-            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params, start_time=start_time)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "encode_done",
+                prompt_tokens=len(prompt_ids),
+                audio_count=audio_count,
+                image_count=image_count,
+            )
 
             prompt_tokens = len(prompt_ids)
             # 监控
@@ -310,6 +353,13 @@ class HttpServerManager:
                 self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
                 self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "check_and_repair_length_done",
+                prompt_tokens=len(prompt_ids),
+                max_new_tokens=sampling_params.max_new_tokens,
+            )
 
             if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
                 # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
@@ -357,6 +407,12 @@ class HttpServerManager:
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
                 req_objs.append(req_obj)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "shm_req_init_done",
+                req_count=len(req_objs),
+            )
 
             logger.debug(
                 f"alloc shm_req for req_id {group_request_id}, "
@@ -369,6 +425,13 @@ class HttpServerManager:
 
             await self.transfer_to_next_module_or_node(
                 prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
+            )
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "request_forwarded",
+                has_audio=audio_count > 0,
+                has_image=image_count > 0,
             )
 
             results_generator = self._wait_to_token_package(
@@ -425,7 +488,6 @@ class HttpServerManager:
         return image_tokens, audio_tokens
 
     async def _log_req_header(self, request_headers, group_request_id: int):
-
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
 
@@ -438,7 +500,11 @@ class HttpServerManager:
         return
 
     async def _encode(
-        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
+        self,
+        prompt: Union[str, List[int]],
+        multimodal_params: MultimodalParams,
+        sampling_params: SamplingParams,
+        start_time: Optional[float] = None,
     ):
         if isinstance(prompt, str):
             if self.enable_multimodal:
@@ -448,6 +514,22 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                log_req_id = getattr(sampling_params, "group_request_id", None)
+                if start_time is None:
+                    logger.info(
+                        f"lightllm_req_id:{log_req_id} "
+                        f"stage:alloc_multimodal_resources_done "
+                        f"elapsed_ms:0.000 "
+                        f"audio_count:{len(multimodal_params.audios)} image_count:{len(multimodal_params.images)}"
+                    )
+                else:
+                    self._log_stage_timing(
+                        log_req_id,
+                        start_time,
+                        "alloc_multimodal_resources_done",
+                        audio_count=len(multimodal_params.audios),
+                        image_count=len(multimodal_params.images),
+                    )
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
@@ -538,23 +620,41 @@ class HttpServerManager:
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
+                logger.debug(
+                    f"lightllm_req_id:{group_req_objs.group_req_id} "
+                    f"stage:transfer_to_visual "
+                    f"target_port:{self.args.visual_port}"
+                )
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if not self.args.disable_audio:
+                logger.debug(
+                    f"lightllm_req_id:{group_req_objs.group_req_id} "
+                    f"stage:transfer_to_audio "
+                    f"target_port:{self.args.audio_port}"
+                )
                 self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if self.args.enable_cpu_cache:
+                logger.debug(
+                    f"lightllm_req_id:{group_req_objs.group_req_id} "
+                    f"stage:transfer_to_multi_level_kv_cache target_port:{self.args.multi_level_kv_cache_port}"
+                )
                 self.send_to_multi_level_kv_cache.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
                 return
 
+            logger.debug(
+                f"lightllm_req_id:{group_req_objs.group_req_id} "
+                f"stage:transfer_to_router "
+                f"target_port:{self.args.router_port}"
+            )
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
@@ -563,6 +663,11 @@ class HttpServerManager:
 
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
+            logger.debug(
+                f"lightllm_req_id:{group_req_objs.group_req_id} "
+                f"stage:transfer_to_router_from_decode "
+                f"target_port:{self.args.router_port}"
+            )
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
@@ -581,7 +686,6 @@ class HttpServerManager:
         req_status: "ReqStatus",
         request: Request,
     ):
-
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
@@ -624,6 +728,11 @@ class HttpServerManager:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
                         self.first_time_costs.add(first_token_cost_ms)
+                        logger.info(
+                            f"lightllm_req_id:{group_request_id} "
+                            f"stage:first_token_arrived elapsed_ms:{first_token_cost_ms:.3f} "
+                            f"sub_req_id:{sub_req_id} prompt_tokens:{prompt_tokens}"
+                        )
 
                     out_token_counter += 1
 
@@ -707,7 +816,6 @@ class HttpServerManager:
         pre_time_mark = time.time()
 
         while True:
-
             try:
                 await asyncio.wait_for(self.recycle_event.wait(), timeout=0.02)
             except asyncio.TimeoutError:
@@ -784,7 +892,6 @@ class HttpServerManager:
 
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
-
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
                                 req.cumlogprob += float(req.shm_logprobs.arr[src_index])
                                 metadata = {

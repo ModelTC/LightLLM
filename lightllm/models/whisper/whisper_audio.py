@@ -1,6 +1,5 @@
 import os
 import json
-import rpyc
 import librosa
 import numpy as np
 import torch
@@ -10,8 +9,8 @@ from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.server.multimodal_params import AudioItem
-from rpyc.utils.classic import obtain
+from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
+
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -40,7 +39,7 @@ class WhisperProcessor(ProcessorMixin):
         return self.tokenizer.get_decoder_prompt_ids(task=task, language=language, no_timestamps=no_timestamps)
 
     def get_T_after_cnn(self, L_in, dilation=1):
-        for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
+        for padding, kernel_size, stride in eval("[(1,3,1)] + [(1,3,2)] "):
             L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
             L_out = 1 + L_out // stride
             L_in = L_out
@@ -172,8 +171,7 @@ class WhisperAudioModel:
                 uuids.append(item.uuid)
                 items.append(item)
                 audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=16000)
+                audio = load_audio_from_shm_payload(audio_data, item.extra_params, 16000)
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
@@ -221,11 +219,27 @@ class WhisperAudioModel:
 
         ans_embeds = []
         for i in range(len(uuids)):
-
             item = items[i]
-
             # 拼接该 audio 的所有 chunk embedding
             cur_embed = torch.cat(per_audio_embeds[i], dim=0)
             ans_embeds.append(cur_embed)
 
         return ans_embeds, audio_items
+
+    @torch.no_grad()
+    def warmup(self, audio_bytes: bytes):
+        audio = BytesIO(audio_bytes)
+        audio, _ = librosa.load(audio, sr=16000)
+
+        from .defaults import MIN_AUDIO_LEN
+
+        if audio.shape[0] < MIN_AUDIO_LEN:
+            audio = np.pad(audio, (0, MIN_AUDIO_LEN - len(audio)), mode="constant", constant_values=0.0)
+
+        batch_audio_lens = np.array([min(audio.shape[0], self.max_length)], dtype=np.int32)
+        audios, audio_lens_after_cnn = self.audio_processor(
+            [audio], batch_audio_lens, sampling_rate=16000, return_tensors="pt"
+        )
+        _ = self.forward(audios, audio_lens_after_cnn)
+        torch.cuda.current_stream().synchronize()
+        return

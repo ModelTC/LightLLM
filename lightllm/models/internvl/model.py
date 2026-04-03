@@ -50,6 +50,11 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
 
         self.audio_min_length = MIN_AUDIO_LEN
         self.audio_max_length = 16000 * 30
+        self.audio_preload_config = {
+            "sampling_rate": 16000,
+            "hop_length": 160,
+            "min_audio_len": int(self.audio_min_length),
+        }
 
     def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams

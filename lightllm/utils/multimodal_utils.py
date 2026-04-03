@@ -4,10 +4,14 @@ import base64
 import httpx
 from PIL import Image
 from io import BytesIO
+from urllib.parse import urlparse
+from typing import Dict, Optional
 from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+_HTTP_CLIENTS: Dict[Optional[str], httpx.AsyncClient] = {}
+_LOCAL_RESOURCE_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _httpx_async_client_proxy_kwargs(proxy) -> dict:
@@ -38,20 +42,25 @@ def image2base64(img_str: str):
 async def fetch_resource(url, request: Request, timeout, proxy=None):
     logger.info(f"Begin to download resource from url: {url}")
     start_time = time.time()
-    async with httpx.AsyncClient(**_httpx_async_client_proxy_kwargs(proxy)) as client:
-        async with client.stream("GET", url, timeout=timeout) as response:
-            response.raise_for_status()
-            ans_bytes = []
-            async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                if request is not None and await request.is_disconnected():
-                    await response.aclose()
-                    raise Exception("Request disconnected. User cancelled download.")
-                ans_bytes.append(chunk)
-                # 接收的数据不能大于128M
-                if len(ans_bytes) > 128:
-                    raise Exception(f"url {url} recv data is too big")
+    hostname = urlparse(url).hostname
+    effective_proxy = None if hostname in _LOCAL_RESOURCE_HOSTS else proxy
+    client = _HTTP_CLIENTS.get(effective_proxy)
+    if client is None:
+        client = httpx.AsyncClient(**_httpx_async_client_proxy_kwargs(effective_proxy))
+        _HTTP_CLIENTS[effective_proxy] = client
+    async with client.stream("GET", url, timeout=timeout) as response:
+        response.raise_for_status()
+        ans_bytes = []
+        async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+            if request is not None and await request.is_disconnected():
+                await response.aclose()
+                raise Exception("Request disconnected. User cancelled download.")
+            ans_bytes.append(chunk)
+            # 接收的数据不能大于128M
+            if len(ans_bytes) > 128:
+                raise Exception(f"url {url} recv data is too big")
 
-            content = b"".join(ans_bytes)
+    content = b"".join(ans_bytes)
     end_time = time.time()
     cost_time = end_time - start_time
     logger.info(f"Download url {url} resource cost time: {cost_time} seconds")

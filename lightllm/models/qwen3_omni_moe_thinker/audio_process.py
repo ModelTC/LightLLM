@@ -46,10 +46,25 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
             norm="slaney",
             mel_scale="slaney",
         )
+        self._hann_window_cache = {}
+        self._mel_filters_cache = {}
+
+    def _get_cached_feature_tensors(self, device: Union[str, torch.device]):
+        device_key = str(device)
+        window = self._hann_window_cache.get(device_key)
+        if window is None:
+            window = torch.hann_window(self.n_fft, device=device)
+            self._hann_window_cache[device_key] = window
+
+        mel_filters = self._mel_filters_cache.get(device_key)
+        if mel_filters is None:
+            mel_filters = torch.from_numpy(self.mel_filters).to(device, torch.float32)
+            self._mel_filters_cache[device_key] = mel_filters
+        return window, mel_filters
 
     def _torch_extract_fbank_features(self, waveform: np.ndarray, device: str = "cpu") -> np.ndarray:
         waveform = torch.from_numpy(waveform).to(device, torch.float32)
-        window = torch.hann_window(self.n_fft, device=device)
+        window, mel_filters = self._get_cached_feature_tensors(device)
 
         if self.dither != 0.0:
             waveform += self.dither * torch.randn(waveform.shape, dtype=waveform.dtype, device=waveform.device)
@@ -57,7 +72,6 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         stft = torch.stft(waveform, self.n_fft, self.hop_length, window=window, return_complex=True)
         magnitudes = stft[..., :-1].abs() ** 2
 
-        mel_filters = torch.from_numpy(self.mel_filters).to(device, torch.float32)
         mel_spec = mel_filters.T @ magnitudes
 
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
@@ -90,6 +104,29 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
             normed_input_values = [(x - x.mean()) / np.sqrt(x.var() + 1e-7) for x in input_values]
 
         return normed_input_values
+
+    def _preprocess_single_padded(
+        self,
+        raw_speech: np.ndarray,
+        num_frames: int,
+        device: Optional[str] = "cpu",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        waveform = np.asarray(raw_speech, dtype=np.float32)
+        if waveform.ndim != 1:
+            raise ValueError(f"single audio fast path expects 1D waveform, got shape={waveform.shape}")
+
+        extracted = self._torch_extract_fbank_features(waveform[None, :], device)
+        extracted = np.asarray(extracted, dtype=np.float32)
+        if extracted.ndim != 3:
+            raise ValueError(f"unexpected extracted feature shape={extracted.shape}")
+
+        if extracted.shape[-1] < num_frames:
+            raise ValueError(f"feature frames {extracted.shape[-1]} < requested num_frames {num_frames}")
+
+        compact_features = torch.from_numpy(extracted[:, :, :num_frames]).to(device="cuda", dtype=torch.bfloat16)
+        compact_features = compact_features[0].contiguous()
+        feature_lens = torch.tensor([num_frames], device="cuda", dtype=torch.long)
+        return compact_features, feature_lens
 
     def _preprocess(
         self,

@@ -1,6 +1,10 @@
+import io
 import queue
 import threading
 import time
+import wave
+
+import numpy as np
 import rpyc
 import socket
 import torch
@@ -8,6 +12,7 @@ import torch.distributed as dist
 from typing import List
 from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
+
 from lightllm.models.whisper.whisper_audio import WhisperAudioModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_audio import Qwen3OmniMoeAudioEncoder
 from lightllm.server.multimodal_params import AudioItem
@@ -18,6 +23,17 @@ from lightllm.utils.log_utils import init_logger
 
 
 logger = init_logger(__name__)
+
+
+def _generate_silence_wav_bytes(sample_rate: int = 16000, num_samples: int = 16000) -> bytes:
+    samples = np.zeros(num_samples, dtype=np.int16)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(samples.tobytes())
+    return buffer.getvalue()
 
 
 class AudioModelRpcServer(rpyc.Service):
@@ -58,6 +74,7 @@ class AudioModelRpcServer(rpyc.Service):
                 create_meta_data=False,
                 init_shm_data=False,
             )
+            self._auto_warmup_model()
             self._init_taskes()
         except Exception as e:
             print("#" * 16)
@@ -69,6 +86,20 @@ class AudioModelRpcServer(rpyc.Service):
 
         set_random_seed(2147483647)
         return
+
+    def _auto_warmup_model(self):
+        if not hasattr(self.model, "warmup"):
+            return
+        try:
+            torch.cuda.set_device(self.device_id)
+            warmup_audio = _generate_silence_wav_bytes()
+            self.model.warmup(warmup_audio)
+            logger.info(
+                f"audio model auto warmup finished on dp_rank_id:{self.dp_rank_id} tp_rank_id:{self.tp_rank_id}"
+            )
+        except Exception as e:
+            logger.exception(f"audio model auto warmup failed: {e}")
+            raise
 
     def exposed_run_task(self, audios: List[AudioItem], ref_event_list: List[threading.Event]):
         try:
