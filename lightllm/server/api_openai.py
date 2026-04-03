@@ -19,7 +19,7 @@ import ujson as json
 from http import HTTPStatus
 from PIL import Image
 import multiprocessing as mp
-from typing import Any, AsyncGenerator, Optional, Union, List, Dict
+from typing import Any, AsyncGenerator, Optional, Union, List, Dict, Tuple
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -160,6 +160,22 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
     return normal_text, calls
 
 
+def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
+    """Split a complete JSON argument string into OpenAI-style deltas."""
+    if not arguments:
+        return []
+    if len(arguments) <= 2:
+        return [arguments]
+    if arguments[0] in "{[" and arguments[-1] in "}]":
+        middle = arguments[1:-1]
+        chunks = [arguments[0]]
+        if middle:
+            chunks.append(middle)
+        chunks.append(arguments[-1])
+        return [chunk for chunk in chunks if chunk]
+    return [arguments]
+
+
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -193,6 +209,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             multimodal_params_dict["images"].append({"type": "base64", "data": data})
                         else:
                             raise ValueError("Unrecognized image input.")
+                    elif img.startswith("file://"):
+                        # Local file path with file:// prefix
+                        file_path = img[7:]  # Remove "file://" prefix
+                        with open(file_path, "rb") as f:
+                            multimodal_params_dict["images"].append(
+                                {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
+                            )
                     else:
                         raise ValueError(
                             "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
@@ -322,8 +345,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             tool_choice = request.tool_choice
             tools = request.tools
             if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
-                if finish_reason == "stop":
-                    finish_reason = "tool_calls"
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
@@ -337,6 +358,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             ToolCall(
                                 id=tool_id,
                                 index=getattr(call_info, "tool_index", None),
+                                type="function",
                                 function=FunctionResponse(name=call_info.name, arguments=call_info.parameters),
                             )
                         )
@@ -346,7 +368,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
-            if finish_reason == "tool_calls":
+            if tool_calls and finish_reason == "stop":
+                finish_reason = "tool_calls"
                 text = ""
             chat_message = ChatMessage(
                 role="assistant",
@@ -365,16 +388,13 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         )
         return resp
 
-    if sampling_params.n != 1:
-        return create_error_response(HTTPStatus.BAD_REQUEST, "stream api only support n = 1")
-
     parser_dict = {}
     reasoning_parser_dict = {}
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        finish_reason = None
-        has_emitted_tool_calls = False
+        has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
+        stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
         from .req_id_generator import convert_sub_id_to_group_id
 
         prompt_tokens = 0
@@ -383,18 +403,19 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             prompt_tokens = metadata["prompt_tokens"]
             completion_tokens += 1
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
-            index = sub_req_id
+            choice_index = sub_req_id - group_request_id
+
             delta = request_output
-            finish_reason = finish_status.get_finish_reason()
+            current_finish_reason = finish_status.get_finish_reason()
 
             # Handle reasoning content
             if get_env_start_args().reasoning_parser and request.separate_reasoning:
                 reasoning_text, delta = _process_reasoning_stream(
-                    index, delta, reasoning_parser_dict, request_output, request
+                    choice_index, delta, reasoning_parser_dict, request_output, request
                 )
                 if reasoning_text:
                     choice_data = ChatCompletionStreamResponseChoice(
-                        index=0,
+                        index=choice_index,
                         delta=DeltaMessage(role="assistant", reasoning_content=reasoning_text),
                         finish_reason=None,
                     )
@@ -404,18 +425,18 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
             if request.tool_choice != "none" and request.tools:
                 # parse_increment => returns (normal_text, calls)
                 normal_text, calls = _process_tools_stream(
-                    index=index, delta=delta, parser_dict=parser_dict, request=request
+                    index=choice_index, delta=delta, parser_dict=parser_dict, request=request
                 )
 
                 # 1) if there's normal_text, output it as normal content
-                if normal_text:
+                if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
                     choice_data = ChatCompletionStreamResponseChoice(
-                        index=0,
+                        index=choice_index,
                         delta=DeltaMessage(role="assistant", content=normal_text),
                         finish_reason=None,
                     )
@@ -425,87 +446,143 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
+                fc_parser = parser_dict[choice_index]
                 for call_item in calls:
-                    has_emitted_tool_calls = True
+                    has_emitted_tool_calls[sub_req_id] = True
                     # transform call_item -> FunctionResponse + ToolCall
-                    if finish_reason == "stop":
-                        latest_delta_len = 0
-                        if isinstance(call_item.parameters, str):
-                            latest_delta_len = len(call_item.parameters)
+                    if current_finish_reason == "stop":
+                        det = fc_parser.detector
+                        ti = call_item.tool_index
+                        if ti >= 0 and ti < len(det.prev_tool_call_arr) and ti < len(det.streamed_args_for_tool):
+                            latest_delta_len = 0
+                            if isinstance(call_item.parameters, str):
+                                latest_delta_len = len(call_item.parameters)
 
-                        expected_call = json.dumps(
-                            parser.multi_format_parser.detectors[0].prev_tool_call_arr[index].get("arguments", {}),
-                            ensure_ascii=False,
-                        )
-                        actual_call = parser.multi_format_parser.detectors[0].streamed_args_for_tool[index]
-                        if latest_delta_len > 0:
-                            actual_call = actual_call[:-latest_delta_len]
-                        remaining_call = expected_call.replace(actual_call, "", 1)
-                        call_item.parameters = remaining_call
+                            expected_call = json.dumps(
+                                det.prev_tool_call_arr[ti].get("arguments", {}),
+                                ensure_ascii=False,
+                            )
+                            actual_call = det.streamed_args_for_tool[ti]
+                            if latest_delta_len > 0:
+                                actual_call = actual_call[:-latest_delta_len]
+                            remaining_call = expected_call.replace(actual_call, "", 1)
+                            call_item.parameters = remaining_call
 
+                    tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
+                    stream_index = getattr(call_item, "tool_index", None)
+                    id_key = (choice_index, stream_index)
                     if call_item.name:
-                        # First chunk: include ID and function name
-                        tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
-                        tool_call_id = _process_tool_call_id(tool_parser, call_item, history_tool_calls_cnt)
+                        if id_key not in stream_tool_call_ids:
+                            stream_tool_call_ids[id_key] = _process_tool_call_id(
+                                tool_parser, call_item, history_tool_calls_cnt
+                            )
+                        tool_call_id = stream_tool_call_ids[id_key]
                         function_name = call_item.name
                     else:
-                        # Subsequent chunks: null ID and name for argument deltas
-                        tool_call_id = None
+                        tool_call_id = stream_tool_call_ids.get(id_key)
                         function_name = None
 
-                    tool_call = ToolCall(
-                        id=tool_call_id,
-                        index=getattr(call_item, "tool_index", None),
-                        function=FunctionResponse(
-                            name=function_name,
-                            arguments=call_item.parameters,
-                        ),
-                    )
-                    choice_data = ChatCompletionStreamResponseChoice(
-                        index=0,
-                        delta=DeltaMessage(role="assistant", tool_calls=[tool_call]),
-                        finish_reason=None,
-                    )
-                    chunk = ChatCompletionStreamResponse(
-                        id=group_request_id,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=request.model,
-                    )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                    is_tool_head = call_item.name is not None
+
+                    if is_tool_head and call_item.parameters:
+                        head_tool_call = ToolCall(
+                            id=tool_call_id,
+                            index=stream_index,
+                            type="function",
+                            function=FunctionResponse(
+                                name=function_name,
+                                arguments="",
+                            ),
+                        )
+                        head_choice = ChatCompletionStreamResponseChoice(
+                            index=choice_index,
+                            delta=DeltaMessage(tool_calls=[head_tool_call]),
+                            finish_reason=None,
+                        )
+                        head_chunk = ChatCompletionStreamResponse(
+                            id=group_request_id,
+                            created=created_time,
+                            choices=[head_choice],
+                            model=request.model,
+                        )
+                        yield f"data: {head_chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                        for arg_delta in _split_tool_argument_delta(call_item.parameters):
+                            arg_tool_call = ToolCall(
+                                index=stream_index,
+                                function=FunctionResponse(arguments=arg_delta),
+                            )
+                            arg_choice = ChatCompletionStreamResponseChoice(
+                                index=choice_index,
+                                delta=DeltaMessage(tool_calls=[arg_tool_call]),
+                                finish_reason=None,
+                            )
+                            arg_chunk = ChatCompletionStreamResponse(
+                                id=group_request_id,
+                                created=created_time,
+                                choices=[arg_choice],
+                                model=request.model,
+                            )
+                            yield f"data: {arg_chunk.model_dump_json(exclude_none=True)}\n\n"
+                    else:
+                        tool_call = ToolCall(
+                            id=tool_call_id if is_tool_head else None,
+                            index=stream_index,
+                            type="function" if is_tool_head else None,
+                            function=FunctionResponse(
+                                name=function_name,
+                                arguments=(
+                                    (call_item.parameters if call_item.parameters is not None else "")
+                                    if is_tool_head
+                                    else call_item.parameters
+                                ),
+                            ),
+                        )
+                        choice_data = ChatCompletionStreamResponseChoice(
+                            index=choice_index,
+                            delta=DeltaMessage(tool_calls=[tool_call]),
+                            finish_reason=None,
+                        )
+                        chunk = ChatCompletionStreamResponse(
+                            id=group_request_id,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=request.model,
+                        )
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
             else:
                 delta_message = DeltaMessage(role="assistant", content=delta)
-                stream_choice = ChatCompletionStreamResponseChoice(index=0, delta=delta_message, finish_reason=None)
+                stream_choice = ChatCompletionStreamResponseChoice(
+                    index=choice_index, delta=delta_message, finish_reason=None
+                )
                 stream_resp = ChatCompletionStreamResponse(
                     id=group_request_id,
                     created=created_time,
                     model=request.model,
                     choices=[stream_choice],
                 )
-                yield f"data: {stream_resp.model_dump_json()}\n\n"
+                yield f"data: {stream_resp.model_dump_json(exclude_none=True)}\n\n"
 
-        # Determine final finish_reason: override to "tool_calls" if tool calls were emitted
-        if has_emitted_tool_calls and finish_reason == "stop":
-            finish_reason = "tool_calls"
-
-        # Final empty chunk containing only finish_reason (and role)
-        if finish_reason is not None:
-            final_choice = ChatCompletionStreamResponseChoice(
-                index=0,
-                delta=DeltaMessage(),
-                finish_reason=finish_reason,
-            )
-            final_chunk = ChatCompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                model=request.model,
-                choices=[final_choice],
-            )
-            yield f"data: {final_chunk.model_dump_json()}\n\n"
+            # Emit a per-choice final empty chunk with finish_reason.
+            if current_finish_reason is not None:
+                if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
+                    current_finish_reason = "tool_calls"
+                final_choice = ChatCompletionStreamResponseChoice(
+                    index=choice_index,
+                    delta=DeltaMessage(),
+                    finish_reason=current_finish_reason,
+                )
+                final_chunk = ChatCompletionStreamResponse(
+                    id=group_request_id,
+                    created=created_time,
+                    model=request.model,
+                    choices=[final_choice],
+                )
+                yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
 
         if request.stream_options and request.stream_options.include_usage:
             usage = UsageInfo(
@@ -520,7 +597,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 model=request.model,
                 usage=usage,
             )
-            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
@@ -628,9 +705,6 @@ async def _process_prompts_completion(
                 "Streaming is not supported for batch requests",
             )
 
-        if sampling_params.n != 1:
-            return create_error_response(HTTPStatus.BAD_REQUEST, "stream api only support n = 1")
-
         return await _handle_streaming_completion(
             prompts[0], sampling_params, multimodal_params, raw_request, request, created_time
         )
@@ -684,6 +758,7 @@ async def _handle_streaming_completion(
 
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
+            choice_index = sub_req_id - group_request_id
             prompt_tokens = metadata["prompt_tokens"]
             completion_tokens += 1
             current_finish_reason = None
@@ -698,7 +773,7 @@ async def _handle_streaming_completion(
                 output_text = prompt_str + output_text
 
             stream_choice = CompletionStreamChoice(
-                index=0,
+                index=choice_index,
                 text=output_text,
                 finish_reason=current_finish_reason,
                 logprobs=None if request.logprobs is None else {},

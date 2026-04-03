@@ -31,7 +31,7 @@ class LlamaTransformerLayerWeight(TransformerLayerWeight):
         head_dim = self.network_config_["hidden_size"] // self.network_config_["num_attention_heads"]
         self.head_dim = self.network_config_.get("head_dim", head_dim)
         self.n_embed = self.network_config_["hidden_size"]
-        self.n_inter = self.network_config_["intermediate_size"]
+        self.n_inter = self.network_config_.get("intermediate_size", -1)
 
     def _init_weight_names(self):
         self._q_weight_name = f"model.layers.{self.layer_num_}.self_attn.q_proj.weight"

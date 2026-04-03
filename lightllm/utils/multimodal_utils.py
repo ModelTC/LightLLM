@@ -1,3 +1,4 @@
+import inspect
 import time
 import base64
 import httpx
@@ -11,6 +12,22 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 _HTTP_CLIENTS: Dict[Optional[str], httpx.AsyncClient] = {}
 _LOCAL_RESOURCE_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _httpx_async_client_proxy_kwargs(proxy) -> dict:
+    """
+    httpx 0.28+ 使用 AsyncClient(proxy=...)；更早版本使用 proxies=...
+    用签名检测避免写死版本号。
+    """
+    if proxy is None:
+        return {}
+    params = inspect.signature(httpx.AsyncClient.__init__).parameters
+
+    if "proxy" in params:
+        return {"proxy": proxy}
+    if "proxies" in params:
+        return {"proxies": proxy}
+    return {}
 
 
 def image2base64(img_str: str):
@@ -29,7 +46,7 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
     effective_proxy = None if hostname in _LOCAL_RESOURCE_HOSTS else proxy
     client = _HTTP_CLIENTS.get(effective_proxy)
     if client is None:
-        client = httpx.AsyncClient(proxy=effective_proxy)
+        client = httpx.AsyncClient(**_httpx_async_client_proxy_kwargs(effective_proxy))
         _HTTP_CLIENTS[effective_proxy] = client
     async with client.stream("GET", url, timeout=timeout) as response:
         response.raise_for_status()
@@ -43,7 +60,7 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
             if len(ans_bytes) > 128:
                 raise Exception(f"url {url} recv data is too big")
 
-        content = b"".join(ans_bytes)
+    content = b"".join(ans_bytes)
     end_time = time.time()
     cost_time = end_time - start_time
     logger.info(f"Download url {url} resource cost time: {cost_time} seconds")

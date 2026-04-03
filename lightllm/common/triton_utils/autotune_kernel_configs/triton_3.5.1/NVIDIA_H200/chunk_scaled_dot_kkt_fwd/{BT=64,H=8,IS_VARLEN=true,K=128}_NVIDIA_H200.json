@@ -1,0 +1,12 @@
+{
+  "2": {
+    "BK": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  },
+  "4": {
+    "BK": 64,
+    "num_stages": 2,
+    "num_warps": 4
+  }
+}

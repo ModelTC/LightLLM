@@ -87,7 +87,7 @@ class ToolCall(BaseModel):
 
     id: Optional[str] = None
     index: Optional[int] = None
-    type: Literal["function"] = "function"
+    type: Optional[Literal["function"]] = None
     function: FunctionResponse
 
 
@@ -370,3 +370,16 @@ class CompletionStreamResponse(BaseModel):
     @field_validator("id", mode="before")
     def ensure_id_is_str(cls, v):
         return str(v)
+
+
+class ModelCard(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    owned_by: str = "lightllm"
+    max_model_len: Optional[int] = None
+
+
+class ModelListResponse(BaseModel):
+    object: str = "list"
+    data: List[ModelCard]

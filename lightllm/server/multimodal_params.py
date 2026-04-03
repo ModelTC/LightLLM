@@ -62,6 +62,8 @@ class AudioItem:
         self.start_index_in_embed_cache = None
         # the audio token num
         self.token_num = None
+        # the data md5 sum
+        self.md5 = None
         # the audio length
         self.audio_length = None
 
@@ -142,6 +144,7 @@ class AudioItem:
         ret["token_id"] = self.token_id
         ret["token_num"] = self.token_num
         ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
+        ret["md5"] = self.md5
         return ret
 
     def to_origin_dict(self):
@@ -166,6 +169,8 @@ class ImageItem:
         self.start_index_in_embed_cache = None
         # the image token num
         self.token_num = None
+        # the data md5 sum
+        self.md5 = None
         # the start index of the image in the input_ids
         # used for mrope position id calculation
         self.start_idx = None
@@ -218,6 +223,7 @@ class ImageItem:
         ret["token_num"] = self.token_num
         ret["grid_thwd"] = self.grid_thwd
         ret["start_idx"] = self.start_idx
+        ret["md5"] = self.md5
         return ret
 
     def to_origin_dict(self):

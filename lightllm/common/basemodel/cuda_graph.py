@@ -33,7 +33,7 @@ class CudaGraph:
         graph_split_batch_size = self.args.graph_split_batch_size * (self.mtp_step + 1)
         graph_grow_step_size = self.args.graph_grow_step_size * (self.mtp_step + 1)
 
-        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, graph_split_batch_size + 1)]
+        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, self.args.graph_split_batch_size + 1)]
         for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
             batch_sizes.append(_batch_size)
 
