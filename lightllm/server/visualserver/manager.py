@@ -191,10 +191,13 @@ class VisualManager:
 
     def clean_up(self):
         for proc in getattr(self, "model_procs", []):
-            if proc.is_alive():
-                logger.info(f"Killing VIT model process {proc.pid}")
-                proc.kill()
-                proc.join(timeout=5)
+            try:
+                if proc.is_alive():
+                    logger.info(f"Killing VIT model process {proc.pid}")
+                    proc.kill()
+                    proc.join(timeout=5)
+            except (ProcessLookupError, OSError):
+                pass
 
 
 def start_visual_process(args, pipe_writer):
