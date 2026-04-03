@@ -158,6 +158,10 @@ class AudioModelRpcServer(rpyc.Service):
         return tasks
 
     def _get_audio_items_from_store_queue(self, max_num: int) -> List[AudioItem]:
+        """
+        与 visual 的 _get_image_items_from_store_queue 一致：store 队列中单条为 AudioItem，
+        按批取出至多 max_num 条。
+        """
         tasks = []
         task = self.store_queue.get(block=True)
         tasks.append(task)
@@ -172,6 +176,9 @@ class AudioModelRpcServer(rpyc.Service):
         return tasks
 
     def _infer_worker(self):
+        """
+        与 visual _infer_worker 一致：推理后对每个 item 单独放入 store_queue，由 store 线程批处理再 commit。
+        """
         torch.cuda.set_device(self.device_id)
         while True:
             try:
@@ -190,6 +197,7 @@ class AudioModelRpcServer(rpyc.Service):
 
                 self._save_to_cpu_cache(all_embeds=all_embeds, audios=audios)
 
+                # 与 visual _store_to_cpu_cache 相同条入队，便于 store 侧按 infer_max_batch_size 聚合
                 for audio in audios:
                     self.store_queue.put(audio)
 
@@ -208,6 +216,7 @@ class AudioModelRpcServer(rpyc.Service):
         return
 
     def _commit_to_cpu_cache(self, audios: List[AudioItem]):
+        # 与 visual _commit_to_cpu_cache：仅 tp0 通知完成；embed 已在 model.encode 内写入 cache
         if self.tp_rank_id == 0:
             for audio in audios:
                 audio.cuda_event.synchronize()
@@ -221,6 +230,9 @@ class AudioModelRpcServer(rpyc.Service):
             self._log_latency(audios[0], "set_items_embed")
 
     def _store_worker(self):
+        """
+        与 visual _store_worker 一致：从 store 队列按批取 AudioItem，再 commit 并释放信号量。
+        """
         while True:
             try:
                 audios: List[AudioItem] = self._get_audio_items_from_store_queue(max_num=self.infer_max_batch_size)
