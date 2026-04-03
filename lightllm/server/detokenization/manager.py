@@ -76,7 +76,10 @@ class DeTokenizationManager:
                     for _ in range(recv_max_count):
                         recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         assert isinstance(recv_obj, GroupReqIndexes)
-                        self._add_new_group_req_index(recv_obj=recv_obj)
+                        try:
+                            self._add_new_group_req_index(recv_obj=recv_obj)
+                        except Exception:
+                            logger.exception("add new group req index has exception")
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)
