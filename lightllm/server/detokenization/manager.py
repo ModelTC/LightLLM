@@ -78,7 +78,7 @@ class DeTokenizationManager:
                         assert isinstance(recv_obj, GroupReqIndexes)
                         try:
                             self._add_new_group_req_index(recv_obj=recv_obj)
-                        except Exception as e:
+                        except Exception:
                             logger.exception("add new group req index has exception")
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
