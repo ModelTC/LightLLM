@@ -2,47 +2,65 @@ import torch
 import triton
 import triton.language as tl
 
+import torch
+import triton
+import triton.language as tl
+
 @triton.jit
 def update_eagle_mem_indexes_kernel(
-    old_indexes_ptr,      # 原始 mem_indexes 指针
-    new_indices_ptr,      # 本轮分配的 eagle_mem_indexes_i 指针
-    offsets_ptr,          # 每组在 old_indexes 中的起始偏移量 (num_reqs + 1)
-    output_ptr,           # 输出的 mem_indexes 指针
-    num_reqs,             # 请求数量
-    BLOCK_SIZE: tl.constexpr
+    old_ptr,            # [N]
+    b_mtp_ptr,          # [N]
+    req_ids_ptr,        # [N], 每个位置所属第几个主请求
+    new_step_ptr,       # [num_reqs]
+    out_ptr,            # [N]
+    N,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    # 每个 program 处理一个 request 组
     pid = tl.program_id(0)
-    if pid >= num_reqs:
-        return
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
 
-    # 获取当前组的起始位置和长度
-    start_idx = tl.load(offsets_ptr + pid)
-    next_start_idx = tl.load(offsets_ptr + pid + 1)
-    group_size = next_start_idx - start_idx
+    # 当前/下一个 mtp_index
+    cur_mtp = tl.load(b_mtp_ptr + offs, mask=mask, other=0)
+    next_offs = offs + 1
+    next_in_range = next_offs < N
+    next_mtp = tl.load(b_mtp_ptr + next_offs, mask=next_in_range, other=0)
 
-    # 读取当前组的索引
-    # 逻辑：output[0 : size-1] = old[1 : size], output[size-1] = new_val
-    for i in range(0, group_size - 1, BLOCK_SIZE):
-        offs = i + tl.arange(0, BLOCK_SIZE)
-        mask = offs < (group_size - 1)
-        
-        # 移位读取：从 old 的第 1 个位置开始读
-        vals = tl.load(old_indexes_ptr + start_idx + offs + 1, mask=mask)
-        tl.store(output_ptr + start_idx + offs, vals, mask=mask)
+    # 组尾判断：越界 或 下一个是新组起点
+    is_last = (~next_in_range) | (next_mtp == 0)
 
-    # 将新的索引填入该组的最后一个位置
-    new_val = tl.load(new_indices_ptr + pid)
-    tl.store(output_ptr + start_idx + group_size - 1, new_val)
+    # 非组尾：左移 old[i+1]
+    shifted = tl.load(old_ptr + next_offs, mask=next_in_range, other=0)
 
-def update_eagle_mem_indexes_triton(old_indexes, new_step_indexes, group_offsets):
-    num_reqs = new_step_indexes.shape[0]
-    output = torch.empty_like(old_indexes)
+    # 组尾：new_step[req_id]
+    req_id = tl.load(req_ids_ptr + offs, mask=mask, other=0)
+    new_val = tl.load(new_step_ptr + req_id, mask=mask, other=0)
+
+    out = tl.where(is_last, new_val, shifted)
+    tl.store(out_ptr + offs, out, mask=mask)
     
-    # 这里的 BLOCK_SIZE 建议设为 32 或 64，因为 MTP 长度通常不大
-    grid = (num_reqs,)
+
+def update_eagle_mem_indexes_triton(old_indexes, new_step_indexes, b_mtp_index):
+    """
+    old_indexes:      [N] CUDA Tensor
+    new_step_indexes: [num_reqs] CUDA Tensor
+    b_mtp_index:      [N] CUDA Tensor, 如 [0,1,0,1,2,0,1,2,3]
+    """
+    # 固定 shape 的 GPU 计算，不用 nonzero/where 动态输出
+    is_start = (b_mtp_index == 0).to(torch.int32)          # [N]
+    req_ids = torch.cumsum(is_start, dim=0) - 1            # [N], int32/int64 均可
+    req_ids = req_ids.to(torch.int32)
+    out = torch.empty_like(old_indexes)
+    N = old_indexes.numel()
+    BLOCK_SIZE = 128
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
     update_eagle_mem_indexes_kernel[grid](
-        old_indexes, new_step_indexes, group_offsets, output,
-        num_reqs, BLOCK_SIZE=32
+        old_indexes,
+        b_mtp_index,
+        req_ids,
+        new_step_indexes,
+        out,
+        N,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
-    return output
+    return out

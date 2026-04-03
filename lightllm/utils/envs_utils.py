@@ -205,6 +205,13 @@ def enable_dynamic_mtp_verify() -> bool:
     """
     return get_env_start_args().mtp_dynamic_verify
 
+@lru_cache(maxsize=None)
+def enable_triton_mtp_kernel() -> bool:
+    """
+    启用 Triton MTP 解码专用 kernel
+    通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
+    """
+    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
 
 @lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():

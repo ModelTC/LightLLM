@@ -550,7 +550,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph_split_batch_size",
         type=int,
-        default=32,
+        default=128,
         help="""
         Controls the interval for generating CUDA graphs during decoding.
         CUDA graphs will be generated continuously for values ranging from 1 up to the specified
@@ -562,7 +562,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph_grow_step_size",
         type=int,
-        default=16,
+        default=1,
         help="""
         For batch_size values from graph_split_batch_size to graph_max_batch_size,
         a new CUDA graph will be generated for every increment of graph_grow_step_size.

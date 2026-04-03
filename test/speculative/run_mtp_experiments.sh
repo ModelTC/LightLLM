@@ -13,13 +13,13 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 # =============================================================================
 
 # Base directory configuration
-PROJECT_DIR="/data/chenjunyi/project/lightllm"
-BASE_DIR="/data/chenjunyi/project/lightllm/test/speculative"
+PROJECT_DIR="/data/nvme0/chenjunyi/project/lightllm"
+BASE_DIR="${PROJECT_DIR}/test/speculative"
 SCRIPTS_DIR="${BASE_DIR}/qwen3-8b"
 HELPER_SCRIPT="${BASE_DIR}/helper.py"
 BENCH_SCRIPT="${BASE_DIR}/bench_throughput.sh"
-DATASET="/data/chenjunyi/project/lightllm/datasets/gsm8k.json"
-TOKENIZER="/data/chenjunyi/models/qwen3-8b"
+DATASET="${PROJECT_DIR}/datasets/gsm8k.json"
+TOKENIZER="/mtc/models/qwen3-8b"
 
 # Experiment configuration
 MTP_STEPS=(4 8 12)
@@ -35,7 +35,11 @@ MAX_TOTAL_TOKEN_NUM=200000
 # Log and result configuration
 RESULTS_DIR="${PROJECT_DIR}/experiment_results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULTS_FILE="${RESULTS_DIR}/results_${TIMESTAMP}.csv"
+# Extract dataset name for directory (e.g., gsm8k.json -> gsm8k)
+DATASET_NAME=$(basename "${DATASET}" .json)
+# Create result directory: {results_dir}/{dataset}_{timestamp}/
+EXPERIMENT_SUBDIR="${RESULTS_DIR}/${DATASET_NAME}_${TIMESTAMP}"
+RESULTS_FILE="${EXPERIMENT_SUBDIR}/results.csv"
 
 # =============================================================================
 # Parse Command Line Arguments
@@ -55,6 +59,10 @@ usage() {
     echo "  --port PORT              API server port (default: ${PORT})"
     echo "  --results-dir DIR        Result output directory (default: ${RESULTS_DIR})"
     echo "  --help                   Show this help message"
+    echo ""
+    echo "Directory Structure:"
+    echo "  Results will be saved to: ${RESULTS_DIR}/{dataset}_{timestamp}/"
+    echo "  Example: ${RESULTS_DIR}/gsm8k_20260402_120000/"
     echo ""
     echo "Examples:"
     echo "  $0 --samples 500 --concurrency 32 --mtp-steps 4,8"
@@ -115,8 +123,8 @@ done
 # Initialization
 # =============================================================================
 
-# Create results directory
-mkdir -p "${RESULTS_DIR}"
+# Create results directory and experiment subdirectory
+mkdir -p "${EXPERIMENT_SUBDIR}"
 
 # Write CSV header
 echo "timestamp,mode,mtp_step,dataset,samples,concurrency,throughput,avg_latency,avg_ttft,avg_inter_token_latency,mtp_avg_token_per_step,mtp_avg_verify_tokens_per_step" > "${RESULTS_FILE}"
@@ -131,7 +139,7 @@ echo "Samples: ${SAMPLES}"
 echo "Concurrency: ${CONCURRENCY}"
 echo "MTP Steps: ${MTP_STEPS[*]}"
 echo "Modes: ${MODES[*]}"
-echo "Results file: ${RESULTS_FILE}"
+echo "Results directory: ${EXPERIMENT_SUBDIR}"
 echo "=============================================="
 
 # =============================================================================
@@ -238,7 +246,7 @@ for MODE in "${MODES[@]}"; do
         fi
 
         # Create log file for this experiment
-        LOG_FILE="${RESULTS_DIR}/log_${MODE}_step${MTP_STEP}_${TIMESTAMP}.txt"
+        LOG_FILE="${EXPERIMENT_SUBDIR}/log_${MODE}_step${MTP_STEP}_${TIMESTAMP}.txt"
 
         # Ensure previous process is stopped first
         kill_lightllm
@@ -264,7 +272,7 @@ for MODE in "${MODES[@]}"; do
         # Run benchmark
         echo "Running benchmark (samples=${SAMPLES}, concurrency=${CONCURRENCY})"
 
-        BENCH_LOG="${RESULTS_DIR}/bench_${MODE}_step${MTP_STEP}_${TIMESTAMP}.txt"
+        BENCH_LOG="${EXPERIMENT_SUBDIR}/bench_${MODE}_step${MTP_STEP}_${TIMESTAMP}.txt"
         bash "${BENCH_SCRIPT}" \
             --port "${PORT}" \
             --num-prompts "${SAMPLES}" \
@@ -300,7 +308,10 @@ echo ""
 echo "=============================================="
 echo "All Experiments Completed"
 echo "=============================================="
-echo "Results file: ${RESULTS_FILE}"
+echo "Results directory: ${EXPERIMENT_SUBDIR}"
 echo ""
 echo "Results Summary:"
 cat "${RESULTS_FILE}"
+echo ""
+echo "Directory structure:"
+ls -la "${EXPERIMENT_SUBDIR}"

@@ -2,7 +2,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional
 from typing import List
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel, enable_dynamic_mtp_verify
+from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel, enable_dynamic_mtp_verify, enable_triton_mtp_kernel
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -14,6 +14,8 @@ class ModelInput:
     # 在 decode 阶段， max_q_seq_len 必定是 1，
     max_q_seq_len: int
     max_kv_seq_len: int
+    # 用于记录原始请求数量，主要是为了动态MTP mode下保留原始请求数
+    original_num_reqs: int = None
     max_cache_len: int = None
     prefix_total_token_num: int = None
     input_ids: torch.Tensor = None
@@ -59,7 +61,8 @@ class ModelInput:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-        if not self.is_prefill and (enable_diverse_mode_gqa_decode_fast_kernel() or enable_dynamic_mtp_verify()):
+        if not self.is_prefill and \
+            (enable_diverse_mode_gqa_decode_fast_kernel() or enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
             batch_size = len(self.b_req_idx)
             if self.b_mark_shared_group is None:
                 self.b_mark_shared_group = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
@@ -74,6 +77,8 @@ class ModelInput:
 
     def __post_init__(self):
         self.check_input()
+        if self.original_num_reqs is None:
+            self.original_num_reqs = self.batch_size
 
     def check_input(self):
         assert len(self.multimodal_params) == self.batch_size

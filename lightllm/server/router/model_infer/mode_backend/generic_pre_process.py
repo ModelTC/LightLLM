@@ -6,8 +6,10 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_triton_mtp_kernel,
     get_diverse_max_batch_shared_group_size,
     enable_dynamic_mtp_verify,
+    get_env_start_args
 )
 from lightllm.utils.infer_utils import calculate_time
 
@@ -84,6 +86,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_ready_cache_len=b_ready_cache_len,
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
+        original_num_reqs=len(req_objs),
         b_prefill_has_output_cpu=b_prefill_has_output,
         prefix_total_token_num=prefix_total_token_num,
         multimodal_params=batch_multimodal_params,
@@ -132,13 +135,13 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     # diverse mode 和 dynamic MTP mode 使用不同的 shared group 构建逻辑
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
-    elif enable_dynamic_mtp_verify():
+    elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
         # MTP 模式下，使用专门的 shared group 构建函数
         b_shared_seq_len = None  # MTP 模式不需要 b_shared_seq_len
         b_mark_shared_group = build_mtp_shared_group_infos(b_mtp_index=b_mtp_index)
     else:
         b_shared_seq_len = None
-        b_mark_shared_group = None
+        b_mark_shared_group = None 
 
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
@@ -160,6 +163,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
+        original_num_reqs=len(req_objs),
         multimodal_params=multimodal_params,
     )
     return model_input, run_reqs
@@ -214,41 +218,68 @@ def build_mtp_shared_group_infos(
     b_mtp_index: torch.Tensor,
 ) -> torch.Tensor:
     """
-    为 MTP 动态验证模式构建 b_mark_shared_group 信息
+    构建 b_mark_shared_group（支持 max shared group size 截断）
 
-    MTP 模式下，每个原始请求会扩展成 (1 + mtp_size) 个请求，这些请求共享相同的 KV 前缀
-    例如：mtp_size=3 时，4 个请求 [A0, A1, A2, A3] 共享前缀，标记为 [0, 0, 0, 4]
+    规则：
+    - 组边界由 b_mtp_index == 0 定义（每个 0 是新组起点）
+    - 默认在每个组的最后一个位置写入组大小，其余位置为 0
+    - 若组大小 > max_batch_shared_group_size，则切分为多个连续子组
+      （每个子组大小 <= max_batch_shared_group_size），并在每个子组末尾写入子组大小
 
-    Args:
-        b_mtp_index: 每个请求的 mtp_index (0 表示原始请求，1,2,...表示 draft 请求)
-
-    Returns:
-        b_mark_shared_group: 标记请求组的数组，0 表示非组内最后一个请求，N>=1 表示 N 人组的最后一个请求
+    返回：
+    - res: shape [batch_size], int32
+      0 表示非子组末尾；N>=1 表示该子组大小
     """
-    batch_size = b_mtp_index.shape[0]
     device = b_mtp_index.device
-    
-    # 1. 找到每个组的结束位置索引
-    # 情况 A: 下一个元素是 0 (新组开始)
-    # 情况 B: 当前元素是最后一个元素 (i == batch_size - 1)
-    
-    # 构造一个偏移数组，用来对比当前位和下一位
-    # 如果 b_mtp_index[i+1] == 0，则 i 是当前组的结尾
-    is_last_in_group = torch.zeros(batch_size, dtype=torch.bool, device=device)
-    is_last_in_group[:-1] = (b_mtp_index[1:] == 0)
-    is_last_in_group[-1] = True  # 最后一个元素永远是最后一组的结尾
-    
-    # 2. 获取所有结尾处的索引
-    end_indices = torch.where(is_last_in_group)[0]
-    
-    # 3. 计算每个组的大小 (Group Sizes)
-    # 组大小 = 当前结尾索引 - 上一个结尾索引
-    # 我们在开头补一个 -1，方便统一计算第一个组的大小
-    shifted_indices = torch.cat([torch.tensor([-1], device=device), end_indices])
-    group_sizes = torch.diff(shifted_indices)
-    
-    # 4. 构建结果张量
+    batch_size = b_mtp_index.numel()
     res = torch.zeros(batch_size, dtype=torch.int32, device=device)
-    res[end_indices] = group_sizes.to(torch.int32)
-    
+
+    if batch_size == 0:
+        return res
+
+    max_size = int(get_diverse_max_batch_shared_group_size())
+    if max_size <= 0:
+        max_size = 1
+
+    # 1) 找每个原始组起点（b_mtp_index == 0）
+    is_start = (b_mtp_index == 0)
+    starts = torch.nonzero(is_start, as_tuple=False).flatten()
+
+    # 防御：若输入不规范（没有 0），则把整个 batch 当一组
+    if starts.numel() == 0:
+        starts = torch.zeros(1, dtype=torch.long, device=device)
+
+    # 2) 原始组长度
+    # ends = [starts[1]-1, starts[2]-1, ..., batch_size-1]
+    ends = torch.empty_like(starts)
+    if starts.numel() > 1:
+        ends[:-1] = starts[1:] - 1
+    ends[-1] = batch_size - 1
+    lens = ends - starts + 1  # [num_groups]
+
+    # 3) 每个原始组需要切成多少个子组
+    # sub_cnt[g] = ceil(lens[g] / max_size)
+    sub_cnt = (lens + max_size - 1) // max_size  # [num_groups], int64
+
+    # 4) 展平到“子组级别”（全向量化）
+    num_groups = starts.numel()
+    group_ids = torch.repeat_interleave(
+        torch.arange(num_groups, device=device, dtype=torch.long),
+        sub_cnt
+    )  # [num_subgroups]
+
+    # 子组在原始组内的序号：0,1,2,...
+    sub_prefix = torch.cumsum(sub_cnt, dim=0) - sub_cnt               # 每个组的子组起始全局序号
+    sub_prefix_rep = torch.repeat_interleave(sub_prefix, sub_cnt)
+    global_sub_idx = torch.arange(group_ids.numel(), device=device, dtype=torch.long)
+    sub_idx_in_group = global_sub_idx - sub_prefix_rep                # [num_subgroups]
+
+    # 5) 计算每个子组大小与末尾位置
+    # size = min(max_size, lens - sub_idx*max_size)
+    rem = lens[group_ids] - sub_idx_in_group * max_size
+    sub_size = torch.minimum(rem, torch.full_like(rem, max_size))     # [num_subgroups]
+    sub_end = starts[group_ids] + sub_idx_in_group * max_size + sub_size - 1
+
+    # 6) 写回结果：子组末尾位置写子组大小
+    res[sub_end] = sub_size.to(torch.int32)
     return res

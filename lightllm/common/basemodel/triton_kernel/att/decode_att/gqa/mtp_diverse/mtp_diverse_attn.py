@@ -63,11 +63,8 @@ def token_decode_attention_mtp_diverse_single_token(
     b_seq_len,
     b_mark_shared_group,       # 原始 mark
     block_seq: int = 256,
-    max_shared_group_size: int = 16,
     out=None,
     alloc_tensor_func=torch.empty,
-    split_mark_buf=None,       # 可外部分配复用
-    stage1_run_config=None,    # 可选：固定 stage1 配置（含 BLOCK_BATCH）
 ):
     batch_size = b_seq_len.shape[0]
     num_heads = q.shape[1]
@@ -88,35 +85,34 @@ def token_decode_attention_mtp_diverse_single_token(
         [batch_size, num_heads, seq_block_num], dtype=torch.float32, device=q.device
     )
 
-    if split_mark_buf is None:
-        split_mark_buf = alloc_tensor_func(
-            [batch_size], dtype=b_mark_shared_group.dtype, device=b_mark_shared_group.device
-        )
+    # if split_mark_buf is None:
+    #     split_mark_buf = alloc_tensor_func(
+    #         [batch_size], dtype=b_mark_shared_group.dtype, device=b_mark_shared_group.device
+    #     )
 
-    # 关键：split 用一个“安全最小值”，保证 <= stage1 可能的 BLOCK_BATCH
-    # 若 stage1 autotune 配置是 [4, 8]，这里固定 4 最稳
-    split_block_batch = 4
-    if stage1_run_config is not None and "BLOCK_BATCH" in stage1_run_config:
-        split_block_batch = int(stage1_run_config["BLOCK_BATCH"])
+    # # 关键：split 用一个“安全最小值”，保证 <= stage1 可能的 BLOCK_BATCH
+    # # 若 stage1 autotune 配置是 [4, 8]，这里固定 4 最稳
+    # split_block_batch = 4
+    # if stage1_run_config is not None and "BLOCK_BATCH" in stage1_run_config:
+    #     split_block_batch = int(stage1_run_config["BLOCK_BATCH"])
 
-    _prepare_split_marks(
-        b_mark_shared_group=b_mark_shared_group,
-        out_mark=split_mark_buf,
-        block_batch=split_block_batch,
-        max_shared_group_size=max_shared_group_size,
-    )
+    # _prepare_split_marks(
+    #     b_mark_shared_group=b_mark_shared_group,
+    #     out_mark=split_mark_buf,
+    #     block_batch=split_block_batch,
+    #     max_shared_group_size=max_shared_group_size,
+    # )
 
     mtp_diverse_stage1_single_token(
         q=q, k=k, v=v,
         Req_to_tokens=Req_to_tokens,
-        B_req_idx=B_req_idx,                   # ✅ 原样
+        B_req_idx=B_req_idx,                   
         b_seq_len=b_seq_len,
-        b_mark_shared_group=split_mark_buf,    # ✅ 仅替换 mark
+        b_mark_shared_group=b_mark_shared_group,    
         max_kv_len=max_kv_len,
         mid_out=mid_o,
         mid_out_logsumexp=mid_o_logsumexp,
         block_seq=block_seq,
-        run_config=stage1_run_config,
     )
 
     mtp_diverse_stage2_single_token(

@@ -1,7 +1,7 @@
 import dataclasses
 import torch
 
-from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_env_start_args
+from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_diverse_max_batch_shared_group_size, get_env_start_args
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 
@@ -92,16 +92,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         if args_mtp_step > 0:
             # MTP mode initialization
             self.mtp_size = args_mtp_step + 1
-            batch_size = self.infer_state.batch_size
-
-            # 在动态 MTP 验证模式下，b_mark_shared_group 会在 _create_inferstate 中从 model_input 传递
-            # 因为动态模式下每个请求的 mtp_size 可能不同，无法静态初始化
-            if not enable_dynamic_mtp_verify():
-                assert batch_size % self.mtp_size == 0, f"batch_size {batch_size} must be divisible by mtp_size {self.mtp_size}"
-
-                # b_mark_shared_group: 0 for non-last requests in group, mtp_size for last request
-                self.b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=self.infer_state.input_ids.device)
-                self.b_mark_shared_group[args_mtp_step::self.mtp_size] = self.mtp_size
+            self.b_mark_shared_group = self.infer_state.b_mark_shared_group
         else:
             self.mtp_size = 1
             self.b_mark_shared_group = None
@@ -240,10 +231,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
 
         # 在动态 MTP 验证模式下，使用 infer_state.b_mark_shared_group（从 model_input 传递）
         # 在静态 MTP 模式下，使用 self.b_mark_shared_group（在 init_state 中初始化）
-        if enable_dynamic_mtp_verify():
-            b_mark_shared_group = self.infer_state.b_mark_shared_group
-        else:
-            b_mark_shared_group = self.b_mark_shared_group
+        b_mark_shared_group = self.infer_state.b_mark_shared_group
 
         block_seq = 256
 

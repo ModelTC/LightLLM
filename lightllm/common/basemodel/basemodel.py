@@ -25,7 +25,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
+from lightllm.utils.envs_utils import enable_triton_mtp_kernel, get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
@@ -350,16 +350,16 @@ class TpPartBaseModel:
             if enable_diverse_mode_gqa_decode_fast_kernel():
                 infer_state.b_shared_seq_len = model_input.b_shared_seq_len
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
-            elif enable_dynamic_mtp_verify():
+            elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
                 # 动态 MTP 验证模式下，也需要传递 b_mark_shared_group
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
                 # 将b_mark_shared_group pad到跟input_ids一样的长度，避免后续使用时出现形状不匹配的问题
-                infer_state.b_mark_shared_group = F.pad(
-                    infer_state.b_mark_shared_group,
-                    (0, infer_state.input_ids.shape[0] - infer_state.b_mark_shared_group.shape[0]),
-                    mode="constant",
-                    value=0,
-                )
+                # infer_state.b_mark_shared_group = F.pad(
+                #     infer_state.b_mark_shared_group,
+                #     (0, infer_state.input_ids.shape[0] - infer_state.b_mark_shared_group.shape[0]),
+                #     mode="constant",
+                #     value=0,
+                # )
 
         infer_state.multimodal_params = model_input.multimodal_params
 
@@ -423,7 +423,7 @@ class TpPartBaseModel:
                 new_model_input.b_mark_shared_group = F.pad(
                     new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
                 )
-        elif enable_dynamic_mtp_verify() and not self.is_mtp_draft_model:
+        elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
             if new_model_input.b_mark_shared_group is not None:
                 new_model_input.b_mark_shared_group = F.pad(
                     new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=0

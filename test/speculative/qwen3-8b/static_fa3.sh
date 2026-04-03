@@ -13,8 +13,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-MODEL_DIR=/data/chenjunyi/models/qwen3-8b 
-DRAFT_MODEL_DIR=/data/chenjunyi/models/qwen3-8b-eagle3
+MODEL_DIR=/mtc/models/qwen3-8b 
+DRAFT_MODEL_DIR=/mtc/models/qwen3-8b-eagle3
 
 LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
 --tp 2 --max_total_token_num 200000 \
