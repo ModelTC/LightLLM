@@ -163,6 +163,7 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
     normal_text, calls = parser.parse_stream_chunk(delta)
     return normal_text, calls
 
+
 def _get_images_and_audios(request: ChatCompletionRequest):
     images, audios = [], []
     for message in request.messages:
@@ -199,6 +200,7 @@ def _get_images_and_audios(request: ChatCompletionRequest):
                         raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
     return images, audios
 
+
 def _get_tools(request: ChatCompletionRequest):
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
@@ -210,6 +212,7 @@ def _get_tools(request: ChatCompletionRequest):
             ]
         else:
             tools = [item.function.model_dump() for item in request.tools]
+    return tools
 
 
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
@@ -559,7 +562,7 @@ async def _get_text_generator_input(request: ChatCompletionRequest):
         "best_of": request.n,
         "add_special_tokens": False,
     }
-     # Structured output handling
+    # Structured output handling
     if request.response_format:
         if request.response_format.type == "json_schema":
             obj = request.response_format.json_schema
@@ -580,6 +583,43 @@ async def _get_text_generator_input(request: ChatCompletionRequest):
     return prompt, sampling_params, multimodal_params
 
 
+def _raw_image_to_data_url(image: Union[str, bytes], image_type: str) -> str:
+    mime = {"jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}[image_type]
+    if isinstance(image, bytes):
+        b64 = base64.b64encode(image).decode("ascii")
+    else:
+        if image.startswith("data:"):
+            return image
+        b64 = image
+    return f"data:{mime};base64,{b64}"
+
+
+def _message_contents_from_raw_images(images: List[Any], image_type: str) -> List[MessageContent]:
+    return [
+        MessageContent(
+            type="image_url",
+            image_url=ImageURL(url=_raw_image_to_data_url(img, image_type)),
+        )
+        for img in images
+    ]
+
+
+def _normalize_image_b64_for_multimodal(image: Union[str, bytes]) -> str:
+    if isinstance(image, bytes):
+        return base64.b64encode(image).decode("ascii")
+    return image
+
+
+def _apply_image_generation_stop(chat_request: ChatCompletionRequest, image_start_tag: str) -> None:
+    stop = chat_request.stop or []
+    if isinstance(stop, str):
+        stop = [stop]
+    stop = list(stop)
+    if image_start_tag not in stop:
+        stop.append(image_start_tag)
+    chat_request.stop = stop
+
+
 async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -598,48 +638,135 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
     chat_request: ChatCompletionRequest = ChatCompletionRequest(**request.model_dump())
 
-    # logger.info(f"{type(chat_request)} and {type(request)} and {request.model_dump_json()} and {chat_request.model_dump_json()}")
     if "image" not in request.modalities:
         return await chat_completions_impl(chat_request, raw_request)
 
-    if not request.stream or request.n != 1:
-        return create_error_response(HTTPStatus.BAD_REQUEST, "image only support stream api with n = 1")
+    if request.n != 1:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "multimodal image generation only supports n = 1",
+        )
 
     image_start_tag = g_objs.httpserver_manager.tokenizer.image_start_tag
     image_tag = g_objs.httpserver_manager.tokenizer.image_tag
 
-    stop = chat_request.stop or []
-    if isinstance(stop, str): stop = [stop]
-    chat_request.stop = stop.append(image_start_tag)
+    _apply_image_generation_stop(chat_request, image_start_tag)
 
     created_time = int(time.time())
 
-
     prompt, sampling_params, multimodal_params = await _get_text_generator_input(chat_request)
 
-    width, height = request.image_config.get_resolution()
-    x2i_params_dict = {
-        "width": width,
-        "height": height,
-    }
-
     x2i_params = X2IParams()
-    x2i_params.init(**x2i_params_dict)
+    x2i_params.init_from_image_config(request.image_config)
+
+    if not request.stream:
+        from .req_id_generator import convert_sub_id_to_group_id
+
+        full_text = ""
+        response_images: List[MessageContent] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        finish_reason: Optional[str] = "stop"
+        group_request_id = None
+        max_image_gen_num = 15  # TODO: make this configurable
+
+        while max_image_gen_num > 0:
+            max_image_gen_num -= 1
+            need_call_x2i = False
+            output_chunk = ""
+            text_generator = g_objs.httpserver_manager.generate(
+                prompt, sampling_params, multimodal_params.clone(), request=raw_request
+            )
+            async for sub_req_id, request_output, metadata, finish_status in text_generator:
+                prompt_tokens = metadata["prompt_tokens"]
+                completion_tokens += 1
+                if group_request_id is None:
+                    group_request_id = convert_sub_id_to_group_id(sub_req_id)
+                delta = request_output
+                if finish_status.is_finished():
+                    finish_reason = finish_status.get_finish_reason()
+                if delta == image_start_tag:
+                    need_call_x2i = True
+                    continue
+                output_chunk += delta
+
+            full_text += output_chunk
+
+            if need_call_x2i:
+                prompt += output_chunk
+                images = await g_objs.httpserver_manager.generate_image(
+                    prompt, x2i_params, multimodal_params.clone(), request=raw_request
+                )
+                if len(images) == 0:
+                    logger.warning(f"No image generated by x2i: {prompt[-100:]}, exit...")
+                    break
+                response_images.extend(_message_contents_from_raw_images(images, request.image_config.image_type))
+                for image in images:
+                    prompt += image_tag
+                    full_text += image_tag
+                    multimodal_params.add_image({"type": "base64", "data": _normalize_image_b64_for_multimodal(image)})
+            else:
+                break
+
+        reasoning_text = None
+        text_out = full_text
+        reasoning_parser = get_env_start_args().reasoning_parser
+        if reasoning_parser and request.separate_reasoning:
+            request_enable_reasoning = _get_reasoning_from_request(request)
+            try:
+                parser = ReasoningParser(
+                    model_type=reasoning_parser,
+                    stream_reasoning=False,
+                    force_reasoning=request_enable_reasoning,
+                )
+                reasoning_text, text_out = parser.parse_non_stream(full_text)
+            except Exception as e:
+                logger.error(f"Reasoning parsing error: {e}")
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    "Failed to parse reasoning content!",
+                )
+
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+        chat_message = ChatMessage(
+            role="assistant",
+            content=text_out,
+            reasoning_content=reasoning_text if reasoning_text else "",
+            images=response_images if response_images else None,
+        )
+        choice = ChatCompletionResponseChoice(
+            index=0,
+            message=chat_message,
+            finish_reason=finish_reason,
+        )
+        return ChatCompletionResponse(
+            id=group_request_id or f"chatcmpl-{uuid.uuid4().hex}",
+            created=created_time,
+            model=request.model,
+            choices=[choice],
+            usage=usage,
+        )
 
     async def stream_result() -> AsyncGenerator[bytes, None]:
         nonlocal prompt
         from .req_id_generator import convert_sub_id_to_group_id
+
         prompt_tokens = 0
         completion_tokens = 0
         finish_reason = None
         group_request_id = None
-        max_image_gen_num = 15 # TODO: make this configurable
+        max_image_gen_num = 15  # TODO: make this configurable
 
         while max_image_gen_num > 0:
             max_image_gen_num -= 1
             need_call_x2i = False
             text_generator = g_objs.httpserver_manager.generate(
-                prompt, sampling_params, multimodal_params.clone(), request=raw_request)
+                prompt, sampling_params, multimodal_params.clone(), request=raw_request
+            )
 
             reasoning_parser_dict = {}
             output_chunk = ""
@@ -659,7 +786,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
                 output_chunk += delta
 
-                 # Handle reasoning content
+                # Handle reasoning content
                 if get_env_start_args().reasoning_parser and request.separate_reasoning:
                     reasoning_text, delta = _process_reasoning_stream(
                         index, delta, reasoning_parser_dict, request_output, request
@@ -678,7 +805,6 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                         )
                         yield f"data: {chunk.model_dump_json()}\n\n"
 
-
                 delta_message = DeltaMessage(role="assistant", content=delta)
                 if finish_status.is_finished():
                     finish_reason = finish_status.get_finish_reason()
@@ -691,33 +817,51 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                     model=request.model,
                     choices=[stream_choice],
                 )
-                yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
-
+                yield ("data: " + json.dumps(stream_resp.model_dump(), ensure_ascii=False) + "\n\n").encode("utf-8")
 
             if need_call_x2i:
                 prompt += output_chunk
 
                 images = await g_objs.httpserver_manager.generate_image(
-                    prompt, x2i_params, multimodal_params.clone(), request=raw_request)
+                    prompt, x2i_params, multimodal_params.clone(), request=raw_request
+                )
 
                 if len(images) == 0:
                     logger.warning(f"No image generated by x2i: {prompt[-100:]}, exit...")
                     break
 
-                delta_message = DeltaMessage(role="assistant", content=[])
-                for image in images:
-                    message_content = MessageContent(type="image_url", image_url=ImageURL(url=image))
-                    delta_message.content.append(message_content)
-                    prompt += image_tag
-                    multimodal_params.add_image({"type": "base64", "data": image})
-
-                stream_resp = ChatCompletionStreamResponse(
+                tag_chunk = ChatCompletionStreamResponse(
                     id=group_request_id,
                     created=created_time,
                     model=request.model,
-                    choices=[ChatCompletionStreamResponseChoice(index=0, delta=delta_message)],
+                    choices=[
+                        ChatCompletionStreamResponseChoice(
+                            index=0,
+                            delta=DeltaMessage(role="assistant", content=image_tag),
+                            finish_reason=None,
+                        )
+                    ],
                 )
-                yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+                yield f"data: {tag_chunk.model_dump_json()}\n\n"
+
+                img_items = _message_contents_from_raw_images(images, request.image_config.image_type)
+                img_chunk = ChatCompletionStreamResponse(
+                    id=group_request_id,
+                    created=created_time,
+                    model=request.model,
+                    choices=[
+                        ChatCompletionStreamResponseChoice(
+                            index=0,
+                            delta=DeltaMessage(role="assistant", images=img_items),
+                            finish_reason=None,
+                        )
+                    ],
+                )
+                yield f"data: {img_chunk.model_dump_json()}\n\n"
+
+                for image in images:
+                    prompt += image_tag
+                    multimodal_params.add_image({"type": "base64", "data": _normalize_image_b64_for_multimodal(image)})
 
             else:
                 break

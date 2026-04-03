@@ -186,6 +186,8 @@ def has_vision_module(model_path: str) -> bool:
         ):
             # Qwen3OmniMoeVisionTransformerPretrainedModel
             return True
+        elif model_type == "neo_chat":
+            return True
         else:
             raise Exception("unknown vision model type")
     except:

@@ -278,6 +278,8 @@ class ChatMessage(BaseModel):
     content: Optional[Union[str, List[MessageContent]]] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    # OpenRouter-style: generated images alongside text; content may include "<image>" placeholders
+    images: Optional[List[MessageContent]] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -304,6 +306,7 @@ class DeltaMessage(BaseModel):
     content: Optional[Union[str, List[MessageContent]]] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     reasoning_content: Optional[str] = None
+    images: Optional[List[MessageContent]] = None
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):
@@ -374,20 +377,36 @@ class CompletionStreamResponse(BaseModel):
 
 # Supported values
 AspectRatio: TypeAlias = Literal[
-    "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
-    "9:16", "16:9", "21:9",
+    "1:1",
+    "2:3",
+    "3:2",
+    "3:4",
+    "4:3",
+    "4:5",
+    "5:4",
+    "9:16",
+    "16:9",
+    "21:9",
 ]
 
-ImageSize: TypeAlias  = Literal["0.5K", "1K", "2K", "4K"]
+ImageSize: TypeAlias = Literal["0.5K", "1K", "2K", "4K"]
 
 Modality: TypeAlias = Literal["text", "image", "audio"]
 
 ImageType: TypeAlias = Literal["png", "jpeg", "webp"]
 
+
 class ImageConfig(BaseModel):
     aspect_ratio: AspectRatio = "1:1"
     image_size: ImageSize = "1K"
     image_type: ImageType = "jpeg"
+    # X2I / diffusion sampling (optional; server defaults apply when omitted)
+    steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
+    image_guidance_scale: Optional[float] = None
+    seed: Optional[int] = None
+    num_images: Optional[int] = None
+    cfg_norm: Optional[Literal["none", "cfg_zero_star", "global", "text_channel", "channel"]] = None
 
     # Mapping to actual resolutions (base resolution for 1K)
     _aspect_ratio_to_resolution: ClassVar[dict] = {
@@ -427,7 +446,7 @@ class ImageConfig(BaseModel):
     @field_validator("image_type")
     @classmethod
     def validate_image_type(cls, v):
-        if v not in ['jpeg', 'png', 'webp']:
+        if v not in ["jpeg", "png", "webp"]:
             raise ValueError(f"unsupported image type: {v}")
         return v
 

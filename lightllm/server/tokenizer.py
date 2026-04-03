@@ -125,5 +125,5 @@ def get_tokenizer(
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
     elif model_type == "neo_chat":
         tokenizer = NeoChatTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
-
+    print(type(tokenizer), tokenizer, flush=True)
     return tokenizer

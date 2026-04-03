@@ -1,8 +1,9 @@
 import ctypes
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from enum import IntEnum
 from .token_chunck_hash_list import PastKVCachePageList
+
 
 class CfgNormType(IntEnum):
     NONE = 0
@@ -52,10 +53,11 @@ class X2IParams(ctypes.Structure):
     _num_images: int = 1
     _cfg_norm: CfgNormType = CfgNormType.NONE
 
-    def init(self,  **kwargs):
+    def init(self, **kwargs):
         def _get(key, default):
             v = kwargs.get(key)
             return v if v is not None else default
+
         self.width = _get("width", X2IParams._width)
         self.height = _get("height", X2IParams._height)
         self.steps = _get("steps", X2IParams._steps)
@@ -69,6 +71,31 @@ class X2IParams(ctypes.Structure):
         self.past_kvcache_img = PastKVCachePageList()
         self.total_prompt_tokens = 0
         self.request_id = 0
+
+    def init_from_image_config(self, image_config: Any) -> None:
+        """从 HTTP `image_config`（api_models.ImageConfig）填充，与 `init(**kwargs)` 共用默认值逻辑。"""
+        from lightllm.server.api_models import ImageConfig
+
+        if not isinstance(image_config, ImageConfig):
+            raise TypeError(f"expected ImageConfig, got {type(image_config)!r}")
+        w, h = image_config.get_resolution()
+        kwargs: Dict[str, Any] = {"width": w, "height": h}
+        if image_config.steps is not None:
+            kwargs["steps"] = image_config.steps
+        if image_config.guidance_scale is not None:
+            kwargs["guidance_scale"] = image_config.guidance_scale
+        if image_config.image_guidance_scale is not None:
+            kwargs["image_guidance_scale"] = image_config.image_guidance_scale
+        if image_config.seed is not None:
+            kwargs["seed"] = image_config.seed
+        if image_config.num_images is not None:
+            kwargs["num_images"] = image_config.num_images
+        if image_config.cfg_norm is not None:
+            for e in CfgNormType:
+                if e.as_str() == image_config.cfg_norm:
+                    kwargs["cfg_norm"] = e
+                    break
+        self.init(**kwargs)
 
     def update(self, past_kv: PastKVCachePageList, meta: Dict):
         item: PastKVCacheItem = meta.get("kv_cache_item")

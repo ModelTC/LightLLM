@@ -22,14 +22,15 @@ from .past_kv_cache_client import PastKVCacheClient
 logger = init_logger(__name__)
 
 
-'''
+"""
 manage a generation service,
 1. start x2v pipelines
 2. receive generation request from http_server.
 3. call llm gen to obtain past key values
 4. call x2v to generate images and pass the key values to it
 5. return the generated images.
-'''
+"""
+
 
 class X2IManager:
     def __init__(
@@ -50,30 +51,43 @@ class X2IManager:
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
     async def wait_to_model_ready(self):
-        # from lightx2v import LightX2VPipeline
-        # self.gen_pipe = LightX2VPipeline(
-        #     model_path = self.args.model_dir,
-        #     model_cls = self.args.model_name,
-        #     task="t2i"
-        # )
-        # self.gen_pipe.create_generator(
-        #     config_json = self.args.x2v_gen_model_config,
-        # )
+        from lightx2v import LightX2VPipeline
 
-        from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
-
-        self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
-
+        self.gen_pipe = LightX2VPipeline(
+            model_path=self.args.model_dir,
+            model_cls="neopp",
+            support_tasks=["t2i", "i2i"],
+        )
+        self.gen_pipe.create_generator(
+            config_json=self.args.x2v_gen_model_config,
+        )
+        self.gen_pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False})
+        # from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
+        # self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
         pass
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
-        images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
-        return images
+        print(past_kv_cache.shape, past_kv_cache_text.shape, param, flush=True)
+        self.gen_pipe.runner.set_kvcache_t2i(past_kv_cache, past_kv_cache_text)
+        image = self.gen_pipe.generate(
+            seed=param.seed,
+            task="t2i",
+            save_result_path="",  # 返回base64，不需要指定路径了
+            target_shape=[param.height, param.width],  # Height, Width
+        )
+        # images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
+        return [image]
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
-        images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
-        return images
-
+        self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
+        image = self.gen_pipe.generate(
+            seed=param.seed,
+            task="i2i",
+            save_result_path="",  # 返回base64，不需要指定路径了
+            target_shape=[param.height, param.width],  # Height, Width
+        )
+        # images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
+        return [image]
 
     async def loop_for_fwd(self):
         while True:
@@ -94,15 +108,15 @@ class X2IManager:
                 is_t2i = x2i_param.past_kvcache_img.is_empty()
 
                 past_kv_cache_img = None
-                if not is_t2i: # t2i
+                if not is_t2i:  # t2i
                     past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
                         x2i_param.past_kvcache_img.get_all(), x2i_param.past_kvcache_img.token_len
                     )
 
                 # release
                 self.send_to_httpserver.send_pyobj(
-                    X2ICacheRelease(request_id=x2i_param.request_id),
-                    protocol=pickle.HIGHEST_PROTOCOL)
+                    X2ICacheRelease(request_id=x2i_param.request_id), protocol=pickle.HIGHEST_PROTOCOL
+                )
 
                 images = []
                 logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {x2i_param}")
@@ -111,19 +125,16 @@ class X2IManager:
                 else:
                     images = await self.it2i_generate(past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param)
 
-                self.send_to_httpserver.send_pyobj(X2IResponse(
-                    request_id=x2i_param.request_id,
-                    images=images),
-                    protocol=pickle.HIGHEST_PROTOCOL)
+                self.send_to_httpserver.send_pyobj(
+                    X2IResponse(request_id=x2i_param.request_id, images=images), protocol=pickle.HIGHEST_PROTOCOL
+                )
 
             except Exception as e:
-                self.send_to_httpserver.send_pyobj(X2IResponse(
-                    request_id=x2i_param.request_id,
-                    images=None),
-                    protocol=pickle.HIGHEST_PROTOCOL)
+                self.send_to_httpserver.send_pyobj(
+                    X2IResponse(request_id=x2i_param.request_id, images=None), protocol=pickle.HIGHEST_PROTOCOL
+                )
 
                 logger.error(e)
-
 
     async def loop_for_netio_req(self):
         while True:
@@ -139,6 +150,7 @@ class X2IManager:
     def clean_up(self):
         pass
 
+
 def setup_devices(args: StartArgs):
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     logger.info(f"current devices: {devices} {torch.cuda.device_count()}")
@@ -152,11 +164,12 @@ def setup_devices(args: StartArgs):
     if len(devices) < llm_need_gpus + x2i_need_gpus:
         raise ValueError(f"devices {devices} not enough, need {llm_need_gpus} and {x2i_need_gpus}")
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, devices[
-        llm_need_gpus:llm_need_gpus + x2i_need_gpus]))
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, devices[llm_need_gpus : llm_need_gpus + x2i_need_gpus]))
 
-    logger.info(f"setup devices for x2i server: {os.environ['CUDA_VISIBLE_DEVICES']}, "
-                f"{torch.cuda.device_count()} {torch.cuda.current_device()}")
+    logger.info(
+        f"setup devices for x2i server: {os.environ['CUDA_VISIBLE_DEVICES']}, "
+        f"{torch.cuda.device_count()} {torch.cuda.current_device()}"
+    )
 
 
 def start_x2i_process(args, pipe_writer):
@@ -166,7 +179,9 @@ def start_x2i_process(args, pipe_writer):
     start_parent_check_thread()
     set_current_device_id(torch.cuda.current_device())
     try:
-        x2iserver = X2IManager(args=args,)
+        x2iserver = X2IManager(
+            args=args,
+        )
         asyncio.run(x2iserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))
