@@ -136,6 +136,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
     ):
         super().__init__()
         self.data_type = kvargs.get("data_type", "bfloat16")
+        self.max_batch_size = kvargs.get("max_batch_size", 1)
 
         self.depth = depth
         self.out_hidden_size = out_hidden_size
@@ -201,6 +202,12 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         else:
             raise ValueError(f"Unsupport datatype {self.data_type}!")
         return
+
+    @torch.no_grad()
+    def _check_max_len_infer(self):
+        from lightllm.models.qwen2_vl.vision_process import qwen_vl_check_max_len_infer
+
+        qwen_vl_check_max_len_infer(self, self.max_batch_size)
 
     def concat_img_embed_and_deepstack_features(self, image_embed, deepstack_feature_lists, valid_ids):
         all_chunks = []

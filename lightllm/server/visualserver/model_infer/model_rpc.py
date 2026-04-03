@@ -111,6 +111,8 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
+            if hasattr(self.model, "_check_max_len_infer"):
+                self.model._check_max_len_infer()
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
