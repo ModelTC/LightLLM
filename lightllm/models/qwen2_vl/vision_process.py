@@ -69,16 +69,17 @@ def qwen_vl_check_max_len_infer(model, max_batch_size):
         grid_thw = grid_thw.to("cuda", non_blocking=True)
 
         result = model.forward(pixel_values, grid_thw=grid_thw)
-        del result
+        del result, pixel_values, grid_thw
+        torch.cuda.empty_cache()
         logger.info(f"vit check max_len {max_batch_size} infer ok")
     except (RuntimeError, torch.OutOfMemoryError, ValueError) as e:
-        logger.exception(str(e))
+        logger.exception("Qwen VL check max len infer failed")
         exception_str = (
             "Vit check max len infer fail, you can try: "
             "1.Set the --visual_infer_batch_size to a smaller value."
         )
         logger.error(exception_str)
-        raise Exception(exception_str)
+        raise RuntimeError(exception_str)
 
 
 IMAGE_FACTOR = 28
