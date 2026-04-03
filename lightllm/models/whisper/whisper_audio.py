@@ -11,6 +11,7 @@ from transformers.processing_utils import ProcessorMixin
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
 
+
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
     r"""
@@ -38,7 +39,7 @@ class WhisperProcessor(ProcessorMixin):
         return self.tokenizer.get_decoder_prompt_ids(task=task, language=language, no_timestamps=no_timestamps)
 
     def get_T_after_cnn(self, L_in, dilation=1):
-        for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
+        for padding, kernel_size, stride in eval("[(1,3,1)] + [(1,3,2)] "):
             L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
             L_out = 1 + L_out // stride
             L_in = L_out

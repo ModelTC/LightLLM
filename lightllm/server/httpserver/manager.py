@@ -164,7 +164,6 @@ class HttpServerManager:
         return items, md5sums, tokens_nums, datas
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
-
         while True:
             records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
 
@@ -489,7 +488,6 @@ class HttpServerManager:
         return image_tokens, audio_tokens
 
     async def _log_req_header(self, request_headers, group_request_id: int):
-
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
 
@@ -622,7 +620,6 @@ class HttpServerManager:
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 logger.debug(
@@ -689,7 +686,6 @@ class HttpServerManager:
         req_status: "ReqStatus",
         request: Request,
     ):
-
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
@@ -820,7 +816,6 @@ class HttpServerManager:
         pre_time_mark = time.time()
 
         while True:
-
             try:
                 await asyncio.wait_for(self.recycle_event.wait(), timeout=0.02)
             except asyncio.TimeoutError:
@@ -897,7 +892,6 @@ class HttpServerManager:
 
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
-
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
                                 req.cumlogprob += float(req.shm_logprobs.arr[src_index])
                                 metadata = {
