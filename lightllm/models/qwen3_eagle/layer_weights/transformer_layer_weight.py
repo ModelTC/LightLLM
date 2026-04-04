@@ -33,20 +33,24 @@ class Qwen3EagleTransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_weight_names(self):
         super()._init_weight_names()
-        self._q_weight_name = f"midlayer.self_attn.q_proj.weight"
-        self._k_weight_name = f"midlayer.self_attn.k_proj.weight"
-        self._v_weight_name = f"midlayer.self_attn.v_proj.weight"
-        self._kv_weight_name = f"midlayer.self_attn.kv_proj.weight"
-        self._o_weight_name = f"midlayer.self_attn.o_proj.weight"
+        if self.network_config_["architectures"][0] == "Eagle3Speculator":
+            weight_prefix = f"layers.0"
+        else:
+            weight_prefix = f"midlayer"
+        self._q_weight_name = f"{weight_prefix}.self_attn.q_proj.weight"
+        self._k_weight_name = f"{weight_prefix}.self_attn.k_proj.weight"
+        self._v_weight_name = f"{weight_prefix}.self_attn.v_proj.weight"
+        self._kv_weight_name = f"{weight_prefix}.self_attn.kv_proj.weight"
+        self._o_weight_name = f"{weight_prefix}.self_attn.o_proj.weight"
 
-        self._gate_weight_name = f"midlayer.mlp.gate_proj.weight"
-        self._up_weight_name = f"midlayer.mlp.up_proj.weight"
-        self._down_weight_name = f"midlayer.mlp.down_proj.weight"
+        self._gate_weight_name = f"{weight_prefix}.mlp.gate_proj.weight"
+        self._up_weight_name = f"{weight_prefix}.mlp.up_proj.weight"
+        self._down_weight_name = f"{weight_prefix}.mlp.down_proj.weight"
         self._gate_up_bias_name = None
-        
-        self._att_norm_weight_name = f"midlayer.input_layernorm.weight"
-        self._ffn_norm_weight_name = f"midlayer.post_attention_layernorm.weight"
-        self._hidden_norm_weight_name = f"midlayer.hidden_norm.weight"
+
+        self._att_norm_weight_name = f"{weight_prefix}.input_layernorm.weight"
+        self._ffn_norm_weight_name = f"{weight_prefix}.post_attention_layernorm.weight"
+        self._hidden_norm_weight_name = f"{weight_prefix}.hidden_norm.weight"
     
     def _init_qkv(self):
         in_dim = self.n_embed * 2

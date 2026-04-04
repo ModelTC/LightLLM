@@ -339,12 +339,11 @@ class ModeBackend:
             # 如有，则加载到self.d2t和self.t2d中
             if self.args.mtp_mode == "eagle3":
                 if os.path.exists(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors")):
-                    with open(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors"), "rb") as f:
-                        from safetensors import load_file
-                        weights = load_file(f)
-                        if "d2t" in weights and "t2d" in weights:
-                            self.d2t = weights["d2t"].cuda()
-                            self.t2d = weights["t2d"].cuda()
+                    from safetensors import safe_open
+                    with safe_open(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors"), framework="pt", device="cuda") as f:
+                        if "d2t" in f.keys() and "t2d" in f.keys():
+                            self.d2t = f.get_tensor("d2t").cuda()
+                            self.t2d = f.get_tensor("t2d").cuda()
                         else:
                             self.d2t = None
                             self.t2d = None

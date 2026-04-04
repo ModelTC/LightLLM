@@ -291,7 +291,7 @@ if __name__ == "__main__":
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
     # static params
-    gqa_group_size = 4
+    gqa_group_size = 8
     q_head_dim = 128
     block_seq = 256
     out_dtype = torch.bfloat16

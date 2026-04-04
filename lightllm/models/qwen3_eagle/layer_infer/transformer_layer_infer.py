@@ -18,6 +18,7 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.hidden_size = network_config["hidden_size"]
+        self.head_dim_ = network_config["head_dim"]
         return
 
     def _hidden_norm(

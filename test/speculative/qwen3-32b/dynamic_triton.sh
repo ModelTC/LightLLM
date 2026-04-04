@@ -14,7 +14,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 MODEL_DIR=/mtc/models/qwen3-32b 
-DRAFT_MODEL_DIR=/mtc/models/qwen3-32b-eagle
+DRAFT_MODEL_DIR=/mtc/models/qwen3-32b-eagle3
 
 LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
 --tp 4 --max_total_token_num 200000 \
