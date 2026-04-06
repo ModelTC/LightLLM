@@ -4,24 +4,41 @@
 import logging
 import sys
 import os
-import time
 from typing import Optional
 
 _FORMAT = "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-_LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "debug")
+_STATUS_FORMAT = "%(levelname)s [%(asctime)s] %(message)s"
+
+_LOG_LEVEL = os.environ.get("LIGHTLLM_LOG_LEVEL", "info")
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL.upper(), 0)
 _LOG_DIR = os.environ.get("LIGHTLLM_LOG_DIR", None)
 
+# ANSI color codes
+_RESET = "\033[0m"
+_LEVEL_COLORS = {
+    logging.DEBUG: "\033[36m",  # cyan
+    logging.INFO: "\033[32m",  # green
+    logging.WARNING: "\033[33m",  # yellow
+    logging.ERROR: "\033[31m",  # red
+    logging.CRITICAL: "\033[1;31m",  # bold red
+}
+
 
 class NewLineFormatter(logging.Formatter):
-    """Adds logging prefix to newlines to align multi-line messages."""
+    """Adds logging prefix to newlines to align multi-line messages, with optional color on levelname."""
 
-    def __init__(self, fmt, datefmt=None):
+    def __init__(self, fmt, datefmt=None, use_color=False):
         logging.Formatter.__init__(self, fmt, datefmt)
+        self.use_color = use_color
 
     def format(self, record):
+        if self.use_color:
+            color = _LEVEL_COLORS.get(record.levelno, "")
+            if color:
+                record = logging.makeLogRecord(record.__dict__)
+                record.levelname = color + record.levelname + _RESET
         msg = logging.Formatter.format(self, record)
         if record.message != "":
             parts = msg.split(record.message)
@@ -39,7 +56,9 @@ def _setup_logger():
     _root_logger.setLevel(_LOG_LEVEL)
     global _default_handler
     global _default_file_handler
-    fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT)
+    _use_color = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    color_fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT, use_color=_use_color)
+    plain_fmt = NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT, use_color=False)
 
     if _default_handler is None:
         _default_handler = logging.StreamHandler(sys.stdout)
@@ -55,10 +74,10 @@ def _setup_logger():
                 _root_logger.warn(f"Error creating directory {_LOG_DIR} : {e}")
         _default_file_handler = logging.FileHandler(_LOG_DIR + "/default.log")
         _default_file_handler.setLevel(_LOG_LEVEL)
-        _default_file_handler.setFormatter(fmt)
+        _default_file_handler.setFormatter(plain_fmt)
         _root_logger.addHandler(_default_file_handler)
 
-    _default_handler.setFormatter(fmt)
+    _default_handler.setFormatter(color_fmt)
     # Setting this will avoid the message
     # being propagated to the parent logger.
     _root_logger.propagate = False
@@ -89,29 +108,28 @@ def init_logger(name: str):
                     _root_logger.warn(f"Error creating directory {_LOG_DIR} : {e}")
             _inference_log_file_handler[pid] = logging.FileHandler(_LOG_DIR + f"/process.{pid}.log")
             _inference_log_file_handler[pid].setLevel(_LOG_LEVEL)
-            _inference_log_file_handler[pid].setFormatter(NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT))
+            _inference_log_file_handler[pid].setFormatter(
+                NewLineFormatter(_FORMAT, datefmt=_DATE_FORMAT, use_color=False)
+            )
             _root_logger.addHandler(_inference_log_file_handler[pid])
             logger.addHandler(_inference_log_file_handler[pid])
     logger.propagate = False
     return logger
 
 
-_log_time_mark_dict = {}
-
-
-def log_time_ready(mark_name, time_count: int):
-    """
-    time_count 间隔时间超过多少s调用该函数会返回True，否则返回False
-    用于控制一些日志输出的频率
-    """
-    global _log_time_mark_dict
-
-    if mark_name not in _log_time_mark_dict:
-        _log_time_mark_dict[mark_name] = time.time()
-        return False
-    cur_time_mark = time.time()
-    if cur_time_mark - _log_time_mark_dict[mark_name] >= time_count:
-        _log_time_mark_dict[mark_name] = cur_time_mark
-        return True
-    else:
-        return False
+def init_system_status_logger(name: str):
+    logger = logging.getLogger(f"lightllm.status.{name}")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        fmt = logging.Formatter(_STATUS_FORMAT, datefmt=_DATE_FORMAT)
+        handler = logging.StreamHandler(sys.stdout)
+        handler.flush = sys.stdout.flush
+        handler.setFormatter(fmt)
+        logger.addHandler(handler)
+        if _LOG_DIR is not None:
+            file_handler = logging.FileHandler(os.path.join(_LOG_DIR, f"status.{name}.log"))
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(fmt)
+            logger.addHandler(file_handler)
+        logger.propagate = False
+    return logger

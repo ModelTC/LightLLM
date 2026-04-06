@@ -52,7 +52,7 @@ class DeTokenizationManager:
             req.link_prompt_ids_shm_array()
             req.link_logprobs_shm_array()
 
-            logger.info(
+            logger.debug(
                 f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
             )
 
@@ -76,7 +76,10 @@ class DeTokenizationManager:
                     for _ in range(recv_max_count):
                         recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         assert isinstance(recv_obj, GroupReqIndexes)
-                        self._add_new_group_req_index(recv_obj=recv_obj)
+                        try:
+                            self._add_new_group_req_index(recv_obj=recv_obj)
+                        except Exception:
+                            logger.exception("add new group req index has exception")
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)
@@ -160,7 +163,7 @@ class DeTokenizationManager:
 
         for decode_req in finished_reqs:
             decode_req.req.can_released_mark = True
-            logger.info(f"detoken release req id {decode_req.req.request_id}")
+            logger.debug(f"detoken release req id {decode_req.req.request_id}")
             self.shm_req_manager.put_back_req_obj(decode_req.req)
             self.req_id_to_out.pop(decode_req.request_id, None)
         return
