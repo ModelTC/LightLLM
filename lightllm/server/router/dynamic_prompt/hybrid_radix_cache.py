@@ -200,6 +200,12 @@ class HybridRadixCache(RadixCache):
 
         return
 
+    def available_opportunistic_buffer_count(self) -> int:
+        """Count how many buffers can be obtained without evicting hotspot buffers."""
+        free = self.buffer_mem_manager.can_use_mem_size
+        non_hotspot = sum(1 for n in self.evict_buffer_set if not n.is_hotspot)
+        return free + non_hotspot
+
     def _maybe_adjust_threshold(self):
         total_events = self.buffer_insert_count + self.buffer_waste_count + self.buffer_hit_count
         if total_events < self.adjust_interval:

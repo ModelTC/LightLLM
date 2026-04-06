@@ -321,6 +321,7 @@ class SamplingParams(ctypes.Structure):
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
+        ("disable_radix_cache_insert", ctypes.c_bool),  # whether to skip radix cache insertion on request free
         ("seed", ctypes.c_int64),  # random seed
     ]
 
@@ -353,6 +354,7 @@ class SamplingParams(ctypes.Structure):
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
         self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
+        self.disable_radix_cache_insert = kwargs.get("disable_radix_cache_insert", False)
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)

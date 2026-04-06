@@ -290,6 +290,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+    if _get_reasoning_from_request(request):
+        sampling_params_dict["disable_radix_cache_insert"] = True
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 

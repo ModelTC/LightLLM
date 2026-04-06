@@ -168,25 +168,8 @@ class InferenceContext:
                 req.shared_kv_node = None
 
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
-        logger.info(
-            f"[FREE_MAMBA] radix_cache={'exists' if self.radix_cache else 'None'}, "
-            f"disable_insert={req.sampling_param.disable_radix_cache_insert}, "
-            f"cur_kv_len={req.cur_kv_len}"
-        )
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
-        elif req.sampling_param.disable_radix_cache_insert:
-            # Thinking mode requests: skip radix cache insertion, free all tokens directly
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len : req.cur_kv_len])
-            if req.shared_kv_node is not None:
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-
-            # Drain deferred frees from hotspot buffer insertion
-            if len(req.extra_need_to_free_token_index) > 0:
-                free_token_index.extend(req.extra_need_to_free_token_index)
-                req.extra_need_to_free_token_index = []
         else:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -221,7 +204,6 @@ class InferenceContext:
         reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill]
         if not reqs_to_insert:
             return
-
         radix_cache: HybridRadixCache = self.radix_cache
         radix_cache.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
 
@@ -247,6 +229,57 @@ class InferenceContext:
             )
             req.shared_kv_node = new_node
             req.is_hotspot_prefill = False
+            req.mamba_buffer_target_len = 0
+
+    def snapshot_prefill_complete_buffers(self, run_reqs: List["InferReq"]):
+        """Opportunistically snapshot Mamba states for requests that just completed prefill.
+
+        Unlike snapshot_hybrid_buffers (which targets hotspot requests), this tries to
+        attach a buffer to every request finishing prefill, as long as buffer space is
+        available without evicting hotspot buffers.
+        """
+        radix_cache: HybridRadixCache = self.radix_cache
+
+        eligible = []
+        for r in run_reqs:
+            # Skip: still in chunked prefill
+            if r.cur_kv_len + 1 < r.get_cur_total_len():
+                continue
+            # Skip: shared node already has a buffer (e.g., from hotspot snapshot)
+            if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None:
+                continue
+            eligible.append(r)
+
+        if not eligible:
+            return
+
+        max_buffers = radix_cache.available_opportunistic_buffer_count()
+        eligible = eligible[:max_buffers]
+        if not eligible:
+            return
+
+        radix_cache.free_radix_cache_to_get_enough_buffer(len(eligible))
+        new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(eligible))
+        req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
+        cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+        new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
+        radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+
+        for i, req in enumerate(eligible):
+            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+
+            prefix_len, new_node = radix_cache.insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+
+            radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            radix_cache.add_node_ref_counter(new_node)
+            radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=False)
+
+            req.extra_need_to_free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+            )
+            req.shared_kv_node = new_node
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -532,7 +565,7 @@ class InferReq:
         self.finish_status = FinishStatus()
 
         # Hybrid radix cache hotspot detection
-        self.mamba_buffer_insert_len = 0
+        self.mamba_buffer_target_len = 0  # absolute token position for buffer snapshot
         self.is_hotspot_prefill = False
         self.extra_need_to_free_token_index = []
         return
@@ -555,7 +588,7 @@ class InferReq:
                 if g_infer_context.has_recurrent_state:
                     threshold = g_infer_context.radix_cache.min_insert_threshold
                     if miss_prefix_len > threshold:
-                        self.mamba_buffer_insert_len = miss_prefix_len
+                        self.mamba_buffer_target_len = self.cur_kv_len + miss_prefix_len
                         self.is_hotspot_prefill = True
             elif g_infer_context.has_recurrent_state and miss_prefix_len > 0:
                 # Bootstrap case: tree had KV structure but no buffer anywhere.
@@ -563,6 +596,7 @@ class InferReq:
                 # the tree was — evidence of a hot prefix worth seeding a buffer for.
                 threshold = g_infer_context.radix_cache.min_insert_threshold
                 if miss_prefix_len > threshold:
+                    self.mamba_buffer_target_len = miss_prefix_len
                     self.is_hotspot_prefill = True
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -617,10 +651,10 @@ class InferReq:
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
-        if self.mamba_buffer_insert_len > 0:
-            chunked_end = min(self.get_cur_total_len(), chunked_start + self.mamba_buffer_insert_len)
-            self.mamba_buffer_insert_len = 0
+        if self.mamba_buffer_target_len > 0 and chunked_start < self.mamba_buffer_target_len:
+            chunked_end = min(self.get_cur_total_len(), self.mamba_buffer_target_len)
+        else:
+            chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
