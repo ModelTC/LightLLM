@@ -448,11 +448,17 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
-                prompt_ids = self.tokenizer.encode(
-                    prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                prompt_ids = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.tokenizer.encode(
+                        prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                    ),
                 )
             else:
-                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
+                prompt_ids = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens),
+                )
 
             if self.args.detail_log:
                 logger.debug(
