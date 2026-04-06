@@ -116,6 +116,20 @@ g_objs = G_Objs()
 app = FastAPI()
 g_objs.app = app
 
+_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
+_ACCESS_LOG_RESET = "\033[0m"
+
+
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    response = await call_next(request)
+    msg = f"{request.method} {request.url.path} {response.status_code}"
+    color = _ACCESS_LOG_STATUS_COLORS.get(response.status_code // 100, "")
+    if color:
+        msg = color + msg + _ACCESS_LOG_RESET
+    logger.info(msg)
+    return response
+
 
 _ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
 _ACCESS_LOG_RESET = "\033[0m"
