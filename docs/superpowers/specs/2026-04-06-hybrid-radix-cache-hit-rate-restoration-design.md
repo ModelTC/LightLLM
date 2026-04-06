@@ -15,33 +15,118 @@ In a hybrid model, when `match_prefix` walks back to the nearest buffer, the KV 
 
 This makes R3 (walk-back cleanup) essential for memory correctness, not just optimization.
 
+## Design Principles
+
+1. **Only hot insertions.** Buffer slots are precious. Buffers enter the cache ONLY through the hotspot path (proven demand via `miss_prefix_len`). No buffer donation at request completion.
+2. **Adaptive threshold.** Start with a reasonable baseline (1024 tokens), then dynamically adjust based on observed caching effectiveness.
+3. **Hotspot eviction resistance.** Hot-inserted buffers resist eviction longer than regular entries.
+4. **Aggressive orphan cleanup.** KV tokens without a buffer are dead weight — free them immediately.
+
 ## Design
 
-### 1. Startup-Computed Threshold
+### 1. Adaptive Insertion Threshold
 
-The threshold for buffer insertion is the cost-equivalence point: how many KV tokens' worth of memory does one buffer slot cost?
+Buffer capacity is critical. Each cached buffer must justify its slot by saving significant recomputation. The threshold determines the minimum `miss_prefix_len` worth caching.
 
+**Baseline**: `min_insert_threshold = 1024` (reasonable starting point).
+
+**Runtime adaptation** based on ground truth: did cached buffers actually get used before eviction?
+
+#### 1.1 Tracking State
+
+On `TreeNode`:
+```python
+self.was_hit = False    # set True when match_prefix finds and uses this buffer
 ```
-buffer_cell_size = conv_cell_size + ssm_cell_size
-kv_per_token_size = 2 * num_kv_heads * head_dim * num_full_attn_layers * dtype_size
 
-min_insert_threshold = buffer_cell_size // kv_per_token_size
+On `HybridRadixCache`:
+```python
+self.min_insert_threshold = 1024    # adaptive, starts at baseline
+self.MIN_THRESHOLD = 256            # floor
+self.MAX_THRESHOLD = 16384          # ceiling
+self.adjust_interval = 100          # evaluate every N events
+
+# Sliding window counters
+self.buffer_insert_count = 0        # hot insertions performed
+self.buffer_hit_count = 0           # cached buffers hit by match_prefix
+self.buffer_waste_count = 0         # cached buffers evicted without ever being hit
 ```
 
-A buffer is worth caching when `miss_prefix_len > min_insert_threshold`. Below that, the memory is better spent on KV cache capacity.
+#### 1.2 Counter Updates
 
-**Computed at startup** from model architecture parameters already available in `Qwen3NextHybridMemManager` and `MambaCacheManager`:
+**On hot insertion** (`add_buffer_idx_to_node` with `is_hotspot=True`):
+```python
+node.was_hit = False
+self.buffer_insert_count += 1
+```
 
-- `Qwen3NextHybridMemManager.get_cell_size()` returns `kv_per_token_size`
-- `MambaCacheManager` has `conv_state_cache.get_cell_size()` and `ssm_state_cache.get_cell_size()` for `buffer_cell_size`
+**On cache hit** (`match_prefix`, when buffer node is found):
+```python
+tree_node.was_hit = True
+self.buffer_hit_count += 1
+```
 
-**Where to store**: On `HybridRadixCache` as `self.min_insert_threshold`, computed during `__init__` from the mem managers.
+**On buffer eviction** (`_evict_buffer`, before clearing buffer_idx):
+```python
+if node.was_hit:
+    self.buffer_hit_count += 1
+else:
+    self.buffer_waste_count += 1
+```
+
+Note: `buffer_hit_count` is incremented both on match (immediate signal) and on eviction of previously-hit buffers. The eviction-time check is the definitive signal — it tells us the buffer served at least one hit during its lifetime.
+
+#### 1.3 Adjustment Logic
+
+Called from `_evict_buffer` (already under `g_infer_state_lock`):
+
+```python
+def _maybe_adjust_threshold(self):
+    total_events = self.buffer_insert_count + self.buffer_waste_count + self.buffer_hit_count
+    if total_events < self.adjust_interval:
+        return
+
+    total_resolved = self.buffer_hit_count + self.buffer_waste_count
+    if total_resolved == 0:
+        self._reset_counters()
+        return
+
+    waste_ratio = self.buffer_waste_count / total_resolved
+
+    if waste_ratio > 0.5:
+        # More than half of evicted buffers were never hit — caching too aggressively
+        self.min_insert_threshold = min(self.min_insert_threshold * 2, self.MAX_THRESHOLD)
+    elif waste_ratio < 0.1 and self.buffer_mem_manager.can_use_mem_size > self.buffer_mem_manager.size * 0.3:
+        # Almost all cached buffers were useful AND pool has >30% free — can cache more
+        self.min_insert_threshold = max(self.min_insert_threshold // 2, self.MIN_THRESHOLD)
+    # else: hold — not enough signal to change
+
+    self._reset_counters()
+
+def _reset_counters(self):
+    self.buffer_insert_count = 0
+    self.buffer_hit_count = 0
+    self.buffer_waste_count = 0
+```
+
+#### 1.4 Adaptation Behavior
+
+| Scenario | waste_ratio | Pool free | Action |
+|---|---|---|---|
+| Caching too aggressively | High (>0.5) | Any | Threshold *= 2 (be more selective) |
+| Caching effectively, pool has room | Low (<0.1) | >30% | Threshold //= 2 (cache more) |
+| Caching effectively, pool is tight | Low (<0.1) | <30% | Hold (good picks but no room to expand) |
+| Mixed results | 0.1–0.5 | Any | Hold (not enough signal to change) |
+
+Doubling/halving gives logarithmic convergence (1024 → 512 → 256 or 1024 → 2048 → 4096). Floor and ceiling prevent pathological behavior.
 
 ### 2. `match_prefix` — Return `miss_prefix_len` + Walk-Back Cleanup (R3)
 
 **Return value change**: Replace the redundant `kv_len` (equals `node.node_prefix_total_len`) with `miss_prefix_len` (the gap size). Callers already use `share_node.node_prefix_total_len` for the usable prefix length.
 
 **Walk-back cleanup (R3)**: When `update_refs=True` and a walked-back node becomes an unreferenced leaf, destroy it and free its KV tokens immediately. These tokens are proven useless (no buffer = no computational benefit).
+
+**Cache hit tracking**: When the walk-back finds a buffer node, mark it as hit.
 
 ```python
 def match_prefix(self, key, update_refs=False):
@@ -82,6 +167,10 @@ def match_prefix(self, key, update_refs=False):
     if tree_node == self.root_node:
         return None, miss_prefix_len, None
 
+    # Mark buffer as hit for adaptive threshold tracking
+    if update_refs:
+        tree_node.was_hit = True
+
     # Refresh buffer LRU times along the matched path
     update_node = tree_node
     while update_node != self.root_node:
@@ -95,7 +184,7 @@ def match_prefix(self, key, update_refs=False):
     return tree_node, miss_prefix_len, value
 ```
 
-### 3. `_evict_buffer` — Cascading Cleanup (R4)
+### 3. `_evict_buffer` — Cascading Cleanup (R4) + Adaptive Tracking
 
 When a buffer is evicted from a node, and the node is an unreferenced leaf, the node and its KV tokens are useless (same reasoning as R3). Destroy them.
 
@@ -106,10 +195,19 @@ def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback, evict_toke
     while need_evict_buffer_num > 0:
         node = self.evict_buffer_set.pop(0)
         assert node.buffer_idx is not None
+
+        # Track whether this buffer was useful (for adaptive threshold)
+        if node.was_hit:
+            self.buffer_hit_count += 1
+        else:
+            self.buffer_waste_count += 1
+
         evict_buffer_callback(node.buffer_idx)
         node.buffer_idx = None
         node.is_hotspot = False
+        node.was_hit = False
         need_evict_buffer_num -= 1
+
         # R4: buffer-less unreferenced leaf is dead weight
         if node.is_leaf() and node.ref_counter == 0:
             self.evict_tree_set.discard(node)
@@ -119,6 +217,8 @@ def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback, evict_toke
             parent_node.remove_child(node)
             if parent_node.is_leaf():
                 self.evict_tree_set.add(parent_node)
+
+    self._maybe_adjust_threshold()
 ```
 
 `free_radix_cache_to_get_enough_buffer` passes both callbacks:
@@ -140,9 +240,9 @@ def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
 
 ### 4. Hotspot Eviction Resistance
 
-Buffers inserted at natural reuse boundaries (multi-turn conversation history, system prompts) should be harder to evict than buffers planted at request completion.
+Buffers inserted at natural reuse boundaries (multi-turn conversation history, system prompts) should be harder to evict.
 
-**TreeNode**: Add `is_hotspot: bool = False` field.
+**TreeNode**: Add `is_hotspot: bool = False` and `was_hit: bool = False` fields.
 
 **`evict_buffer_set` sort key**: Change from `(buffer_time,)` to `(is_hotspot, buffer_time)`.
 
@@ -164,15 +264,20 @@ def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int, is_hotspot: bo
         self.buffer_mem_manager.free([node.buffer_idx])
     node.buffer_idx = buffer_idx
     node.is_hotspot = is_hotspot
+    node.was_hit = False
     node.update_buffer_time()
     self.evict_buffer_set.add(node)
     if node.is_leaf():
         self.evict_tree_set.add(node)
+    if is_hotspot:
+        self.buffer_insert_count += 1
 ```
 
-### 5. Targeted Buffer Insertion (Replaces R1)
+### 5. Targeted Buffer Insertion — Hot Only
 
-**No mid-chunk insertion.** Buffers are only inserted in two high-ROI scenarios:
+**No mid-chunk insertion. No buffer donation at request completion.** Buffers enter the cache ONLY through the hotspot path.
+
+Two high-ROI scenarios trigger insertion:
 
 1. **System prompt miss**: system prompt has tree structure but no buffer (every request benefits)
 2. **Multi-turn conversation return**: previous conversation history has tree structure but no buffer
@@ -220,7 +325,48 @@ def snapshot_hybrid_buffers(self, run_reqs: List[InferReq]):
         req.is_hotspot_prefill = False  # one-shot: don't re-insert on subsequent chunks
 ```
 
-### 6. Hotspot Detection in `_match_radix_cache` (R2)
+### 6. Remove Non-Hot Buffer Donation at Request Completion
+
+In `free_a_req_mem_for_mamba`, remove the block that attaches the request's buffer to the tree node. Buffers should ONLY enter the cache through the hotspot path.
+
+**Current code to remove:**
+```python
+# DELETE: non-hot buffer donation
+if node is not None and node.buffer_idx is None:
+    buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+    self.radix_cache.add_buffer_idx_to_node(node, buffer_idx)
+    return False
+```
+
+**Always return `True`** (always free the request's buffer back to the pool).
+
+**Keep the deferred free drain:**
+```python
+def free_a_req_mem_for_mamba(self, free_token_index, req):
+    if self.radix_cache is None:
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+    else:
+        input_token_ids = req.get_input_token_ids()
+        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+
+        prefix_len, node = self.radix_cache.insert(key, value)
+        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+        if req.shared_kv_node is not None:
+            assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
+
+        # Drain deferred frees from hotspot buffer insertion
+        if len(req.extra_need_to_free_token_index) > 0:
+            free_token_index.extend(req.extra_need_to_free_token_index)
+            req.extra_need_to_free_token_index = []
+
+    return True  # always free request's buffer back to pool
+```
+
+### 7. Hotspot Detection in `_match_radix_cache` (R2)
 
 ```python
 def _match_radix_cache(self):
@@ -250,7 +396,7 @@ def _match_radix_cache(self):
     return
 ```
 
-### 7. First-Chunk Enlargement in `get_chuncked_input_token_len`
+### 8. First-Chunk Enlargement in `get_chuncked_input_token_len`
 
 ```python
 def get_chuncked_input_token_len(self):
@@ -270,30 +416,12 @@ def get_chuncked_input_token_ids(self):
     return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 ```
 
-### 8. `InferReq` Field Additions
+### 9. `InferReq` Field Additions
 
 ```python
 self.mamba_buffer_insert_len = 0
 self.is_hotspot_prefill = False
 self.extra_need_to_free_token_index = []
-```
-
-### 9. Deferred Free in `free_a_req_mem_for_mamba`
-
-Drain the deferred free list accumulated by `snapshot_hybrid_buffers`:
-
-```python
-def free_a_req_mem_for_mamba(self, free_token_index, req):
-    # ... existing code ...
-    if self.radix_cache is not None:
-        # ... existing insert + buffer attach logic ...
-
-        # Drain deferred frees from mid-prefill buffer insertion
-        if len(req.extra_need_to_free_token_index) > 0:
-            free_token_index.extend(req.extra_need_to_free_token_index)
-            req.extra_need_to_free_token_index = []
-
-        # ... rest of existing logic ...
 ```
 
 ### 10. Integration in Chunked Prefill Backend
@@ -344,9 +472,9 @@ Applied to both `prefill_normal` and `prefill_mtp`.
 
 | File | Changes |
 |---|---|
-| `radix_cache.py` | Add `is_hotspot` field to `TreeNode` |
-| `hybrid_radix_cache.py` | `match_prefix` returns `miss_prefix_len` + R3 cleanup; `_evict_buffer` R4 cascading cleanup; hotspot-aware `evict_buffer_set` sort key; `add_buffer_idx_to_node` with `is_hotspot`; `free_radix_cache_to_get_enough_buffer` dual callbacks; `min_insert_threshold` computed at init |
-| `infer_batch.py` | `InferReq` fields (`mamba_buffer_insert_len`, `is_hotspot_prefill`, `extra_need_to_free_token_index`); `_match_radix_cache` hotspot detection; `get_chuncked_input_token_len` + `get_chuncked_input_token_ids` enlargement; `snapshot_hybrid_buffers` on `InferenceContext`; `free_a_req_mem_for_mamba` deferred free |
+| `radix_cache.py` | Add `is_hotspot`, `was_hit` fields to `TreeNode` |
+| `hybrid_radix_cache.py` | `match_prefix` returns `miss_prefix_len` + R3 cleanup + hit tracking; `_evict_buffer` R4 cascading cleanup + waste tracking + `_maybe_adjust_threshold`; hotspot-aware `evict_buffer_set` sort key; `add_buffer_idx_to_node` with `is_hotspot`; `free_radix_cache_to_get_enough_buffer` dual callbacks; adaptive threshold state and logic |
+| `infer_batch.py` | `InferReq` fields (`mamba_buffer_insert_len`, `is_hotspot_prefill`, `extra_need_to_free_token_index`); `_match_radix_cache` hotspot detection; `get_chuncked_input_token_len` + `get_chuncked_input_token_ids` enlargement; `snapshot_hybrid_buffers` on `InferenceContext`; `free_a_req_mem_for_mamba` remove non-hot donation + add deferred free drain |
 | `chunked_prefill/impl.py` | `_maybe_snapshot_hybrid_buffers` method; calls in `prefill_normal` and `prefill_mtp` |
 
 ## Key Differences from Original `origin/qwen3next_last`
@@ -354,10 +482,11 @@ Applied to both `prefill_normal` and `prefill_mtp`.
 | Aspect | Original | This Design |
 |---|---|---|
 | Buffer insertion timing | After every prefill chunk | Only for hotspot requests, one-shot after enlarged first chunk |
-| Threshold | Magic numbers (128, 1024) | `buffer_cell_size // kv_per_token_size`, computed at startup |
+| Buffer donation at request end | Always donates buffer to cache | Never — only hot insertions |
+| Threshold | Magic numbers (128, 1024) | Adaptive: baseline 1024, self-tunes via waste_ratio |
 | Buffer copy API | `copy_buffer_p2p` (PyTorch indexing) | `copy_state_buffers` (Triton kernels) |
 | `match_prefix` ref counting | Unconditional decrement (bug) | Conditional on `update_refs` (correct) |
 | Walk-back cleanup | Always destroys orphans | Destroys orphans only when `update_refs=True` |
 | Eviction priority | Uniform LRU | Hotspot-aware: non-hotspot evicted first |
 | `insert_for_hybrid_radix_cache` location | On `HybridRadixCache` (circular import) | On `InferenceContext` (clean dependency) |
-| Cache architecture awareness | None | `HybridRadixCache` stays pure; request logic in `InferenceContext` |
+| Observability | Hit rate logging (removed) | `was_hit` tracking, waste_ratio for adaptive control |
