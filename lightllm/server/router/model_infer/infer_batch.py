@@ -145,6 +145,13 @@ class InferenceContext:
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+        elif req.sampling_param.disable_radix_cache_insert:
+            # Thinking mode requests: skip radix cache insertion, free all tokens directly
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len : req.cur_kv_len])
+            if req.shared_kv_node is not None:
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
         else:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -163,6 +170,18 @@ class InferenceContext:
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+        elif req.sampling_param.disable_radix_cache_insert:
+            # Thinking mode requests: skip radix cache insertion, free all tokens directly
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len : req.cur_kv_len])
+            if req.shared_kv_node is not None:
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
+
+            # Drain deferred frees from hotspot buffer insertion
+            if len(req.extra_need_to_free_token_index) > 0:
+                free_token_index.extend(req.extra_need_to_free_token_index)
+                req.extra_need_to_free_token_index = []
         else:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -356,6 +375,7 @@ class InferSamplingParams:
     ) -> None:
         self.shm_param = shm_req.sample_params
         self.disable_prompt_cache = self.shm_param.disable_prompt_cache
+        self.disable_radix_cache_insert = self.shm_param.disable_radix_cache_insert
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
@@ -532,6 +552,13 @@ class InferReq:
                     if miss_prefix_len > threshold:
                         self.mamba_buffer_insert_len = miss_prefix_len
                         self.is_hotspot_prefill = True
+            elif g_infer_context.has_recurrent_state and miss_prefix_len > 0:
+                # Bootstrap case: tree had KV structure but no buffer anywhere.
+                # R3 destroyed the nodes, but miss_prefix_len records how deep
+                # the tree was — evidence of a hot prefix worth seeding a buffer for.
+                threshold = g_infer_context.radix_cache.min_insert_threshold
+                if miss_prefix_len > threshold:
+                    self.is_hotspot_prefill = True
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
