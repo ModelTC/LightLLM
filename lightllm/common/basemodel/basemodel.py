@@ -133,6 +133,7 @@ class TpPartBaseModel:
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
         self._check_max_len_infer()
+        self._check_decode_infer()
         torch.cuda.empty_cache()
         set_model_init_status(True)
         return
@@ -828,7 +829,6 @@ class TpPartBaseModel:
 
         return model_output, model_output1
 
-    @final
     @torch.no_grad()
     def _check_max_len_infer(self):
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
@@ -881,10 +881,104 @@ class TpPartBaseModel:
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
             exception_str = (
-                "check max len infer fail, you can try:"
-                "1.Set the --mem_fraction or --max_total_token_num startup parameter to a smaller value."
-                "2.Set the --max_req_total_len to a smaller value."
-                "3.Set the --batch_max_tokens startup parameter to a smaller value."
+                "check max len infer fail, you can try:\n"
+                "1. Set --mem_fraction or --max_total_token_num to a smaller value.\n"
+                "2. Set --max_req_total_len to a smaller value.\n"
+                "3. Set --batch_max_tokens to a smaller value.\n"
+                "4. For hybrid models (Qwen3.5), try adjusting --mamba_cache_ratio or --mamba_cache_size."
+            )
+            logger.error(exception_str)
+            raise Exception(exception_str)
+        return
+
+    @torch.no_grad()
+    def _check_decode_infer(self):
+        """Simulate a decode batch to detect OOM from concurrent request activations."""
+        disable_check = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+        if disable_check:
+            return
+
+        torch.distributed.barrier()
+
+        batch_size = self.graph_max_batch_size
+        if batch_size <= 1:
+            return
+
+        try:
+            logger.info(f"begin check decode infer with batch_size={batch_size}")
+            # Each decode request has 1 new token
+            dummy_input_ids = torch.ones(batch_size, dtype=torch.int32, device="cuda")
+
+            # Allocate request slots
+            req_idxs = []
+            for _ in range(batch_size):
+                idx = self.req_manager.alloc()
+                if idx is None:
+                    break
+                req_idxs.append(idx)
+            actual_batch = len(req_idxs)
+            if actual_batch < 2:
+                logger.info("skip decode check: not enough req slots")
+                self.req_manager.free_all()
+                return
+
+            b_req_idx = torch.tensor(req_idxs, dtype=torch.int32, device="cuda")
+
+            # Allocate KV tokens spread across requests to simulate occupied cache.
+            # Use min of max_total_token_num and batch * batch_max_tokens to stay within pool.
+            tokens_per_req = min(
+                self.batch_max_tokens,
+                max(1, self.max_total_token_num // actual_batch),
+            )
+            total_tokens = tokens_per_req * actual_batch
+            # Clamp to available pool size
+            total_tokens = min(total_tokens, self.mem_manager.can_use_mem_size)
+            tokens_per_req = max(1, total_tokens // actual_batch)
+            total_tokens = tokens_per_req * actual_batch
+
+            mem_indexes = self.mem_manager.alloc(total_tokens).cuda()
+
+            b_seq_len = torch.full((actual_batch,), tokens_per_req, dtype=torch.int32, device="cuda")
+            b_ready_cache_len = torch.zeros(actual_batch, dtype=torch.int32, device="cuda")
+            b_mtp_index = torch.zeros(actual_batch, dtype=torch.int32, device="cuda")
+
+            # In decode, max_q_seq_len=1, max_kv_seq_len=max seq len across requests
+            model_input = ModelInput(
+                batch_size=actual_batch,
+                total_token_num=total_tokens,
+                max_q_seq_len=1,
+                max_kv_seq_len=tokens_per_req,
+                max_cache_len=tokens_per_req - 1,
+                prefix_total_token_num=0,
+                input_ids=dummy_input_ids[:actual_batch],
+                mem_indexes=mem_indexes[:actual_batch],
+                b_req_idx=b_req_idx,
+                b_seq_len=b_seq_len,
+                b_mtp_index=b_mtp_index,
+                is_prefill=False,
+                b_ready_cache_len=b_ready_cache_len,
+                multimodal_params=[{"images": [], "audios": []}] * actual_batch,
+            )
+            model_output = self.forward(model_input)
+            prob_out = torch.softmax(model_output.logits, dim=-1)
+            del model_output
+            # Simulate top_p/top_k sampling which calls probs.sort() — this allocates
+            # batch_size * vocab_size * element_size and can OOM with large decode batches.
+            prob_out.sort(dim=-1, descending=True)
+            prob_out = None
+            self.req_manager.free_all()
+            self.mem_manager.free_all()
+            logger.info(f"check decode infer batch_size={actual_batch} tokens_per_req={tokens_per_req} ok")
+        except (RuntimeError, torch.OutOfMemoryError) as e:
+            logger.exception(str(e))
+            self.req_manager.free_all()
+            self.mem_manager.free_all()
+            exception_str = (
+                "check decode infer fail (OOM during decode with concurrent requests), you can try:\n"
+                "1. Set --graph_max_batch_size to a smaller value.\n"
+                "2. Set --running_max_req_size to a smaller value.\n"
+                "3. Set --mem_fraction or --max_total_token_num to a smaller value.\n"
+                "4. For hybrid models (Qwen3.5), try increasing --mamba_cache_ratio or reducing --mamba_cache_size."
             )
             logger.error(exception_str)
             raise Exception(exception_str)

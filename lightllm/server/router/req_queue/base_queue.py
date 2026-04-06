@@ -15,6 +15,11 @@ class BaseQueue:
         from lightllm.server.router.manager import RouterManager
 
         self.router: RouterManager = router
+        self.read_only_mamba_cache_manager = getattr(router, "read_only_mamba_cache_manager", None)
+        # Total mamba cache capacity for hard-cap scheduling.
+        # mamba_cache_size is the total number of buffer slots available.
+        self.mamba_cache_size = self.args.mamba_cache_size
+        self.mamba_buffers_per_req = self.args.mtp_step + 1
         # max_total_token_num - get_fixed_kv_len() 是为了减去被特定
         # 推理模式预先占用了部分token kv 资源，这会导致整体可用的kv 资源
         # 在极端情况下减少，在非特定模式下，get_fixed_kv_len() 返回的都是

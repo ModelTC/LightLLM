@@ -20,7 +20,13 @@ class NIXLPDQueue(BaseQueue):
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
 
-        if ok_token_num and ok_req_num:
+        # For hybrid models, ensure total request count never exceeds mamba cache capacity.
+        ok_mamba = True
+        if self.mamba_cache_size is not None:
+            max_reqs = self.mamba_cache_size // self.mamba_buffers_per_req
+            ok_mamba = batch_req_num < max_reqs
+
+        if ok_token_num and ok_req_num and ok_mamba:
             self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
                 estimated_peak_token_num / self.max_total_tokens,
@@ -67,7 +73,6 @@ class NIXLPDQueue(BaseQueue):
 
         estimated_peak_token_num = self._caclu_batch_estimated_peak_token_num(current_batch)
         batch_req_num = exist_req_num
-
         can_run_list = []
         abort_req_list = []
         aborted_count = 0

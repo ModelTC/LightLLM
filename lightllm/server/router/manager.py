@@ -31,6 +31,7 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
+from lightllm.common.mamba_cache_mem_manager.cache_manager import ReadOnlyStaticsMambaCacheManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -64,6 +65,15 @@ class RouterManager:
         self.shm_req_manager = ShmReqManager()
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
+        # Mamba cache reader for hybrid models (Qwen3Next). Initialized for all models;
+        # returns None-like values when mamba cache shared memory doesn't exist.
+        self.read_only_mamba_cache_manager = None
+        if self.args.mamba_cache_size is not None or self._is_hybrid_model():
+            try:
+                self.read_only_mamba_cache_manager = ReadOnlyStaticsMambaCacheManager()
+                logger.info(f"Mamba cache reader initialized (mamba_cache_size={self.args.mamba_cache_size})")
+            except Exception:
+                logger.warning("No mamba cache shared memory found, mamba-aware scheduling disabled")
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
         self.status_reporter = None
@@ -413,6 +423,11 @@ class RouterManager:
             )
         else:
             return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
+
+    def _is_hybrid_model(self):
+        """Check if the model uses hybrid attention (has mamba/linear attention layers)."""
+        model_type = getattr(self.args, "model_type", "")
+        return model_type in ("qwen3_next",)
 
     def _add_req(self, group_req_indexes: GroupReqIndexes):
         req_group = []

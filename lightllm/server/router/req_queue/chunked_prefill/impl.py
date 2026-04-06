@@ -48,7 +48,16 @@ class ChunkedPrefillQueue(BaseQueue):
             new_batch_first_router_need_tokens += req.get_first_router_need_tokens()
             ok_prefill = new_batch_first_router_need_tokens <= self.batch_max_tokens
 
-            if ok_token_num and ok_req_num and ok_prefill:
+            # For hybrid models, ensure total request count never exceeds mamba cache capacity.
+            # We use total capacity (mamba_cache_size) as the hard cap, comparing against the
+            # total number of requests: existing running + newly admitted in this round.
+            ok_mamba = True
+            if self.mamba_cache_size is not None:
+                total_reqs = len(self.cache_len_list)  # includes existing + newly added
+                max_reqs = self.mamba_cache_size // self.mamba_buffers_per_req
+                ok_mamba = total_reqs < max_reqs
+
+            if ok_token_num and ok_req_num and ok_prefill and ok_mamba:
                 self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
                 self.router.shared_token_load.set_dynamic_max_load(
                     (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
@@ -80,7 +89,6 @@ class ChunkedPrefillQueue(BaseQueue):
         can_run_list = []
         abort_req_list = []
         aborted_count = 0
-
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
