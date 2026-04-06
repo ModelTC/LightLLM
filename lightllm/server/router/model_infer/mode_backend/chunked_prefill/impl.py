@@ -50,6 +50,14 @@ class ChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         return
 
+    def _maybe_snapshot_hybrid_buffers(self, run_reqs: List[InferReq]):
+        """Snapshot Mamba states for hotspot requests. Called after prefill, before next iteration."""
+        if g_infer_context.has_recurrent_state and self.radix_cache is not None:
+            torch.cuda.synchronize()
+            g_infer_state_lock.acquire()
+            g_infer_context.snapshot_hybrid_buffers(run_reqs)
+            g_infer_state_lock.release()
+
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
         try:
@@ -136,6 +144,8 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
+        # Buffer snapshot for hotspot requests (between Stage 3 and Stage 4)
+        self._maybe_snapshot_hybrid_buffers(run_reqs)
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -219,6 +229,8 @@ class ChunkedPrefillBackend(ModeBackend):
             nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
         )
 
+        # Buffer snapshot for hotspot requests (between Stage 3 and Stage 4)
+        self._maybe_snapshot_hybrid_buffers(run_reqs)
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
