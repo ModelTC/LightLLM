@@ -30,7 +30,6 @@ class HybridRadixCache(RadixCache):
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
-        evict_token_list = []
         miss_prefix_len = 0
         while tree_node != self.root_node and tree_node.buffer_idx is None:
             miss_prefix_len += len(ans_value_list[-1]) if ans_value_list else 0
@@ -38,30 +37,21 @@ class HybridRadixCache(RadixCache):
             next_node = tree_node.parent
 
             if update_refs:
-                # Undo the ref increment from _match_prefix_helper
+                # Undo the ref increment from _match_prefix_helper.
+                # Do NOT destroy nodes here — that caused a cascade where each
+                # destroyed child turned its parent into a leaf, which was then
+                # also destroyed, silently wiping the entire prefix chain.
+                # Unreferenced leaves will be reclaimed by the normal eviction path.
                 if tree_node.is_leaf():
                     self.evict_tree_set.discard(tree_node)
                 if tree_node.ref_counter == 1:
                     self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
                 tree_node.ref_counter -= 1
-
-                # R3 cleanup: destroy unreferenced leaf nodes walked back over
-                if tree_node.is_leaf() and tree_node.ref_counter == 0:
-                    evict_token_list.append(tree_node.token_mem_index_value)
-                    self.tree_total_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
-                    next_node.remove_child(tree_node)
-                    if next_node.is_leaf():
-                        self.evict_tree_set.add(next_node)
-                else:
-                    if tree_node.is_leaf():
-                        self.evict_tree_set.add(tree_node)
+                if tree_node.is_leaf():
+                    self.evict_tree_set.add(tree_node)
 
             ans_value_list.pop()
             tree_node = next_node
-
-        if len(evict_token_list) > 0:
-            evict_token_value = torch.concat(evict_token_list)
-            self.mem_manager.free(evict_token_value)
 
         if tree_node == self.root_node:
             return None, miss_prefix_len, None
