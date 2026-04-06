@@ -58,6 +58,17 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
+async def _safe_stream_wrapper(stream_generator):
+    """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
+    event instead of letting the exception propagate to Starlette which prints a long traceback."""
+    try:
+        async for item in stream_generator:
+            yield item
+    except ValueError as e:
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}})
+        yield f"data: {error_data}\n\n"
+
+
 def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
     from .api_http import g_objs
 
@@ -600,7 +611,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    return StreamingResponse(
+        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+    )
 
 
 async def completions_impl(request: CompletionRequest, raw_request: Request) -> Response:
@@ -804,7 +817,9 @@ async def _handle_streaming_completion(
             yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    return StreamingResponse(
+        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+    )
 
 
 async def _collect_generation_results(
