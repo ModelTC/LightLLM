@@ -168,6 +168,11 @@ class InferenceContext:
                 req.shared_kv_node = None
 
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
+        logger.info(
+            f"[FREE_MAMBA] radix_cache={'exists' if self.radix_cache else 'None'}, "
+            f"disable_insert={req.sampling_param.disable_radix_cache_insert}, "
+            f"cur_kv_len={req.cur_kv_len}"
+        )
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         elif req.sampling_param.disable_radix_cache_insert:
@@ -213,7 +218,7 @@ class InferenceContext:
 
     def snapshot_hybrid_buffers(self, run_reqs: List["InferReq"]):
         """Snapshot Mamba states for hotspot requests after their enlarged first chunk."""
-        reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill and r.cur_kv_len < r.get_cur_total_len()]
+        reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill]
         if not reqs_to_insert:
             return
 
