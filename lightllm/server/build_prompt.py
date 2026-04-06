@@ -17,6 +17,10 @@ def init_tokenizer(args):
         with open(chat_path, "r", encoding="utf-8") as f:
             chat_template_str = f.read()
         tokenizer.chat_template = chat_template_str
+        # Multimodal tokenizers wrap an inner HF tokenizer; apply_chat_template
+        # reads the template from the inner tokenizer, so set it there too.
+        if hasattr(tokenizer, "tokenizer"):
+            tokenizer.tokenizer.chat_template = chat_template_str
         return
 
     # 如果 tokenizer 目录下存在chat_template.json， 同时不存在 chat_template.jinja,
