@@ -214,3 +214,46 @@ def test_adaptive_threshold_decreases_on_low_waste():
     assert cache.min_insert_threshold == initial_threshold // 2
     # Counters should be reset
     assert cache.buffer_insert_count == 0
+
+
+def test_full_hotspot_lifecycle():
+    """End-to-end: insert -> match (miss) -> hotspot insert -> match (hit) -> evict."""
+    cache = _make_hybrid_cache("lifecycle", kv_size=200, buf_size=10)
+
+    # 1. Create tree structure (no buffer)
+    key = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int64, device="cpu")
+    val = torch.tensor([10, 11, 12, 13, 14, 15, 16, 17], dtype=torch.int64, device="cpu")
+    cache.insert(key, val)
+
+    # 2. Match walks back to root, R3 cleans up orphaned leaves
+    node2, miss, val2 = cache.match_prefix(
+        torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int64, device="cpu"),
+        update_refs=True,
+    )
+    assert node2 is None
+    assert miss == 8
+    assert cache.get_tree_total_tokens_num() == 0
+
+    # 3. Hotspot insert: re-insert tree + add buffer
+    key2 = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int64, device="cpu")
+    val2 = torch.tensor([20, 21, 22, 23, 24, 25, 26, 27], dtype=torch.int64, device="cpu")
+    _, hot_node = cache.insert(key2, val2)
+    cache.add_buffer_idx_to_node(hot_node, 0, is_hotspot=True)
+    assert cache.buffer_insert_count == 1
+
+    # 4. Match finds buffer, no miss
+    node3, miss3, val3 = cache.match_prefix(
+        torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int64, device="cpu"),
+        update_refs=True,
+    )
+    assert node3 is hot_node
+    assert miss3 == 0
+    assert len(val3) == 8
+    assert hot_node.was_hit is True
+
+    # 5. Evict — tracked as hit
+    release_bufs = []
+    release_mems = []
+    cache._evict_buffer(1, lambda x: release_bufs.append(x), lambda m: release_mems.append(m))
+    assert cache.buffer_hit_count == 1
+    assert cache.buffer_waste_count == 0
