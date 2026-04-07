@@ -118,23 +118,8 @@ def get_prefill_kv_cache_and_remap_indices_triton(
 
     original_shape = topk_mem_indices.shape
     flat_topk = topk_mem_indices.reshape(-1).contiguous().to(torch.int32)
-
-    if flat_topk.numel() == 0:
-        empty_kv = torch.empty((0, 1, 576), dtype=prefill_dtype, device=packed_kv.device)
-        remapped = topk_mem_indices.clone()
-        if squeeze_h_kv:
-            remapped = remapped.squeeze(1)
-        return empty_kv, remapped
-
     valid_mask = flat_topk != -1
     valid_topk = flat_topk[valid_mask]
-    if valid_topk.numel() == 0:
-        empty_kv = torch.empty((0, 1, 576), dtype=prefill_dtype, device=packed_kv.device)
-        remapped = torch.full(original_shape, -1, dtype=torch.int32, device=packed_kv.device)
-        if squeeze_h_kv:
-            remapped = remapped.squeeze(1)
-        return empty_kv, remapped
-
     table_size = packed_kv.shape[0]
 
     prefill_row_table = torch.full((table_size,), -1, dtype=torch.int32, device=packed_kv.device)
