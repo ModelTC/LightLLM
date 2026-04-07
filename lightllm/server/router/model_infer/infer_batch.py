@@ -91,9 +91,18 @@ class InferenceContext:
         req_manager.alloc_buffer_for_req(req_idx_gpu)
 
         if radix_cache is not None:
-            fork_req_ids = [r.req_idx for r in req_objs if r.shared_kv_node is not None]
+            # After free_radix_cache_to_get_enough_buffer above, some shared_kv_node
+            # buffers may have been evicted (buffer_idx set to None).  Only fork from
+            # nodes that still have a valid buffer.
+            fork_req_ids = [
+                r.req_idx for r in req_objs if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
+            ]
             if fork_req_ids:
-                src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
+                src_buf_ids = [
+                    r.shared_kv_node.buffer_idx
+                    for r in req_objs
+                    if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
+                ]
                 req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
                 src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
                 dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
@@ -198,6 +207,48 @@ class InferenceContext:
             free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
         else:
             self.free_a_req_mem(free_token_index, req)
+
+    def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
+        """Free request memory during pause, transferring the Mamba buffer to the
+        tree node so that recovery can find it via match_prefix.
+
+        Without this, pause inserts KV tokens into the radix tree but attaches
+        no buffer.  On recovery, match_prefix walks back and finds no buffer,
+        returns None, and the request must fully re-prefill — evicting the
+        entire unreferenced cache (the 97% → 0% drop).
+        """
+        if not self.has_recurrent_state or self.radix_cache is None:
+            self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+            return
+
+        # --- Insert KV into radix tree (same as free_a_req_mem_for_mamba) ---
+        input_token_ids = req.get_input_token_ids()
+        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+
+        prefix_len, node = self.radix_cache.insert(key, value)
+        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+        if req.shared_kv_node is not None:
+            assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
+
+        # Drain deferred frees from hotspot buffer insertion
+        if len(req.extra_need_to_free_token_index) > 0:
+            free_token_index.extend(req.extra_need_to_free_token_index)
+            req.extra_need_to_free_token_index = []
+
+        # --- Transfer primary buffer to the tree node ---
+        req_to_buffer_index = self.req_manager.req_to_buffer_index
+        if node is not None and req.cur_kv_len > 0:
+            primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+            self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=True)
+            # Free only the non-primary buffers; primary is now owned by the tree
+            free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+        else:
+            # No valid node — free all buffers normally
+            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
 
     def snapshot_hybrid_buffers(self, run_reqs: List["InferReq"]):
         """Snapshot Mamba states for hotspot requests after their enlarged first chunk."""
@@ -352,7 +403,7 @@ class InferenceContext:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+                self._pause_req_mem_and_buffers(free_token_index, free_buffer_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
@@ -592,8 +643,9 @@ class InferReq:
                         self.is_hotspot_prefill = True
             elif g_infer_context.has_recurrent_state and miss_prefix_len > 0:
                 # Bootstrap case: tree had KV structure but no buffer anywhere.
-                # R3 destroyed the nodes, but miss_prefix_len records how deep
-                # the tree was — evidence of a hot prefix worth seeding a buffer for.
+                # The KV tokens exist in the tree but no ancestor has a Mamba
+                # buffer, so they can't be reused directly.  Seed a hotspot
+                # buffer on the next prefill to prevent repeated cache misses.
                 threshold = g_infer_context.radix_cache.min_insert_threshold
                 if miss_prefix_len > threshold:
                     self.mamba_buffer_target_len = miss_prefix_len
