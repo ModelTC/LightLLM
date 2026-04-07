@@ -1,7 +1,6 @@
 """Multimodal parameters for text generation."""
 import asyncio
 import os
-import wave
 import time
 import librosa
 import base64
@@ -23,17 +22,6 @@ AUDIO_SHM_USE_RAW_ENV = "LIGHTLLM_AUDIO_SHM_USE_RAW"
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
 DEFAULT_AUDIO_HOP_LENGTH = 160
 DEFAULT_MIN_AUDIO_LEN = 480
-
-
-def generate_silence_wav_bytes(sample_rate: int = 16000, duration_seconds: float = 1.0) -> bytes:
-    num_samples = max(1, int(sample_rate * duration_seconds))
-    with BytesIO() as buffer:
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(b"\x00\x00" * num_samples)
-        return buffer.getvalue()
 
 
 def load_audio_from_shm_payload(audio_data: bytes, extra_params: dict, sample_rate: int) -> np.ndarray:
@@ -273,13 +261,3 @@ class MultimodalParams:
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
         return ret
-
-
-async def warmup_audio_preload():
-    warmup_audio = AudioItem(
-        type="base64",
-        data=base64.b64encode(generate_silence_wav_bytes()).decode("utf-8"),
-    )
-    await warmup_audio.preload(None)
-    warmup_audio.read()
-    return

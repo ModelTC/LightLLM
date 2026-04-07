@@ -2,9 +2,7 @@ import os
 import json
 import math
 import torch
-import librosa
 import numpy as np
-from io import BytesIO
 from torch import Tensor, nn
 from safetensors import safe_open
 from torch.nn import functional as F
@@ -16,10 +14,6 @@ from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
-from lightllm.utils.log_utils import init_logger
-
-
-logger = init_logger(__name__)
 
 
 def _get_feat_extract_output_lengths(input_lengths):
@@ -376,21 +370,3 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             all_embeds.append(cur_embed)
 
         return all_embeds, audio_items
-
-    @torch.no_grad()
-    def warmup(self, audio_bytes: bytes):
-        audio = BytesIO(audio_bytes)
-        audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
-        num_frames = max(audio.shape[0], 480) // self.processor.hop_length
-        padded_len = ((max(audio.shape[0], 480) + self.processor.hop_length - 1) // self.processor.hop_length) * (
-            self.processor.hop_length
-        )
-        if padded_len > audio.shape[0]:
-            audio = np.pad(audio, (0, padded_len - audio.shape[0]), mode="constant", constant_values=0.0)
-        input_features, feature_lens = self.processor._preprocess_single_padded(audio, num_frames, device="cpu")
-        _ = self.forward(
-            input_features,
-            feature_lens=feature_lens,
-        )
-        torch.cuda.current_stream().synchronize()
-        return

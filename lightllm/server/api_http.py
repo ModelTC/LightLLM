@@ -41,7 +41,7 @@ from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisco
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
-from .multimodal_params import MultimodalParams, warmup_audio_preload
+from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
@@ -389,11 +389,6 @@ async def startup_event():
     logger.info("server start up")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    if g_objs.args.enable_multimodal and not g_objs.args.disable_audio:
-        warmup_start = time.time()
-        logger.info("http_audio_preload_warmup_start")
-        await warmup_audio_preload()
-        logger.info(f"http_audio_preload_warmup_done elapsed_ms:{(time.time() - warmup_start) * 1000.0:.3f}")
     loop.create_task(g_objs.httpserver_manager.handle_loop())
     logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
     return
