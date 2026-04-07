@@ -2,7 +2,7 @@ import time
 from typing_extensions import deprecated
 import uuid
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
 from transformers import GenerationConfig
 
@@ -116,6 +116,7 @@ ChatCompletionMessageParam = Union[ChatCompletionMessageGenericParam, Message]
 
 
 class CompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     model: str
     # prompt: string or tokens
     prompt: Union[str, List[str], List[int], List[List[int]]]
@@ -187,6 +188,7 @@ class CompletionRequest(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     model: str
     messages: List[ChatCompletionMessageParam]
     function_call: Optional[str] = "none"
