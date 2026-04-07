@@ -80,6 +80,9 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         prefill_cache_kv = nsa_dict["prefill_cache_kv"]
 
         if self.infer_state.prefix_total_token_num > 0:
+            # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
+            # 部分kv 从 packed_kv 中获取, 并进行反量化，这样可以避免 prefill_cache_kv
+            # 部分的数据进行重复的反量化操作，提升整体的性能。
             kv, topk_indices = self.infer_state.mem_manager.get_prefill_kv_cache_and_remap_indices(
                 packed_kv=packed_kv,
                 topk_indices=topk_mem_indices,
