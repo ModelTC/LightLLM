@@ -617,7 +617,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             )
             yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
-        yield "data: [DONE]\n\n"
+        yield "data: [DONE]\n\n".encode("utf-8")
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
