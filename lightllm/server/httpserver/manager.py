@@ -162,9 +162,6 @@ class HttpServerManager:
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
-            items, md5sums, tokens_nums, datas = self._prepare_multimodal_resource_inputs(
-                multimodal_params, sampling_params
-            )
             items, md5sums, tokens_nums, datas = [], [], [], []
             for img in multimodal_params.images:
                 self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
