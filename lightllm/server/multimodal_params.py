@@ -94,7 +94,7 @@ class AudioItem:
 
             # check if valid audio bytes
             decode_start = time.time()
-            audio_values, _ = librosa.load(BytesIO(audio_data), sr=target_sample_rate)
+            audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=target_sample_rate)
             audio_values = np.asarray(audio_values, dtype=np.float32)
             decode_cost_ms = (time.time() - decode_start) * 1000.0
             effective_audio_len = max(audio_values.shape[0], min_audio_len)
