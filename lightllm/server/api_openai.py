@@ -614,6 +614,38 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             # Emit a per-choice final empty chunk with finish_reason.
             if current_finish_reason is not None:
+                # Flush any buffered reasoning content that was never released
+                # (e.g., max_completion_tokens hit before </think> was seen).
+                if get_env_start_args().reasoning_parser and request.separate_reasoning:
+                    parser = reasoning_parser_dict.get(choice_index)
+                    if parser is not None:
+                        flush_reasoning, flush_text = parser.flush()
+                        if flush_reasoning:
+                            flush_choice = ChatCompletionStreamResponseChoice(
+                                index=choice_index,
+                                delta=DeltaMessage(reasoning_content=flush_reasoning),
+                                finish_reason=None,
+                            )
+                            flush_chunk = ChatCompletionStreamResponse(
+                                id=group_request_id,
+                                created=created_time,
+                                model=request.model,
+                                choices=[flush_choice],
+                            )
+                            yield f"data: {flush_chunk.model_dump_json(exclude_none=True)}\n\n"
+                        if flush_text:
+                            flush_choice = ChatCompletionStreamResponseChoice(
+                                index=choice_index,
+                                delta=DeltaMessage(content=flush_text),
+                                finish_reason=None,
+                            )
+                            flush_chunk = ChatCompletionStreamResponse(
+                                id=group_request_id,
+                                created=created_time,
+                                model=request.model,
+                                choices=[flush_choice],
+                            )
+                            yield f"data: {flush_chunk.model_dump_json(exclude_none=True)}\n\n"
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(

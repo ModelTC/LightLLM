@@ -622,20 +622,38 @@ class BaseReasoningFormatDetector:
 
         return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text)
 
+    def flush(self) -> StreamingParseResult:
+        """
+        Flush any remaining buffered content when generation ends prematurely
+        (e.g., max_completion_tokens reached before </think> is seen).
+        Returns buffered content as reasoning_text (if still in reasoning block)
+        or normal_text (if in normal content block).
+        """
+        if not self._buffer:
+            return StreamingParseResult()
+        remaining = self._buffer
+        self._buffer = ""
+        if self._in_reasoning:
+            return StreamingParseResult(reasoning_text=remaining)
+        else:
+            return StreamingParseResult(normal_text=remaining)
+
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
         """
         Streaming incremental parsing for reasoning content.
         Handles partial reasoning tags and content.
 
-        If stream_reasoning is False:
-            Accumulates reasoning content until the end tag is found
-        If stream_reasoning is True:
-            Streams reasoning content as it arrives
+        Reasoning tokens are always streamed immediately as they arrive,
+        regardless of stream_reasoning setting (aligns with vLLM behavior).
+        The only exception is when the buffer holds a partial tag prefix
+        (e.g. "</" while waiting to confirm "</think>"), in which case we
+        keep buffering until the tag is confirmed or refuted.
         """
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
+        # until we can confirm or refute the tag.
         if any(
             token.startswith(current_text) and token != current_text
             for token in [self.think_start_token, self.think_end_token]
@@ -660,14 +678,11 @@ class BaseReasoningFormatDetector:
 
             return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text.rstrip())
 
-        # Continue with reasoning content
+        # Always stream reasoning content immediately (vLLM-compatible behavior).
+        # stream_reasoning flag is ignored for streaming responses.
         if self._in_reasoning:
-            if self.stream_reasoning:
-                # Stream the content immediately
-                self._buffer = ""
-                return StreamingParseResult(reasoning_text=current_text)
-            else:
-                return StreamingParseResult()
+            self._buffer = ""
+            return StreamingParseResult(reasoning_text=current_text)
 
         # If we're not in a reasoning block return as normal text
         if not self._in_reasoning:
@@ -906,4 +921,9 @@ class ReasoningParser:
     def parse_stream_chunk(self, chunk_text: str) -> Tuple[Optional[str], Optional[str]]:
         """Streaming call: incremental parsing"""
         ret = self.detector.parse_streaming_increment(chunk_text)
+        return ret.reasoning_text, ret.normal_text
+
+    def flush(self) -> Tuple[Optional[str], Optional[str]]:
+        """Flush remaining buffered content when generation ends prematurely."""
+        ret = self.detector.flush()
         return ret.reasoning_text, ret.normal_text
