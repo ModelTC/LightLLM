@@ -230,18 +230,5 @@ def test_case9():
     assert torch.equal(unmerged_node_d.token_id_key, torch.tensor([6], dtype=torch.int64))
 
 
-def test_tree_node_hotspot_fields():
-    """TreeNode should have is_hotspot and was_hit fields, defaulting to False."""
-    from lightllm.server.router.dynamic_prompt.radix_cache import TreeNode
-
-    node = TreeNode()
-    assert node.is_hotspot is False
-    assert node.was_hit is False
-    node.is_hotspot = True
-    node.was_hit = True
-    assert node.is_hotspot is True
-    assert node.was_hit is True
-
-
 if __name__ == "__main__":
     pytest.main()
