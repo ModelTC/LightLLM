@@ -415,7 +415,7 @@ class InferenceContext:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self._pause_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+                self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
