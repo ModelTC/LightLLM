@@ -128,40 +128,8 @@ class HttpServerManager:
         cost_ms = (time.time() - start_time) * 1000.0
         extras = " ".join(f"{k}:{v}" for k, v in kwargs.items())
         suffix = f" {extras}" if extras else ""
-        logger.info(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
+        logger.debug(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
         return
-
-    def _prepare_multimodal_resource_inputs(
-        self, multimodal_params: MultimodalParams, sampling_params: SamplingParams
-    ) -> Tuple[List[Union[ImageItem, AudioItem]], List[str], List[int], List[bytes]]:
-        items, md5sums, tokens_nums, datas = [], [], [], []
-
-        for img in multimodal_params.images:
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-            data = img.read()
-            token_num = self.tokenizer.get_image_token_length(img)
-            md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-            img.md5 = md5sum
-            md5sums.append(md5sum)
-            tokens_nums.append(token_num)
-            datas.append(data)
-            items.append(img)
-
-        for audio in multimodal_params.audios:
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-            data = audio.read()
-            token_num = self.tokenizer.get_audio_token_length(audio)
-            payload_md5 = audio.extra_params.get("audio_payload_md5")
-            if payload_md5 is None:
-                payload_md5 = hashlib.md5(data).hexdigest()
-            md5sum = payload_md5 + "_" + str(hash(frozendict(audio.extra_params)))
-            audio.md5 = md5sum
-            md5sums.append(md5sum)
-            tokens_nums.append(token_num)
-            datas.append(data)
-            items.append(audio)
-
-        return items, md5sums, tokens_nums, datas
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
         while True:
@@ -197,6 +165,29 @@ class HttpServerManager:
             items, md5sums, tokens_nums, datas = self._prepare_multimodal_resource_inputs(
                 multimodal_params, sampling_params
             )
+            items, md5sums, tokens_nums, datas = [], [], [], []
+            for img in multimodal_params.images:
+                self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+                data = img.read()
+                token_num = self.tokenizer.get_image_token_length(img)
+                md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+                img.md5 = md5sum
+                md5sums.append(md5sum)
+                tokens_nums.append(token_num)
+                datas.append(data)
+                items.append(img)
+            for audio in multimodal_params.audios:
+                self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+                data = audio.read()
+                token_num = self.tokenizer.get_audio_token_length(audio)
+                payload_md5 = audio.extra_params.get("audio_payload_md5")
+                md5sum = payload_md5
+                audio.md5 = md5sum
+                md5sums.append(md5sum)
+                tokens_nums.append(token_num)
+                datas.append(data)
+                items.append(audio)
+
             if len(items) <= 1:
                 await self._alloc_resource(items, md5sums, tokens_nums, datas)
                 return
@@ -515,21 +506,13 @@ class HttpServerManager:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 log_req_id = getattr(sampling_params, "group_request_id", None)
-                if start_time is None:
-                    logger.info(
-                        f"lightllm_req_id:{log_req_id} "
-                        f"stage:alloc_multimodal_resources_done "
-                        f"elapsed_ms:0.000 "
-                        f"audio_count:{len(multimodal_params.audios)} image_count:{len(multimodal_params.images)}"
-                    )
-                else:
-                    self._log_stage_timing(
-                        log_req_id,
-                        start_time,
-                        "alloc_multimodal_resources_done",
-                        audio_count=len(multimodal_params.audios),
-                        image_count=len(multimodal_params.images),
-                    )
+                self._log_stage_timing(
+                    log_req_id,
+                    start_time,
+                    "alloc_multimodal_resources_done",
+                    audio_count=len(multimodal_params.audios),
+                    image_count=len(multimodal_params.images),
+                )
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
