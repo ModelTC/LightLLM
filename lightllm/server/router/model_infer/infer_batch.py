@@ -176,52 +176,15 @@ class InferenceContext:
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
 
-    def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
+    def _insert_kv_for_mamba(self, free_token_index: List, req: "InferReq"):
+        """Insert KV tokens into radix tree for a mamba/hybrid request.
+
+        Returns the tree node where KV was inserted, or None if no radix cache.
+        """
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
-        else:
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+            return None
 
-            prefix_len, node = self.radix_cache.insert(key, value)
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-
-            # Drain deferred frees from hotspot buffer insertion
-            if len(req.extra_need_to_free_token_index) > 0:
-                free_token_index.extend(req.extra_need_to_free_token_index)
-                req.extra_need_to_free_token_index = []
-
-        return True  # always free request's buffer back to pool
-
-    def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
-        """释放请求的 KV cache 和 buffer 内存"""
-        if self.has_recurrent_state:
-            self.free_a_req_mem_for_mamba(free_token_index, req)
-            req_to_buffer_index = self.req_manager.req_to_buffer_index
-            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-        else:
-            self.free_a_req_mem(free_token_index, req)
-
-    def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
-        """Free request memory during pause, transferring the Mamba buffer to the
-        tree node so that recovery can find it via match_prefix.
-
-        Without this, pause inserts KV tokens into the radix tree but attaches
-        no buffer.  On recovery, match_prefix walks back and finds no buffer,
-        returns None, and the request must fully re-prefill — evicting the
-        entire unreferenced cache (the 97% → 0% drop).
-        """
-        if not self.has_recurrent_state or self.radix_cache is None:
-            self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
-            return
-
-        # --- Insert KV into radix tree (same as free_a_req_mem_for_mamba) ---
         input_token_ids = req.get_input_token_ids()
         key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
         value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
@@ -238,6 +201,45 @@ class InferenceContext:
         if len(req.extra_need_to_free_token_index) > 0:
             free_token_index.extend(req.extra_need_to_free_token_index)
             req.extra_need_to_free_token_index = []
+
+        return node
+
+    def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
+        self._insert_kv_for_mamba(free_token_index, req)
+        return True  # always free request's buffer back to pool
+
+    def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
+        """释放请求的 KV cache 和 buffer 内存"""
+        if self.has_recurrent_state:
+            node = self._insert_kv_for_mamba(free_token_index, req)
+            req_to_buffer_index = self.req_manager.req_to_buffer_index
+            # Transfer primary Mamba buffer to the tree node so that subsequent
+            # multi-turn requests can reuse the full KV cache up to this point.
+            # Without this, match_prefix walks back to the last snapshot position
+            # (prompt-end) and discards all response-phase KV cache.
+            if node is not None and req.cur_kv_len > 0:
+                primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=False)
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+            else:
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+        else:
+            self.free_a_req_mem(free_token_index, req)
+
+    def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
+        """Free request memory during pause, transferring the Mamba buffer to the
+        tree node so that recovery can find it via match_prefix.
+
+        Without this, pause inserts KV tokens into the radix tree but attaches
+        no buffer.  On recovery, match_prefix walks back and finds no buffer,
+        returns None, and the request must fully re-prefill — evicting the
+        entire unreferenced cache (the 97% → 0% drop).
+        """
+        if not self.has_recurrent_state or self.radix_cache is None:
+            self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+            return
+
+        node = self._insert_kv_for_mamba(free_token_index, req)
 
         # --- Transfer primary buffer to the tree node ---
         req_to_buffer_index = self.req_manager.req_to_buffer_index
