@@ -36,6 +36,8 @@ class TreeNode:
         # Pure attention models keep buffer_idx as None.
         self.buffer_idx = None
         self.buffer_time = time_gen.generate_time_id()
+        self.is_hotspot = False
+        self.was_hit = False
 
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
