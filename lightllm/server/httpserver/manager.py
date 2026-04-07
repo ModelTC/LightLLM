@@ -125,10 +125,11 @@ class HttpServerManager:
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
-        cost_ms = (time.time() - start_time) * 1000.0
-        extras = " ".join(f"{k}:{v}" for k, v in kwargs.items())
-        suffix = f" {extras}" if extras else ""
-        logger.debug(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
+        if self.args.detail_log:
+            cost_ms = (time.time() - start_time) * 1000.0
+            extras = " ".join(f"{k}:{v}" for k, v in kwargs.items())
+            suffix = f" {extras}" if extras else ""
+            logger.debug(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
