@@ -4,21 +4,6 @@ from typing import Optional
 
 import torch
 
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
-
-try:
-    from sgl_kernel import causal_conv1d_fwd
-    from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
-except ImportError:
-    causal_conv1d_fwd = None
-    causal_conv1d_update_kernel = None
-    logger.warning(
-        "sgl_kernel is not installed, qwen3next/qwen3.5 causal_conv1d kernels are unavailable. "
-        "Install `sgl_kernel` before serving those models."
-    )
-
 
 def causal_conv1d_fn(
     x: torch.Tensor,
@@ -63,8 +48,8 @@ def causal_conv1d_fn(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    if causal_conv1d_fwd is None:
-        raise ImportError("sgl_kernel is required for qwen3next/qwen3.5 causal_conv1d_fn")
+    from sgl_kernel import causal_conv1d_fwd
+
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -117,8 +102,8 @@ def causal_conv1d_update(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"activation must be None, silu, or swish, actual: {activation}")
-    if causal_conv1d_update_kernel is None:
-        raise ImportError("sgl_kernel is required for qwen3next/qwen3.5 causal_conv1d_update")
+    from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
+
     activation_val = activation in ["silu", "swish"]
     unsqueeze = x.dim() == 2
     if unsqueeze:
