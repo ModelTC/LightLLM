@@ -210,12 +210,16 @@ class InferenceContext:
         if self.has_recurrent_state:
             node = self._insert_kv_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
-            # Transfer primary Mamba buffer to the tree node so that subsequent
-            # multi-turn requests can reuse the full KV cache up to this point.
-            if node is not None and req.cur_kv_len > 0:
+            # Only transfer the buffer if the tree node doesn't already have one.
+            # This matches the original behavior and avoids replacing hotspot
+            # buffers placed by _pause_req_mem_and_buffers.
+            if node is not None and node.buffer_idx is None:
                 primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
                 self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=False)
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+                # Primary buffer is now owned by the tree — don't free it.
+                # Note: secondary buffers (MTP) are NOT freed here either,
+                # matching the original behavior where return False skipped
+                # all buffer freeing.
             else:
                 free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
         else:
