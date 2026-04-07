@@ -271,12 +271,10 @@ class ChatCompletionRequest(BaseModel):
         """Mirror thinking <-> enable_thinking when only one is set (Qwen vs DeepSeek templates)."""
         if not self.chat_template_kwargs:
             return self
-        d = dict(self.chat_template_kwargs)
-        if "thinking" not in d and "enable_thinking" in d:
-            d["thinking"] = d["enable_thinking"]
-        elif "enable_thinking" not in d and "thinking" in d:
-            d["enable_thinking"] = d["thinking"]
-        self.chat_template_kwargs = d
+        if "thinking" not in self.chat_template_kwargs and "enable_thinking" in self.chat_template_kwargs:
+            self.chat_template_kwargs["thinking"] = self.chat_template_kwargs["enable_thinking"]
+        elif "enable_thinking" not in self.chat_template_kwargs and "thinking" in self.chat_template_kwargs:
+            self.chat_template_kwargs["enable_thinking"] = self.chat_template_kwargs["thinking"]
         return self
 
 
