@@ -91,9 +91,15 @@ class InferenceContext:
         req_manager.alloc_buffer_for_req(req_idx_gpu)
 
         if radix_cache is not None:
-            fork_req_ids = [r.req_idx for r in req_objs if r.shared_kv_node is not None]
+            fork_req_ids = [
+                r.req_idx for r in req_objs if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
+            ]
             if fork_req_ids:
-                src_buf_ids = [r.shared_kv_node.buffer_idx for r in req_objs if r.shared_kv_node is not None]
+                src_buf_ids = [
+                    r.shared_kv_node.buffer_idx
+                    for r in req_objs
+                    if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
+                ]
                 req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
                 src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
                 dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
