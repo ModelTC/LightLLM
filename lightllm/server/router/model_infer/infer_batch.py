@@ -216,6 +216,31 @@ class InferenceContext:
         else:
             self.free_a_req_mem(free_token_index, req)
 
+    def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
+        """Free request memory during pause, transferring the Mamba buffer to the
+        tree node so that recovery can find it via match_prefix.
+
+        Without this, pause inserts KV tokens into the radix tree but attaches
+        no buffer.  On recovery, match_prefix walks back and finds no buffer,
+        returns None, and the request must fully re-prefill.
+        """
+        if not self.has_recurrent_state or self.radix_cache is None:
+            self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+            return
+
+        node = self._insert_kv_for_mamba(free_token_index, req)
+
+        # Transfer primary buffer to the tree node as hotspot
+        req_to_buffer_index = self.req_manager.req_to_buffer_index
+        if node is not None and req.cur_kv_len > 0:
+            primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+            self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=True)
+            # Free only the non-primary buffers; primary is now owned by the tree
+            free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+        else:
+            # No valid node — free all buffers normally
+            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+
     def _save_promptcache_kvbuffer(self):
         """
         save prompt cache kv buffer
@@ -287,7 +312,7 @@ class InferenceContext:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+                self._pause_req_mem_and_buffers(free_token_index, free_buffer_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
