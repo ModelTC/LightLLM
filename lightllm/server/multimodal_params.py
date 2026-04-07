@@ -120,7 +120,9 @@ class AudioItem:
                 self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
                 self.extra_params["audio_num_frames"] = int(effective_audio_len // hop_length)
                 self._preload_data = audio_values.tobytes()
-            self.extra_params["audio_payload_md5"] = hashlib.md5(self._preload_data).hexdigest() + "_" + str(hash(frozendict(self.extra_params)))
+            self.extra_params["audio_payload_md5"] = (
+                hashlib.md5(self._preload_data).hexdigest() + "_" + str(hash(frozendict(self.extra_params)))
+            )
             logger.info(
                 f"lightllm_req_id:{req_id} stage:audio_preload_done "
                 f"elapsed_ms:{(time.time() - preload_start) * 1000.0:.3f} "
