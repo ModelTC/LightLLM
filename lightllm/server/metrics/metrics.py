@@ -27,6 +27,11 @@ MONITOR_INFO = {
     "lightllm_cache_ratio": "cache length / input_length",
     "lightllm_batch_current_max_tokens": "dynamic max token used for current batch",
     "lightllm_request_mtp_avg_token_per_step": "Average number of tokens per step",
+    "lightllm_prompt_tokens_total": "Total number of prefill tokens processed",
+    "lightllm_generation_tokens_total": "Total number of generation tokens processed",
+    "lightllm_cache_hit_rate": "Prefix cache hit rate",
+    "lightllm_gen_throughput": "Generation throughput (tokens/s)",
+    "lightllm_num_running_reqs": "Number of running requests",
 }
 
 
@@ -100,6 +105,12 @@ class Monitor:
             mtp_avg_token_per_step_buckets = [1.0, 2.0]
         self.create_histogram("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step_buckets)
 
+        self.create_counter("lightllm_prompt_tokens_total")
+        self.create_counter("lightllm_generation_tokens_total")
+        self.create_gauge("lightllm_cache_hit_rate")
+        self.create_gauge("lightllm_gen_throughput")
+        self.create_gauge("lightllm_num_running_reqs")
+
     def create_histogram(self, name, buckets, labelnames=None):
         if labelnames is None:
             histogram = Histogram(name, MONITOR_INFO[name], buckets=buckets, registry=self.registry)
@@ -125,6 +136,9 @@ class Monitor:
             self.monitor_registry[name].inc()
         else:
             self.monitor_registry[name].labels(method=label).inc()
+
+    def counter_inc_by(self, name, amount):
+        self.monitor_registry[name].inc(amount)
 
     def histogram_observe(self, name, value, label=None):
         if label is None:

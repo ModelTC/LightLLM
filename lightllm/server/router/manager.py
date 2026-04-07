@@ -210,6 +210,7 @@ class RouterManager:
             args=self.args,
             max_total_token_num=self.max_total_token_num,
             dp_size_in_node=self.dp_size_in_node,
+            metric_client=self.metric_client,
         )
 
         if self.args.run_mode == "prefill":

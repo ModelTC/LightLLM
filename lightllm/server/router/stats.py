@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 class SystemStatusReporter:
-    def __init__(self, args, max_total_token_num, dp_size_in_node):
+    def __init__(self, args, max_total_token_num, dp_size_in_node, metric_client=None):
         self.enabled = not args.disable_log_stats
         self.interval = max(5, args.log_stats_interval)
         if args.log_stats_interval < 5:
@@ -15,6 +15,7 @@ class SystemStatusReporter:
         self.max_total_token_num = max_total_token_num
         self.dp_size_in_node = dp_size_in_node
         self.status_logger = init_system_status_logger("router")
+        self.metric_client = metric_client
 
         # Accumulation counters (reset each interval)
         self.last_print_time = time.time()
@@ -32,10 +33,14 @@ class SystemStatusReporter:
         self.global_mtp_accepted_total = 0
 
     def count_prompt_tokens(self, num_tokens: int):
+        if self.metric_client is not None:
+            self.metric_client.counter_inc_by("lightllm_prompt_tokens_total", num_tokens)
         if self.enabled:
             self.prompt_tokens += num_tokens
 
     def count_output_tokens(self, num_tokens: int):
+        if self.metric_client is not None:
+            self.metric_client.counter_inc_by("lightllm_generation_tokens_total", num_tokens)
         if self.enabled:
             self.output_tokens += num_tokens
 
@@ -114,6 +119,11 @@ class SystemStatusReporter:
             f"CACHE HIT {window_cache_hit_rate:.1f}% (global {global_cache_hit_rate:.1f}%)"
             f"{mtp_suffix}"
         )
+
+        if self.metric_client is not None:
+            self.metric_client.gauge_set("lightllm_cache_hit_rate", global_cache_hit_rate / 100.0)
+            self.metric_client.gauge_set("lightllm_gen_throughput", output_tps)
+            self.metric_client.gauge_set("lightllm_num_running_reqs", running)
 
         # Reset windowed counters
         self.prompt_tokens = 0
