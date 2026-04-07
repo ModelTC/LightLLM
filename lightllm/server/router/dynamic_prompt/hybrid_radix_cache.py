@@ -15,7 +15,7 @@ class HybridRadixCache(RadixCache):
         super().__init__(unique_name, total_token_num, rank_in_node, kv_cache_mem_manager)
         assert hasattr(kv_cache_mem_manager, "mamba_cache_mem_manager")
         self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
-        self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.buffer_time,))
+        self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.is_hotspot, x.buffer_time))
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
@@ -56,7 +56,7 @@ class HybridRadixCache(RadixCache):
         value = torch.concat(ans_value_list)
         return tree_node, kv_len, value
 
-    def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int):
+    def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int, is_hotspot: bool = False):
         """Set buffer_idx for a node and add it to evict_buffer_set."""
         self.evict_buffer_set.discard(node)
         if node.is_leaf():
@@ -64,6 +64,8 @@ class HybridRadixCache(RadixCache):
         if node.buffer_idx is not None:
             self.buffer_mem_manager.free([node.buffer_idx])
         node.buffer_idx = buffer_idx
+        node.is_hotspot = is_hotspot
+        node.was_hit = False
         node.update_buffer_time()
         self.evict_buffer_set.add(node)
         if node.is_leaf():
