@@ -87,12 +87,46 @@ class HybridRadixCache(RadixCache):
         return
 
     def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback):
+        # Two-pass eviction: first evict buffers from unreferenced nodes,
+        # then from referenced nodes only if necessary.  Evicting a buffer
+        # from a referenced node makes its KV cache unreachable for hybrid
+        # model reuse (no Mamba state to resume from).
+        deferred_referenced = []
         while need_evict_buffer_num > 0:
+            if not self.evict_buffer_set:
+                break
             node = self.evict_buffer_set.pop(0)
             assert node.buffer_idx is not None
+
+            if node.ref_counter > 0:
+                deferred_referenced.append(node)
+                continue
+
             evict_buffer_callback(node.buffer_idx)
             node.buffer_idx = None
+            node.is_hotspot = False
+            node.was_hit = False
             need_evict_buffer_num -= 1
+
+            # Keep tree node alive after buffer eviction so prefix matching
+            # still works in multi-turn dialogues.  The node's tokens are cheap;
+            # only the buffer was the expensive resource.  Tree-level eviction
+            # (evict_tree_set) will reclaim the node later if memory is needed.
+            if node.is_leaf() and node.ref_counter == 0:
+                self.evict_tree_set.add(node)
+
+        # Fallback: evict referenced buffers if unreferenced ones were not enough
+        for node in deferred_referenced:
+            if need_evict_buffer_num <= 0:
+                self.evict_buffer_set.add(node)
+                continue
+
+            evict_buffer_callback(node.buffer_idx)
+            node.buffer_idx = None
+            node.is_hotspot = False
+            node.was_hit = False
+            need_evict_buffer_num -= 1
+            # Node is referenced, so it stays out of evict_tree_set.
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
