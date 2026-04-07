@@ -1,18 +1,15 @@
-# Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/nsa_backend.py
-# Uses sgl_kernel.flash_mla and sgl_kernel.flash_attn from the sglang kernel library.
-
 import dataclasses
 import torch
-from typing import Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 from lightllm.utils.dist_utils import get_current_device_id
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-class NsaFlashMlaSparseAttBackend(BaseAttBackend):
+class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
         device = get_current_device_id()
@@ -21,24 +18,22 @@ class NsaFlashMlaSparseAttBackend(BaseAttBackend):
             for _ in range(2)
         ]
 
-    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
-        return NsaFlashMlaSparsePrefillAttState(backend=self, infer_state=infer_state)
+    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaFp8SparsePrefillAttState":
+        return NsaFlashMlaFp8SparsePrefillAttState(backend=self, infer_state=infer_state)
 
-    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparseDecodeAttState":
-        return NsaFlashMlaSparseDecodeAttState(backend=self, infer_state=infer_state)
+    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaFp8SparseDecodeAttState":
+        return NsaFlashMlaFp8SparseDecodeAttState(backend=self, infer_state=infer_state)
 
 
 @dataclasses.dataclass
-class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
-    """Prefill attention state for NSA using flash_mla_sparse_fwd."""
-
+class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
 
     def init_state(self):
-        self.backend: NsaFlashMlaSparseAttBackend = self.backend
+        self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
         self.ragged_mem_index = torch.empty(
             self.infer_state.total_token_num,
             dtype=torch.int32,
@@ -67,26 +62,40 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
         assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
-
-        return self._nsa_prefill_att(q=q, kv=k, att_control=att_control)
+        return self._nsa_prefill_att(q=q, packed_kv=k, att_control=att_control)
 
     def _nsa_prefill_att(
         self,
         q: torch.Tensor,
-        kv: torch.Tensor,
+        packed_kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        from sgl_kernel.flash_mla import flash_mla_sparse_fwd
+        import flash_mla
 
         nsa_dict = att_control.nsa_prefill_dict
         topk_indices = nsa_dict["topk_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
+        topk_mem_indices = nsa_dict["topk_mem_indices"]
+        prefill_cache_kv = nsa_dict["prefill_cache_kv"]
+
+        if self.infer_state.prefix_total_token_num > 0:
+            # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
+            # 部分kv 从 packed_kv 中获取, 并进行反量化，这样可以避免 prefill_cache_kv
+            # 部分的数据进行重复的反量化操作，提升整体的性能。
+            kv, topk_indices = self.infer_state.mem_manager.get_prefill_kv_cache_and_remap_indices(
+                packed_kv=packed_kv,
+                topk_indices=topk_mem_indices,
+                prefill_mem_index=self.infer_state.mem_index,
+                prefill_cache_kv=prefill_cache_kv,
+            )
+        else:
+            kv = prefill_cache_kv
 
         if topk_indices.ndim == 2:
             topk_indices = topk_indices.unsqueeze(1)
 
-        mla_out, _, _ = flash_mla_sparse_fwd(
+        mla_out, _, _ = flash_mla.flash_mla_sparse_fwd(
             q=q,
             kv=kv,
             indices=topk_indices,
@@ -97,17 +106,15 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
-
+class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
-    nsa_cache_seqlens: torch.Tensor = None
-    nsa_cu_seqlens_k_new: torch.Tensor = None
+    flashmla_sched_meta: object = None
 
     def init_state(self):
-        self.backend: NsaFlashMlaSparseAttBackend = self.backend
+        self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
         model = self.backend.model
         use_cuda_graph = (
             self.infer_state.batch_size <= model.graph_max_batch_size
@@ -134,14 +141,10 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
-        self.nsa_cache_seqlens = torch.minimum(
-            torch.full(size=(self.infer_state.batch_size,), fill_value=2048, dtype=torch.int32, device="cuda"),
-            self.infer_state.b_seq_len,
-        )
-        padded_seq_lens = torch.zeros(size=(self.nsa_cache_seqlens.shape[0] + 1,), dtype=torch.int32, device="cuda")
-        # 进行 cumsum 操作
-        padded_seq_lens[1:].copy_(self.nsa_cache_seqlens, non_blocking=True)
-        self.nsa_cu_seqlens_k_new = padded_seq_lens.cumsum(dim=0, dtype=torch.int32)
+        import flash_mla
+
+        self.flashmla_sched_meta, _ = flash_mla.get_mla_metadata()
+        return
 
     def decode_att(
         self,
@@ -153,40 +156,43 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
     ) -> torch.Tensor:
         assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
         assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
-
-        return self._nsa_decode_att(q=q, kv=k, att_control=att_control)
+        return self._nsa_decode_att(q=q, packed_kv=k, att_control=att_control)
 
     def _nsa_decode_att(
         self,
         q: Tuple[torch.Tensor, torch.Tensor],
-        kv: torch.Tensor,
+        packed_kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        from sgl_kernel.flash_attn import flash_attn_with_kvcache
+        import flash_mla
 
         nsa_dict = att_control.nsa_decode_dict
         topk_mem_indices = nsa_dict["topk_mem_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
-        qk_rope_head_dim = nsa_dict["qk_rope_head_dim"]
+
+        if topk_mem_indices.ndim == 2:
+            topk_mem_indices = topk_mem_indices.unsqueeze(1)
+        assert topk_mem_indices.shape[1] == 1, "FlashMLA sparse decode path currently expects seq_len_q == 1"
 
         q_nope, q_rope = q
-
-        # Extract k_rope and kv_nope from the KV buffer
-        k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, 1, 1, qk_rope_head_dim)
-        kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, 1, 1, kv_lora_rank)
-
-        o_tensor = flash_attn_with_kvcache(
-            q=q_rope,
-            k_cache=k_rope,
-            v_cache=kv_nope,
-            qv=q_nope,
-            page_table=topk_mem_indices,
-            cache_seqlens=self.nsa_cache_seqlens,
-            cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
-            cu_seqlens_k_new=self.nsa_cu_seqlens_k_new,
-            max_seqlen_q=self.infer_state.max_q_seq_len,
-            softmax_scale=softmax_scale,
-            causal=True,
+        q_all = torch.cat([q_nope, q_rope], dim=-1).unsqueeze(1).contiguous()
+        kv = torch.as_strided(
+            packed_kv,
+            size=(packed_kv.shape[0], 1, 1, packed_kv.shape[-1]),
+            stride=(packed_kv.stride(0), packed_kv.shape[-1], packed_kv.shape[-1], packed_kv.stride(-1)),
         )
-        return o_tensor
+
+        o_tensor, _ = flash_mla.flash_mla_with_kvcache(
+            q=q_all,
+            k_cache=kv,
+            block_table=None,
+            cache_seqlens=None,
+            head_dim_v=kv_lora_rank,
+            tile_scheduler_metadata=self.flashmla_sched_meta,
+            softmax_scale=softmax_scale,
+            causal=False,
+            is_fp8_kvcache=True,
+            indices=topk_mem_indices,
+        )
+        return o_tensor[:, 0, :, :]  # [b, 1, h, d] -> [b, h, d]
