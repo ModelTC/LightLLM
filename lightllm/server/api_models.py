@@ -222,7 +222,7 @@ class ChatCompletionRequest(BaseModel):
 
     # OpenAI parameters for reasoning and others
     chat_template_kwargs: Optional[Dict] = None
-    separate_reasoning: Optional[bool] = True
+    separate_reasoning: Optional[bool] = False
     stream_reasoning: Optional[bool] = False
 
     # Additional parameters supported by LightLLM
