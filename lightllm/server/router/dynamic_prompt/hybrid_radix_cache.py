@@ -140,15 +140,12 @@ class HybridRadixCache(RadixCache):
             node.was_hit = False
             need_evict_buffer_num -= 1
 
-            # R4 cascading cleanup: if node is now an unreferenced leaf, destroy it
+            # Keep tree node alive after buffer eviction so prefix matching
+            # still works in multi-turn dialogues.  The node's tokens are cheap;
+            # only the buffer was the expensive resource.  Tree-level eviction
+            # (evict_tree_set) will reclaim the node later if memory is needed.
             if node.is_leaf() and node.ref_counter == 0:
-                self.evict_tree_set.discard(node)
-                evict_token_callback(node.token_mem_index_value)
-                self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-                parent_node = node.parent
-                parent_node.remove_child(node)
-                if parent_node.is_leaf():
-                    self.evict_tree_set.add(parent_node)
+                self.evict_tree_set.add(node)
 
         # Fallback: evict referenced buffers if unreferenced ones were not enough
         for node in deferred_referenced:
