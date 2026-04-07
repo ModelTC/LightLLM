@@ -52,8 +52,13 @@ class HybridRadixCache(RadixCache):
             ans_value_list.pop()
             tree_node = next_node
 
+        # Stash miss_prefix_len for callers that need it (e.g. hotspot detection).
+        # The second return value stays as kv_len for backward compatibility with
+        # diverse_backend, pd_mode, and other callers that expect total prefix length.
+        self._last_miss_prefix_len = miss_prefix_len
+
         if tree_node == self.root_node:
-            return None, miss_prefix_len, None
+            return None, 0, None
 
         # Mark buffer node as hit when update_refs is True
         if update_refs:
@@ -67,8 +72,9 @@ class HybridRadixCache(RadixCache):
                 self.evict_buffer_set.add(update_node)
             update_node = update_node.parent
 
+        kv_len = tree_node.node_prefix_total_len
         value = torch.concat(ans_value_list)
-        return tree_node, miss_prefix_len, value
+        return tree_node, kv_len, value
 
     def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int, is_hotspot: bool = False):
         """Set buffer_idx for a node and add it to evict_buffer_set."""

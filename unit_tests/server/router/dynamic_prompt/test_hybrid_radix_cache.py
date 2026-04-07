@@ -122,10 +122,11 @@ def test_match_prefix_walkback_does_not_destroy_nodes():
     cache.add_buffer_idx_to_node(node_12, 42)
 
     # match_prefix with [1,2,3,4] — should walk back from [3,4] to [1,2]
-    share_node, miss_prefix_len, value_tensor = cache.match_prefix(key, update_refs=True)
+    share_node, kv_len, value_tensor = cache.match_prefix(key, update_refs=True)
 
     assert share_node is node_12, "Should match at [1,2] which has buffer"
-    assert miss_prefix_len == 2, "Missed 2 tokens in [3,4] node"
+    assert kv_len == 2, "kv_len should be the matched node's prefix total len"
+    assert cache._last_miss_prefix_len == 2, "Missed 2 tokens in [3,4] node"
 
     # Critical: the [3,4] node must still exist in the tree
     assert 3 in node_12.children, "Child [3,4] must not be destroyed during walk-back"
