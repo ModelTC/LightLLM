@@ -311,9 +311,7 @@ class HttpServerManager:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
 
             if self.pd_mode.is_P_or_NORMAL():
-                await multimodal_params.verify_and_preload(
-                    request, audio_preload_config=getattr(self.tokenizer, "audio_preload_config", None)
-                )
+                await multimodal_params.verify_and_preload(request)
                 self._log_stage_timing(
                     group_request_id,
                     start_time,

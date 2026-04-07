@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
 from transformers.activations import ACT2FN
 
-from lightllm.server.multimodal_params import AudioItem, WAVEFORM_F32_SHM_FORMAT, load_audio_from_shm_payload
+from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
@@ -338,25 +338,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 items.append(item)
                 audio_data = read_shm(get_shm_name_data(item.uuid))
                 audio = load_audio_from_shm_payload(audio_data, item.extra_params, self.processor.sampling_rate)
-                audio_num_frames = item.extra_params.get("audio_num_frames")
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
-            if audio_num_frames is not None and item.extra_params.get("audio_shm_format") == WAVEFORM_F32_SHM_FORMAT:
-                input_features, feature_lens = self.processor._preprocess_single_padded(
-                    audio, int(audio_num_frames), device="cpu"
-                )
+            input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
+            if feature_attention_mask is not None:
+                audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
+                input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
             else:
-                input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
-                if feature_attention_mask is not None:
-                    audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
-                    input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
-                else:
-                    audio_feature_lengths = None
+                audio_feature_lengths = None
 
-                feature_lens = (
-                    audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
-                )
+            feature_lens = (
+                audio_feature_lengths if audio_feature_lengths is not None else feature_attention_mask.sum(-1)
+            )
 
             audio_features = self.forward(
                 input_features,

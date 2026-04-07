@@ -16,28 +16,14 @@ from frozendict import frozendict
 
 
 logger = init_logger(__name__)
-RAW_AUDIO_SHM_FORMAT = "raw_audio_bytes"
-WAVEFORM_F32_SHM_FORMAT = "waveform_f32"
-AUDIO_SHM_USE_RAW_ENV = "LIGHTLLM_AUDIO_SHM_USE_RAW"
 DEFAULT_AUDIO_SAMPLE_RATE = 16000
-DEFAULT_AUDIO_HOP_LENGTH = 160
-DEFAULT_MIN_AUDIO_LEN = 480
 
 
 def load_audio_from_shm_payload(audio_data: bytes, extra_params: dict, sample_rate: int) -> np.ndarray:
-    audio_shm_format = extra_params.get("audio_shm_format", RAW_AUDIO_SHM_FORMAT)
-    if audio_shm_format == WAVEFORM_F32_SHM_FORMAT:
-        num_samples = int(extra_params.get("audio_num_samples", 0))
-        if num_samples > 0:
-            return np.frombuffer(audio_data, dtype=np.float32, count=num_samples)
-        return np.frombuffer(audio_data, dtype=np.float32)
-
-    audio, _ = librosa.load(BytesIO(audio_data), sr=sample_rate)
-    return np.asarray(audio, dtype=np.float32)
-
-
-def should_use_raw_audio_shm() -> bool:
-    return os.getenv(AUDIO_SHM_USE_RAW_ENV, "0") == "1"
+    num_samples = int(extra_params.get("audio_num_samples", 0))
+    if num_samples > 0:
+        return np.frombuffer(audio_data, dtype=np.float32, count=num_samples)
+    return np.frombuffer(audio_data, dtype=np.float32)
 
 
 class AudioItem:
@@ -60,11 +46,8 @@ class AudioItem:
         self._preload_data = None
         self.extra_params = {}
 
-    async def preload(self, request: Request, audio_preload_config: dict = None):
+    async def preload(self, request: Request):
         try:
-            req_id = getattr(getattr(request, "state", None), "lightllm_req_id", None)
-            preload_start = time.time()
-            source_ready_start = preload_start
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
                 proxy = os.getenv("REQUEST_PROXY", None)
@@ -73,50 +56,17 @@ class AudioItem:
                 audio_data = base64.b64decode(self._data)
             else:
                 raise ValueError(f"cannot read audio which type is {self._type}!")
-            source_ready_cost_ms = (time.time() - source_ready_start) * 1000.0
-
-            audio_preload_config = audio_preload_config or {}
-            target_sample_rate = int(audio_preload_config.get("sampling_rate", DEFAULT_AUDIO_SAMPLE_RATE))
-            hop_length = int(audio_preload_config.get("hop_length", DEFAULT_AUDIO_HOP_LENGTH))
-            min_audio_len = int(audio_preload_config.get("min_audio_len", DEFAULT_MIN_AUDIO_LEN))
 
             # check if valid audio bytes
-            decode_start = time.time()
-            audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=target_sample_rate)
+            audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=DEFAULT_AUDIO_SAMPLE_RATE)
             audio_values = np.asarray(audio_values, dtype=np.float32)
-            decode_cost_ms = (time.time() - decode_start) * 1000.0
-            effective_audio_len = max(audio_values.shape[0], min_audio_len)
-            padded_audio_len = ((effective_audio_len + hop_length - 1) // hop_length) * hop_length
-            if padded_audio_len > audio_values.shape[0]:
-                audio_values = np.pad(
-                    audio_values,
-                    (0, padded_audio_len - audio_values.shape[0]),
-                    mode="constant",
-                    constant_values=0.0,
-                )
+            from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
-            self.audio_length = effective_audio_len
-            if should_use_raw_audio_shm():
-                self.extra_params["audio_shm_format"] = RAW_AUDIO_SHM_FORMAT
-                self.extra_params.pop("audio_sample_rate", None)
-                self.extra_params.pop("audio_num_samples", None)
-                self.extra_params.pop("audio_num_frames", None)
-                self._preload_data = audio_data
-            else:
-                self.extra_params["audio_shm_format"] = WAVEFORM_F32_SHM_FORMAT
-                self.extra_params["audio_sample_rate"] = target_sample_rate
-                self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
-                self.extra_params["audio_num_frames"] = int(effective_audio_len // hop_length)
-                self._preload_data = audio_values.tobytes()
+            self.audio_length = max(int(audio_values.shape[0]), MIN_AUDIO_LEN)
+            self._preload_data = audio_values.tobytes()
+            self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
             self.extra_params["audio_payload_md5"] = (
                 hashlib.md5(self._preload_data).hexdigest() + "_" + str(hash(frozendict(self.extra_params)))
-            )
-            logger.info(
-                f"lightllm_req_id:{req_id} stage:audio_preload_done "
-                f"elapsed_ms:{(time.time() - preload_start) * 1000.0:.3f} "
-                f"source_type:{self._type} source_ready_ms:{source_ready_cost_ms:.3f} "
-                f"decode_ms:{decode_cost_ms:.3f} audio_length:{self.audio_length} "
-                f"shm_format:{self.extra_params['audio_shm_format']}"
             )
             return
 
@@ -238,11 +188,9 @@ class MultimodalParams:
         self.audios = [AudioItem(**a) for a in audios]
         return
 
-    async def verify_and_preload(self, request: Request, audio_preload_config: dict = None):
+    async def verify_and_preload(self, request: Request):
         preload_coroutines = [image.preload(request) for image in self.images]
-        preload_coroutines.extend(
-            audio.preload(request, audio_preload_config=audio_preload_config) for audio in self.audios
-        )
+        preload_coroutines.extend(audio.preload(request) for audio in self.audios)
         if preload_coroutines:
             await asyncio.gather(*preload_coroutines)
         return

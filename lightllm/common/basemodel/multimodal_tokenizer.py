@@ -33,7 +33,6 @@ from lightllm.server.multimodal_params import AudioItem, ImageItem, MultimodalPa
 class BaseMultiModalTokenizer(ABC):
     def __init__(self, tokenizer, **kwargs):
         self.tokenizer = tokenizer
-        self.audio_preload_config = None
 
     def __getattr__(self, name):
         obj_dict = object.__getattribute__(self, "__dict__")

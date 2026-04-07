@@ -8,7 +8,6 @@ import torch.distributed as dist
 from typing import List
 from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
-
 from lightllm.models.whisper.whisper_audio import WhisperAudioModel
 from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_audio import Qwen3OmniMoeAudioEncoder
 from lightllm.server.multimodal_params import AudioItem
