@@ -523,6 +523,11 @@ class InferReq:
         self.shared_kv_node: TreeNode = None
 
         self.finish_status = FinishStatus()
+
+        # Hybrid radix cache hotspot detection
+        self.mamba_buffer_target_len = 0  # absolute token position for buffer snapshot
+        self.is_hotspot_prefill = False
+        self.extra_need_to_free_token_index = []
         return
 
     def _match_radix_cache(self):
@@ -540,6 +545,18 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+
+                if g_infer_context.has_recurrent_state:
+                    threshold = g_infer_context.radix_cache.min_insert_threshold
+                    if miss_prefix_len > threshold:
+                        self.mamba_buffer_target_len = self.cur_kv_len + miss_prefix_len
+                        self.is_hotspot_prefill = True
+            elif g_infer_context.has_recurrent_state and miss_prefix_len > 0:
+                # Bootstrap case: tree had KV structure but no buffer anywhere.
+                threshold = g_infer_context.radix_cache.min_insert_threshold
+                if miss_prefix_len > threshold:
+                    self.mamba_buffer_target_len = miss_prefix_len
+                    self.is_hotspot_prefill = True
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -588,13 +605,15 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
     def get_chuncked_input_token_ids(self):
-        chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        chunked_end = self.get_chuncked_input_token_len()
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        if self.mamba_buffer_target_len > 0 and chunked_start < self.mamba_buffer_target_len:
+            chunked_end = min(self.get_cur_total_len(), self.mamba_buffer_target_len)
+        else:
+            chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
