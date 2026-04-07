@@ -216,13 +216,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     from .api_http import g_objs
 
     if request.logit_bias is not None:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The logit_bias parameter is not currently supported",
-        )
+        logger.debug("Received unsupported parameter 'logit_bias', ignoring")
 
     if request.function_call != "none":
-        return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
+        logger.debug("Received unsupported parameter 'function_call', ignoring")
 
     created_time = int(time.time())
 
@@ -746,10 +743,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
     from .api_http import g_objs
 
     if request.logit_bias is not None:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The logit_bias parameter is not currently supported",
-        )
+        logger.debug("Received unsupported parameter 'logit_bias', ignoring")
 
     created_time = int(time.time())
 
@@ -777,10 +771,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
 
     # Handle suffix for completion mode
     if request.suffix:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            "The suffix parameter is not currently supported",
-        )
+        logger.debug("Received unsupported parameter 'suffix', ignoring")
 
     # Prepare sampling parameters - same as g_generate_stream_func pattern
     sampling_params_dict = {
