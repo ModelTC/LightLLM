@@ -112,9 +112,21 @@ class HybridRadixCache(RadixCache):
         return
 
     def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback, evict_token_callback):
+        # Two-pass eviction: first evict buffers from unreferenced nodes,
+        # then from referenced nodes only if necessary.  Evicting a buffer
+        # from a referenced node makes its KV cache unreachable for hybrid
+        # model reuse (no Mamba state to resume from), which cascades into
+        # full cache eviction when subsequent requests cannot match a buffer.
+        deferred_referenced = []
         while need_evict_buffer_num > 0:
+            if not self.evict_buffer_set:
+                break
             node = self.evict_buffer_set.pop(0)
             assert node.buffer_idx is not None
+
+            if node.ref_counter > 0:
+                deferred_referenced.append(node)
+                continue
 
             # Track waste/hit
             if node.was_hit:
@@ -137,6 +149,24 @@ class HybridRadixCache(RadixCache):
                 parent_node.remove_child(node)
                 if parent_node.is_leaf():
                     self.evict_tree_set.add(parent_node)
+
+        # Fallback: evict referenced buffers if unreferenced ones were not enough
+        for node in deferred_referenced:
+            if need_evict_buffer_num <= 0:
+                self.evict_buffer_set.add(node)
+                continue
+
+            if node.was_hit:
+                self.buffer_hit_count += 1
+            else:
+                self.buffer_waste_count += 1
+
+            evict_buffer_callback(node.buffer_idx)
+            node.buffer_idx = None
+            node.is_hotspot = False
+            node.was_hit = False
+            need_evict_buffer_num -= 1
+            # Node is referenced, so R4 cleanup does not apply.
 
         self._maybe_adjust_threshold()
         return
