@@ -4,14 +4,11 @@ import base64
 import httpx
 from PIL import Image
 from io import BytesIO
-from urllib.parse import urlparse
-from typing import Dict, Optional
 from fastapi import Request
+from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
-_HTTP_CLIENTS: Dict[Optional[str], httpx.AsyncClient] = {}
-_LOCAL_RESOURCE_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _httpx_async_client_proxy_kwargs(proxy) -> dict:
@@ -39,15 +36,17 @@ def image2base64(img_str: str):
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+@lru_cache(maxsize=256)
+def _get_xhttp_client(proxy=None):
+    kvargs = _httpx_async_client_proxy_kwargs(proxy)
+    kvargs["limits"] = httpx.Limits(max_connections=10000, max_keepalive_connections=20)
+    return httpx.AsyncClient(**kvargs)
+
+
 async def fetch_resource(url, request: Request, timeout, proxy=None):
     logger.info(f"Begin to download resource from url: {url}")
     start_time = time.time()
-    hostname = urlparse(url).hostname
-    effective_proxy = None if hostname in _LOCAL_RESOURCE_HOSTS else proxy
-    client = _HTTP_CLIENTS.get(effective_proxy)
-    if client is None:
-        client = httpx.AsyncClient(**_httpx_async_client_proxy_kwargs(effective_proxy))
-        _HTTP_CLIENTS[effective_proxy] = client
+    client = _get_xhttp_client(proxy)
     async with client.stream("GET", url, timeout=timeout) as response:
         response.raise_for_status()
         ans_bytes = []
