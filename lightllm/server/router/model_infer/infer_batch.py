@@ -254,6 +254,13 @@ class InferenceContext:
         radix_cache: HybridRadixCache = self.radix_cache
         radix_cache.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
 
+        if radix_cache.buffer_mem_manager.can_use_mem_size < len(reqs_to_insert):
+            # Not enough buffers even after eviction — skip snapshot, clear hotspot flags
+            for r in reqs_to_insert:
+                r.is_hotspot_prefill = False
+                r.mamba_buffer_target_len = 0
+            return
+
         new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(reqs_to_insert))
         req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
         cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
@@ -287,6 +294,9 @@ class InferenceContext:
             # Skip: still in chunked prefill
             if r.cur_kv_len + 1 < r.get_cur_total_len():
                 continue
+            # Skip: already in decode phase (has generated output tokens)
+            if r.cur_output_len > 0:
+                continue
             # Skip: shared node already has a buffer
             if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None:
                 continue
@@ -301,6 +311,13 @@ class InferenceContext:
             return
 
         radix_cache.free_radix_cache_to_get_enough_buffer(len(eligible))
+
+        if radix_cache.buffer_mem_manager.can_use_mem_size < len(eligible):
+            # Not enough buffers — reduce to what's available
+            eligible = eligible[: radix_cache.buffer_mem_manager.can_use_mem_size]
+        if not eligible:
+            return
+
         new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(eligible))
         req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
         cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()

@@ -55,9 +55,13 @@ class ChunkedPrefillBackend(ModeBackend):
         if g_infer_context.has_recurrent_state and self.radix_cache is not None:
             torch.cuda.synchronize()
             g_infer_state_lock.acquire()
-            g_infer_context.snapshot_hybrid_buffers(run_reqs)
-            g_infer_context.snapshot_prefill_complete_buffers(run_reqs)
-            g_infer_state_lock.release()
+            try:
+                g_infer_context.snapshot_hybrid_buffers(run_reqs)
+                g_infer_context.snapshot_prefill_complete_buffers(run_reqs)
+            except Exception as e:
+                logger.warning(f"Mamba buffer snapshot failed (non-fatal): {e}")
+            finally:
+                g_infer_state_lock.release()
 
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
