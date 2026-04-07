@@ -48,6 +48,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
 
     def load_conversion_module(self, model_dir: str):
         import importlib
+
         conversion_path = os.path.join(model_dir, "conversation.py")
         if not os.path.exists(conversion_path):
             return None
@@ -151,6 +152,9 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         query_condition = prompt + IMG_START_TOKEN if not prompt.endswith(IMG_START_TOKEN) else prompt
         query_text_uncondition = self._build_t2i_query(IMG_TOKEN * image_len)
         question_img_uncondition = self._build_t2i_query("")
+        print(f"query_condition: {query_condition}")
+        print(f"query_text_uncondition: {query_text_uncondition}")
+        print(f"question_img_uncondition: {question_img_uncondition}")
         return query_condition, query_text_uncondition, question_img_uncondition
 
     def get_query_for_t2i(self, prompt: str):
@@ -160,6 +164,8 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         #     f"Please generate an image based on the following description: {prompt}",
         #     thinking_content="<think>\n\n</think>\n\n")
         query_uncondition = self._build_t2i_query("")
+        print(f"query_condition: {query_condition}", flush=True)
+        print(f"query_uncondition: {query_uncondition}", flush=True)
         return query_condition, query_uncondition
 
 

@@ -202,6 +202,7 @@ def _get_images_and_audios(request: ChatCompletionRequest):
 
 
 def _get_tools(request: ChatCompletionRequest):
+    tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
         if not isinstance(request.tool_choice, str):
@@ -537,15 +538,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
 
 
-async def _get_text_generator_input(request: ChatCompletionRequest):
+async def _get_text_generator_input(request: ChatCompletionRequest, apply_chat_template: bool = True):
     from .api_http import g_objs
 
     images, audios = _get_images_and_audios(request)
     multimodal_params_dict = {"images": images, "audios": audios}
 
     tools = _get_tools(request)
-
-    prompt = await build_prompt(request, tools)
+    if apply_chat_template:
+        prompt = await build_prompt(request, tools)
+    else:
+        prompt = request.messages[-1].content
 
     sampling_params_dict = {
         "do_sample": request.do_sample,
@@ -620,6 +623,42 @@ def _apply_image_generation_stop(chat_request: ChatCompletionRequest, image_star
     chat_request.stop = stop
 
 
+async def _chat_completion_image_only(
+    request: ChatCompletionRequestV2,
+    raw_request: Request,
+) -> ChatCompletionResponse:
+    from .api_http import g_objs
+
+    created_time = int(time.time())
+    x2i_params = X2IParams()
+    x2i_params.init_from_image_config(request.image_config)
+
+    prompt, _, multimodal_params = await _get_text_generator_input(request, apply_chat_template=False)
+
+    images = await g_objs.httpserver_manager.generate_image(
+        prompt, x2i_params, multimodal_params.clone(), request=raw_request
+    )
+    response_images = _message_contents_from_raw_images(images, request.image_config.image_type)
+    chat_message = ChatMessage(
+        role="assistant",
+        content=prompt,
+        images=response_images if response_images else None,
+    )
+    choice = ChatCompletionResponseChoice(
+        index=0,
+        message=chat_message,
+        finish_reason="stop",
+    )
+    usage = UsageInfo(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+    return ChatCompletionResponse(
+        id=f"chatcmpl-{uuid.uuid4().hex}",
+        created=created_time,
+        model=request.model,
+        choices=[choice],
+        usage=usage,
+    )
+
+
 async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
     from .api_http import g_objs
 
@@ -640,6 +679,9 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
     if "image" not in request.modalities:
         return await chat_completions_impl(chat_request, raw_request)
+
+    if request.modalities == ["image"]:
+        return await _chat_completion_image_only(request, raw_request)
 
     if request.n != 1:
         return create_error_response(

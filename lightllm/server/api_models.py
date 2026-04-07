@@ -468,8 +468,8 @@ class ChatCompletionRequestV2(ChatCompletionRequest):
     @field_validator("modalities")
     @classmethod
     def validate_modalities(cls, v):
-        if "text" not in v:
-            raise ValueError("modalities must include 'text'")
+        if "text" not in v and v != ["image"]:
+            raise ValueError("modalities must include 'text', or be ['image'] for image-only generation")
         if len(v) != len(set(v)):
             raise ValueError("modalities must be unique")
         return v

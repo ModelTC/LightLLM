@@ -67,7 +67,12 @@ class X2IManager:
         pass
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
-        print(past_kv_cache.shape, past_kv_cache_text.shape, param, flush=True)
+        past_kv_cache = self._truncate_kv_cache_to_compressed_len(
+            past_kv_cache, param.past_kvcache.get_compressed_len()
+        )
+        past_kv_cache_text = self._truncate_kv_cache_to_compressed_len(
+            past_kv_cache_text, param.past_kvcache_text.get_compressed_len()
+        )
         self.gen_pipe.runner.set_kvcache_t2i(past_kv_cache, past_kv_cache_text)
         image = self.gen_pipe.generate(
             seed=param.seed,
@@ -79,6 +84,15 @@ class X2IManager:
         return [image]
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
+        past_kv_cache = self._truncate_kv_cache_to_compressed_len(
+            past_kv_cache, param.past_kvcache.get_compressed_len()
+        )
+        past_kv_cache_text = self._truncate_kv_cache_to_compressed_len(
+            past_kv_cache_text, param.past_kvcache_text.get_compressed_len()
+        )
+        past_kv_cache_img = self._truncate_kv_cache_to_compressed_len(
+            past_kv_cache_img, param.past_kvcache_img.get_compressed_len()
+        )
         self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
         image = self.gen_pipe.generate(
             seed=param.seed,
@@ -149,6 +163,11 @@ class X2IManager:
 
     def clean_up(self):
         pass
+
+    def _truncate_kv_cache_to_compressed_len(self, kv: torch.Tensor, compressed_len: int) -> torch.Tensor:
+        seq = kv.shape[2]
+        n = min(compressed_len, seq)
+        return kv[:, :, :n:, :].contiguous()
 
 
 def setup_devices(args: StartArgs):

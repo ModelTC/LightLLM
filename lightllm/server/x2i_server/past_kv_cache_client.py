@@ -83,7 +83,7 @@ class PastKVCacheClient(object):
             and token_num > (len(page_indexes) - 1) * self.token_page_size
         )
         (P, L, S, H, D) = self.cpu_kv_cache_tensor[page_indexes].shape
-        # (P, L, S, H, D) -> (P, L, S, 2, H // 2, D) -> (L, 2, H // 2, P, S, D) -> (L, 2, H // 2, P * S, D)
+        # (P, L, S, H, D) -> (P, L, S, 2, H // 2, D) -> (L, 2,P, S,  H // 2, D) -> (L, 2, P * S, H // 2, D)
         kv = (
             self.cpu_kv_cache_tensor[page_indexes]
             .view(P, L, S, 2, H // 2, D)
