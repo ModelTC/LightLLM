@@ -117,9 +117,22 @@ app = FastAPI()
 g_objs.app = app
 
 
-def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+def create_error_response(
+    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
+) -> JSONResponse:
+    if err_type is None:
+        if status_code.value >= 500:
+            err_type = "InternalServerError"
+        elif status_code == HTTPStatus.NOT_FOUND:
+            err_type = "NotFoundError"
+        else:
+            err_type = "BadRequestError"
+
     g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse({"message": message}, status_code=status_code.value)
+    return JSONResponse(
+        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
+        status_code=status_code.value,
+    )
 
 
 @app.get("/liveness")
