@@ -194,6 +194,11 @@ class InferenceContext:
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
 
+        # Drain deferred frees from hotspot buffer insertion
+        if len(req.extra_need_to_free_token_index) > 0:
+            free_token_index.extend(req.extra_need_to_free_token_index)
+            req.extra_need_to_free_token_index = []
+
         return node
 
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
@@ -240,6 +245,83 @@ class InferenceContext:
         else:
             # No valid node — free all buffers normally
             free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+
+    def snapshot_hybrid_buffers(self, run_reqs: List["InferReq"]):
+        """Snapshot Mamba states for hotspot requests after their enlarged first chunk."""
+        reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill]
+        if not reqs_to_insert:
+            return
+        radix_cache: HybridRadixCache = self.radix_cache
+        radix_cache.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
+
+        new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(reqs_to_insert))
+        req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
+        cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+        new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
+        radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+
+        for i, req in enumerate(reqs_to_insert):
+            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+
+            prefix_len, new_node = radix_cache.insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+
+            radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            radix_cache.add_node_ref_counter(new_node)
+            radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=True)
+
+            req.extra_need_to_free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+            )
+            req.shared_kv_node = new_node
+            req.is_hotspot_prefill = False
+            req.mamba_buffer_target_len = 0
+
+    def snapshot_prefill_complete_buffers(self, run_reqs: List["InferReq"]):
+        """Opportunistically snapshot Mamba states for requests that just completed prefill."""
+        radix_cache: HybridRadixCache = self.radix_cache
+
+        eligible = []
+        for r in run_reqs:
+            # Skip: still in chunked prefill
+            if r.cur_kv_len + 1 < r.get_cur_total_len():
+                continue
+            # Skip: shared node already has a buffer
+            if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None:
+                continue
+            eligible.append(r)
+
+        if not eligible:
+            return
+
+        max_buffers = radix_cache.available_opportunistic_buffer_count()
+        eligible = eligible[:max_buffers]
+        if not eligible:
+            return
+
+        radix_cache.free_radix_cache_to_get_enough_buffer(len(eligible))
+        new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(eligible))
+        req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
+        cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+        new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
+        radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+
+        for i, req in enumerate(eligible):
+            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+
+            prefix_len, new_node = radix_cache.insert(key, value)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+
+            radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            radix_cache.add_node_ref_counter(new_node)
+            radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=False)
+
+            req.extra_need_to_free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+            )
+            req.shared_kv_node = new_node
 
     def _save_promptcache_kvbuffer(self):
         """
