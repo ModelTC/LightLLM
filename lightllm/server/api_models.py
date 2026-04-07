@@ -266,6 +266,19 @@ class ChatCompletionRequest(BaseModel):
                     data[key] = value
         return data
 
+    @model_validator(mode="after")
+    def sync_thinking_chat_template_kwargs(self):
+        """Mirror thinking <-> enable_thinking when only one is set (Qwen vs DeepSeek templates)."""
+        if not self.chat_template_kwargs:
+            return self
+        d = dict(self.chat_template_kwargs)
+        if "thinking" not in d and "enable_thinking" in d:
+            d["thinking"] = d["enable_thinking"]
+        elif "enable_thinking" not in d and "thinking" in d:
+            d["enable_thinking"] = d["thinking"]
+        self.chat_template_kwargs = d
+        return self
+
 
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
