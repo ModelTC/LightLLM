@@ -21,29 +21,35 @@ class HybridRadixCache(RadixCache):
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
-        evict_token_list = []
-        kv_len = tree_node.node_prefix_total_len
+        miss_prefix_len = 0
         while tree_node != self.root_node and tree_node.buffer_idx is None:
-            if tree_node.is_leaf():
-                self.evict_tree_set.discard(tree_node)
+            miss_prefix_len += len(ans_value_list[-1]) if ans_value_list else 0
 
-            # Only update ref_counter when update_refs is True to maintain consistency
-            # with _match_prefix_helper which only increments ref_counter when update_refs=True
+            next_node = tree_node.parent
+
             if update_refs:
+                # Undo the ref increment from _match_prefix_helper.
+                # Do NOT destroy nodes here — that caused a cascade where each
+                # destroyed child turned its parent into a leaf, which was then
+                # also destroyed, silently wiping the entire prefix chain.
+                # Unreferenced leaves will be reclaimed by the normal eviction path.
+                if tree_node.is_leaf():
+                    self.evict_tree_set.discard(tree_node)
                 if tree_node.ref_counter == 1:
                     self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
                 tree_node.ref_counter -= 1
-            kv_len -= len(ans_value_list.pop())
-            if tree_node.is_leaf():
-                self.evict_tree_set.add(tree_node)
-            tree_node = tree_node.parent
+                if tree_node.is_leaf():
+                    self.evict_tree_set.add(tree_node)
 
-        if len(evict_token_list) > 0:
-            evict_token_value = torch.concat(evict_token_list)
-            self.mem_manager.free(evict_token_value)
+            ans_value_list.pop()
+            tree_node = next_node
 
         if tree_node == self.root_node:
-            return None, kv_len, None
+            return None, miss_prefix_len, None
+
+        # Mark buffer node as hit when update_refs is True
+        if update_refs:
+            tree_node.was_hit = True
 
         update_node = tree_node
         while update_node != self.root_node:
@@ -54,7 +60,7 @@ class HybridRadixCache(RadixCache):
             update_node = update_node.parent
 
         value = torch.concat(ans_value_list)
-        return tree_node, kv_len, value
+        return tree_node, miss_prefix_len, value
 
     def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int, is_hotspot: bool = False):
         """Set buffer_idx for a node and add it to evict_buffer_set."""

@@ -532,7 +532,7 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            share_node, miss_prefix_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len

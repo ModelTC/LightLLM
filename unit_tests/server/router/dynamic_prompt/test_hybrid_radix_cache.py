@@ -104,3 +104,32 @@ def test_node_stays_alive_after_buffer_eviction():
     assert node1.buffer_idx is None
     # Node should be in evict_tree_set for later KV reclamation
     assert node1 in cache.evict_tree_set
+
+
+def test_match_prefix_walkback_does_not_destroy_nodes():
+    """match_prefix walk-back must NOT destroy nodes — they must survive for prefix matching."""
+    cache = _make_hybrid_cache("walkback")
+
+    # Build a chain: root -> [1,2] -> [3,4]
+    # Insert [1,2] first to create that intermediate node, then [1,2,3,4] to extend it
+    cache.insert(torch.tensor([1, 2], dtype=torch.int64), torch.tensor([10, 11], dtype=torch.int64))
+    key = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+    val = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+    cache.insert(key, val)
+
+    # Only attach buffer to the [1,2] node (parent), not [3,4]
+    node_12 = cache.root_node.children[1]
+    cache.add_buffer_idx_to_node(node_12, 42)
+
+    # match_prefix with [1,2,3,4] — should walk back from [3,4] to [1,2]
+    share_node, miss_prefix_len, value_tensor = cache.match_prefix(key, update_refs=True)
+
+    assert share_node is node_12, "Should match at [1,2] which has buffer"
+    assert miss_prefix_len == 2, "Missed 2 tokens in [3,4] node"
+
+    # Critical: the [3,4] node must still exist in the tree
+    assert 3 in node_12.children, "Child [3,4] must not be destroyed during walk-back"
+    child = node_12.children[3]
+    assert child.ref_counter == 0, "Walk-back should have decremented ref"
+
+    cache.dec_node_ref_counter(share_node)
