@@ -156,16 +156,6 @@ To use the model in non-thinking mode for faster responses, set ``enable_thinkin
      - 0.0
      - 1.5
 
-FP8 KV Cache Quantization
---------------------------
-
-Qwen3.5 supports FP8 KV cache quantization to reduce memory usage. Add the following parameter to your launch command:
-
-.. code-block:: bash
-
-    --data_type fp8_e4m3
-
-This can significantly reduce KV cache memory usage, allowing larger batch sizes and longer sequences.
 
 Testing and Validation
 ----------------------
