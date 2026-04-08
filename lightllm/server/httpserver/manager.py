@@ -307,8 +307,8 @@ class HttpServerManager:
             group_request_id,
             start_time,
             "received",
-            has_audio=audio_count > 0,
-            has_image=image_count > 0,
+            audio_count=audio_count,
+            image_count=image_count,
         )
 
         try:
