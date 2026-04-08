@@ -327,7 +327,7 @@ class HttpServerManager:
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
             # encode
-            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params, start_time=start_time)
+            prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             self._log_stage_timing(
                 group_request_id,
                 start_time,
