@@ -4,6 +4,7 @@ import torch
 from sortedcontainers import SortedSet
 
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
+from lightllm.common.kv_cache_mem_manager.kv_buffer.hybrid_kv_buffer import HybridKvBuffer
 from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
 from lightllm.utils.log_utils import init_logger
 
@@ -13,8 +14,8 @@ logger = init_logger(__name__)
 class HybridRadixCache(RadixCache):
     def __init__(self, unique_name, total_token_num, rank_in_node, kv_cache_mem_manager):
         super().__init__(unique_name, total_token_num, rank_in_node, kv_cache_mem_manager)
-        assert hasattr(kv_cache_mem_manager, "mamba_cache_mem_manager")
-        self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
+        assert isinstance(kv_cache_mem_manager.kv_buffer, HybridKvBuffer)
+        self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.kv_buffer.mamba_cache_manager
         self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.buffer_time,))
 
     def match_prefix(self, key, update_refs=False):

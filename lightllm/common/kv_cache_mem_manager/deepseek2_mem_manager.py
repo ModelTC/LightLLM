@@ -2,13 +2,13 @@ import torch
 import os
 import torch.distributed as dist
 from lightllm.server.pd_io_struct import KVMoveTask
+from .kv_buffer.kv_buffer import KvBuffer
 from .mem_manager import MemoryManager
 from typing import List, Union, Any
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
 from lightllm.distributed.pynccl import PyNcclCommunicator
-from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 
 
 logger = init_logger(__name__)
@@ -45,7 +45,10 @@ class Deepseek2MemoryManager(MemoryManager):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = KvBuffer(
+            torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda"),
+            head_num=head_num,
+        )
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         self.kv_move_buffer = torch.empty(
@@ -77,11 +80,8 @@ class Deepseek2MemoryManager(MemoryManager):
         pin_mem_indexes.numpy()[:] = mem_indexes
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mla_page_io(
-            mem_indexes=mem_indexes_gpu,
-            page_tensor=cur_page,
-            kv_buffer=dp_mems[0].kv_buffer,
-            mode="write",
+        dp_mems[0].kv_buffer_adapter.write_to_page_buffer(
+            mem_indexes=mem_indexes_gpu, page_tensor=cur_page, is_mla=True
         )
         return
 
@@ -99,12 +99,7 @@ class Deepseek2MemoryManager(MemoryManager):
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for mem in dp_mems:
-            mla_page_io(
-                mem_indexes=mem_indexes_gpu,
-                page_tensor=cur_page,
-                kv_buffer=mem.kv_buffer,
-                mode="read",
-            )
+            mem.kv_buffer_adapter.read_from_page_buffer(mem_indexes=mem_indexes_gpu, page_tensor=cur_page, is_mla=True)
 
     def send_to_decode_node(
         self,

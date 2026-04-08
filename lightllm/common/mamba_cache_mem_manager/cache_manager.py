@@ -199,7 +199,7 @@ class MambaCacheManager:
     ):
         start_args = get_env_start_args()
         if self.size is not None and not start_args.disable_dynamic_prompt_cache:
-            assert self.size < start_args.running_max_req_size * 2, (
+            assert self.size >= start_args.running_max_req_size * 2, (
                 f"error mamba_cache_size({self.size}), ",
                 f"mamba_cache_size should be at least running_max_req_size * 2",
                 f"({start_args.running_max_req_size * 2}), ",

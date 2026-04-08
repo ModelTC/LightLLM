@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from typing import List, Union, Tuple, Any
+from .kv_buffer.kv_buffer import KvBuffer
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
@@ -64,21 +65,21 @@ class MemoryManager:
             head_dim,
             layer_num,
         )
+        self._init_kv_buffer_adapter()
         self.HOLD_TOKEN_MEMINDEX = self.size
+
+    def _init_kv_buffer_adapter(self):
+        self.kv_buffer_adapter = self.kv_buffer.create_adapter()
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         """
         将每一层生成的kv拷贝到mem manager对应mem_index 位置中
         """
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-        destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
+        self.kv_buffer.copy_kv_to_mem_manager(layer_index, mem_index, kv)
         return
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
-        k = self.kv_buffer[layer_index][:, : self.head_num, :]
-        v = self.kv_buffer[layer_index][:, self.head_num :, :]
-        return k, v
+        return self.kv_buffer.get_att_input_params(layer_index)
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
@@ -108,7 +109,10 @@ class MemoryManager:
         # 分配，内部实际也没有管理，这个token是预留来对一些特殊的运行模式，如多dp下，overlap microbatch
         # 等模式下 padding 一些请求，使推理过程可以正常运行采用的，其索引值为size，存储在HOLD_TOKEN_MEMINDEX
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
-        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = KvBuffer(
+            torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"),
+            head_num=head_num,
+        )
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         """
@@ -148,17 +152,15 @@ class MemoryManager:
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
-        repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
+        repeat_count = dp_world_size * (2 * self.head_num) // self.kv_move_buffer.shape[3]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for tp_index in range(dp_world_size):
             if tp_index % repeat_count == 0:
-                page_io(
+                dp_mems[tp_index].kv_buffer_adapter.write_to_page_buffer(
                     mem_indexes=mem_indexes_gpu,
                     page_tensor=cur_page,
-                    kv_buffer=dp_mems[tp_index].kv_buffer,
                     tp_index=tp_index,
                     tp_world_size=dp_world_size,
-                    mode="write",
                 )
         # keep for debug
         # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
@@ -182,13 +184,11 @@ class MemoryManager:
             non_blocking=True
         )
         for tp_index in range(dp_world_size):
-            page_io(
+            dp_mems[tp_index].kv_buffer_adapter.read_from_page_buffer(
                 mem_indexes=mem_indexes_gpu,
                 page_tensor=cur_page,
-                kv_buffer=dp_mems[tp_index].kv_buffer,
                 tp_index=tp_index,
                 tp_world_size=dp_world_size,
-                mode="read",
             )
         # keep for debug
         # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
@@ -340,6 +340,7 @@ class MemoryManager:
 
     def _free_buffers(self):
         self.kv_buffer = None
+        self.kv_buffer_adapter = None
 
     def alloc(self, need_size) -> torch.Tensor:
         if need_size > self.mark_end - self.mark_start:
@@ -414,13 +415,14 @@ class MemoryManager:
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
+        self._init_kv_buffer_adapter()
         return
 
     def get_index_kv_buffer(self, index):
-        return {"kv_buffer": self.kv_buffer[:, index]}
+        return self.kv_buffer.get_index_kv_buffer(index)
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
-        self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
+        self.kv_buffer.load_index_kv_buffer(index, load_tensor_dict)
 
     def copy_kv_from_other_dp_ranks(
         self,
@@ -431,20 +433,11 @@ class MemoryManager:
         dp_size_in_node: int,
         rank_in_dp: int,
     ):
-        if not hasattr(self, "mem_ptrs_tensor"):
-            # 构建一个2D tensor，shape为(layer_num, mem_num)
-            mems_ptr_list = []
-            for i in range(0, len(mem_managers)):
-                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
-            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
-
-        # 一次性传输所有层
-        kv_trans_for_dp(
-            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
-            input_idx=move_token_indexes,
-            input_dp_idx=token_dp_indexes,
-            output=self.kv_buffer,
-            output_idx=mem_indexes,
+        self.kv_buffer_adapter.copy_kv_from_other_dp_ranks(
+            mem_managers=mem_managers,
+            move_token_indexes=move_token_indexes,
+            token_dp_indexes=token_dp_indexes,
+            mem_indexes=mem_indexes,
             dp_size_in_node=dp_size_in_node,
             rank_in_dp=rank_in_dp,
         )

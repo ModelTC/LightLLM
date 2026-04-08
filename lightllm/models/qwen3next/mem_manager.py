@@ -1,9 +1,10 @@
 import torch
-from typing import Tuple
+import torch.distributed as dist
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.kv_cache_mem_manager.kv_buffer.hybrid_kv_buffer import HybridKvBuffer
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
-from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
-from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 
 logger = init_logger(__name__)
 
@@ -36,41 +37,93 @@ class Qwen3NextHybridMemManager(MemoryManager):
         self.layer_num = layer_num
         self.full_attn_layer_num = layer_num // full_attention_interval
         self.linear_attn_layer_num = layer_num - self.full_attn_layer_num
-
-        self.mamba_cache_mem_manager = MambaCacheManager(
-            size=linear_attn_cache_size,
-            layer_num=self.linear_attn_layer_num,
-            conv_state_dtype=conv_state_dtype,
-            ssm_state_dtype=ssm_state_dtype,
-            conv_kernel_size=conv_kernel_size,
-            num_linear_k_heads=num_linear_k_heads,
-            num_linear_v_heads=num_linear_v_heads,
-            head_linear_k_dim=head_linear_k_dim,
-            head_linear_v_dim=head_linear_v_dim,
-        )
+        self.linear_attn_cache_size = linear_attn_cache_size
+        self.conv_state_dtype = conv_state_dtype
+        self.ssm_state_dtype = ssm_state_dtype
+        self.conv_kernel_size = conv_kernel_size
+        self.num_linear_k_heads = num_linear_k_heads
+        self.num_linear_v_heads = num_linear_v_heads
+        self.head_linear_k_dim = head_linear_k_dim
+        self.head_linear_v_dim = head_linear_v_dim
 
         super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
+
+    def profile_size(self, mem_fraction):
+        if self.size is not None:
+            return
+
+        world_size = dist.get_world_size()
+        total_memory = get_total_gpu_memory()
+        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
+
+        conv_dim = (
+            self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
+        )
+        mamba_cell_size = (
+            self.linear_attn_layer_num
+            * conv_dim
+            * (self.conv_kernel_size - 1)
+            * torch._utils._element_size(self.conv_state_dtype)
+        ) + (
+            self.linear_attn_layer_num
+            * self.num_linear_v_heads
+            * self.head_linear_k_dim
+            * self.head_linear_v_dim
+            * torch._utils._element_size(self.ssm_state_dtype)
+        )
+
+        if self.linear_attn_cache_size is None:
+            start_args = get_env_start_args()
+            mamba_cache_ratio = start_args.mamba_cache_ratio if start_args.mamba_cache_ratio is not None else 0.5
+            self.linear_attn_cache_size = int(available_memory * mamba_cache_ratio * 1024 ** 3 / mamba_cell_size)
+        reserved_mamba_memory = self.linear_attn_cache_size * mamba_cell_size / (1024 ** 3)
+        available_memory -= reserved_mamba_memory
+
+        cell_size = self.get_cell_size()
+        self.size = int(available_memory * 1024 ** 3 / cell_size)
+        if world_size > 1:
+            tensor = torch.tensor(self.size, dtype=torch.int64, device="cuda")
+            dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
+            self.size = tensor.item()
+
+        logger.info(
+            f"{available_memory} GB space is available for full attention kv cache after reserving "
+            f"{reserved_mamba_memory} GB for mamba cache\n"
+            f"{cell_size / 1024 ** 2} MB is the size of one token kv cache\n"
+            f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
+        )
+        return
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         # KV buffer layout: [None, None, None, kv_cache, None, None, None, kv_cache, ...,
         #                    None, kv_cache, mtp_kv_cache, mtp_kv_cache]
         # Only full attention layers have KV cache.
-        self.kv_buffer = [None for _ in range(self.layer_num)]
+        kv_buffers = [None for _ in range(self.layer_num)]
         for layer_id in range(self.full_attn_layer_num):
-            self.kv_buffer[(layer_id + 1) * self.full_attention_interval - 1] = torch.empty(
+            kv_buffers[(layer_id + 1) * self.full_attention_interval - 1] = torch.empty(
                 (size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"
             )
+        self.kv_buffer = HybridKvBuffer(
+            kv_buffers,
+            head_num=head_num,
+            full_attention_interval=self.full_attention_interval,
+            mamba_cache_size=self.linear_attn_cache_size,
+            linear_attn_layer_num=self.linear_attn_layer_num,
+            conv_state_dtype=self.conv_state_dtype,
+            ssm_state_dtype=self.ssm_state_dtype,
+            conv_kernel_size=self.conv_kernel_size,
+            num_linear_k_heads=self.num_linear_k_heads,
+            num_linear_v_heads=self.num_linear_v_heads,
+            head_linear_k_dim=self.head_linear_k_dim,
+            head_linear_v_dim=self.head_linear_v_dim,
+        )
 
     def free_all(self):
         super().free_all()
-        self.mamba_cache_mem_manager.free_all()
+        self.kv_buffer.mamba_cache_manager.free_all()
         return
 
     def get_cell_size(self):
         # Only full attention layers and MTP layers have KV cache
         kv_cache_layer_num = self.full_attn_layer_num
         return 2 * self.head_num * self.head_dim * kv_cache_layer_num * torch._utils._element_size(self.dtype)
-
-    def get_mamba_cache(self, layer_idx: int):
-        layer_idx_in_linear = layer_idx - (layer_idx // self.full_attention_interval)
-        return self.mamba_cache_mem_manager.get_mamba_cache(layer_idx_in_linear)

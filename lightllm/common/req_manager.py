@@ -237,11 +237,13 @@ class ReqSamplingParamsManager:
 
 class ReqManagerForMamba(ReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager):
+        from lightllm.common.kv_cache_mem_manager.kv_buffer.hybrid_kv_buffer import HybridKvBuffer
         from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
 
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
-        self.buffer_mem_manager: MambaCacheManager = self.mem_manager.mamba_cache_mem_manager
+        assert isinstance(self.mem_manager.kv_buffer, HybridKvBuffer)
+        self.buffer_mem_manager: MambaCacheManager = self.mem_manager.kv_buffer.mamba_cache_manager
         self.req_to_buffer_index = torch.zeros(
             (self.max_request_num + 1, self.mtp_step + 1), dtype=torch.int32, device="cuda"
         )
