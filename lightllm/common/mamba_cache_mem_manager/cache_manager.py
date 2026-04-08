@@ -235,7 +235,7 @@ class MambaCacheManager:
         mamba_memory_gb = available_memory * mamba_cache_ratio
         mamba_cache_size = int(mamba_memory_gb * 1024 ** 3 / total_cell_size)
 
-        if mamba_cache_size < start_args.running_max_req_size * 2:
+        if mamba_cache_size < start_args.running_max_req_size * 2 and not start_args.disable_dynamic_prompt_cache:
             ratio = mamba_cache_ratio if mamba_cache_ratio is not None else 0.5
             raise ValueError(
                 f"Insufficient memory for mamba cache allocation!\n\n"
