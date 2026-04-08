@@ -213,6 +213,8 @@ class InMemoryCache:
                             "token_id": rec.token_id,
                             "start_index_in_embed_cache": rec.mem_block.start,
                             "token_num": rec.token_num,
+                            "data_ready": rec.data,
+                            "embed_ready": rec.embed,
                         }
                     )
 

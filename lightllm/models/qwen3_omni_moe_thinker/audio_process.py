@@ -5,6 +5,7 @@ from transformers.audio_utils import mel_filter_bank, spectrogram, window_functi
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.utils import TensorType
+from functools import lru_cache
 
 
 class WhisperFeatureExtractor(SequenceFeatureExtractor):
@@ -47,17 +48,24 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
             mel_scale="slaney",
         )
 
+    @lru_cache(maxsize=12)
+    def get_hann_window(self, device: Union[str, torch.device]):
+        return torch.hann_window(self.n_fft, device=device)
+
+    @lru_cache(maxsize=12)
+    def get_mel_filters(self, device: Union[str, torch.device]):
+        return torch.from_numpy(self.mel_filters).to(device, torch.float32)
+
     def _torch_extract_fbank_features(self, waveform: np.ndarray, device: str = "cpu") -> np.ndarray:
         waveform = torch.from_numpy(waveform).to(device, torch.float32)
-        window = torch.hann_window(self.n_fft, device=device)
+        window = self.get_hann_window(device)
 
         if self.dither != 0.0:
             waveform += self.dither * torch.randn(waveform.shape, dtype=waveform.dtype, device=waveform.device)
 
         stft = torch.stft(waveform, self.n_fft, self.hop_length, window=window, return_complex=True)
         magnitudes = stft[..., :-1].abs() ** 2
-
-        mel_filters = torch.from_numpy(self.mel_filters).to(device, torch.float32)
+        mel_filters = self.get_mel_filters(device)
         mel_spec = mel_filters.T @ magnitudes
 
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()

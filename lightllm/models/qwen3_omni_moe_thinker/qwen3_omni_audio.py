@@ -2,20 +2,14 @@ import os
 import json
 import math
 import torch
-import rpyc
-import librosa
 import numpy as np
-from io import BytesIO
 from torch import Tensor, nn
 from safetensors import safe_open
 from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
-from rpyc.utils.classic import obtain
-
 from transformers.activations import ACT2FN
 
 from lightllm.server.multimodal_params import AudioItem
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
@@ -341,9 +335,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
-                audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
+                assert self.processor.sampling_rate == 16000
+                audio = item.load_audio_from_shm_payload()
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 

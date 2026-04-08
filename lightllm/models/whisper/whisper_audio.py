@@ -1,17 +1,13 @@
 import os
 import json
-import rpyc
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
-from io import BytesIO
 from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import AudioItem
-from rpyc.utils.classic import obtain
+
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -171,9 +167,7 @@ class WhisperAudioModel:
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
-                audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=16000)
+                audio = item.load_audio_from_shm_payload()
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 

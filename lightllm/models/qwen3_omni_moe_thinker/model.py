@@ -1,6 +1,8 @@
 import os
 import json
 import librosa
+import copy
+from functools import lru_cache
 from io import BytesIO
 from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
@@ -66,6 +68,11 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         # print(f"token_num is {token_num}  n_samples is {self.n_samples} hop_length is {self.hop_length}")
         return token_num
 
+    @lru_cache(maxsize=128)
+    def _encode_prompt_text(self, prompt: str):
+        origin_ids = self.tokenizer.encode(prompt)
+        return origin_ids
+
     def _caclu_audio_token_num(self, input_audio_len: int):
         _mel_len = input_audio_len // int(self.hop_length)
         input_lengths_leave = _mel_len % 100
@@ -74,7 +81,8 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return output_lengths
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
-        origin_ids = self.tokenizer.encode(prompt)
+        origin_ids = self._encode_prompt_text(prompt)
+        origin_ids = copy.deepcopy(origin_ids)
 
         # <img><image_pad></img> -> <img></img>
         origin_ids = [token for token in origin_ids if token not in (self.image_token_id, self.audio_token_id)]

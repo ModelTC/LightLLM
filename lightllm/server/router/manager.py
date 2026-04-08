@@ -316,8 +316,7 @@ class RouterManager:
         # 添加新请求
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
         while not self.shm_reqs_io_buffer.is_empty():
-            await asyncio.sleep(0.02)
-
+            await asyncio.sleep(0.001)
         self.shm_reqs_io_buffer.write_obj(reqs)
         self.shm_reqs_io_buffer.set_ready()
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
@@ -326,8 +325,7 @@ class RouterManager:
     async def _aborted_reqs(self, aborted_reqs: List[Req]):
         cmds = [AbortedReqCmd(req_id=r.request_id) for r in aborted_reqs]
         while not self.shm_reqs_io_buffer.is_empty():
-            await asyncio.sleep(0.02)
-
+            await asyncio.sleep(0.001)
         self.shm_reqs_io_buffer.write_obj(cmds)
         self.shm_reqs_io_buffer.set_ready()
         return
@@ -335,8 +333,7 @@ class RouterManager:
     async def _stop_str_matched_reqs(self, stop_str_matched_reqs: List[Req]):
         cmds = [StopStrMatchedReqCmd(req_id=r.request_id) for r in stop_str_matched_reqs]
         while not self.shm_reqs_io_buffer.is_empty():
-            await asyncio.sleep(0.02)
-
+            await asyncio.sleep(0.001)
         self.shm_reqs_io_buffer.write_obj(cmds)
         self.shm_reqs_io_buffer.set_ready()
         return
