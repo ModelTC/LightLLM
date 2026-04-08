@@ -90,7 +90,7 @@ class X2IManager:
         )
         self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
         image = self.gen_pipe.generate(
-            seed=param.seed,
+            seed=param.seed + param.past_kvcache.img_len,
             save_result_path="",  # 返回base64，不需要指定路径了
             target_shape=[param.height, param.width],  # Height, Width
         )
@@ -112,7 +112,7 @@ class X2IManager:
         )
         self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
         image = self.gen_pipe.generate(
-            seed=param.seed,
+            seed=param.seed + param.past_kvcache_img.img_len,
             save_result_path="",  # 返回base64，不需要指定路径了
             target_shape=[param.height, param.width],  # Height, Width
         )
