@@ -189,10 +189,11 @@ class MultimodalParams:
         return
 
     async def verify_and_preload(self, request: Request):
-        preload_coroutines = [image.preload(request) for image in self.images]
-        preload_coroutines.extend(audio.preload(request) for audio in self.audios)
-        if preload_coroutines:
-            await asyncio.gather(*preload_coroutines)
+        tasks = [image.preload(request) for image in self.images]
+        tasks += [audio.preload(request) for audio in self.audios]
+
+        if tasks:
+            await asyncio.gather(*tasks)
         return
 
     def to_dict(self):
