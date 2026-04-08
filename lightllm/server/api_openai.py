@@ -363,7 +363,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Handle reasoning content
             reasoning_text = None
             reasoning_parser = get_env_start_args().reasoning_parser
-            if reasoning_parser and request.separate_reasoning:
+            if reasoning_parser:
                 request_enable_reasoning = _get_reasoning_from_request(request)
                 try:
                     parser = ReasoningParser(
@@ -372,12 +372,17 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         force_reasoning=request_enable_reasoning,
                     )
                     reasoning_text, text = parser.parse_non_stream(text)
+                    full_text = text
                 except Exception as e:
                     logger.error(f"Reasoning parsing error: {e}")
                     return create_error_response(
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
+                if not request.separate_reasoning:
+                    # Merge reasoning back into content (vLLM-compatible behavior)
+                    text = (reasoning_text or "") + (text or "")
+                    reasoning_text = None
 
             # Handle tool_calls parsing
             tool_calls = None
@@ -414,7 +419,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 role="assistant",
                 content=text if text else "",
                 tool_calls=tool_calls,
-                reasoning_content=reasoning_text if reasoning_text else "",
+                reasoning=reasoning_text if reasoning_text else "",
             )
             choice = ChatCompletionResponseChoice(
                 index=i,
@@ -483,7 +488,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     if request.separate_reasoning:
                         choice_data = ChatCompletionStreamResponseChoice(
                             index=choice_index,
-                            delta=DeltaMessage(reasoning_content=reasoning_text),
+                            delta=DeltaMessage(reasoning=reasoning_text),
                             finish_reason=None,
                         )
                         chunk = ChatCompletionStreamResponse(
@@ -669,7 +674,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             if request.separate_reasoning:
                                 flush_choice = ChatCompletionStreamResponseChoice(
                                     index=choice_index,
-                                    delta=DeltaMessage(reasoning_content=flush_reasoning),
+                                    delta=DeltaMessage(reasoning=flush_reasoning),
                                     finish_reason=None,
                                 )
                             else:

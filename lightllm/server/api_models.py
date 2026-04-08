@@ -96,7 +96,7 @@ class ChatCompletionMessageGenericParam(BaseModel):
     content: Union[str, List[MessageContent], None] = Field(default=None)
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
-    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
     @field_validator("role", mode="before")
@@ -222,7 +222,7 @@ class ChatCompletionRequest(BaseModel):
 
     # OpenAI parameters for reasoning and others
     chat_template_kwargs: Optional[Dict] = None
-    separate_reasoning: Optional[bool] = False
+    separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
 
     # Additional parameters supported by LightLLM
@@ -276,7 +276,7 @@ class UsageInfo(BaseModel):
 class ChatMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
-    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
 
@@ -303,7 +303,7 @@ class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
-    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):

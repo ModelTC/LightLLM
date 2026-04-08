@@ -305,7 +305,6 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
 
 @app.get("/v1/models", response_model=ModelListResponse)
-@app.post("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
     max_model_len = g_objs.args.max_req_total_len
