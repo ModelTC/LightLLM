@@ -1,17 +1,13 @@
 import os
 import json
-import rpyc
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
-from io import BytesIO
 from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
-from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.server.multimodal_params import AudioItem
+
 
 # tokenizer_class removed
 class WhisperProcessor(ProcessorMixin):
@@ -88,8 +84,6 @@ class WhisperAudioModel:
         self.max_seconds = 30
         self.sampling_rate = 16000
         self.max_length = self.max_seconds * self.sampling_rate
-        self.cache_port = kvargs["cache_port"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         data_type = kvargs["data_type"]
         if data_type in ["bf16", "bfloat16"]:
             self.data_type = torch.bfloat16
@@ -161,7 +155,7 @@ class WhisperAudioModel:
         x = F.linear(x, weight=self.projector_weights["mlp2.3.weight"], bias=self.projector_weights["mlp2.3.bias"])
         return x
 
-    def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
+    def encode(self, audio_items: List[AudioItem]):
         # 每个元素是一个chunk
         batch_audios = []
         batch_audio_lens = []
@@ -173,8 +167,7 @@ class WhisperAudioModel:
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
-                audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = load_audio_from_shm_payload(audio_data, item.extra_params, 16000)
+                audio = item.load_audio_from_shm_payload()
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
@@ -220,32 +213,13 @@ class WhisperAudioModel:
                 continue
             per_audio_embeds[owner].append(audios[chunk_idx][:token_len])
 
-        for i, uid in enumerate(uuids):
+        ans_embeds = []
+        for i in range(len(uuids)):
+
             item = items[i]
+
             # 拼接该 audio 的所有 chunk embedding
             cur_embed = torch.cat(per_audio_embeds[i], dim=0)
-            cpu_embed_cache_client.copy_to_cache(
-                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
-            )
+            ans_embeds.append(cur_embed)
 
-        if uuids:
-            torch.cuda.current_stream().synchronize()
-            self.cache_client.root.set_items_embed(ids=uuids)
-
-    @torch.no_grad()
-    def warmup(self, audio_bytes: bytes):
-        audio = BytesIO(audio_bytes)
-        audio, _ = librosa.load(audio, sr=16000)
-
-        from .defaults import MIN_AUDIO_LEN
-
-        if audio.shape[0] < MIN_AUDIO_LEN:
-            audio = np.pad(audio, (0, MIN_AUDIO_LEN - len(audio)), mode="constant", constant_values=0.0)
-
-        batch_audio_lens = np.array([min(audio.shape[0], self.max_length)], dtype=np.int32)
-        audios, audio_lens_after_cnn = self.audio_processor(
-            [audio], batch_audio_lens, sampling_rate=16000, return_tensors="pt"
-        )
-        _ = self.forward(audios, audio_lens_after_cnn)
-        torch.cuda.current_stream().synchronize()
-        return
+        return ans_embeds, audio_items

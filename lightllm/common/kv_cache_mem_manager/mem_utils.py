@@ -24,7 +24,12 @@ def select_mem_manager_class():
     from lightllm.models import Deepseek3_2TpPartModel
 
     if issubclass(model_class, Deepseek3_2TpPartModel):
-        mem_class = Deepseek3_2MemoryManager
+        if get_env_start_args().llm_kv_type == "fp8kv_dsa":
+            from . import FP8PerTokenGroupQuantDeepseek3_2MemoryManager
+
+            mem_class = FP8PerTokenGroupQuantDeepseek3_2MemoryManager
+        else:
+            mem_class = Deepseek3_2MemoryManager
         logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
         return mem_class
 
@@ -55,4 +60,9 @@ def select_mem_manager_class():
 @lru_cache(maxsize=None)
 def used_mem_manager_has_scale() -> bool:
     mem_class = select_mem_manager_class()
-    return mem_class in [PPLINT8KVMemoryManager, PPLINT4KVMemoryManager, FP8StaticPerHeadQuantMemManager, FP8StaticPerTensorQuantMemManager]
+    return mem_class in [
+        PPLINT8KVMemoryManager,
+        PPLINT4KVMemoryManager,
+        FP8StaticPerHeadQuantMemManager,
+        FP8StaticPerTensorQuantMemManager,
+    ]
