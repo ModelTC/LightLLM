@@ -8,18 +8,12 @@ from typing import List
 from io import BytesIO
 from PIL import Image
 from fastapi import Request
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
 
 
 logger = init_logger(__name__)
-
-
-def load_audio_from_shm_payload(audio_data: bytes, extra_params: dict, sample_rate: int) -> np.ndarray:
-    num_samples = int(extra_params.get("audio_num_samples", 0))
-    if num_samples > 0:
-        return np.frombuffer(audio_data, dtype=np.float32, count=num_samples)
-    return np.frombuffer(audio_data, dtype=np.float32)
 
 
 class AudioItem:
@@ -96,6 +90,12 @@ class AudioItem:
         ret["type"] = self._type
         ret["data"] = self._data
         return ret
+
+    def load_audio_from_shm_payload(self) -> np.ndarray:
+        audio_data = read_shm(get_shm_name_data(self.uuid))
+        audio_array = np.frombuffer(audio_data, dtype=np.float32)
+        assert audio_array.shape[0] == self.audio_length
+        return audio_array
 
 
 class ImageItem:
