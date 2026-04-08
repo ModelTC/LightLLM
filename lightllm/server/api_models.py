@@ -458,7 +458,11 @@ class ImageConfig(BaseModel):
 
         scale = self._size_multiplier[self.image_size]
         w, h = base
-        return int(w * scale), int(h * scale)
+        w, h = int(w * scale), int(h * scale)
+        from lightllm.models.neo_chat_moe.vision_process import smart_resize
+
+        h, w = smart_resize(h, w, factor=32, min_pixels=512 * 512, max_pixels=2048 * 2048)
+        return w, h
 
 
 class ChatCompletionRequestV2(ChatCompletionRequest):

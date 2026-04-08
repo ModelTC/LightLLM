@@ -636,7 +636,7 @@ async def _chat_completion_image_only(
     response_images = _message_contents_from_raw_images(images, request.image_config.image_type)
     chat_message = ChatMessage(
         role="assistant",
-        content=prompt,
+        content="",
         images=response_images if response_images else None,
     )
     choice = ChatCompletionResponseChoice(
