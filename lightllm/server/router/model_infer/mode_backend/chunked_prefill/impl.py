@@ -58,8 +58,6 @@ class ChunkedPrefillBackend(ModeBackend):
             try:
                 g_infer_context.snapshot_hybrid_buffers(run_reqs)
                 g_infer_context.snapshot_prefill_complete_buffers(run_reqs)
-            except Exception as e:
-                logger.warning(f"Mamba buffer snapshot failed (non-fatal): {e}")
             finally:
                 g_infer_state_lock.release()
 

@@ -136,6 +136,10 @@ class MambaCacheManager:
         Args:
             free_index: Buffer indices to free (tensor or list of ints)
         """
+        free_len = len(free_index)
+        if free_len == 0:
+            return
+
         # Convert to tensor if needed for indexing
         if isinstance(free_index, list):
             free_index_tensor = torch.tensor(free_index, dtype=torch.long, device="cuda")

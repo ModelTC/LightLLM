@@ -185,7 +185,6 @@ class InferenceContext:
         input_token_ids = req.get_input_token_ids()
         key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
         value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-
         prefix_len, node = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
@@ -251,8 +250,8 @@ class InferenceContext:
             free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
 
     def snapshot_hybrid_buffers(self, run_reqs: List["InferReq"]):
-        """Snapshot Mamba states for hotspot requests after their enlarged first chunk."""
-        reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill]
+        """Snapshot Mamba states for hotspot requests after they reach mamba_buffer_target_len."""
+        reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill and r.cur_kv_len >= r.mamba_buffer_target_len]
         if not reqs_to_insert:
             return
         radix_cache: HybridRadixCache = self.radix_cache
@@ -716,7 +715,13 @@ class InferReq:
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         if self.mamba_buffer_target_len > 0 and chunked_start < self.mamba_buffer_target_len:
-            chunked_end = min(self.get_cur_total_len(), self.mamba_buffer_target_len)
+            # Use mamba_buffer_target_len as the endpoint, but still respect chunk size
+            # to avoid exceeding batch_max_tokens and causing a scheduling deadlock.
+            chunked_end = min(
+                self.get_cur_total_len(),
+                self.mamba_buffer_target_len,
+                chunked_start + self.shm_req.chunked_prefill_size,
+            )
         else:
             chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
