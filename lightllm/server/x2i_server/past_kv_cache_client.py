@@ -75,7 +75,7 @@ class PastKVCacheClient(object):
             item = self.allocated_pages_dict.get(req_id, None)
             return item
 
-    def get_kv_cache_for_x2i(self, page_indexes: List[int], token_num: int) -> Optional[torch.Tensor]:
+    def get_kv_cache_for_x2i(self, page_indexes: List[int], token_num: int, use_naive=False) -> Optional[torch.Tensor]:
         if page_indexes is None:
             return None
         assert (
@@ -83,15 +83,22 @@ class PastKVCacheClient(object):
             and token_num > (len(page_indexes) - 1) * self.token_page_size
         )
         (P, L, S, H, D) = self.cpu_kv_cache_tensor[page_indexes].shape
-        # (P, L, S, H, D) -> (P, L, S, 2, H // 2, D) -> (L, 2,P, S,  H // 2, D) -> (L, 2, P * S, H // 2, D)
-        kv = (
-            self.cpu_kv_cache_tensor[page_indexes]
-            .view(P, L, S, 2, H // 2, D)
-            .permute(1, 3, 0, 2, 4, 5)
-            .contiguous()
-            .view(L, 2, P * S, H // 2, D)
-        )
-        return kv
+        if not use_naive:
+            # (P, L, S, H, D) -> (P, L, S, 2, H // 2, D) -> (L, 2,P, S,  H // 2, D) -> (L, 2, P * S, H // 2, D)
+            kv = (
+                self.cpu_kv_cache_tensor[page_indexes]
+                .view(P, L, S, 2, H // 2, D)
+                .permute(1, 3, 0, 2, 4, 5)
+                .contiguous()
+                .view(L, 2, P * S, H // 2, D)
+            )
+            return kv
+        else:
+            kv = self.cpu_kv_cache_tensor[page_indexes] \
+                .view(P, L, S, 2, H // 2, D) \
+                .permute(1, 3, 4, 0, 2, 5).contiguous() \
+                .view(L, 2, H // 2, P * S, D)
+            return kv[:, :, :, :token_num, :].contiguous()
 
     def _create_shm_cpu_kv_cache(self):
         shm_ptr = create_shm_kv_cache_ptr(

@@ -372,7 +372,7 @@ class NEOChatModel(PreTrainedModel):
                       img_cfg_scale=1,
                       cfg_norm='none',
                       enable_timestep_shift=True,
-                      timestep_shift=1,
+                      timestep_shift=3,
                       image_size=(256, 256),
                       num_steps=30,
                       cfg_interval=(0.1, 1.0),
@@ -421,7 +421,7 @@ class NEOChatModel(PreTrainedModel):
         # init noise image tokens
         grid_h = image_size[1] // self.patch_size
         grid_w = image_size[0] // self.patch_size
-        grid_hw = torch.tensor([[grid_h, grid_w]]*batch_size, device=device)
+        grid_hw = torch.tensor([[grid_h, grid_w]] * batch_size, device=device)
 
         noise_scale = self.noise_scale
         if self.noise_scale_mode in ("resolution", "dynamic", 'dynamic_sqrt'):
@@ -446,6 +446,7 @@ class NEOChatModel(PreTrainedModel):
         for step_i in range(num_steps):
             t = timesteps[step_i]
             t_next = timesteps[step_i + 1]
+            use_cfg = t >= cfg_interval[0] and t <= cfg_interval[1]
 
             z = self.patchify(image_prediction, self.patch_size * merge_size)
             image_input = self.patchify(image_prediction, self.patch_size, channel_first=True)
@@ -459,27 +460,69 @@ class NEOChatModel(PreTrainedModel):
             image_embeds = image_embeds + timestep_embeddings
 
             v_pred_condition = self._t2i_predict_v(image_embeds, indexes_image_condition, attention_mask_condition, past_key_values_condition, t, z, image_token_num=token_h*token_w, timestep_embeddings=timestep_embeddings,image_size=image_size)
-            if t > cfg_interval[0] and t < cfg_interval[1]:
-                if cfg_scale > 1:
-                    v_pred_text_uncondition = self._t2i_predict_v(image_embeds, indexes_image_text_uncondition, attention_mask_text_uncondition, past_key_values_text_uncondition, t, z, image_token_num=token_h*token_w, timestep_embeddings=timestep_embeddings,image_size=image_size)
-                else:
-                    v_pred_text_uncondition = 0
-                if img_cfg_scale > 1:
-                    v_pred_img_uncondition = self._t2i_predict_v(image_embeds, indexes_image_img_uncondition, attention_mask_img_uncondition, past_key_values_img_uncondition, t, z, image_token_num=token_h*token_w, timestep_embeddings=timestep_embeddings,image_size=image_size)
-                else:
-                    v_pred_img_uncondition = 0
+            if not use_cfg:
+                v_pred = v_pred_condition
+            elif cfg_scale == 1 and img_cfg_scale == 1:
+                v_pred = v_pred_condition
+            elif img_cfg_scale == 1:
+                out_img_cond = self._t2i_predict_v(
+                    image_embeds,
+                    indexes_image_text_uncondition,
+                    attention_mask_text_uncondition,
+                    past_key_values_text_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                v_pred = out_img_cond + cfg_scale * (v_pred_condition - out_img_cond)
+            elif cfg_scale == img_cfg_scale:
+                out_uncond = self._t2i_predict_v(
+                    image_embeds,
+                    indexes_image_img_uncondition,
+                    attention_mask_img_uncondition,
+                    past_key_values_img_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                v_pred = out_uncond + cfg_scale *(v_pred_condition - out_uncond)
+            else:
+                out_img_cond = self._t2i_predict_v(
+                    image_embeds,
+                    indexes_image_text_uncondition,
+                    attention_mask_text_uncondition,
+                    past_key_values_text_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                out_uncond = self._t2i_predict_v(
+                    image_embeds,
+                    indexes_image_img_uncondition,
+                    attention_mask_img_uncondition,
+                    past_key_values_img_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                v_pred = (
+                    out_uncond
+                    + cfg_scale * (v_pred_condition - out_img_cond)
+                    + img_cfg_scale * (out_img_cond - out_uncond)
+                )
 
-            if t > cfg_interval[0] and t < cfg_interval[1]:
-                v_pred_text = v_pred_text_uncondition + cfg_scale * (v_pred_condition - v_pred_text_uncondition)
-                if cfg_norm == 'text_channel':
-                    norm_v_condition = torch.norm(v_pred_condition, dim=-1, keepdim=True)
-                    norm_v_cfg = torch.norm(v_pred_text, dim=-1, keepdim=True)
-                    scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
-                    v_pred_text = v_pred_text * scale
-                v_pred = v_pred_img_uncondition + img_cfg_scale * (v_pred_text - v_pred_img_uncondition)
+            if cfg_scale > 1 or img_cfg_scale > 1:
                 if cfg_norm == 'global':
-                    norm_v_condition = torch.norm(v_pred_condition, dim=(1,2), keepdim=True)
-                    norm_v_cfg = torch.norm(v_pred, dim=(1,2), keepdim=True)
+                    norm_v_condition = torch.norm(v_pred_condition, dim=(1, 2), keepdim=True)
+                    norm_v_cfg = torch.norm(v_pred, dim=(1, 2), keepdim=True)
                     scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
                     v_pred = v_pred * scale
                 elif cfg_norm == 'channel':
@@ -488,8 +531,6 @@ class NEOChatModel(PreTrainedModel):
                     scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
                     v_pred = v_pred * scale
 
-            else:
-                v_pred = v_pred_condition
 
             z = z + (t_next - t) * v_pred
 
@@ -517,7 +558,7 @@ class NEOChatModel(PreTrainedModel):
                      past_key_values_uncondition,
                      text_lens,
                      cfg_scale=1,
-                     timestep_shift=1,
+                     timestep_shift=3,
                      enable_timestep_shift=True,
                      cfg_norm='none',
                      image_size=(256, 256),
@@ -601,7 +642,7 @@ class NEOChatModel(PreTrainedModel):
                                                    timestep_embeddings=timestep_embeddings, image_size=image_size)
 
 
-            if t > cfg_interval[0] and t < cfg_interval[1] and cfg_scale > 1:
+            if t >= cfg_interval[0] and t <= cfg_interval[1] and cfg_scale > 1:
                 v_pred_uncondition = self._t2i_predict_v(image_embeds, indexes_image_uncondition, attention_mask_uncondition, past_key_values_uncondition, t, z, image_token_num=token_h*token_w,
                                                          timestep_embeddings=timestep_embeddings, image_size=image_size)
                 if cfg_norm == 'cfg_zero_star':
@@ -623,6 +664,12 @@ class NEOChatModel(PreTrainedModel):
                         norm_v_cfg = torch.norm(v_pred, dim=(1,2), keepdim=True)
                         scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
                         v_pred = v_pred * scale
+                    elif cfg_norm == 'channel':
+                        norm_v_condition = torch.norm(v_pred_condition, dim=-1, keepdim=True)
+                        norm_v_cfg = torch.norm(v_pred, dim=-1, keepdim=True)
+                        scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
+                        v_pred = v_pred * scale
+
             else:
                 v_pred = v_pred_condition
 
@@ -718,7 +765,8 @@ class NEOX2I:
             cfg_scale=param.guidance_scale,
             image_size=(param.width, param.height),
             num_steps=param.steps,
-            batch_size=param.num_images)
+            batch_size=param.num_images,
+            timestep_shift=param.timestep_shift)
 
         return self._post_process(output)
 
@@ -750,6 +798,7 @@ class NEOX2I:
             image_size=(param.width, param.height),
             num_steps=param.steps,
             batch_size=param.num_images,
+            timestep_shift=param.timestep_shift,
         )
 
         return self._post_process(output)

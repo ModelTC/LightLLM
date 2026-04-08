@@ -37,6 +37,7 @@ class X2IParams(ctypes.Structure):
         ("seed", ctypes.c_int),
         ("num_images", ctypes.c_int),
         ("cfg_norm", ctypes.c_int),
+        ("timestep_shift", ctypes.c_float),
         ("past_kvcache", PastKVCachePageList),
         ("past_kvcache_text", PastKVCachePageList),
         ("past_kvcache_img", PastKVCachePageList),
@@ -47,11 +48,12 @@ class X2IParams(ctypes.Structure):
     _width: int = 1024
     _height: int = 1024
     _steps: int = 50
-    _guidance_scale: float = 7.0
-    _image_guidance_scale: float = 7.0
+    _guidance_scale: float = 4.0
+    _image_guidance_scale: float = 1.0
     _seed: int = 42
     _num_images: int = 1
     _cfg_norm: CfgNormType = CfgNormType.NONE
+    _timestep_shift: float = 3.0
 
     def init(self, **kwargs):
         def _get(key, default):
@@ -66,6 +68,7 @@ class X2IParams(ctypes.Structure):
         self.seed = _get("seed", X2IParams._seed)
         self.num_images = _get("num_images", X2IParams._num_images)
         self.cfg_norm = _get("cfg_norm", X2IParams._cfg_norm)
+        self.timestep_shift = _get("timestep_shift", X2IParams._timestep_shift)
         self.past_kvcache = PastKVCachePageList()
         self.past_kvcache_text = PastKVCachePageList()
         self.past_kvcache_img = PastKVCachePageList()
