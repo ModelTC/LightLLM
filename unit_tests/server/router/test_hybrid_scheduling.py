@@ -16,7 +16,7 @@ def _check_ok_mamba(mamba_cache_size, total_reqs, mtp_step=0):
         return True
     buffers_per_req = mtp_step + 1
     max_reqs = mamba_cache_size // buffers_per_req
-    return total_reqs < max_reqs
+    return total_reqs <= max_reqs
 
 
 def test_ok_mamba_passes_when_capacity_available():
@@ -24,26 +24,26 @@ def test_ok_mamba_passes_when_capacity_available():
     assert _check_ok_mamba(mamba_cache_size=20, total_reqs=1) is True
 
 
-def test_ok_mamba_rejects_at_capacity():
-    """20th request out of 20 slots is rejected (total_reqs=20, max=20, 20<20 is False)."""
-    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=20) is False
+def test_ok_mamba_rejects_over_capacity():
+    """21st request out of 20 slots is rejected."""
+    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=21) is False
 
 
 def test_ok_mamba_admits_up_to_capacity():
-    """With 20 slots: admits 19 (total<20), rejects 20th."""
-    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=19) is True
-    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=20) is False
+    """With 20 slots: admits 20 (total<=20), rejects 21st."""
+    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=20) is True
+    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=21) is False
 
 
 def test_ok_mamba_flood_scenario():
-    """Simulate 30 requests hitting a 20-slot pool. At most 19 are admitted."""
+    """Simulate 30 requests hitting a 20-slot pool. All 20 are admitted."""
     admitted = 0
     for total in range(1, 31):
         if _check_ok_mamba(mamba_cache_size=20, total_reqs=total):
             admitted += 1
         else:
             break
-    assert admitted == 19
+    assert admitted == 20
 
 
 def test_ok_mamba_skipped_for_non_hybrid():
@@ -53,8 +53,8 @@ def test_ok_mamba_skipped_for_non_hybrid():
 
 def test_ok_mamba_with_mtp_step():
     """With mtp_step=3: buffers_per_req=4, max_reqs=20//4=5."""
-    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=4, mtp_step=3) is True
-    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=5, mtp_step=3) is False
+    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=5, mtp_step=3) is True
+    assert _check_ok_mamba(mamba_cache_size=20, total_reqs=6, mtp_step=3) is False
 
 
 def test_ok_mamba_zero_capacity():

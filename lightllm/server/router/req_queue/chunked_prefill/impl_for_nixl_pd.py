@@ -14,7 +14,9 @@ class NIXLPDQueue(BaseQueue):
         super().__init__(args, router, dp_index, dp_size_in_node)
 
     # @calculate_time(show=True, min_cost_ms=0.1)
-    def _can_add_new_req(self, req: Req, estimated_peak_token_num: int, batch_req_num: int) -> Tuple[bool, int, int]:
+    def _can_add_new_req(
+        self, req: Req, estimated_peak_token_num: int, batch_req_num: int, paused_count: int = 0
+    ) -> Tuple[bool, int, int]:
         estimated_peak_token_num += req.input_len + req.sample_params.max_new_tokens
         ok_token_num = estimated_peak_token_num < self.max_total_tokens
         batch_req_num += 1
@@ -25,10 +27,9 @@ class NIXLPDQueue(BaseQueue):
         # so they should not count against the cap.
         ok_mamba = True
         if self.mamba_cache_size is not None:
-            paused_count = self.router._get_paused_req_num_in_dp_index(self.dp_index)
             active_reqs = batch_req_num - paused_count
             max_reqs = self.mamba_cache_size // self.mamba_buffers_per_req
-            ok_mamba = active_reqs < max_reqs
+            ok_mamba = active_reqs <= max_reqs
 
         if ok_token_num and ok_req_num and ok_mamba:
             self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_num, self.dp_index)
@@ -80,6 +81,10 @@ class NIXLPDQueue(BaseQueue):
         can_run_list = []
         abort_req_list = []
         aborted_count = 0
+        # Snapshot paused count once per batch formation instead of re-scanning per candidate.
+        paused_count = (
+            self.router._get_paused_req_num_in_dp_index(self.dp_index) if self.mamba_cache_size is not None else 0
+        )
 
         waiting_queue = self.waiting_req_list
 
@@ -91,7 +96,10 @@ class NIXLPDQueue(BaseQueue):
                 abort_req_list.append(req)
                 continue
             ok_insert, estimated_peak_token_num, batch_req_num = self._can_add_new_req(
-                req=req, estimated_peak_token_num=estimated_peak_token_num, batch_req_num=batch_req_num
+                req=req,
+                estimated_peak_token_num=estimated_peak_token_num,
+                batch_req_num=batch_req_num,
+                paused_count=paused_count,
             )
             if ok_insert:
                 can_run_list.append(req)

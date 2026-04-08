@@ -22,6 +22,9 @@ class ChunkedPrefillQueue(BaseQueue):
             ]
         else:
             self.cache_len_list = []
+        # Snapshot paused count once per batch formation instead of re-scanning per candidate.
+        if self.mamba_cache_size is not None:
+            self._paused_count = self.router._get_paused_req_num_in_dp_index(self.dp_index)
         return
 
     # @calculate_time(show=True, min_cost_ms=0.1)
@@ -53,10 +56,9 @@ class ChunkedPrefillQueue(BaseQueue):
             # radix tree on pause), so they should not count against the cap.
             ok_mamba = True
             if self.mamba_cache_size is not None:
-                paused_count = self.router._get_paused_req_num_in_dp_index(self.dp_index)
-                active_reqs = len(self.cache_len_list) - paused_count
+                active_reqs = len(self.cache_len_list) - self._paused_count
                 max_reqs = self.mamba_cache_size // self.mamba_buffers_per_req
-                ok_mamba = active_reqs < max_reqs
+                ok_mamba = active_reqs <= max_reqs
 
             if ok_token_num and ok_req_num and ok_prefill and ok_mamba:
                 self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
