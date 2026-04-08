@@ -1,10 +1,8 @@
 """Multimodal parameters for text generation."""
 import asyncio
 import os
-import time
 import librosa
 import base64
-import hashlib
 import numpy as np
 from typing import List
 from io import BytesIO
@@ -12,11 +10,9 @@ from PIL import Image
 from fastapi import Request
 from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
-from frozendict import frozendict
 
 
 logger = init_logger(__name__)
-DEFAULT_AUDIO_SAMPLE_RATE = 16000
 
 
 def load_audio_from_shm_payload(audio_data: bytes, extra_params: dict, sample_rate: int) -> np.ndarray:
@@ -58,16 +54,19 @@ class AudioItem:
                 raise ValueError(f"cannot read audio which type is {self._type}!")
 
             # check if valid audio bytes
-            audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=DEFAULT_AUDIO_SAMPLE_RATE)
+            audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=16000)
             audio_values = np.asarray(audio_values, dtype=np.float32)
+
             from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
-            self.audio_length = max(int(audio_values.shape[0]), MIN_AUDIO_LEN)
+            if audio_values.shape[0] < MIN_AUDIO_LEN:
+                audio_values = np.pad(
+                    audio_values, (0, MIN_AUDIO_LEN - audio_values.shape[0]), mode="constant", constant_values=0.0
+                )
+                logger.warning(f"audio length is too short, pad to {MIN_AUDIO_LEN}")
+
+            self.audio_length = int(audio_values.shape[0])
             self._preload_data = audio_values.tobytes()
-            self.extra_params["audio_num_samples"] = int(audio_values.shape[0])
-            self.extra_params["audio_payload_md5"] = (
-                hashlib.md5(self._preload_data).hexdigest() + "_" + str(hash(frozendict(self.extra_params)))
-            )
             return
 
         except Exception as e:
