@@ -12,13 +12,15 @@ def get_test_configs():
     for block_n in [16, 32, 64]:
         for num_warps in [2, 4, 8]:
             for num_stages in [2, 3, 4]:
-                configs.append(
-                    {
-                        "BLOCK_N": block_n,
-                        "num_warps": num_warps,
-                        "num_stages": num_stages,
-                    }
-                )
+                for num_ctas in [1, 2]:
+                    configs.append(
+                        {
+                            "BLOCK_N": block_n,
+                            "num_warps": num_warps,
+                            "num_stages": num_stages,
+                            "num_ctas": num_ctas,
+                        }
+                    )
     return configs
 
 
@@ -167,11 +169,12 @@ def mtp_diverse_single_token_fused(
     run_config: Optional[dict] = None,
 ):
     if not run_config:
-        run_config = {"BLOCK_N": 16, "num_warps": 4, "num_stages": 2}
+        run_config = {"BLOCK_N": 16, "num_warps": 4, "num_stages": 2, "num_ctas": 1}
 
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
+    num_ctas = run_config.get("num_ctas", 1)
 
     Lq, Lk = int(q.shape[2]), int(k.shape[2])
     assert Lq == Lk and Lk in {16, 32, 64, 128}
@@ -211,4 +214,5 @@ def mtp_diverse_single_token_fused(
         MAX_KV_LEN=max_kv_len,
         num_warps=num_warps,
         num_stages=num_stages,
+        num_ctas=num_ctas,
     )

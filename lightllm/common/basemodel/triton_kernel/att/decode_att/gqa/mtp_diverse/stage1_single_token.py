@@ -17,6 +17,7 @@ import triton
 import triton.language as tl
 from typing import Optional
 from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.utils.device_utils import is_hopper
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
@@ -25,11 +26,13 @@ def get_test_configs():
     for block_n in [16, 32, 64]:
         for num_warps in [2, 4, 8]:
             for num_stages in [2, 3, 4]:
-                configs.append({
-                    "BLOCK_N": block_n,
-                    "num_warps": num_warps,
-                    "num_stages": num_stages,
-                })
+                for warp_specialize in [True, False] if is_hopper() else [False]: # warp_specialize only support hopper
+                    configs.append({
+                        "BLOCK_N": block_n,
+                        "num_warps": num_warps,
+                        "num_stages": num_stages,
+                        "warp_specialize": warp_specialize,
+                    })
     return configs
 
 
@@ -72,6 +75,7 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    warp_specialize: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
@@ -125,7 +129,7 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
 
     # P1: 固定循环次数
     NUM_SUBBLOCK: tl.constexpr = BLOCK_SEQ // BLOCK_N
-    for i in range(NUM_SUBBLOCK):
+    for i in range(NUM_SUBBLOCK, warp_specialize=warp_specialize):
         offs_n_new = offs_n_base + i * BLOCK_N
         n_mask = offs_n_new < kv_end
 
@@ -217,11 +221,12 @@ def mtp_diverse_stage1_single_token(
     例如组内 [q1, q2, q3, q4] 对应 b_seq_len [2, 3, 4, 5]
     """
     if not run_config:
-        run_config = {"BLOCK_N": 16, "num_warps": 2, "num_stages": 2}  # 默认配置
+        run_config = {"BLOCK_N": 16, "num_warps": 2, "num_stages": 2, "warp_specialize": False}  # 默认配置
 
     BLOCK_N = run_config["BLOCK_N"]
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
+    warp_specialize = run_config.get("warp_specialize", False)
     BLOCK_BATCH = get_diverse_max_batch_shared_group_size()
 
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
@@ -280,6 +285,7 @@ def mtp_diverse_stage1_single_token(
         BLOCK_N=BLOCK_N,
         num_warps=num_warps,
         num_stages=num_stages,
+        warp_specialize=warp_specialize,
     )
     return
 
@@ -291,7 +297,7 @@ if __name__ == "__main__":
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
     # static params
-    gqa_group_size = 8
+    gqa_group_size = 4
     q_head_dim = 128
     block_seq = 256
     out_dtype = torch.bfloat16

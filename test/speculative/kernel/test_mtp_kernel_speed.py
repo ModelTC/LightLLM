@@ -313,7 +313,7 @@ def main():
 
     base_len = 1024
     dynamic_gs = 2      # 动态 MTP: 每次验证 2 个 token
-    static_gs_list = [4, 8, 12]  # 静态 MTP: 每次验证 4/8/12 个 token
+    static_gs_list = [1, 2, 3, 4]  # 静态 MTP: 每次验证 1, 2, 3, 4 个 token
     num_groups_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
     print(f"\nbase_len={base_len}, 动态 MTP group_size={dynamic_gs}")
