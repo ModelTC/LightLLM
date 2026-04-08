@@ -24,7 +24,6 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
 from transformers.utils.deprecation import deprecate_kwarg
-from transformers.utils.generic import check_model_inputs
 from transformers import Qwen3Config
 
 from flash_attn import flash_attn_func
@@ -42,7 +41,7 @@ def create_block_causal_mask(index: torch.Tensor):
     arange = torch.arange(L, device=index.device)
     mask = (idx_j == idx_i) | (arange.unsqueeze(0) <= arange.unsqueeze(1))
 
-    return torch.where(mask[None, None, :, :] > 0, torch.tensor(0.0), torch.tensor(float('-inf')))
+    return torch.where(mask[None, None, :, :] > 0, torch.tensor(0.0), torch.tensor(float("-inf")))
 
 
 def visualize_mask(mask: torch.Tensor, i: int = 0, j: int = 12):
@@ -226,7 +225,7 @@ class Qwen3Attention(nn.Module):
         self.layer_idx = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
 
@@ -262,9 +261,13 @@ class Qwen3Attention(nn.Module):
         self.q_norm_hw = Qwen3RMSNorm(self.head_dim // 2, eps=config.rms_norm_eps)
         self.q_norm_hw_mot_gen = Qwen3RMSNorm(self.head_dim // 2, eps=config.rms_norm_eps)
 
-        self.k_norm = Qwen3RMSNorm(self.head_dim // 2, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.k_norm = Qwen3RMSNorm(
+            self.head_dim // 2, eps=config.rms_norm_eps
+        )  # thus post q_norm does not need reshape
         self.k_norm_mot_gen = Qwen3RMSNorm(self.head_dim // 2, eps=config.rms_norm_eps)
-        self.k_norm_hw = Qwen3RMSNorm(self.head_dim // 2, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.k_norm_hw = Qwen3RMSNorm(
+            self.head_dim // 2, eps=config.rms_norm_eps
+        )  # thus post q_norm does not need reshape
         self.k_norm_hw_mot_gen = Qwen3RMSNorm(self.head_dim // 2, eps=config.rms_norm_eps)
 
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
@@ -278,7 +281,7 @@ class Qwen3Attention(nn.Module):
         hw_config.rope_theta = config.rope_theta_hw
         hw_config.max_position_embeddings = config.max_position_embeddings_hw
         self.rotary_emb_hw = Qwen3RotaryEmbedding(config=hw_config)
-    
+
     def forward_und(
         self,
         hidden_states: torch.Tensor,
@@ -318,21 +321,22 @@ class Qwen3Attention(nn.Module):
         query_states = torch.cat([query_states_t, query_states_h, query_states_w], dim=-1)
         key_states = torch.cat([key_states_t, key_states_h, key_states_w], dim=-1)
 
-
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             # key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
             update_cache = kwargs.get("update_cache", True)
             if update_cache:
-                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs=None)
+                key_states, value_states = past_key_values.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs=None
+                )
             else:
                 # only use the past key values but do not append the current one
                 layer = past_key_values.layers[self.layer_idx]
                 past_k, past_v = layer.keys, layer.values
 
                 if past_k is not None:
-                    key_states   = torch.cat([past_k, key_states], dim=2)   # concat on seq_len
+                    key_states = torch.cat([past_k, key_states], dim=2)  # concat on seq_len
                     value_states = torch.cat([past_v, value_states], dim=2)
 
         attention_interface: Callable = eager_attention_forward
@@ -394,14 +398,15 @@ class Qwen3Attention(nn.Module):
     #     query_states = torch.cat([query_states_t, query_states_h, query_states_w], dim=-1)
     #     key_states = torch.cat([key_states_t, key_states_h, key_states_w], dim=-1)
 
-
     #     if past_key_values is not None:
     #         # sin and cos are specific to RoPE models; cache_position needed for the static cache
     #         # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-    #         # key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+    #         # key_states, value_states = past_key_values.update(key_states, value_states,
+    #         self.layer_idx, cache_kwargs)
     #         update_cache = kwargs.get("update_cache", True)
     #         if update_cache:
-    #             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs=None)
+    #             key_states, value_states = past_key_values.update(key_states, value_states,
+    #             self.layer_idx, cache_kwargs=None)
     #         else:
     #             # only use the past key values but do not append the current one
     #             layer = past_key_values.layers[self.layer_idx]
@@ -452,13 +457,13 @@ class Qwen3Attention(nn.Module):
         # -----------------------------
         query_states = self.q_proj_mot_gen(hidden_states).view(hidden_shape)
         query_states_t, query_states_hw = query_states.chunk(2, dim=-1)
-        query_states_t = self.q_norm_mot_gen(query_states_t).transpose(1, 2)   # [B,H,S,D/2]
+        query_states_t = self.q_norm_mot_gen(query_states_t).transpose(1, 2)  # [B,H,S,D/2]
         query_states_hw = self.q_norm_hw_mot_gen(query_states_hw).transpose(1, 2)
         query_states_h, query_states_w = query_states_hw.chunk(2, dim=-1)
 
         key_states = self.k_proj_mot_gen(hidden_states).view(hidden_shape)
         key_states_t, key_states_hw = key_states.chunk(2, dim=-1)
-        key_states_t = self.k_norm_mot_gen(key_states_t).transpose(1, 2)       # [B,H,S,D/2]
+        key_states_t = self.k_norm_mot_gen(key_states_t).transpose(1, 2)  # [B,H,S,D/2]
         key_states_hw = self.k_norm_hw_mot_gen(key_states_hw).transpose(1, 2)
         key_states_h, key_states_w = key_states_hw.chunk(2, dim=-1)
 
@@ -518,11 +523,11 @@ class Qwen3Attention(nn.Module):
                         cur_len = k_cur.shape[1]
 
                         # overwrite current segment in-place
-                        layer.flash_k_cache[:, prefix_len:prefix_len + cur_len].copy_(k_cur)
-                        layer.flash_v_cache[:, prefix_len:prefix_len + cur_len].copy_(v_cur)
+                        layer.flash_k_cache[:, prefix_len : prefix_len + cur_len].copy_(k_cur)
+                        layer.flash_v_cache[:, prefix_len : prefix_len + cur_len].copy_(v_cur)
 
-                        k = layer.flash_k_cache[:, :prefix_len + cur_len]
-                        v = layer.flash_v_cache[:, :prefix_len + cur_len]
+                        k = layer.flash_k_cache[:, : prefix_len + cur_len]
+                        v = layer.flash_v_cache[:, : prefix_len + cur_len]
                     else:
                         # fallback if user forgot to prepare flash cache
                         layer = past_key_values.layers[self.layer_idx]
@@ -612,12 +617,12 @@ class Qwen3Attention(nn.Module):
             return self.forward_und(hidden_states, indexes, attention_mask, past_key_values, cache_position, **kwargs)
         if not exist_non_image_gen_tokens and exist_image_gen_tokens:
             return self.forward_gen(hidden_states, indexes, attention_mask, past_key_values, cache_position, **kwargs)
-        
+
         assert self.config._attn_implementation == "eager"
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = hidden_states.new_zeros((*input_shape, self.config.num_attention_heads*self.head_dim))
+        query_states = hidden_states.new_zeros((*input_shape, self.config.num_attention_heads * self.head_dim))
         if exist_non_image_gen_tokens:
             query_states[~image_gen_indicators] = self.q_proj(hidden_states[~image_gen_indicators])
         if exist_image_gen_tokens:
@@ -628,11 +633,11 @@ class Qwen3Attention(nn.Module):
         if exist_non_image_gen_tokens:
             _query_states_hw[~image_gen_indicators] = self.q_norm_hw(query_states_hw[~image_gen_indicators])
         if exist_image_gen_tokens:
-            _query_states_hw[image_gen_indicators] = self.q_norm_hw_mot_gen(query_states_h[image_gen_indicators])
+            _query_states_hw[image_gen_indicators] = self.q_norm_hw_mot_gen(query_states_hw[image_gen_indicators])
         query_states_hw = _query_states_hw.transpose(1, 2)
         query_states_h, query_states_w = query_states_hw.chunk(2, dim=-1)
 
-        key_states = hidden_states.new_zeros((*input_shape, self.config.num_key_value_heads*self.head_dim))
+        key_states = hidden_states.new_zeros((*input_shape, self.config.num_key_value_heads * self.head_dim))
         if exist_non_image_gen_tokens:
             key_states[~image_gen_indicators] = self.k_proj(hidden_states[~image_gen_indicators])
         if exist_image_gen_tokens:
@@ -643,11 +648,11 @@ class Qwen3Attention(nn.Module):
         if exist_non_image_gen_tokens:
             _key_states_hw[~image_gen_indicators] = self.k_norm_hw(key_states_hw[~image_gen_indicators])
         if exist_image_gen_tokens:
-            _key_states_hw[image_gen_indicators] = self.k_norm_hw_mot_gen(key_states_h[image_gen_indicators])
+            _key_states_hw[image_gen_indicators] = self.k_norm_hw_mot_gen(key_states_hw[image_gen_indicators])
         key_states_hw = _key_states_hw.transpose(1, 2)
         key_states_h, key_states_w = key_states_hw.chunk(2, dim=-1)
 
-        value_states = hidden_states.new_zeros((*input_shape, self.config.num_key_value_heads*self.head_dim))
+        value_states = hidden_states.new_zeros((*input_shape, self.config.num_key_value_heads * self.head_dim))
         if exist_non_image_gen_tokens:
             value_states[~image_gen_indicators] = self.v_proj(hidden_states[~image_gen_indicators])
         if exist_image_gen_tokens:
@@ -666,21 +671,22 @@ class Qwen3Attention(nn.Module):
         query_states = torch.cat([query_states_t, query_states_h, query_states_w], dim=-1)
         key_states = torch.cat([key_states_t, key_states_h, key_states_w], dim=-1)
 
-
         if past_key_values is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             # cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             # key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
             update_cache = kwargs.get("update_cache", True)
             if update_cache:
-                key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs=None)
+                key_states, value_states = past_key_values.update(
+                    key_states, value_states, self.layer_idx, cache_kwargs=None
+                )
             else:
                 # only use the past key values but do not append the current one
                 layer = past_key_values.layers[self.layer_idx]
                 past_k, past_v = layer.keys, layer.values
 
                 if past_k is not None:
-                    key_states   = torch.cat([past_k, key_states], dim=2)   # concat on seq_len
+                    key_states = torch.cat([past_k, key_states], dim=2)  # concat on seq_len
                     value_states = torch.cat([past_v, value_states], dim=2)
 
         attention_interface: Callable = eager_attention_forward
@@ -820,9 +826,33 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
         if exist_non_image_gen_tokens and not exist_image_gen_tokens:
-            return self.forward_und(hidden_states, image_gen_indicators, exist_non_image_gen_tokens, exist_image_gen_tokens, indexes, attention_mask, position_ids, past_key_values, use_cache, cache_position, **kwargs)
+            return self.forward_und(
+                hidden_states,
+                image_gen_indicators,
+                exist_non_image_gen_tokens,
+                exist_image_gen_tokens,
+                indexes,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                use_cache,
+                cache_position,
+                **kwargs,
+            )
         if not exist_non_image_gen_tokens and exist_image_gen_tokens:
-            return self.forward_gen(hidden_states, image_gen_indicators, exist_non_image_gen_tokens, exist_image_gen_tokens, indexes, attention_mask, position_ids, past_key_values, use_cache, cache_position, **kwargs)
+            return self.forward_gen(
+                hidden_states,
+                image_gen_indicators,
+                exist_non_image_gen_tokens,
+                exist_image_gen_tokens,
+                indexes,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                use_cache,
+                cache_position,
+                **kwargs,
+            )
 
         residual = hidden_states
 
@@ -854,10 +884,14 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
 
         _hidden_states = hidden_states.new_zeros(hidden_states.shape)
         if exist_non_image_gen_tokens:
-            _hidden_states[~image_gen_indicators] = self.mlp(self.post_attention_layernorm(hidden_states[~image_gen_indicators]))
+            _hidden_states[~image_gen_indicators] = self.mlp(
+                self.post_attention_layernorm(hidden_states[~image_gen_indicators])
+            )
 
         if exist_image_gen_tokens:
-            _hidden_states[image_gen_indicators] = self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(hidden_states[image_gen_indicators]))
+            _hidden_states[image_gen_indicators] = self.mlp_mot_gen(
+                self.post_attention_layernorm_mot_gen(hidden_states[image_gen_indicators])
+            )
 
         hidden_states = _hidden_states
         hidden_states = residual + hidden_states
@@ -896,7 +930,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         )
         self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.norm_mot_gen = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
+
         self.gradient_checkpointing = False
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
         self.current_index = -1
@@ -904,7 +938,6 @@ class Qwen3Model(Qwen3PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @check_model_inputs
     @auto_docstring
     def forward(
         self,
@@ -919,10 +952,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        
+
         # assert position_ids is not None
         # assert cache_position is not None
-        # assert past_key_values is not None 
+        # assert past_key_values is not None
 
         if image_gen_indicators is None:
             exist_non_image_gen_tokens = True
@@ -930,7 +963,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         else:
             exist_non_image_gen_tokens = (~image_gen_indicators).any()
             exist_image_gen_tokens = image_gen_indicators.any()
-        
+
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 

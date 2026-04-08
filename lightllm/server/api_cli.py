@@ -314,6 +314,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Number of GPUs to use for x2i server (requird --enable_multimodal_x2i).",
     )
     parser.add_argument(
+        "--x2i_use_naive_impl",
+        action="store_true",
+        help="""Whether to use the native backend for x2i generation.
+        If set, it will use the naive pytorch backend mainly for testing and debugging purpose.""",
+    )
+    parser.add_argument(
         "--x2v_gen_model_config",
         type=str,
         default=None,

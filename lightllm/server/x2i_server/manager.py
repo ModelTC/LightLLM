@@ -50,7 +50,15 @@ class X2IManager:
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
+        self.use_naive_x2i = args.x2i_use_naive_impl
+
     async def wait_to_model_ready(self):
+        if self.use_naive_x2i:
+            from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
+
+            self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
+            return
+
         from lightx2v import LightX2VPipeline
 
         self.gen_pipe = LightX2VPipeline(
@@ -68,6 +76,10 @@ class X2IManager:
         pass
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
+        if self.use_naive_x2i:
+            images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
+            return images
+
         self.gen_pipe.runner.set_inference_params(
             index_offset_cond=param.past_kvcache.get_compressed_len(),
             index_offset_uncond=param.past_kvcache_text.get_compressed_len(),
@@ -86,13 +98,24 @@ class X2IManager:
         return [image]
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
+        if self.use_naive_x2i:
+            images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
+            return images
+
+        self.gen_pipe.runner.set_inference_params(
+            index_offset_cond=param.past_kvcache.get_compressed_len(),
+            index_offset_uncond=param.past_kvcache_text.get_compressed_len(),
+            cfg_interval=param.cfg_interval,
+            cfg_scale=param.guidance_scale,
+            cfg_norm=CfgNormType(param.cfg_norm).as_str(),
+            timestep_shift=param.timestep_shift,
+        )
         self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
         image = self.gen_pipe.generate(
             seed=param.seed,
             save_result_path="",  # 返回base64，不需要指定路径了
             target_shape=[param.height, param.width],  # Height, Width
         )
-        # images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
         return [image]
 
     async def loop_for_fwd(self):
@@ -105,18 +128,18 @@ class X2IManager:
                 x2i_param = self.waiting_reqs.pop(0)
 
                 past_kv_cache = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                    x2i_param.past_kvcache.get_all(), x2i_param.past_kvcache.token_len
+                    x2i_param.past_kvcache.get_all(), x2i_param.past_kvcache.token_len, self.use_naive_x2i
                 )
 
                 past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                    x2i_param.past_kvcache_text.get_all(), x2i_param.past_kvcache_text.token_len
+                    x2i_param.past_kvcache_text.get_all(), x2i_param.past_kvcache_text.token_len, self.use_naive_x2i
                 )
                 is_t2i = x2i_param.past_kvcache_img.is_empty()
 
                 past_kv_cache_img = None
                 if not is_t2i:  # t2i
                     past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                        x2i_param.past_kvcache_img.get_all(), x2i_param.past_kvcache_img.token_len
+                        x2i_param.past_kvcache_img.get_all(), x2i_param.past_kvcache_img.token_len, self.use_naive_x2i
                     )
 
                 # release

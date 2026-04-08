@@ -705,7 +705,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
         completion_tokens = 0
         finish_reason: Optional[str] = "stop"
         group_request_id = None
-        max_image_gen_num = 2  # TODO: make this configurable
+        max_image_gen_num = 15  # TODO: make this configurable
 
         while max_image_gen_num > 0:
             max_image_gen_num -= 1

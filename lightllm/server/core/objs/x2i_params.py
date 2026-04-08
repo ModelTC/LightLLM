@@ -39,6 +39,7 @@ class X2IParams(ctypes.Structure):
         ("cfg_interval", ctypes.c_float * 2),
         ("timestep_shift", ctypes.c_float),
         ("cfg_norm", ctypes.c_int),
+        ("timestep_shift", ctypes.c_float),
         ("past_kvcache", PastKVCachePageList),
         ("past_kvcache_text", PastKVCachePageList),
         ("past_kvcache_img", PastKVCachePageList),
@@ -53,7 +54,7 @@ class X2IParams(ctypes.Structure):
     _image_guidance_scale: float = 1.0
     _seed: int = 42
     _num_images: int = 1
-    _cfg_norm: CfgNormType = CfgNormType.GLOBAL
+    _cfg_norm: CfgNormType = CfgNormType.NONE
     _cfg_interval: float = (-1, 2)
     _timestep_shift: float = 3.0
 
