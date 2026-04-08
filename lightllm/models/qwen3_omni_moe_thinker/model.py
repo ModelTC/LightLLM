@@ -59,12 +59,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return
 
     def get_audio_token_length(self, audio: AudioItem):
-        # 这里得处理对应奖语音长度按照 30 进行限制，后续处理中，超过30的会被截断。
-        if audio.audio_length > self.n_samples:
-            logger.warning(f"audio length {audio.audio_length} exceed max length {self.n_samples}, will be truncated.")
-
-        length = min(audio.audio_length, int(self.n_samples))
-        token_num = self._caclu_audio_token_num(length)
+        token_num = self._caclu_audio_token_num(audio.audio_length)
         # print(f"token_num is {token_num}  n_samples is {self.n_samples} hop_length is {self.hop_length}")
         return token_num
 

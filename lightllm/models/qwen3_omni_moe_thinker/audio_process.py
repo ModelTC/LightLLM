@@ -102,7 +102,7 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
     def _preprocess(
         self,
         raw_speech: Union[np.ndarray, list[float], list[np.ndarray], list[list[float]]],
-        truncation: bool = True,
+        truncation: bool = False,
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         return_attention_mask: Optional[bool] = None,
