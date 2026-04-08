@@ -6,8 +6,7 @@ import torch.nn.functional as F
 from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.server.multimodal_params import AudioItem, load_audio_from_shm_payload
+from lightllm.server.multimodal_params import AudioItem
 
 
 # tokenizer_class removed
@@ -37,7 +36,7 @@ class WhisperProcessor(ProcessorMixin):
         return self.tokenizer.get_decoder_prompt_ids(task=task, language=language, no_timestamps=no_timestamps)
 
     def get_T_after_cnn(self, L_in, dilation=1):
-        for padding, kernel_size, stride in eval("[(1,3,1)] + [(1,3,2)] "):
+        for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
             L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
             L_out = 1 + L_out // stride
             L_in = L_out
@@ -168,8 +167,7 @@ class WhisperAudioModel:
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
-                audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = load_audio_from_shm_payload(audio_data, item.extra_params, 16000)
+                audio = item.load_audio_from_shm_payload()
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
@@ -217,7 +215,9 @@ class WhisperAudioModel:
 
         ans_embeds = []
         for i in range(len(uuids)):
+
             item = items[i]
+
             # 拼接该 audio 的所有 chunk embedding
             cur_embed = torch.cat(per_audio_embeds[i], dim=0)
             ans_embeds.append(cur_embed)
