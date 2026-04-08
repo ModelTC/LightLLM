@@ -637,7 +637,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_storage_size",
         type=float,
-        default=2,
+        default=50,
         help="""The capacity of cpu cache. GB used.""",
     )
     parser.add_argument(

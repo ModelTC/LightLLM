@@ -33,6 +33,7 @@ class PastKVCacheClient(object):
         self.free_pages: List[int] = list(range(self.page_num))
         self.lock = Lock()
         self.cond = Condition(self.lock)
+        print("PastKVCacheClient init, page num: ", self.page_num, flush=True)
 
         if not only_create_meta_data:
             if init_shm_data:
@@ -86,12 +87,13 @@ class PastKVCacheClient(object):
         # (P, L, S, H, D) -> (P, L, S, 2, H // 2, D) -> (L, 2,P, S,  H // 2, D) -> (L, 2, P * S, H // 2, D)
         kv = (
             self.cpu_kv_cache_tensor[page_indexes]
+            .contiguous()
             .view(P, L, S, 2, H // 2, D)
             .permute(1, 3, 0, 2, 4, 5)
             .contiguous()
             .view(L, 2, P * S, H // 2, D)
         )
-        return kv
+        return kv[:, :, :token_num, :, :].contiguous()
 
     def _create_shm_cpu_kv_cache(self):
         shm_ptr = create_shm_kv_cache_ptr(

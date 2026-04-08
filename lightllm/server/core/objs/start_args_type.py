@@ -125,7 +125,9 @@ class StartArgs:
     vit_att_backend: List[str] = field(
         default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
-    llm_kv_type: str = field(default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"]})
+    llm_kv_type: str = field(
+        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"]}
+    )
     llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
     penalty_counter_mode: str = field(
@@ -144,7 +146,7 @@ class StartArgs:
     nixl_pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
-    cpu_cache_storage_size: float = field(default=2)
+    cpu_cache_storage_size: float = field(default=20)
     cpu_cache_token_page_size: int = field(default=64)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)

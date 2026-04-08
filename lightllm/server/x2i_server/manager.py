@@ -15,7 +15,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease
+from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType
 from lightllm.utils.dist_utils import set_current_device_id
 from .past_kv_cache_client import PastKVCacheClient
 
@@ -61,22 +61,24 @@ class X2IManager:
         self.gen_pipe.create_generator(
             config_json=self.args.x2v_gen_model_config,
         )
-        self.gen_pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False})
+        self.gen_pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False})
+
         # from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
         # self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
         pass
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
-        past_kv_cache = self._truncate_kv_cache_to_compressed_len(
-            past_kv_cache, param.past_kvcache.get_compressed_len()
+        self.gen_pipe.runner.set_inference_params(
+            index_offset_cond=param.past_kvcache.get_compressed_len(),
+            index_offset_uncond=param.past_kvcache_text.get_compressed_len(),
+            cfg_interval=param.cfg_interval,
+            cfg_scale=param.guidance_scale,
+            cfg_norm=CfgNormType(param.cfg_norm).as_str(),
+            timestep_shift=param.timestep_shift,
         )
-        past_kv_cache_text = self._truncate_kv_cache_to_compressed_len(
-            past_kv_cache_text, param.past_kvcache_text.get_compressed_len()
-        )
-        self.gen_pipe.runner.set_kvcache_t2i(past_kv_cache, past_kv_cache_text)
+        self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
         image = self.gen_pipe.generate(
             seed=param.seed,
-            task="t2i",
             save_result_path="",  # 返回base64，不需要指定路径了
             target_shape=[param.height, param.width],  # Height, Width
         )
@@ -84,19 +86,9 @@ class X2IManager:
         return [image]
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
-        past_kv_cache = self._truncate_kv_cache_to_compressed_len(
-            past_kv_cache, param.past_kvcache.get_compressed_len()
-        )
-        past_kv_cache_text = self._truncate_kv_cache_to_compressed_len(
-            past_kv_cache_text, param.past_kvcache_text.get_compressed_len()
-        )
-        past_kv_cache_img = self._truncate_kv_cache_to_compressed_len(
-            past_kv_cache_img, param.past_kvcache_img.get_compressed_len()
-        )
         self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
         image = self.gen_pipe.generate(
             seed=param.seed,
-            task="i2i",
             save_result_path="",  # 返回base64，不需要指定路径了
             target_shape=[param.height, param.width],  # Height, Width
         )
@@ -163,11 +155,6 @@ class X2IManager:
 
     def clean_up(self):
         pass
-
-    def _truncate_kv_cache_to_compressed_len(self, kv: torch.Tensor, compressed_len: int) -> torch.Tensor:
-        seq = kv.shape[2]
-        n = min(compressed_len, seq)
-        return kv[:, :, :n:, :].contiguous()
 
 
 def setup_devices(args: StartArgs):
