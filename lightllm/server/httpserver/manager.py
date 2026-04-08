@@ -322,8 +322,6 @@ class HttpServerManager:
                     group_request_id,
                     start_time,
                     "verify_and_preload_done",
-                    audio_count=audio_count,
-                    image_count=image_count,
                 )
 
             # 记录请求到达的相关信息
@@ -334,9 +332,6 @@ class HttpServerManager:
                 group_request_id,
                 start_time,
                 "encode_done",
-                prompt_tokens=len(prompt_ids),
-                audio_count=audio_count,
-                image_count=image_count,
             )
 
             prompt_tokens = len(prompt_ids)
@@ -350,8 +345,6 @@ class HttpServerManager:
                 group_request_id,
                 start_time,
                 "check_and_repair_length_done",
-                prompt_tokens=len(prompt_ids),
-                max_new_tokens=sampling_params.max_new_tokens,
             )
 
             if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
@@ -404,7 +397,6 @@ class HttpServerManager:
                 group_request_id,
                 start_time,
                 "shm_req_init_done",
-                req_count=len(req_objs),
             )
 
             logger.debug(
@@ -423,8 +415,6 @@ class HttpServerManager:
                 group_request_id,
                 start_time,
                 "request_forwarded",
-                has_audio=audio_count > 0,
-                has_image=image_count > 0,
             )
 
             results_generator = self._wait_to_token_package(
@@ -481,6 +471,7 @@ class HttpServerManager:
         return image_tokens, audio_tokens
 
     async def _log_req_header(self, request_headers, group_request_id: int):
+
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
 
@@ -493,11 +484,7 @@ class HttpServerManager:
         return
 
     async def _encode(
-        self,
-        prompt: Union[str, List[int]],
-        multimodal_params: MultimodalParams,
-        sampling_params: SamplingParams,
-        start_time: Optional[float] = None,
+        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
             if self.enable_multimodal:
@@ -507,14 +494,6 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
-                log_req_id = getattr(sampling_params, "group_request_id", None)
-                self._log_stage_timing(
-                    log_req_id,
-                    start_time,
-                    "alloc_multimodal_resources_done",
-                    audio_count=len(multimodal_params.audios),
-                    image_count=len(multimodal_params.images),
-                )
                 prompt_ids = self.tokenizer.encode(
                     prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
                 )
@@ -605,13 +584,9 @@ class HttpServerManager:
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
+
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
-                logger.debug(
-                    f"lightllm_req_id:{group_req_objs.group_req_id} "
-                    f"stage:transfer_to_visual "
-                    f"target_port:{self.args.visual_port}"
-                )
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
