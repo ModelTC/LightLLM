@@ -136,7 +136,7 @@ class HttpServerManager:
         if len(items) == 0:
             return
 
-        for _ in range(1000):
+        for _ in range(2000):
             # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
@@ -144,7 +144,7 @@ class HttpServerManager:
                 records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
                 if records is not None:
                     break
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.005)
 
         # 长时间无法申请到足够资源的时候，则开始进行阻塞式尝试，防止其他请求一起申请相关资源。
         if records is None:
