@@ -618,30 +618,16 @@ class HttpServerManager:
                 return
 
             if not self.args.disable_audio:
-                logger.debug(
-                    f"lightllm_req_id:{group_req_objs.group_req_id} "
-                    f"stage:transfer_to_audio "
-                    f"target_port:{self.args.audio_port}"
-                )
                 self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if self.args.enable_cpu_cache:
-                logger.debug(
-                    f"lightllm_req_id:{group_req_objs.group_req_id} "
-                    f"stage:transfer_to_multi_level_kv_cache target_port:{self.args.multi_level_kv_cache_port}"
-                )
                 self.send_to_multi_level_kv_cache.send_pyobj(
                     group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
                 return
 
-            logger.debug(
-                f"lightllm_req_id:{group_req_objs.group_req_id} "
-                f"stage:transfer_to_router "
-                f"target_port:{self.args.router_port}"
-            )
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
@@ -650,11 +636,6 @@ class HttpServerManager:
 
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
-            logger.debug(
-                f"lightllm_req_id:{group_req_objs.group_req_id} "
-                f"stage:transfer_to_router_from_decode "
-                f"target_port:{self.args.router_port}"
-            )
             self.send_to_router.send_pyobj(
                 group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
@@ -673,6 +654,7 @@ class HttpServerManager:
         req_status: "ReqStatus",
         request: Request,
     ):
+
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
@@ -715,11 +697,6 @@ class HttpServerManager:
                         first_token_cost_ms = (time.time() - start_time) * 1000
                         is_first_token = False
                         self.first_time_costs.add(first_token_cost_ms)
-                        logger.info(
-                            f"lightllm_req_id:{group_request_id} "
-                            f"stage:first_token_arrived elapsed_ms:{first_token_cost_ms:.3f} "
-                            f"sub_req_id:{sub_req_id} prompt_tokens:{prompt_tokens}"
-                        )
 
                     out_token_counter += 1
 
@@ -803,6 +780,7 @@ class HttpServerManager:
         pre_time_mark = time.time()
 
         while True:
+
             try:
                 await asyncio.wait_for(self.recycle_event.wait(), timeout=0.02)
             except asyncio.TimeoutError:
@@ -879,6 +857,7 @@ class HttpServerManager:
 
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
+
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
                                 req.cumlogprob += float(req.shm_logprobs.arr[src_index])
                                 metadata = {
