@@ -133,32 +133,47 @@ class HttpServerManager:
         return
 
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
-        while True:
-            records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
-
-            if records is None:
-                await asyncio.sleep(0.1)
-                continue
-
-            if isinstance(records, str) and "error" in records:
-                logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
-                raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
-
-            update_data_ids = []
-            for item, rec, data in zip(items, records, datas):
-                item: Union[ImageItem, AudioItem] = item
-                item.uuid = rec["id"]
-                item.token_id = rec["token_id"]
-                item.token_num = rec["token_num"]
-                item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
-
-                if not rec["data_ready"]:
-                    create_shm(get_shm_name_data(rec["id"]), data)
-                    update_data_ids.append(rec["id"])
-
-            if update_data_ids:
-                self.cache_client.root.set_items_data(update_data_ids)
+        if len(items) == 0:
             return
+
+        for _ in range(1000):
+            # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
+            # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
+            # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
+            async with self._resource_lock:
+                records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+                if records is not None:
+                    break
+                await asyncio.sleep(0.01)
+
+        # 长时间无法申请到足够资源的时候，则开始进行阻塞式尝试，防止其他请求一起申请相关资源。
+        if records is None:
+            async with self._resource_lock:
+                while records is None:
+                    records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+                    if records is not None:
+                        break
+                    await asyncio.sleep(0.1)
+
+        if isinstance(records, str) and "error" in records:
+            logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
+            raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
+
+        update_data_ids = []
+        for item, rec, data in zip(items, records, datas):
+            item: Union[ImageItem, AudioItem] = item
+            item.uuid = rec["id"]
+            item.token_id = rec["token_id"]
+            item.token_num = rec["token_num"]
+            item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
+
+            if not rec["data_ready"]:
+                create_shm(get_shm_name_data(rec["id"]), data)
+                update_data_ids.append(rec["id"])
+
+        if update_data_ids:
+            self.cache_client.root.set_items_data(update_data_ids)
+        return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
@@ -167,10 +182,11 @@ class HttpServerManager:
             for img in multimodal_params.images:
                 self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                 data = img.read()
+                # must after init_imageitem_extral_params
                 token_num = self.tokenizer.get_image_token_length(img)
                 md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-                img.md5 = md5sum
                 md5sums.append(md5sum)
+                img.md5 = md5sum
                 tokens_nums.append(token_num)
                 datas.append(data)
                 items.append(img)
@@ -178,22 +194,14 @@ class HttpServerManager:
                 self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
                 data = audio.read()
                 token_num = self.tokenizer.get_audio_token_length(audio)
-                payload_md5 = audio.extra_params.get("audio_payload_md5")
-                md5sum = payload_md5
-                audio.md5 = md5sum
+                md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
                 md5sums.append(md5sum)
+                audio.md5 = md5sum
                 tokens_nums.append(token_num)
                 datas.append(data)
                 items.append(audio)
 
-            if len(items) <= 1:
-                await self._alloc_resource(items, md5sums, tokens_nums, datas)
-                return
-            # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
-            # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
-            # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
-            async with self._resource_lock:
-                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+            await self._alloc_resource(items, md5sums, tokens_nums, datas)
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
