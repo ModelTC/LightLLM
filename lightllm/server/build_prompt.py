@@ -16,7 +16,10 @@ def init_tokenizer(args):
     if chat_path is not None:
         with open(chat_path, "r", encoding="utf-8") as f:
             chat_template_str = f.read()
-        tokenizer.chat_template = chat_template_str
+        if hasattr(tokenizer, "tokenizer"):
+            tokenizer.tokenizer.chat_template = chat_template_str
+        else:
+            tokenizer.chat_template = chat_template_str
         return
 
     # 如果 tokenizer 目录下存在chat_template.json， 同时不存在 chat_template.jinja,
