@@ -301,8 +301,6 @@ class HttpServerManager:
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
-        if request is not None:
-            request.state.lightllm_req_id = group_request_id
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
         self._log_stage_timing(
