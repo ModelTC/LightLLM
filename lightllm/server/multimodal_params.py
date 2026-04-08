@@ -94,7 +94,9 @@ class AudioItem:
     def load_audio_from_shm_payload(self) -> np.ndarray:
         audio_data = read_shm(get_shm_name_data(self.uuid))
         audio_array = np.frombuffer(audio_data, dtype=np.float32)
-        assert audio_array.shape[0] == self.audio_length
+        if audio_array.shape[0] != self.audio_length:
+            logger.error(f"audio length is not match, {audio_array.shape[0]} != {self.audio_length}")
+            assert audio_array.shape[0] == self.audio_length
         return audio_array
 
 
