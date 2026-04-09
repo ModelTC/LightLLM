@@ -242,6 +242,7 @@ class ReqManagerForMamba(ReqManager):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
         self.buffer_mem_manager: MambaCacheManager = self.mem_manager.mamba_cache_mem_manager
+        self.cpu_buffer_mem_manager = getattr(self.mem_manager, "cpu_mamba_cache_manager", None)
         self.req_to_buffer_index = torch.zeros(
             (self.max_request_num + 1, self.mtp_step + 1), dtype=torch.int32, device="cuda"
         )
