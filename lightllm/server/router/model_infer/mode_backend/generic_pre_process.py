@@ -138,7 +138,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
         # MTP 模式下，使用专门的 shared group 构建函数
         b_shared_seq_len = None  # MTP 模式不需要 b_shared_seq_len
-        b_mark_shared_group = build_mtp_shared_group_infos(b_mtp_index=b_mtp_index)
+        b_mark_shared_group = build_mtp_shared_group_infos(run_reqs=run_reqs)
     else:
         b_shared_seq_len = None
         b_mark_shared_group = None 
@@ -214,27 +214,32 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
     return b_shared_seq_len, b_mark_shared_group
 
 
-def build_mtp_shared_group_infos(
-    b_mtp_index: torch.Tensor,
-) -> torch.Tensor:
+def build_mtp_shared_group_infos(run_reqs: List[InferReq]) -> torch.Tensor:
     # Similar to build_diverse_shared_group_infos, 
     # but the grouping logic is based on b_mtp_index, which indicates the MTP step of each request
     max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
-    b_mark_shared_group = []
-    num_reqs = b_mtp_index.shape[0]
-    if num_reqs == 0:
-        return torch.zeros_like(b_mtp_index, dtype=torch.int32, device="cpu")
-    mtp_index = b_mtp_index.detach().cpu().tolist()
-    current_group = []
-    for step in mtp_index:
-        if len(current_group) == 0:
-            current_group.append(step)
+    req_ids = [req.id for req in run_reqs]
+    _current_group = []
+    for node in req_ids:
+        if not _current_group:
+            _current_group.append(node)
+        elif node == _current_group[-1]:
+            _current_group.append(node)
         else:
-            if step == current_group[-1] + 1 and len(current_group) < max_batch_shared_group_size:
-                current_group.append(step)
-            else:
-                b_mark_shared_group.extend([0] * (len(current_group) - 1) + [len(current_group)])
-                current_group = [step]
-    if current_group:
-        b_mark_shared_group.extend([0] * (len(current_group) - 1) + [len(current_group)])
-    return torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
+            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
+            b_mark_shared_group[-1] = len(_current_group)
+            _current_group.clear()
+            _current_group.append(node)
+
+        if len(_current_group) == max_batch_shared_group_size:
+            b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
+            b_mark_shared_group[-1] = len(_current_group)
+            _current_group.clear()
+    if _current_group:
+        b_mark_shared_group.extend([0 for _ in range(len(_current_group))])
+        b_mark_shared_group[-1] = len(_current_group)
+        _current_group.clear()
+
+    assert len(b_mark_shared_group) == len(run_reqs)
+    b_mark_shared_group = torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
+    return b_mark_shared_group
