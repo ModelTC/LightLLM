@@ -504,16 +504,6 @@ class RouterManager:
             raise e
         return
 
-    async def _profiler_cmd(self, cmd_obj: ProfilerCmd):
-        self.profiler.cmd(cmd_obj)
-
-        cmd = ProfilerCmd(cmd=cmd_obj.cmd)
-        while not self.shm_reqs_io_buffer.is_empty():
-            await asyncio.sleep(0.02)
-        
-        self.shm_reqs_io_buffer.write_obj([cmd])
-        self.shm_reqs_io_buffer.set_ready()
-
     async def _recv_new_reqs_and_schedule(self):
         if not hasattr(self, "recv_max_count"):
             self.recv_max_count = 64
@@ -521,11 +511,9 @@ class RouterManager:
         try:
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: Union[GroupReqIndexes, ProfilerCmd] = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                 if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
-                elif isinstance(recv_req, ProfilerCmd):
-                    await self._profiler_cmd(recv_req)
                 else:
                     assert False, f"Error Req Inf {recv_req}"
 
