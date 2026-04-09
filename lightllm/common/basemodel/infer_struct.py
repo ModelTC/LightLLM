@@ -138,10 +138,7 @@ class InferStateInfo:
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
-                    try:
-                        attr_.copy_(attr_value, non_blocking=True)
-                    except Exception as e:
-                        print(f"Warning: copy tensor {attr_name} failed during cuda graph copy, error: {e}")
+                    attr_.copy_(attr_value, non_blocking=True)
 
         self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
         if self.decode_att_state1 is not None:
