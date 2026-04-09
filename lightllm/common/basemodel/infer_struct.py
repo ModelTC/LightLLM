@@ -85,7 +85,6 @@ class InferStateInfo:
         # 在开启 mtp_mode 时，mtp draft model
         # 的输入会用到，其他模型和场景都不会用到
         self.mtp_draft_input_hiddens: Optional[torch.Tensor] = None
-        self.is_mtp_draft_model: bool = False
 
         # 在单节点多dp的运行模式下，在进行prefill的阶段，如果出现了dp之间数据不平衡的现象，
         # 可以将推理的数据，进行重新分配到各个dp，在做 att 之前，重新 all to all 到各自的
