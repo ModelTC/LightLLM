@@ -35,7 +35,6 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
-from lightllm.utils.profiler import ProfilerCmd
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -754,16 +753,6 @@ class HttpServerManager:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
-
-    async def profiler_cmd(self, cmd: Literal["start", "stop"]):
-        receivers = [self.send_to_router]
-        if self.pd_mode.is_P_or_NORMAL() and self.enable_multimodal:
-            receivers.append(self.send_to_visual)
-        for receiver in receivers:
-            receiver.send_pyobj(
-                ProfilerCmd(cmd),
-                protocol=pickle.HIGHEST_PROTOCOL,
-            )
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
