@@ -208,6 +208,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
+        "min_pixels": request.min_pixels,
+        "max_pixels": request.max_pixels,
     }
 
     # Structured output handling
@@ -537,6 +539,8 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "n": request.n,
         "best_of": request.best_of,
         "add_special_tokens": False,
+        "min_pixels": request.min_pixels,
+        "max_pixels": request.max_pixels,
     }
 
     if request.response_format:
