@@ -140,9 +140,6 @@ class PastKVCacheModule(object):
                 self.past_kv_cache_task.appendleft(task)
                 break
 
-        if len(trans_ok_tasks) == 0:
-            return
-
         ok_tasks_num = torch.tensor(len(trans_ok_tasks))
         dist.all_reduce(ok_tasks_num, op=dist.ReduceOp.MIN, group=self.sync_task_status_group)
 

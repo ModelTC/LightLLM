@@ -1,11 +1,11 @@
 import zmq
-import zmq.asyncio
 import asyncio
 import uvloop
 import inspect
 import setproctitle
 import pickle
 import torch
+import time
 import os
 from typing import List
 from lightllm.server.core.objs import StartArgs
@@ -149,10 +149,12 @@ class X2IManager:
 
                 images = []
                 logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {x2i_param}")
+                start_t = time.time()
                 if is_t2i:
                     images = await self.t2i_generate(past_kv_cache, past_kv_cache_text, x2i_param)
                 else:
                     images = await self.it2i_generate(past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param)
+                logger.info(f"generate {len(images)} images done, cost {time.time() - start_t:.2f}s")
 
                 self.send_to_httpserver.send_pyobj(
                     X2IResponse(request_id=x2i_param.request_id, images=images), protocol=pickle.HIGHEST_PROTOCOL
@@ -162,8 +164,7 @@ class X2IManager:
                 self.send_to_httpserver.send_pyobj(
                     X2IResponse(request_id=x2i_param.request_id, images=None), protocol=pickle.HIGHEST_PROTOCOL
                 )
-
-                logger.error(e)
+                logger.error(e, exc_info=e)
 
     async def loop_for_netio_req(self):
         while True:
