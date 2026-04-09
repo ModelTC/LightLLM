@@ -8,7 +8,6 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35Tr
 from lightllm.models.qwen3_5_moe.layer_weights.transformer_layer_weight import Qwen35MOETransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.distributed import all_reduce
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
@@ -172,25 +171,8 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
             all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
             input = gather_input[0 : len(infer_state.input_ids), :]
 
-        input = input.view(-1, self.embed_dim_)
-        q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input)
-        layer_weight.qk_norm_weight_(
-            q,
-            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
-            eps=self.eps_,
-        )
-        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        mrope_triton_fused(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-            self.mrope_section,
-            is_interleaved=True,
-            partial_rotary_factor=self.partial_rotary_factor,
-        )
+        # Delegate to _get_qkv which handles fused qkv_proj, QK norm, gate, and mrope
+        q, cache_kv = self._get_qkv(input, infer_state, layer_weight)
 
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)
