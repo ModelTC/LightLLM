@@ -1,6 +1,8 @@
+import torch
 from typing import List
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_eagle.layer_infer.transformer_layer_infer import Qwen3EagleTransformerLayerInfer
@@ -79,3 +81,17 @@ class Qwen3EagleModel(LlamaTpPartModel):
         total_pre_layers_num = 0
         super()._init_infer_layer(start_layer_index=total_pre_layers_num)
         return
+    
+    # Override forward function, for the pre-compute the mtp_draft_input_hiddens
+    @torch.no_grad()
+    def forward(self, model_input: ModelInput):
+        model_input.to_cuda()
+        assert model_input.mem_indexes.is_cuda
+        
+        if model_input.mtp_draft_input_hiddens.shape[-1] != self.config["hidden_size"]:
+            model_input.mtp_draft_input_hiddens = self.trans_layers_weight[0].fc_weight_.mm(model_input.mtp_draft_input_hiddens)
+
+        if model_input.is_prefill:
+            return self._prefill(model_input)
+        else:
+            return self._decode(model_input)

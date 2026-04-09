@@ -47,7 +47,6 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
-from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
 logger = init_logger(__name__)
 
@@ -245,10 +244,6 @@ class ModeBackend:
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
-        
-        prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
-        prof_mode = self.args.enable_profiling
-        self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -406,9 +401,6 @@ class ModeBackend:
         else:
             self._try_read_new_reqs_normal()
             
-        # on each loop thread
-        if self.profiler is not None:
-            self.profiler.multi_thread_helper()
         return
 
     def _try_read_new_reqs_normal(self):
@@ -807,7 +799,7 @@ class ModeBackend:
                 # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
                 # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的_mtp_size
                 if enable_dynamic_mtp_verify():
-                    current_mtp_size = max(0, req.shm_req._mtp_size)
+                    current_mtp_size = max(0, req.mtp_size)
                 else:
                     current_mtp_size = self.mtp_step
                 req.update_mtp_verify_token_num(verify_token_num=1 + current_mtp_size)

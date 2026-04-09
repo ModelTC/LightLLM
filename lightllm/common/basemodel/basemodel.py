@@ -148,27 +148,6 @@ class TpPartBaseModel:
             self.eagle_hidden_layers = [self.config["n_layer"]-1]
         else:
             self.eagle_hidden_layers = []
-        
-        if self.is_eagle3_mode:
-            # load the hidden_proj weight from the draft model path
-            draft_model_path = kvargs.get("mtp_draft_model_dir", None)
-            assert draft_model_path is not None, "mtp_draft_model_dir must be provided when eagle3 mode is enabled"
-            if os.path.exists(os.path.join(draft_model_path[0], "pytorch_model.bin")):
-                self.draft_model_weight_dict = torch.load(os.path.join(draft_model_path[0], "pytorch_model.bin"))
-                self.hidden_proj_weight = self.draft_model_weight_dict["fc.weight"].to(torch.bfloat16).to("cuda")
-                del self.draft_model_weight_dict
-                gc.collect()
-            else:
-                try:
-                    from safetensors import safe_open
-                    with safe_open(os.path.join(draft_model_path[0], "model.safetensors"), framework="pt", device="cuda") as f:
-                        # Check if the key exists to avoid KeyError
-                        if "fc.weight" in f.keys():
-                            self.hidden_proj_weight = f.get_tensor("fc.weight").to(torch.bfloat16).to("cuda")
-                except Exception as e:
-                    logger.warning(f"Failed to load hidden_proj_weight from safetensors with error: {e}")
-                    self.hidden_proj_weight = None
-
 
     def _wait_other_modules_ready(self):
         for event in self.wait_events:
@@ -621,9 +600,6 @@ class TpPartBaseModel:
                 if i in self.eagle_hidden_layers:
                     capture_hiddens.append(_input_embs.clone())
             capture_hidden = torch.cat(capture_hiddens, dim=-1) if len(capture_hiddens) > 0 else None
-            if self.is_eagle3_mode and not self.is_mtp_draft_model and capture_hidden is not None:
-                capture_hidden = self.hidden_proj_weight @ capture_hidden.transpose(0, 1)
-                capture_hidden = capture_hidden.transpose(0, 1)
             return [_input_embs, capture_hidden]
 
         handle_token_num = input_ids.shape[0]
@@ -678,9 +654,6 @@ class TpPartBaseModel:
                 capture_hiddens.append(input_embs.clone())
 
         capture_hidden = torch.cat(capture_hiddens, dim=-1) if len(capture_hiddens) > 0 else None
-        if self.is_eagle3_mode and not self.is_mtp_draft_model and capture_hidden is not None:
-            capture_hidden = self.hidden_proj_weight @ capture_hidden.transpose(0, 1)
-            capture_hidden = capture_hidden.transpose(0, 1)
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
         predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
 

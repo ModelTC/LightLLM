@@ -219,6 +219,7 @@ def build_mtp_shared_group_infos(run_reqs: List[InferReq]) -> torch.Tensor:
     # but the grouping logic is based on b_mtp_index, which indicates the MTP step of each request
     max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
     req_ids = [req.req_id for req in run_reqs]
+    b_mark_shared_group = []
     _current_group = []
     for node in req_ids:
         if not _current_group:

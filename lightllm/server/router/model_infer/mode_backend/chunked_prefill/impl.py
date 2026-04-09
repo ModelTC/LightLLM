@@ -27,7 +27,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
 )
 from lightllm.utils.infer_utils import calculate_time
-from lightllm.utils.log_utils import init_logger, print_rank0
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
 from .control_state import ControlState

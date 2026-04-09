@@ -31,14 +31,8 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         old_is_mtp_draft_model = infer_state.is_mtp_draft_model
         infer_state.is_mtp_draft_model = True
+        
         tgt_hidden = infer_state.mtp_draft_input_hiddens
-            
-        # 只有当tgt_hidden的最后一个维度不等于hidden_size的时候才会过这个fc层
-        if tgt_hidden.shape[-1] != input_embdings.shape[-1]:
-            # 此时根据EAGLE-3的原始实现，tgt_hidden的维度应该是hidden_size * 3
-            assert tgt_hidden.shape[-1] == layer_weight.fc_weight_.in_dim, \
-                f"input hidden dim {tgt_hidden.shape[-1]} not match weight dim {layer_weight.fc_weight_.in_dim}"
-            tgt_hidden = layer_weight.fc_weight_.mm(tgt_hidden)
         tgt_hidden1 = self._hidden_norm(tgt_hidden, infer_state, layer_weight)
         
         input0 = self._att_norm(input_embdings, infer_state, layer_weight)
@@ -73,14 +67,8 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         old_is_mtp_draft_model = infer_state.is_mtp_draft_model
         infer_state.is_mtp_draft_model = True
-        tgt_hidden = infer_state.mtp_draft_input_hiddens
         
-        # 只有当tgt_hidden的最后一个维度不等于hidden_size的时候才会过这个fc层
-        if tgt_hidden.shape[-1] != input_embdings.shape[-1]:
-            # 此时根据EAGLE-3的原始实现，tgt_hidden的维度应该是hidden_size * 3
-            assert tgt_hidden.shape[-1] == layer_weight.fc_weight_.in_dim, \
-                f"input hidden dim {tgt_hidden.shape[-1]} not match weight dim {layer_weight.fc_weight_.in_dim}"
-            tgt_hidden = layer_weight.fc_weight_.mm(tgt_hidden)
+        tgt_hidden = infer_state.mtp_draft_input_hiddens 
         tgt_hidden1 = self._hidden_norm(tgt_hidden, infer_state, layer_weight)
         
         input0 = self._att_norm(input_embdings, infer_state, layer_weight)
