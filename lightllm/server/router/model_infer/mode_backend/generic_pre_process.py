@@ -217,69 +217,25 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
 def build_mtp_shared_group_infos(
     b_mtp_index: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    构建 b_mark_shared_group（支持 max shared group size 截断）
-
-    规则：
-    - 组边界由 b_mtp_index == 0 定义（每个 0 是新组起点）
-    - 默认在每个组的最后一个位置写入组大小，其余位置为 0
-    - 若组大小 > max_batch_shared_group_size，则切分为多个连续子组
-      （每个子组大小 <= max_batch_shared_group_size），并在每个子组末尾写入子组大小
-
-    返回：
-    - res: shape [batch_size], int32
-      0 表示非子组末尾；N>=1 表示该子组大小
-    """
-    device = b_mtp_index.device
-    batch_size = b_mtp_index.numel()
-    res = torch.zeros(batch_size, dtype=torch.int32, device=device)
-
-    if batch_size == 0:
-        return res
-
-    max_size = int(get_diverse_max_batch_shared_group_size())
-    if max_size <= 0:
-        max_size = 1
-
-    # 1) 找每个原始组起点（b_mtp_index == 0）
-    is_start = (b_mtp_index == 0)
-    starts = torch.nonzero(is_start, as_tuple=False).flatten()
-
-    # 防御：若输入不规范（没有 0），则把整个 batch 当一组
-    if starts.numel() == 0:
-        starts = torch.zeros(1, dtype=torch.long, device=device)
-
-    # 2) 原始组长度
-    # ends = [starts[1]-1, starts[2]-1, ..., batch_size-1]
-    ends = torch.empty_like(starts)
-    if starts.numel() > 1:
-        ends[:-1] = starts[1:] - 1
-    ends[-1] = batch_size - 1
-    lens = ends - starts + 1  # [num_groups]
-
-    # 3) 每个原始组需要切成多少个子组
-    # sub_cnt[g] = ceil(lens[g] / max_size)
-    sub_cnt = (lens + max_size - 1) // max_size  # [num_groups], int64
-
-    # 4) 展平到“子组级别”（全向量化）
-    num_groups = starts.numel()
-    group_ids = torch.repeat_interleave(
-        torch.arange(num_groups, device=device, dtype=torch.long),
-        sub_cnt
-    )  # [num_subgroups]
-
-    # 子组在原始组内的序号：0,1,2,...
-    sub_prefix = torch.cumsum(sub_cnt, dim=0) - sub_cnt               # 每个组的子组起始全局序号
-    sub_prefix_rep = torch.repeat_interleave(sub_prefix, sub_cnt)
-    global_sub_idx = torch.arange(group_ids.numel(), device=device, dtype=torch.long)
-    sub_idx_in_group = global_sub_idx - sub_prefix_rep                # [num_subgroups]
-
-    # 5) 计算每个子组大小与末尾位置
-    # size = min(max_size, lens - sub_idx*max_size)
-    rem = lens[group_ids] - sub_idx_in_group * max_size
-    sub_size = torch.minimum(rem, torch.full_like(rem, max_size))     # [num_subgroups]
-    sub_end = starts[group_ids] + sub_idx_in_group * max_size + sub_size - 1
-
-    # 6) 写回结果：子组末尾位置写子组大小
-    res[sub_end] = sub_size.to(torch.int32)
-    return res
+    # Similar to build_diverse_shared_group_infos, 
+    # but the grouping logic is based on b_mtp_index, which indicates the MTP step of each request
+    max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
+    b_mark_shared_group = []
+    num_reqs = b_mtp_index.shape[0]
+    if num_reqs == 0:
+        return torch.zeros_like(b_mtp_index, dtype=torch.int32, device="cpu")
+    current_group = []
+    for i in range(num_reqs):
+        step = b_mtp_index[i].item()
+        if len(current_group) == 0:
+            current_group.append(i)
+        else:
+            prev_step = b_mtp_index[i - 1].item()
+            if step == prev_step + 1 and len(current_group) < max_batch_shared_group_size:
+                current_group.append(i)
+            else:
+                b_mark_shared_group.extend([0] * (len(current_group) - 1) + [len(current_group)])
+                current_group = [i]
+    if current_group:
+        b_mark_shared_group.extend([0] * (len(current_group) - 1) + [len(current_group)])
+    return torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
