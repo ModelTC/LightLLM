@@ -50,6 +50,7 @@ from .multi_level_kv_cache import MultiLevelKvCacheModule
 
 logger = init_logger(__name__)
 
+
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
@@ -327,15 +328,20 @@ class ModeBackend:
                 "is_mtp_draft_model": True,
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
-                "mtp_draft_model_dir":self.args.mtp_draft_model_dir,
+                "mtp_draft_model_dir": self.args.mtp_draft_model_dir,
             }
-            
+
             # 对于eagle3模式，需要检查self.args.mtp_draft_model_dir[0]目录下面的model.safetensors或者pytorch_model.bin权重文件里是否有d2t和t2d
             # 如有，则加载到self.d2t和self.t2d中
             if self.args.mtp_mode == "eagle3":
                 if os.path.exists(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors")):
                     from safetensors import safe_open
-                    with safe_open(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors"), framework="pt", device="cuda") as f:
+
+                    with safe_open(
+                        os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors"),
+                        framework="pt",
+                        device="cuda",
+                    ) as f:
                         if "d2t" in f.keys() and "t2d" in f.keys():
                             self.d2t = f.get_tensor("d2t").cuda()
                             self.t2d = f.get_tensor("t2d").cuda()
@@ -352,7 +358,9 @@ class ModeBackend:
                             self.d2t = None
                             self.t2d = None
                 else:
-                    logger.warning(f"Model file not found in {self.args.mtp_draft_model_dir[i]}, d2t and t2d not loaded")
+                    logger.warning(
+                        f"Model file not found in {self.args.mtp_draft_model_dir[i]}, d2t and t2d not loaded"
+                    )
                     self.d2t = None
                     self.t2d = None
 
@@ -373,6 +381,7 @@ class ModeBackend:
             elif mtp_model_cfg["model_type"] == "llama":
                 assert self.args.mtp_mode in ["eagle3"]
                 from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
+
                 self.draft_models.append(Qwen3EagleModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
@@ -400,7 +409,7 @@ class ModeBackend:
             self._try_read_new_reqs_multinode_tp()
         else:
             self._try_read_new_reqs_normal()
-            
+
         return
 
     def _try_read_new_reqs_normal(self):
@@ -466,8 +475,6 @@ class ModeBackend:
                     if obj.req_id in g_infer_context.requests_mapping:
                         req: InferReq = g_infer_context.requests_mapping[obj.req_id]
                         req.infer_aborted = True
-                elif isinstance(obj, ProfilerCmd):
-                    self.profiler.cmd(obj)
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
@@ -809,22 +816,22 @@ class ModeBackend:
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
-        
+
         # 如果self.d2t不为None，那么draft的token需要进行相应的转换，转换关系保存在self.d2t和self.t2d中
         if hasattr(self, "d2t") and self.d2t is not None:
             draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
-        
+
         return draft_next_token_ids_gpu
 
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
-        
+
         # 如果self.d2t不为None，那么draft的token需要进行相应的转换，转换关系保存在self.d2t和self.t2d中
         if hasattr(self, "d2t") and self.d2t is not None:
             draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
-        
+
         return draft_next_token_ids_gpu, probs
 
     def _sample_and_scatter_token(

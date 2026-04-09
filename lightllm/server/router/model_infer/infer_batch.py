@@ -226,7 +226,7 @@ class InferenceContext:
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
             # 将动态MTP大小重置为默认值
-            req.shm_req._mtp_size = req.shm_req._mtp_step  
+            req.shm_req._mtp_size = req.shm_req._mtp_step
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         if len(free_token_index) != 0:
@@ -612,10 +612,7 @@ class InferReq:
         return 1
 
     def _mtp_decode_need_token_num(self) -> int:
-        # 使用动态 mtp_size 计算需要的 token 数量
-        # (1 + mtp_size) 个 token 用于主 token + mtp_size 个 draft token 的验证
-        # * 2 是为了预留额外的空间
-        return (1 + self.mtp_size) * 2
+        return (1 + self.mtp_step) * 2
 
 
 class InferReqUpdatePack:
