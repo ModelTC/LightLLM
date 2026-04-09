@@ -32,7 +32,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, OutHiddenState
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import (
@@ -610,29 +610,19 @@ class TpPartBaseModel:
         input_tensors = [input_embs]
 
         def prefill_func(input_tensors, infer_state):
-            capture_hiddens = []
+            mtp_out_hidden_state = OutHiddenState(selected_layers=self.output_hidden_layers)
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
                 _input_embs = layer_method(_input_embs, infer_state, self.trans_layers_weight[i])
-                if i in self.output_hidden_layers:
-                    is_last_layer = i == self.layers_num - 1
-                    if is_last_layer:
-                        # 减少一次 clone 操作， 可以提升性能
-                        capture_hiddens.append(_input_embs)
-                    else:
-                        capture_hiddens.append(_input_embs.clone())
+                mtp_out_hidden_state.add_hidden(
+                    layer_index=i,
+                    layer_num=self.layers_num,
+                    hidden_state=_input_embs,
+                )
 
-            if capture_hiddens:
-                if len(capture_hiddens) > 1:
-                    capture_hiddens = torch.cat(capture_hiddens, dim=-1)
-                else:
-                    # 减少一次 clone 操作， 可以提升性能
-                    capture_hiddens = capture_hiddens[0]
-            else:
-                capture_hiddens = None
-
+            capture_hiddens = mtp_out_hidden_state.get_captured_hiddens()
             if capture_hiddens is not None:
                 return [_input_embs, capture_hiddens]
             else:
@@ -681,34 +671,20 @@ class TpPartBaseModel:
         cuda_input_ids = input_ids
         pre_method = (self.pre_infer.token_forward, self.pre_infer.tpsp_token_forward)[run_mode_index]
         input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
-        capture_hiddens = []
+        mtp_out_hidden_state = OutHiddenState(selected_layers=self.output_hidden_layers)
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
             input_embs: torch.Tensor = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
-            if i in self.output_hidden_layers:
-                is_last_layer = i == self.layers_num - 1
-                if is_last_layer:
-                    # 减少一次 clone 操作， 可以提升性能
-                    capture_hiddens.append(input_embs)
-                else:
-                    capture_hiddens.append(input_embs.clone())
+            mtp_out_hidden_state.add_hidden(layer_index=i, layer_num=self.layers_num, hidden_state=input_embs)
 
-        if capture_hiddens:
-            if len(capture_hiddens) > 1:
-                capture_hiddens = torch.cat(capture_hiddens, dim=-1)
-            else:
-                # 减少一次 clone 操作， 可以提升性能
-                capture_hiddens = capture_hiddens[0]
-        else:
-            capture_hiddens = None
-
+        capture_hiddens = mtp_out_hidden_state.get_captured_hiddens()
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
         predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
         model_output = ModelOutput(logits=predict_logits.contiguous())
 
         # 特殊模型特殊模式的额外输出
-        if self.is_mtp_mode:
+        if self.is_mtp_mode and capture_hiddens is not None:
             model_output.mtp_main_output_hiddens = capture_hiddens.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
