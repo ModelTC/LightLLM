@@ -18,7 +18,6 @@ import triton.language as tl
 from typing import Optional
 from lightllm.common.triton_utils.autotuner import autotune, Autotuner
 from lightllm.utils.device_utils import is_hopper
-from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
 
 
 def get_test_configs():
@@ -26,21 +25,24 @@ def get_test_configs():
     for block_n in [16, 32, 64]:
         for num_warps in [2, 4, 8]:
             for num_stages in [2, 3, 4]:
-                for warp_specialize in [True, False] if is_hopper() else [False]: # warp_specialize only support hopper
-                    configs.append({
-                        "BLOCK_N": block_n,
-                        "num_warps": num_warps,
-                        "num_stages": num_stages,
-                        "warp_specialize": warp_specialize,
-                    })
+                for warp_specialize in [True, False] if is_hopper() else [False]:
+                    # warp_specialize only support hopper
+                    configs.append(
+                        {
+                            "BLOCK_N": block_n,
+                            "num_warps": num_warps,
+                            "num_stages": num_stages,
+                            "warp_specialize": warp_specialize,
+                        }
+                    )
     return configs
 
 
-def get_static_key(q, k, block_seq):
+def get_static_key(q, k, block_batch):
     key_params = {
         "gqa_group_size": int(q.shape[1] // k.shape[1]),
         "q_head_dim": int(q.shape[2]),
-        "block_seq": block_seq,
+        "block_batch": block_batch,
         "out_dtype": str(q.dtype),
     }
     return key_params
@@ -54,32 +56,44 @@ def get_run_key(q, max_kv_len):
 @triton.jit
 def _fwd_kernel_mtp_diverse_stage1_single_token(
     Q,
-    stride_qb, stride_qh, stride_qd,
+    stride_qb,
+    stride_qh,
+    stride_qd,
     K,
-    stride_kbs, stride_kh, stride_kd,
+    stride_kbs,
+    stride_kh,
+    stride_kd,
     V,
-    stride_vbs, stride_vh, stride_vd,
+    stride_vbs,
+    stride_vh,
+    stride_vd,
     sm_scale,
     Req_to_tokens,
-    stride_req_to_tokens_b, stride_req_to_tokens_s,
+    stride_req_to_tokens_b,
+    stride_req_to_tokens_s,
     B_req_idx,
     b_seq_len,
     b_mark_shared_group,
     Mid_O,
-    stride_mid_ob, stride_mid_oh, stride_mid_os, stride_mid_od,
+    stride_mid_ob,
+    stride_mid_oh,
+    stride_mid_os,
+    stride_mid_od,
     Mid_O_LogExpSum,
-    stride_mid_o_eb, stride_mid_o_eh, stride_mid_o_es,
+    stride_mid_o_eb,
+    stride_mid_o_eh,
+    stride_mid_o_es,
     gqa_group_size,
     BLOCK_HEAD: tl.constexpr,
     BLOCK_BATCH: tl.constexpr,
-    BLOCK_SEQ: tl.constexpr,
     BLOCK_HEADDIM: tl.constexpr,
     BLOCK_N: tl.constexpr,
     warp_specialize: tl.constexpr,
 ):
-    cur_batch = tl.program_id(0)
+    block_index = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
-    seq_start_block = tl.program_id(2)
+    cur_batch = tl.program_id(2)
+    grid_block_num = tl.num_programs(0)
 
     shared_batch_group_size = tl.load(b_mark_shared_group + cur_batch)
     if shared_batch_group_size == 0:
@@ -89,117 +103,83 @@ def _fwd_kernel_mtp_diverse_stage1_single_token(
 
     # ---- batch lane: 不再回卷索引，使用mask ----
     offs_b = tl.arange(0, BLOCK_BATCH)
-    valid_b = offs_b < shared_batch_group_size
-    batch_idx = cur_batch_start + offs_b
-
-    # ---- head lane: 不再next_pow2回卷，使用mask ----
-    offs_h = tl.arange(0, BLOCK_HEAD)
-    valid_h = offs_h < gqa_group_size
-    q_head_idx = cur_kv_head * gqa_group_size + offs_h
-
-    offs_d = tl.arange(0, BLOCK_HEADDIM)
+    batch_idx = tl.where(offs_b < shared_batch_group_size, cur_batch_start + offs_b, cur_batch)
 
     # load seq len
-    batch_seq_lens = tl.load(b_seq_len + batch_idx, mask=valid_b, other=0)
+    batch_seq_lens = tl.load(b_seq_len + batch_idx)
     max_seq_len = tl.max(batch_seq_lens, axis=0)
-
-    kv_start = seq_start_block * BLOCK_SEQ
-    if kv_start >= max_seq_len:
+    block_num = tl.cdiv(max_seq_len, BLOCK_N)
+    if block_index >= block_num:
         return
-    kv_end = tl.minimum(max_seq_len, kv_start + BLOCK_SEQ)
 
-    # load Q (masked)
-    off_q = (
-        batch_idx[:, None, None] * stride_qb
-        + q_head_idx[None, :, None] * stride_qh
-        + offs_d[None, None, :] * stride_qd
-    )
-    q_mask = valid_b[:, None, None] & valid_h[None, :, None]
-    q = tl.load(Q + off_q, mask=q_mask, other=0.0)
+    batch_seq_lens = tl.broadcast_to(batch_seq_lens[:, None], (BLOCK_BATCH, BLOCK_HEAD))
+    batch_seq_lens = batch_seq_lens.reshape((BLOCK_BATCH * BLOCK_HEAD,))
 
-    # P1: 循环外提不变量
+    # ---- head lane: 不再next_pow2回卷，使用mask  ---    -
+    offs_h = tl.arange(0, BLOCK_HEAD)
+    q_head_idx = tl.where(offs_h < gqa_group_size, cur_kv_head * gqa_group_size + offs_h, cur_kv_head * gqa_group_size)
+    offs_d = tl.arange(0, BLOCK_HEADDIM)
+
+    off_q = batch_idx[:, None, None] * stride_qb + q_head_idx[None, :, None] * stride_qh + offs_d[None, None, :]
+    q = tl.load(Q + off_q)
     q_flat = tl.reshape(q, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_HEADDIM))
 
-    sum_exp = tl.zeros([BLOCK_BATCH, BLOCK_HEAD], dtype=tl.float32)
-    max_logic = tl.full([BLOCK_BATCH, BLOCK_HEAD], float("-inf"), dtype=tl.float32)
-    acc = tl.zeros([BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM], dtype=tl.float32)
+    sum_exp = tl.zeros([BLOCK_BATCH * BLOCK_HEAD], dtype=tl.float32)
+    max_logic = tl.full([BLOCK_BATCH * BLOCK_HEAD], float("-inf"), dtype=tl.float32)
+    acc = tl.zeros([BLOCK_BATCH * BLOCK_HEAD, BLOCK_HEADDIM], dtype=tl.float32)
 
     cur_batch_req_idx = tl.load(B_req_idx + cur_batch)
-    offs_n_base = kv_start + tl.arange(0, BLOCK_N)
 
-    # P1: 固定循环次数
-    NUM_SUBBLOCK: tl.constexpr = BLOCK_SEQ // BLOCK_N
-    for i in range(NUM_SUBBLOCK, warp_specialize=warp_specialize):
-        offs_n_new = offs_n_base + i * BLOCK_N
-        n_mask = offs_n_new < kv_end
+    for iter_block_index in tl.range(block_index, block_num, grid_block_num, warp_specialize=warp_specialize):
+        offs_n_new = iter_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_n_refator = tl.where(offs_n_new < max_seq_len, offs_n_new, max_seq_len - 1)
 
         k_loc = tl.load(
-            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new * stride_req_to_tokens_s,
-            mask=n_mask,
-            other=0,
+            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_refator * stride_req_to_tokens_s,
         ).to(tl.int64)
-
-        off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :] * stride_kd
-        off_v = k_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
-
-        k = tl.load(K + off_k, mask=n_mask[:, None], other=0.0)
-        v = tl.load(V + off_v, mask=n_mask[:, None], other=0.0)
-
-        att_flat = tl.dot(q_flat, tl.trans(k))
-        att = tl.reshape(att_flat, (BLOCK_BATCH, BLOCK_HEAD, BLOCK_N))
+        off_k = k_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
+        off_v = k_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :]
+        k = tl.load(K + off_k)
+        v = tl.load(V + off_v)
+        att = tl.dot(q_flat, k)
         att *= sm_scale
-
-        visible_mask = offs_n_new[None, :] < batch_seq_lens[:, None]         # [B,N]
-        combined_bn = valid_b[:, None] & n_mask[None, :] & visible_mask      # [B,N]
-        combined = combined_bn[:, None, :] & valid_h[None, :, None]          # [B,H,N]
-        att = tl.where(combined, att, float("-inf"))
-
-        cur_max = tl.max(att, axis=2)
+        att = tl.where(offs_n_new[None, :] < batch_seq_lens[:, None], att, -1000000000.0)
+        cur_max = tl.max(att, axis=1)
         new_max = tl.maximum(cur_max, max_logic)
 
-        exp_logic = tl.exp(att - new_max[:, :, None])
+        exp_logic = tl.exp(att - new_max[:, None])
         logic_scale = tl.exp(max_logic - new_max)
 
-        acc *= logic_scale[:, :, None]
-        exp_flat = tl.reshape(exp_logic, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_N))
-        acc_flat = tl.reshape(acc, (BLOCK_BATCH * BLOCK_HEAD, BLOCK_HEADDIM))
-        acc_flat += tl.dot(exp_flat.to(q.dtype), v)
-        acc = tl.reshape(acc_flat, (BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM))
+        acc *= logic_scale[:, None]
+        acc += tl.dot(exp_logic.to(v.dtype), v)
 
-        sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=2)
+        sum_exp = sum_exp * logic_scale + tl.sum(exp_logic, axis=1)
         max_logic = new_max
 
-    # safe normalize
-    safe_sum = tl.where(sum_exp > 0, sum_exp, 1.0)
-    mid_o_val = acc / safe_sum[:, :, None]
-    mid_lse_val = tl.where(sum_exp > 0, max_logic + tl.log(sum_exp), float("-inf"))
+    mid_o_val = acc / sum_exp[:, None]
+    mid_lse_val = max_logic + tl.log(sum_exp)
 
     off_mid_o = (
         batch_idx[:, None, None] * stride_mid_ob
         + q_head_idx[None, :, None] * stride_mid_oh
-        + seq_start_block * stride_mid_os
+        + block_index * stride_mid_os
         + offs_d[None, None, :] * stride_mid_od
     )
     off_mid_lse = (
-        batch_idx[:, None] * stride_mid_o_eb
-        + q_head_idx[None, :] * stride_mid_o_eh
-        + seq_start_block * stride_mid_o_es
+        batch_idx[:, None] * stride_mid_o_eb + q_head_idx[None, :] * stride_mid_o_eh + block_index * stride_mid_o_es
     )
 
-    store_o_mask = valid_b[:, None, None] & valid_h[None, :, None]
-    store_lse_mask = valid_b[:, None] & valid_h[None, :]
-    tl.store(Mid_O + off_mid_o, mid_o_val, mask=store_o_mask)
-    tl.store(Mid_O_LogExpSum + off_mid_lse, mid_lse_val, mask=store_lse_mask)
+    tl.store(Mid_O + off_mid_o, mid_o_val.reshape((BLOCK_BATCH, BLOCK_HEAD, BLOCK_HEADDIM)))
+    tl.store(Mid_O_LogExpSum + off_mid_lse, mid_lse_val.reshape((BLOCK_BATCH, BLOCK_HEAD)))
 
 
 @autotune(
-    kernel_name="_fwd_kernel_mtp_diverse_stage1_single_token:v1",
+    kernel_name="_fwd_kernel_mtp_diverse_stage1_single_token:v2",
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
     mutates_args=["mid_out", "mid_out_logsumexp"],
 )
-@torch.no_grad()
 def mtp_diverse_stage1_single_token(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -211,7 +191,7 @@ def mtp_diverse_stage1_single_token(
     max_kv_len: int,
     mid_out: torch.Tensor,
     mid_out_logsumexp: torch.Tensor,
-    block_seq: int,
+    block_batch: int,
     run_config: Optional[dict] = None,
 ):
     """
@@ -227,14 +207,13 @@ def mtp_diverse_stage1_single_token(
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
     warp_specialize = run_config.get("warp_specialize", False)
-    BLOCK_BATCH = get_diverse_max_batch_shared_group_size()
+    BLOCK_BATCH = triton.next_power_of_2(block_batch)
 
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
     assert q.is_cuda and k.is_cuda and v.is_cuda
     assert Req_to_tokens.is_cuda and B_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
     assert mid_out.is_cuda and mid_out_logsumexp.is_cuda
-    BLOCK_SEQ = int(block_seq)
-    assert BLOCK_SEQ % BLOCK_N == 0
+
     Lq, Lk = int(q.shape[2]), int(k.shape[2])
     assert Lq == Lk
     assert Lk in {16, 32, 64, 128}
@@ -243,11 +222,14 @@ def mtp_diverse_stage1_single_token(
     q_head_num = int(q.shape[1])
     assert q_head_num % kv_head_num == 0
     gqa_group_size = q_head_num // kv_head_num
-    BLOCK_HEAD = gqa_group_size  # P1: 不再 next_power_of_2 回卷
-    
+    BLOCK_HEAD = triton.next_power_of_2(gqa_group_size)
+    assert q.stride(-1) == k.stride(-1) == v.stride(-1) == 1
+
+    grid_num = mid_out.shape[2]
+
     sm_scale = 1.0 / (Lk ** 0.5)
     # 固定 grid（graph friendly）
-    grid = (batch, kv_head_num, triton.cdiv(max_kv_len, BLOCK_SEQ))
+    grid = (grid_num, kv_head_num, batch)
     _fwd_kernel_mtp_diverse_stage1_single_token[grid](
         Q=q,
         stride_qb=q.stride(0),
@@ -280,7 +262,6 @@ def mtp_diverse_stage1_single_token(
         gqa_group_size=gqa_group_size,
         BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_BATCH=BLOCK_BATCH,
-        BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_HEADDIM=Lk,
         BLOCK_N=BLOCK_N,
         num_warps=num_warps,
@@ -299,13 +280,13 @@ if __name__ == "__main__":
     # static params
     gqa_group_size = 4
     q_head_dim = 128
-    block_seq = 256
+    block_batch = 4
     out_dtype = torch.bfloat16
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
     decode_lengths = [32, 64, 128, 256, 512, 1024, 2048, 8192, 16384]
 
-    q_head_num = 32
+    q_head_num = gqa_group_size
     k_head_num = q_head_num // gqa_group_size
 
     Autotuner.start_autotune_warmup()
@@ -344,7 +325,7 @@ if __name__ == "__main__":
                 max_kv_len=length,
                 mid_out=mid_out,
                 mid_out_logsumexp=mid_out_logsumexp,
-                block_seq=block_seq,
+                block_batch=block_batch,
             )
 
     Autotuner.end_autotune_warmup()
