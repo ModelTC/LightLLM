@@ -34,3 +34,6 @@ class Deepseek3_2MemoryManager(Deepseek2MemoryManager):
     def get_att_input_params(self, layer_index: int) -> Any:
         kv = self.kv_buffer[layer_index][:, :, : (self.head_dim - (144 // 2))]
         return kv
+
+    def get_indexer_k_buffer(self, layer_index: int) -> torch.Tensor:
+        return self.kv_buffer[layer_index].view(dtype=torch.uint8)[:, :, -132:]
