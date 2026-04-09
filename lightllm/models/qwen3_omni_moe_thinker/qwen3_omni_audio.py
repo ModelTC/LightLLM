@@ -374,7 +374,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
     @torch.inference_mode()
     def check_long_audio_infer(self):
         """Exercise forward with mel length chosen so the conv loop runs once with batch dim == conv_chunksize."""
-        device = next(self.parameters()).device
+        params = next(self.parameters())
+        device = params.device
+        dtype = params.dtype
         frame_len = self.conv_chunksize * (self.n_window * 2)
         logger.info(
             "check_long_audio_infer: start frame_len=%s conv_chunksize=%s n_window=%s device=%s dtype=%s",
@@ -382,9 +384,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             self.conv_chunksize,
             self.n_window,
             device,
-            self.data_type,
+            dtype,
         )
-        input_features = torch.zeros(self.num_mel_bins, frame_len, device=device, dtype=self.data_type)
+        input_features = torch.zeros(self.num_mel_bins, frame_len, device=device, dtype=dtype)
         feature_lens = torch.tensor([frame_len], device=device, dtype=torch.long)
         out = self.forward(input_features, feature_lens=feature_lens)
         logger.info("check_long_audio_infer: done output_shape=%s", tuple(out.shape))
