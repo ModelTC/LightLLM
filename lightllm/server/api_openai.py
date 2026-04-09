@@ -47,6 +47,7 @@ from .api_models import (
     FunctionResponse,
     ToolCall,
     UsageInfo,
+    PromptTokensDetails,
     ChatMessage,
     ChatCompletionResponseChoice,
     ChatCompletionResponse,
@@ -334,6 +335,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
         prompt_tokens_dict = {}
+        prompt_cache_len_dict = {}
         completion_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
@@ -344,16 +346,19 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
+                prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
         for i in range(request.n):
             sub_req_id = sub_ids[i]
             prompt_tokens = prompt_tokens_dict[sub_req_id]
             completion_tokens = count_output_tokens_dict[sub_req_id]
+            cached_tokens = prompt_cache_len_dict.get(sub_req_id, 0)
             usage = UsageInfo(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
             )
 
             finish_reason = finish_reason_dict[sub_req_id]
@@ -453,8 +458,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
         prompt_tokens = 0
         completion_tokens = 0
+        cached_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             prompt_tokens = metadata["prompt_tokens"]
+            cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
@@ -724,6 +731,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
             )
             usage_chunk = ChatCompletionStreamResponse(
                 id=chat_completion_id,
@@ -894,11 +902,13 @@ async def _handle_streaming_completion(
 
         prompt_tokens = 0
         completion_tokens = 0
+        cached_tokens = 0
 
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
             prompt_tokens = metadata["prompt_tokens"]
+            cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
             current_finish_reason = None
             if finish_status.is_finished():
@@ -932,6 +942,7 @@ async def _handle_streaming_completion(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
             )
             usage_chunk = CompletionStreamResponse(
                 id=group_request_id,
@@ -955,6 +966,7 @@ async def _collect_generation_results(
     count_output_tokens = 0
     finish_reason = None
     prompt_tokens = 0
+    prompt_cache_len = 0
     token_infos = [] if request.logprobs is not None else None
     prompt_logprobs = None
     prompt_token_ids = None
@@ -980,6 +992,7 @@ async def _collect_generation_results(
         if finish_status.is_finished():
             finish_reason = finish_status.get_finish_reason()
             prompt_tokens = metadata["prompt_tokens"]
+            prompt_cache_len = metadata.get("prompt_cache_len", 0)
 
     # 处理停止序列剔除
     final_text = "".join(final_output)
@@ -997,6 +1010,7 @@ async def _collect_generation_results(
         "text": final_text,
         "finish_reason": finish_reason,
         "prompt_tokens": prompt_tokens,
+        "prompt_cache_len": prompt_cache_len,
         "completion_tokens": count_output_tokens,
         "token_infos": token_infos,
         "prompt_logprobs": prompt_logprobs,
@@ -1011,6 +1025,7 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
     choices = []
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_cached_tokens = 0
 
     for result in results:
         text = result["text"]
@@ -1029,11 +1044,13 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
 
         total_prompt_tokens += result["prompt_tokens"]
         total_completion_tokens += result["completion_tokens"]
+        total_cached_tokens += result.get("prompt_cache_len", 0)
 
     usage = UsageInfo(
         prompt_tokens=total_prompt_tokens,
         completion_tokens=total_completion_tokens,
         total_tokens=total_prompt_tokens + total_completion_tokens,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=total_cached_tokens),
     )
 
     if is_batch:

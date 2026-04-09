@@ -278,10 +278,16 @@ class ChatCompletionRequest(BaseModel):
         return self
 
 
+class PromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
+    audio_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
     total_tokens: int = 0
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
 
 
 class ChatMessage(BaseModel):
