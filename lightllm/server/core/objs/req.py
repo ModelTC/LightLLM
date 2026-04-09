@@ -111,8 +111,6 @@ class Req(ctypes.Structure):
         ("mtp_verify_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # 新增：动态MTP大小
-        ("_mtp_size", ctypes.c_int),  
         # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
         # 然后router发停止命令给推理进程，推理进程停止输出
         ("stop_str_matched", ctypes.c_bool),
@@ -181,8 +179,6 @@ class Req(ctypes.Structure):
         self.mtp_accepted_token_num = 0
         self.mtp_verify_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
-        # 新增：动态MTP步数初始化为最大步数
-        self._mtp_size = self._mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
 
@@ -359,11 +355,7 @@ class ChunkedPrefillReq(Req):
             # "vanilla_with_att" 模式需要的 mem 用量为 self._mtp_step + 1
             # "eagle_with_att" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
             # 为了简化统一 返回 （self._mtp_step + 1）* 2
-            
-            # 使用动态 mtp_size 而不是静态 _mtp_step
-            # 如果 mtp_size 为 0，说明当前step不需要MTP验证
-            current_mtp_size = max(0, self._mtp_size)
-            need_tokens = (current_mtp_size + 1) * 2
+            need_tokens = (self._mtp_step + 1) * 2
 
         return need_tokens
 
