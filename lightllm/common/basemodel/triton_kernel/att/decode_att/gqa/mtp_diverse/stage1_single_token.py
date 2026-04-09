@@ -302,7 +302,7 @@ if __name__ == "__main__":
             )
             B_req_idx = torch.arange(batch_size, dtype=torch.int32, device="cuda")
             B_seq_len = torch.full((batch_size,), length, dtype=torch.int32, device="cuda")
-            b_mark_shared_group = torch.arange(1, batch_size + 1, dtype=torch.int32, device="cuda")
+            b_mark_shared_group = torch.ones(batch_size, dtype=torch.int32, device="cuda")
 
             if batch_size <= 16:
                 block_num = 128
