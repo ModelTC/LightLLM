@@ -93,16 +93,11 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-
-        self.is_mtp_mode = self.args.mtp_mode in [
-            "vanilla_with_att",
-            "eagle_with_att",
-            "vanilla_no_att",
-            "eagle_no_att",
-        ]
         self.prefill_graph: PrefillCudaGraph = None
 
         self._init_config()
+        self._init_speculative_algo(kvargs)
+        
         self._verify_must()
         self._verify_params()
         self._init_quant()
@@ -137,6 +132,22 @@ class TpPartBaseModel:
         set_model_init_status(True)
         return
 
+    def _init_speculative_algo(self, kvargs):
+        self.is_mtp_mode = self.args.mtp_mode in [
+            "vanilla_with_att",
+            "eagle_with_att",
+            "vanilla_no_att",
+            "eagle_no_att",
+            "eagle3"
+        ]
+        self.is_mtp_draft_model = kvargs.get("is_mtp_draft_model", False)
+        if "eagle3" in self.args.mtp_mode and not self.is_mtp_draft_model:
+            self.eagle_hidden_layers = [1, self.config["n_layer"]//2-1, self.config["n_layer"]-4]
+        elif self.is_mtp_mode:
+            self.eagle_hidden_layers = [self.config["n_layer"]-1]
+        else:
+            self.eagle_hidden_layers = []
+
     def _wait_other_modules_ready(self):
         for event in self.wait_events:
             event.wait()
@@ -151,6 +162,9 @@ class TpPartBaseModel:
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
+        if "draft_vocab_size" in self.config.keys():
+            self.config["target_vocab_size"] = self.config["vocab_size"]
+            self.config["vocab_size"] = self.config["draft_vocab_size"]
         return
 
     @final
@@ -561,12 +575,16 @@ class TpPartBaseModel:
         input_tensors = [input_embs]
 
         def prefill_func(input_tensors, infer_state):
+            capture_hiddens = []
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
                 _input_embs = layer_method(_input_embs, infer_state, self.trans_layers_weight[i])
-            return [_input_embs]
+                if i in self.eagle_hidden_layers:
+                    capture_hiddens.append(_input_embs.clone())
+            capture_hidden = torch.cat(capture_hiddens, dim=-1) if len(capture_hiddens) > 0 else None
+            return [_input_embs, capture_hidden]
 
         handle_token_num = input_ids.shape[0]
 
@@ -597,7 +615,7 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            model_output.mtp_main_output_hiddens = input_embs
+            model_output.mtp_main_output_hiddens = output_tensors[1]
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -611,16 +629,20 @@ class TpPartBaseModel:
         cuda_input_ids = input_ids
         pre_method = (self.pre_infer.token_forward, self.pre_infer.tpsp_token_forward)[run_mode_index]
         input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
+        capture_hiddens = []
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
             input_embs: torch.Tensor = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
+            if i in self.eagle_hidden_layers:
+                capture_hiddens.append(input_embs.clone())
 
+        capture_hidden = torch.cat(capture_hiddens, dim=-1) if len(capture_hiddens) > 0 else None
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
         predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
 
         if self.is_mtp_mode:
-            graph_out_hiddens = input_embs.contiguous()
+            graph_out_hiddens = capture_hidden.contiguous()
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
 

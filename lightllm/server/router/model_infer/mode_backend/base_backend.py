@@ -47,6 +47,7 @@ from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_toke
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 
+logger = init_logger(__name__)
 
 class ModeBackend:
     def __init__(self) -> None:
@@ -295,7 +296,7 @@ class ModeBackend:
 
         if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle3"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
@@ -321,9 +322,37 @@ class ModeBackend:
                 "quant_type": main_kvargs.get("quant_type", None),
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "run_mode": "normal",
+                "is_mtp_draft_model": True,
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
+            
+            # 对于eagle3模式，需要检查self.args.mtp_draft_model_dir[0]目录下面的model.safetensors或者pytorch_model.bin权重文件里是否有d2t和t2d
+            # 如有，则加载到self.d2t和self.t2d中
+            if self.args.mtp_mode == "eagle3":
+                if os.path.exists(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors")):
+                    with open(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors"), "rb") as f:
+                        from safetensors import load_file
+                        weights = load_file(f)
+                        if "d2t" in weights and "t2d" in weights:
+                            self.d2t = weights["d2t"].cuda()
+                            self.t2d = weights["t2d"].cuda()
+                        else:
+                            self.d2t = None
+                            self.t2d = None
+                elif os.path.exists(os.path.join(self.args.mtp_draft_model_dir[i], "pytorch_model.bin")):
+                    with open(os.path.join(self.args.mtp_draft_model_dir[i], "pytorch_model.bin"), "rb") as f:
+                        weights = torch.load(f)
+                        if "d2t" in weights and "t2d" in weights:
+                            self.d2t = weights["d2t"].cuda()
+                            self.t2d = weights["t2d"].cuda()
+                        else:
+                            self.d2t = None
+                            self.t2d = None
+                else:
+                    logger.warning(f"Model file not found in {self.args.mtp_draft_model_dir[i]}, d2t and t2d not loaded")
+                    self.d2t = None
+                    self.t2d = None
 
             # Select MTP model class based on model type
             model_type = mtp_model_cfg.get("model_type", "")
@@ -339,6 +368,10 @@ class ModeBackend:
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "llama":
+                assert self.args.mtp_mode in ["eagle3"]
+                from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
+                self.draft_models.append(Qwen3EagleModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 
@@ -764,6 +797,11 @@ class ModeBackend:
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        
+        # 如果self.d2t不为None，那么draft的token需要进行相应的转换，转换关系保存在self.d2t和self.t2d中
+        if hasattr(self, "d2t") and self.d2t is not None:
+            draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
+        
         return draft_next_token_ids_gpu
 
     def _sample_and_scatter_token(

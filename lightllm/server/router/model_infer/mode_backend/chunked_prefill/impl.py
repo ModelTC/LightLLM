@@ -2,6 +2,8 @@ import torch
 import time
 from typing import List, Optional, Callable, Dict, Any
 from queue import Queue
+from transformers import AutoTokenizer
+
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -28,6 +30,7 @@ from .control_state import ControlState
 
 logger = init_logger(__name__)
 
+tokenizer = AutoTokenizer.from_pretrained("/data/chenjunyi/models/qwen3-8b", trust_remote_code=True)
 
 class ChunkedPrefillBackend(ModeBackend):
     def __init__(self) -> None:
@@ -40,7 +43,7 @@ class ChunkedPrefillBackend(ModeBackend):
         if get_env_start_args().mtp_mode:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
+            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle3"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
             self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
         else:
@@ -250,6 +253,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
+            print("mtp_accept_len:", mtp_accept_len)
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,
@@ -408,6 +412,9 @@ class ChunkedPrefillBackend(ModeBackend):
             all_next_token_ids.append(draft_next_token_ids)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
+        # print("all_next_tokens")
+        # for i in range(all_next_token_ids.shape[0]):
+        #     print(tokenizer.convert_ids_to_tokens(all_next_token_ids[i].cpu().tolist()))
 
         mtp_scatter_next_token_ids(
             req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,

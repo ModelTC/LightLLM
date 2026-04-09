@@ -1,0 +1,113 @@
+import os
+import torch
+import torch.functional as F
+import torch.distributed as dist
+import numpy as np
+import triton
+from typing import Tuple
+from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from lightllm.distributed.communication_op import all_reduce
+from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
+
+class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
+    def __init__(self, layer_num, network_config):
+        super().__init__(layer_num, network_config)
+        self.hidden_size = network_config["hidden_size"]
+        return
+
+    def _hidden_norm(
+        self, input, infer_state: InferStateInfo, 
+        layer_weight: Qwen3EagleTransformerLayerWeight
+    ) -> torch.Tensor:
+        return layer_weight.hidden_norm_weight_(
+            input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+
+    def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        if infer_state.mtp_draft_input_hiddens is None:
+            # TODO: 因为在做pre check的时候必须要提供一个输入，所以这里会有一个全0的输入
+            tgt_hidden = torch.zeros(
+                input_embdings.shape[0], layer_weight.fc_weight_.in_dim, device=input_embdings.device, dtype=input_embdings.dtype
+            )
+        else:
+            tgt_hidden = infer_state.mtp_draft_input_hiddens
+            
+        # 只有当tgt_hidden的最后一个维度不等于hidden_size的时候才会过这个fc层
+        if tgt_hidden.shape[-1] != input_embdings.shape[-1]:
+            # 此时根据EAGLE-3的原始实现，tgt_hidden的维度应该是hidden_size * 3
+            assert tgt_hidden.shape[-1] == layer_weight.fc_weight_.in_dim, \
+                f"input hidden dim {tgt_hidden.shape[-1]} not match weight dim {layer_weight.fc_weight_.in_dim}"
+            tgt_hidden = layer_weight.fc_weight_.mm(tgt_hidden)
+        tgt_hidden1 = self._hidden_norm(tgt_hidden, infer_state, layer_weight)
+        
+        input0 = self._att_norm(input_embdings, infer_state, layer_weight)
+        input1 = torch.cat([input0, tgt_hidden1], dim=-1)
+        input0 = None
+        
+        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        input1 = None
+        self._post_cache_kv(cache_kv, infer_state, layer_weight) 
+
+        o = self._context_attention_wrapper_run(
+            q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
+        )
+
+        q = None
+        o = self._get_o(o, infer_state, layer_weight)
+        if self.tp_world_size_ > 1:
+            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        tgt_hidden.add_(o.view(-1, self.embed_dim_))
+        o = None
+
+        input1 = self._ffn_norm(tgt_hidden, infer_state, layer_weight)
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        input1 = None
+        if self.tp_world_size_ > 1:
+            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        tgt_hidden.add_(ffn_out.view(-1, self.embed_dim_))
+        return tgt_hidden
+        
+        
+    def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+        if infer_state.mtp_draft_input_hiddens is None:
+            # TODO: 因为在做pre check的时候必须要提供一个输入，所以这里会有一个全0的输入
+            tgt_hidden = torch.zeros(
+                input_embdings.shape[0], layer_weight.fc_weight_.in_dim, device=input_embdings.device, dtype=input_embdings.dtype
+            )
+        else:
+            tgt_hidden = infer_state.mtp_draft_input_hiddens
+        
+        # 只有当tgt_hidden的最后一个维度不等于hidden_size的时候才会过这个fc层
+        if tgt_hidden.shape[-1] != input_embdings.shape[-1]:
+            # 此时根据EAGLE-3的原始实现，tgt_hidden的维度应该是hidden_size * 3
+            assert tgt_hidden.shape[-1] == layer_weight.fc_weight_.in_dim, \
+                f"input hidden dim {tgt_hidden.shape[-1]} not match weight dim {layer_weight.fc_weight_.in_dim}"
+            tgt_hidden = layer_weight.fc_weight_.mm(tgt_hidden)
+        tgt_hidden1 = self._hidden_norm(tgt_hidden, infer_state, layer_weight)
+        
+        input0 = self._att_norm(input_embdings, infer_state, layer_weight)
+        input1 = torch.cat([input0, tgt_hidden1], dim=-1)
+        input0 = None
+        
+        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        input1 = None
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        o = self._token_attention_kernel(q, infer_state, layer_weight)
+        q = None
+        o = self._get_o(o, infer_state, layer_weight)
+        if self.tp_world_size_ > 1:
+            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        tgt_hidden.add_(o.view(-1, self.embed_dim_))
+        o = None
+
+        input1 = self._ffn_norm(tgt_hidden, infer_state, layer_weight)
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        input1 = None
+        if self.tp_world_size_ > 1:
+            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        tgt_hidden.add_(ffn_out.view(-1, self.embed_dim_))
+        return tgt_hidden

@@ -18,7 +18,7 @@ exceptiongroup==1.1.2
 fastapi==0.115.6
 filelock==3.17.0
 fsspec==2023.6.0
-gmpy2==2.1.2
+gmpy2
 h11==0.14.0
 humanfriendly==10.0
 humanize==4.7.0
@@ -74,7 +74,7 @@ tiktoken==0.7.0
 matplotlib==3.8.2
 psutil==5.9.4
 prometheus_client==0.20.0
-cchardet==2.1.7
+# cchardet==2.1.7
 ujson==5.10.0
 frozendict==2.4.6
 atomics==1.0.3
