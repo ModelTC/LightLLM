@@ -115,8 +115,3 @@ def log_time_ready(mark_name, time_count: int):
         return True
     else:
         return False
-
-# print_rank0 use the same as print, but only print on rank 0 in distributed setting
-def print_rank0(*args, **kwargs):
-    if int(os.environ.get("LIGHTLLM_GLOBAL_RANK", "0")) == 0:
-        print(*args, **kwargs)
