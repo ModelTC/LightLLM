@@ -184,6 +184,7 @@ class StartArgs:
     visual_port: int = field(default=None)
     audio_port: int = field(default=None)
     cache_port: int = field(default=None)
+    cache_socket_path: Optional[str] = field(default=None)
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)

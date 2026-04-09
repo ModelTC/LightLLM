@@ -109,7 +109,7 @@ class VisualOnlyManager(rpyc.Service):
                     "weight_dir": self.model_weightdir,
                     "device_id": device_id,
                     "vit_tp": self.vit_tp,
-                    "cache_port": None,  # visual only 模式下不使用 embed cache
+                    "cache_socket_path": None,  # visual only 模式下不使用 embed cache
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,
                     "data_type": self.args.data_type,

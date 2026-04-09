@@ -325,6 +325,7 @@ def normal_or_p_d_start(args):
     args.visual_port = visual_port
     args.audio_port = audio_port
     args.cache_port = cache_port
+    args.cache_socket_path = f"/tmp/{get_unique_server_name()}_embed_cache.sock"
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
     # 申请在 p d 分离模式下，会用的端口

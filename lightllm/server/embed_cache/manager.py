@@ -1,3 +1,4 @@
+import os
 import rpyc
 import uuid
 import inspect
@@ -62,7 +63,10 @@ def start_cache_manager(args: StartArgs, pipe_writer):
     from rpyc.utils.server import ThreadedServer
     import lightllm.utils.rpyc_fix_utils as _
 
-    t = ThreadedServer(service, port=args.cache_port, protocol_config={"allow_pickle": True})
+    socket_path = args.cache_socket_path
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
+    t = ThreadedServer(service, socket_path=socket_path, protocol_config={"allow_pickle": True})
     pipe_writer.send("init ok")
     t.start()
 

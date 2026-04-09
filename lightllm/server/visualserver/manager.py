@@ -2,8 +2,6 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
-import socket
 import pickle
 import inspect
 import setproctitle
@@ -21,6 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.rpyc_fix_utils import connect_embed_cache_rpyc
 from rpyc.utils.classic import obtain
 
 
@@ -48,8 +47,8 @@ class VisualManager:
 
         self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
-        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
-        self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        assert args.cache_socket_path is not None
+        self.cache_client = connect_embed_cache_rpyc(args.cache_socket_path)
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
@@ -77,7 +76,7 @@ class VisualManager:
                     "weight_dir": self.model_weightdir,
                     "device_id": device_id,
                     "vit_tp": self.vit_tp,
-                    "cache_port": self.args.cache_port,
+                    "cache_socket_path": self.args.cache_socket_path,
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,
                     "data_type": self.args.data_type,

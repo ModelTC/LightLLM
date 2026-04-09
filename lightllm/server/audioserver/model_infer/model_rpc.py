@@ -2,7 +2,6 @@ import queue
 import threading
 import time
 import rpyc
-import socket
 import torch
 import torch.distributed as dist
 from typing import List
@@ -14,6 +13,7 @@ from lightllm.server.multimodal_params import AudioItem
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_audio_distributed_env
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.utils.rpyc_fix_utils import connect_embed_cache_rpyc
 from lightllm.utils.log_utils import init_logger
 
 
@@ -31,7 +31,7 @@ class AudioModelRpcServer(rpyc.Service):
         self.audio_tp = kvargs["audio_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
-        self.cache_port = kvargs["cache_port"]
+        self.cache_socket_path = kvargs["cache_socket_path"]
         self.data_type = kvargs["data_type"]
 
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
@@ -39,7 +39,7 @@ class AudioModelRpcServer(rpyc.Service):
             model_cfg = model_cfg["thinker_config"]
 
         audio_config = model_cfg["audio_config"]
-        model_kvargs = {"cache_port": self.cache_port, "data_type": self.data_type}
+        model_kvargs = {"data_type": self.data_type}
         try:
             self.model_type = audio_config["model_type"]
             if self.model_type == "clap_audio_model" or self.model_type == "whisper":
@@ -52,8 +52,7 @@ class AudioModelRpcServer(rpyc.Service):
             self.model.load_model(weight_dir, model_cfg)
             self.model = self.model.cuda()
 
-            self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
-            self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.cache_client = connect_embed_cache_rpyc(self.cache_socket_path)
             self.cpu_embed_cache_client = CpuEmbedCacheClient(
                 create_meta_data=False,
                 init_shm_data=False,

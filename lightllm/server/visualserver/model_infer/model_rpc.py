@@ -1,6 +1,5 @@
 import rpyc
 import torch
-import socket
 import torch.multiprocessing as mp
 import queue
 import threading
@@ -24,6 +23,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.utils.rpyc_fix_utils import connect_embed_cache_rpyc
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
@@ -40,7 +40,7 @@ class VisualModelRpcServer(rpyc.Service):
         #     "weight_dir": self.model_weightdir,
         #     "device_id": device_id,
         #     "vit_tp": self.vit_tp,
-        #     "cache_port": self.args.cache_port,
+        #     "cache_socket_path": self.args.cache_socket_path,
         #     "tp_rank_id": tp_rank_id,
         #     "dp_rank_id": dp_rank_id,
         #     "data_type": self.args.data_type,
@@ -57,7 +57,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
         self.tp_rank_id = kvargs["tp_rank_id"]
-        self.cache_port = kvargs["cache_port"]
+        self.cache_socket_path = kvargs.get("cache_socket_path")
         self.is_visual_only_mode = get_env_start_args().run_mode == "visual_only"
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
@@ -112,8 +112,7 @@ class VisualModelRpcServer(rpyc.Service):
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
             if not self.is_visual_only_mode:
-                self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
-                self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.cache_client = connect_embed_cache_rpyc(self.cache_socket_path)
                 self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
             else:
                 # 独立部署vit模式下，不需要连接 cache_client, 结果是写入 afs

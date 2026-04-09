@@ -3,8 +3,6 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
-import socket
 import time
 import copy
 import hashlib
@@ -34,6 +32,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.rpyc_fix_utils import connect_embed_cache_rpyc
 from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
@@ -80,8 +79,8 @@ class HttpServerManager:
         self.enable_multimodal = args.enable_multimodal
 
         if self.enable_multimodal:
-            self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
-            self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            assert args.cache_socket_path is not None
+            self.cache_client = connect_embed_cache_rpyc(args.cache_socket_path)
 
         if not self.args.disable_vision:
             self.send_to_visual = context.socket(zmq.PUSH)

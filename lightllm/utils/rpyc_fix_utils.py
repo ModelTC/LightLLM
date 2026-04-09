@@ -135,3 +135,12 @@ def fix_accept(self):
 
 
 Server.accept = fix_accept
+
+_EMBED_CACHE_RPYC_CONFIG = {"allow_pickle": True}
+
+
+def connect_embed_cache_rpyc(cache_socket_path: str):
+    """RPyC client to embed cache ThreadedServer over a Unix domain socket."""
+    from rpyc.utils.factory import unix_connect
+
+    return unix_connect(cache_socket_path, config=_EMBED_CACHE_RPYC_CONFIG)
