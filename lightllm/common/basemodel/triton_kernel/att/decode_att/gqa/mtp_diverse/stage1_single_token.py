@@ -268,7 +268,7 @@ def mtp_diverse_stage1_single_token(
         num_stages=num_stages,
         warp_specialize=warp_specialize,
     )
-    return
+    return BLOCK_N
 
 
 if __name__ == "__main__":

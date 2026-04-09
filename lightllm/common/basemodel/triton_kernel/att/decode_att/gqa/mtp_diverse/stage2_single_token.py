@@ -6,6 +6,7 @@ MTP Diverse Attention Stage2 Kernel - Single Token Per Request Mode
 - 根据 seq_len 确定需要聚合的 kv block 数量
 - 使用 flash attention reweighting 公式
 """
+from numpy import outer
 import torch
 import triton
 import triton.language as tl
@@ -16,7 +17,7 @@ from lightllm.common.triton_utils.autotuner import autotune, Autotuner
 def get_test_configs():
     configs = []
     for num_warps in [2, 4, 8, 16]:
-        for num_stages in [2, 4, 6]:
+        for num_stages in [1, 2, 4, 5, 6]:
             configs.append(
                 {
                     "num_warps": num_warps,
@@ -26,18 +27,19 @@ def get_test_configs():
     return configs
 
 
-def get_static_key(mid_out, block_seq):
+def get_static_key(mid_out, block_n, out):
     key_params = {
         "q_head_dim": int(mid_out.shape[-1]),
-        "block_seq": block_seq,
-        "out_dtype": str(mid_out.dtype),
+        "block_n": block_n,
+        "out_dtype": str(out.dtype),
     }
     return key_params
 
 
-def get_run_key(mid_out, max_kv_len):
-    batch_size = mid_out.shape[0]
-    return batch_size * 1000 * 1000 * 1000 + max_kv_len
+def get_run_key(mid_out):
+    batch_size_head = mid_out.shape[0] * mid_out.shape[1]
+    block_num = mid_out.shape[2]
+    return batch_size_head * 1000 * 1000 * 1000 + block_num
 
 
 @triton.jit
@@ -56,8 +58,10 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
     stride_ob,
     stride_oh,
     stride_od,
-    BLOCK_SEQ: tl.constexpr,
+    mid_out_block_num,
+    BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
 ):
     """
     MTP Diverse Stage2 Kernel - Single Token Per Request Mode
@@ -69,28 +73,20 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
 
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
 
-    # 如果 seq_len 为 0，直接返回
-    if cur_batch_seq_len == 0:
-        return
-
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
     # 计算需要处理的 kv block 数量
-    block_n_size = tl.cdiv(cur_batch_seq_len, BLOCK_SEQ)
+    block_n_size = tl.cdiv(cur_batch_seq_len, BLOCK_N)
+    block_n_size = tl.min(block_n_size, mid_out_block_num)
 
     # 初始化 accumulator
     sum_exp = 0.0
     max_logic = -float("inf")
     acc = tl.zeros([BLOCK_DMODEL], dtype=tl.float32)
 
-    for block_idx in range(0, block_n_size, 1):
+    for block_idx in tl.range(0, block_n_size, 1, num_stages=NUM_STAGES):
         # 加载第 block_idx 个 kv block 的中间结果
-        offs_mid_o = (
-            cur_batch * stride_mid_ob
-            + cur_head * stride_mid_oh
-            + block_idx * stride_mid_os
-            + offs_d[:]
-        )
+        offs_mid_o = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + block_idx * stride_mid_os + offs_d[:]
         offs_mid_o_logic = cur_batch * stride_mid_o_eb + cur_head * stride_mid_o_eh + block_idx
 
         mid_o_val = tl.load(Mid_O + offs_mid_o)
@@ -113,7 +109,7 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
 
 
 @autotune(
-    kernel_name="_fwd_kernel_mtp_diverse_stage2_single_token:v1",
+    kernel_name="_fwd_kernel_mtp_diverse_stage2_single_token:v2",
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
@@ -124,22 +120,10 @@ def mtp_diverse_stage2_single_token(
     mid_out: torch.Tensor,
     mid_out_logsumexp: torch.Tensor,
     B_Seqlen: torch.Tensor,
-    O: torch.Tensor,
-    block_seq: int,
-    max_kv_len: int,
+    out: torch.Tensor,
+    block_n: int,
     run_config: Optional[dict] = None,
 ):
-    """
-    MTP Diverse Attention Stage2 - Single Token Per Request Mode
-
-    参数：
-    - mid_out: [batch, head, seq_block_num, head_dim] - 中间结果
-    - mid_out_logsumexp: [batch, head, seq_block_num] - 中间 logsumexp
-    - B_Seqlen: [batch] - 每个请求的 seq_len
-    - O: [batch, num_heads, head_dim] - 输出
-    - block_seq: 块大小
-    - max_kv_len: 最大 kv 长度
-    """
     if not run_config:
         run_config = {"num_warps": 4, "num_stages": 2}
 
@@ -155,7 +139,7 @@ def mtp_diverse_stage2_single_token(
         B_Seqlen=B_Seqlen,
         Mid_O=mid_out,
         Mid_O_LogExpSum=mid_out_logsumexp,
-        O=O,
+        O=out,
         stride_mid_ob=mid_out.stride(0),
         stride_mid_oh=mid_out.stride(1),
         stride_mid_os=mid_out.stride(2),
@@ -163,11 +147,13 @@ def mtp_diverse_stage2_single_token(
         stride_mid_o_eb=mid_out_logsumexp.stride(0),
         stride_mid_o_eh=mid_out_logsumexp.stride(1),
         stride_mid_o_es=mid_out_logsumexp.stride(2),
-        stride_ob=O.stride(0),
-        stride_oh=O.stride(1),
-        stride_od=O.stride(2),
-        BLOCK_SEQ=block_seq,
+        stride_ob=out.stride(0),
+        stride_oh=out.stride(1),
+        stride_od=out.stride(2),
+        mid_out_block_num=mid_out.shape[2],
+        BLOCK_N=block_n,
         BLOCK_DMODEL=Lk,
+        NUM_STAGES=num_stages,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -180,41 +166,38 @@ if __name__ == "__main__":
     if get_triton_autotune_level() != 2:
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
-    # static params
-    gqa_group_size = 4
     q_head_dim = 128
-    block_seq = 256
-    out_dtype = torch.float32
+
+    out_dtype = torch.float
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
-    decode_lengths = [1024, 2048, 8192, 16384]
-
-    q_head_num = 32
+    q_head_num = 1
 
     Autotuner.start_autotune_warmup()
     # autotuing kernel
     for batch_size in batch_sizes:
-        for length in decode_lengths:
-            if batch_size <= 16:
-                block_num = 128
-            elif batch_size <= 64:
-                block_num = 64
-            else:
-                block_num = 32
+        for block_n in [16, 32, 64, 128]:
+            for out_dtype in [torch.float16, torch.bfloat16]:
+                if batch_size <= 16:
+                    block_num = 128
+                elif batch_size <= 64:
+                    block_num = 64
+                else:
+                    block_num = 32
 
-            # Setup test tensors
-            mid_out = torch.randn(batch_size, q_head_num, block_num, q_head_dim, dtype=out_dtype, device="cuda")
-            mid_out_logsumexp = torch.randn(batch_size, q_head_num, block_num, dtype=torch.float32, device="cuda")
-            B_Seqlen = torch.full((batch_size,), length, dtype=torch.int32, device="cuda")
-            O = torch.zeros(batch_size, q_head_num, q_head_dim, dtype=out_dtype, device="cuda")
+                mid_out = torch.randn(
+                    batch_size, q_head_num, block_num, q_head_dim, dtype=torch.bfloat16, device="cuda"
+                )
+                mid_out_logsumexp = torch.randn(batch_size, q_head_num, block_num, dtype=torch.float32, device="cuda")
+                B_Seqlen = torch.full((batch_size,), 8196, dtype=torch.int32, device="cuda")
+                out = torch.zeros(batch_size, q_head_num, q_head_dim, dtype=out_dtype, device="cuda")
 
-            mtp_diverse_stage2_single_token(
-                mid_out=mid_out,
-                mid_out_logsumexp=mid_out_logsumexp,
-                B_Seqlen=B_Seqlen,
-                O=O,
-                block_seq=block_seq,
-                max_kv_len=length,
-            )
+                mtp_diverse_stage2_single_token(
+                    mid_out=mid_out,
+                    mid_out_logsumexp=mid_out_logsumexp,
+                    B_Seqlen=B_Seqlen,
+                    O=out,
+                    block_n=block_n,
+                )
 
     Autotuner.end_autotune_warmup()
