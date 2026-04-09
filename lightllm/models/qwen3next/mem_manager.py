@@ -37,18 +37,6 @@ class Qwen3NextHybridMemManager(MemoryManager):
         self.full_attn_layer_num = layer_num // full_attention_interval
         self.linear_attn_layer_num = layer_num - self.full_attn_layer_num
 
-        self.mamba_cache_mem_manager = MambaCacheManager(
-            size=linear_attn_cache_size,
-            layer_num=self.linear_attn_layer_num,
-            conv_state_dtype=conv_state_dtype,
-            ssm_state_dtype=ssm_state_dtype,
-            conv_kernel_size=conv_kernel_size,
-            num_linear_k_heads=num_linear_k_heads,
-            num_linear_v_heads=num_linear_v_heads,
-            head_linear_k_dim=head_linear_k_dim,
-            head_linear_v_dim=head_linear_v_dim,
-        )
-
         from lightllm.utils.envs_utils import get_env_start_args
 
         start_args = get_env_start_args()
@@ -57,7 +45,7 @@ class Qwen3NextHybridMemManager(MemoryManager):
         if self.enable_cpu_mamba_cache:
             from lightllm.common.mamba_cache_mem_manager.cpu_cache_manager import CpuMambaCacheManager
 
-            # Recreate GPU pool with small fixed size (just for active requests)
+            # GPU pool: small, just for active requests
             gpu_pool_size = max_req_num * (getattr(start_args, "mtp_step", 0) + 1)
             self.mamba_cache_mem_manager = MambaCacheManager(
                 size=gpu_pool_size,
@@ -71,7 +59,7 @@ class Qwen3NextHybridMemManager(MemoryManager):
                 head_linear_v_dim=head_linear_v_dim,
             )
 
-            # CPU pool for tree snapshots (large capacity)
+            # CPU pool: large capacity for tree snapshots
             self.cpu_mamba_cache_manager = CpuMambaCacheManager(
                 size=linear_attn_cache_size,
                 layer_num=self.linear_attn_layer_num,
@@ -86,6 +74,18 @@ class Qwen3NextHybridMemManager(MemoryManager):
                 shm_key_ssm=self._dp_offset_shm_key(getattr(start_args, "cpu_mamba_ssm_shm_id", None)),
             )
         else:
+            # Original path: all mamba cache on GPU
+            self.mamba_cache_mem_manager = MambaCacheManager(
+                size=linear_attn_cache_size,
+                layer_num=self.linear_attn_layer_num,
+                conv_state_dtype=conv_state_dtype,
+                ssm_state_dtype=ssm_state_dtype,
+                conv_kernel_size=conv_kernel_size,
+                num_linear_k_heads=num_linear_k_heads,
+                num_linear_v_heads=num_linear_v_heads,
+                head_linear_k_dim=head_linear_k_dim,
+                head_linear_v_dim=head_linear_v_dim,
+            )
             self.cpu_mamba_cache_manager = None
 
         super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
