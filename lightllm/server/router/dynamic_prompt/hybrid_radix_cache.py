@@ -14,7 +14,11 @@ class HybridRadixCache(RadixCache):
     def __init__(self, unique_name, total_token_num, rank_in_node, kv_cache_mem_manager):
         super().__init__(unique_name, total_token_num, rank_in_node, kv_cache_mem_manager)
         assert hasattr(kv_cache_mem_manager, "mamba_cache_mem_manager")
-        self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
+        cpu_mgr = getattr(kv_cache_mem_manager, "cpu_mamba_cache_manager", None)
+        if cpu_mgr is not None:
+            self.buffer_mem_manager = cpu_mgr
+        else:
+            self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
         self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: (x.is_hotspot, x.buffer_time))
         # Adaptive threshold state
         self.min_insert_threshold = 1024

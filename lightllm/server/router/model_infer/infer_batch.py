@@ -100,10 +100,27 @@ class InferenceContext:
                     for r in req_objs
                     if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
                 ]
-                req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
-                src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
-                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
-                req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
+
+                cpu_mgr = getattr(req_manager, "cpu_buffer_mem_manager", None)
+
+                if cpu_mgr is not None:
+                    # CPU-offloaded path: load from CPU SHM → GPU working buffers
+                    req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int64)
+                    cpu_slots = torch.tensor(src_buf_ids, dtype=torch.int64)
+                    gpu_dst = req_manager.req_to_buffer_index[req_tensor, 0]
+                    cpu_mgr.load_to_gpu(
+                        req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                        req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                        cpu_slots,
+                        gpu_dst,
+                    )
+                    cpu_mgr.sync_transfer()
+                else:
+                    # Original GPU-to-GPU path
+                    req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
+                    src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
+                    dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
+                    req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -209,16 +226,30 @@ class InferenceContext:
         if self.has_recurrent_state:
             node = self._insert_kv_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
-            # Only transfer the buffer if the tree node doesn't already have one.
-            # This matches the original behavior and avoids replacing hotspot
-            # buffers placed by _pause_req_mem_and_buffers.
+            cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
+
             if node is not None and node.buffer_idx is None:
-                primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=False)
-                # Primary buffer is now owned by the tree — don't free it.
-                # Note: secondary buffers (MTP) are NOT freed here either,
-                # matching the original behavior where return False skipped
-                # all buffer freeing.
+                if cpu_mgr is not None:
+                    # Evict existing CPU buffers if needed, then allocate
+                    self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                    if cpu_mgr.can_use_mem_size >= 1:
+                        cpu_slot = cpu_mgr.alloc(1)
+                        primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                        gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                        cpu_mgr.offload_to_cpu(
+                            self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                            self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                            gpu_idx,
+                            cpu_slot,
+                        )
+                        cpu_mgr.sync_transfer()
+                        self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=False)
+                    # GPU buffer is freed back to working pool regardless
+                    free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+                else:
+                    # Original path: transfer GPU buffer ownership to tree
+                    primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                    self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=False)
             else:
                 free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
         else:
@@ -240,11 +271,29 @@ class InferenceContext:
 
         # Transfer primary buffer to the tree node as hotspot
         req_to_buffer_index = self.req_manager.req_to_buffer_index
+        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
+
         if node is not None and req.cur_kv_len > 0:
             primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-            self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=True)
-            # Free only the non-primary buffers; primary is now owned by the tree
-            free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+            if cpu_mgr is not None:
+                # Evict existing CPU buffers if needed, then allocate
+                self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                if cpu_mgr.can_use_mem_size >= 1:
+                    cpu_slot = cpu_mgr.alloc(1)
+                    gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                    cpu_mgr.offload_to_cpu(
+                        self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                        self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                        gpu_idx,
+                        cpu_slot,
+                    )
+                    cpu_mgr.sync_transfer()
+                    self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=True)
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            else:
+                self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=True)
+                # Free only the non-primary buffers; primary is now owned by the tree
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
         else:
             # No valid node — free all buffers normally
             free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
@@ -264,29 +313,57 @@ class InferenceContext:
                 r.mamba_buffer_target_len = 0
             return
 
-        new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(reqs_to_insert))
-        req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
-        cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
-        new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
-        radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
 
-        for i, req in enumerate(reqs_to_insert):
-            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-
-            prefix_len, new_node = radix_cache.insert(key, value)
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-
-            radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            radix_cache.add_node_ref_counter(new_node)
-            radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=True)
-
-            req.extra_need_to_free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+        if cpu_mgr is not None:
+            # CPU-offloaded path: offload current GPU buffers to CPU slots
+            cpu_slots = cpu_mgr.alloc(len(reqs_to_insert))
+            req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
+            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+            cpu_mgr.offload_to_cpu(
+                self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                cur_buffers,
+                cpu_slots,
             )
-            req.shared_kv_node = new_node
-            req.is_hotspot_prefill = False
-            req.mamba_buffer_target_len = 0
+            cpu_mgr.sync_transfer()
+
+            for i, req in enumerate(reqs_to_insert):
+                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+                prefix_len, new_node = radix_cache.insert(key, value)
+                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+                radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                radix_cache.add_node_ref_counter(new_node)
+                radix_cache.add_buffer_idx_to_node(new_node, cpu_slots[i].item(), is_hotspot=True)
+                req.extra_need_to_free_token_index.append(
+                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+                )
+                req.shared_kv_node = new_node
+                req.is_hotspot_prefill = False
+                req.mamba_buffer_target_len = 0
+        else:
+            # Original GPU-to-GPU path
+            new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(reqs_to_insert))
+            req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
+            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+            new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
+            radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+
+            for i, req in enumerate(reqs_to_insert):
+                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+                prefix_len, new_node = radix_cache.insert(key, value)
+                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+                radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                radix_cache.add_node_ref_counter(new_node)
+                radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=True)
+                req.extra_need_to_free_token_index.append(
+                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+                )
+                req.shared_kv_node = new_node
+                req.is_hotspot_prefill = False
+                req.mamba_buffer_target_len = 0
 
     def snapshot_prefill_complete_buffers(self, run_reqs: List["InferReq"]):
         """Opportunistically snapshot Mamba states for requests that just completed prefill."""
@@ -321,27 +398,51 @@ class InferenceContext:
         if not eligible:
             return
 
-        new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(eligible))
-        req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
-        cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
-        new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
-        radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
 
-        for i, req in enumerate(eligible):
-            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-
-            prefix_len, new_node = radix_cache.insert(key, value)
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-
-            radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            radix_cache.add_node_ref_counter(new_node)
-            radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=False)
-
-            req.extra_need_to_free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+        if cpu_mgr is not None:
+            cpu_slots = cpu_mgr.alloc(len(eligible))
+            req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
+            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+            cpu_mgr.offload_to_cpu(
+                self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                cur_buffers,
+                cpu_slots,
             )
-            req.shared_kv_node = new_node
+            cpu_mgr.sync_transfer()
+
+            for i, req in enumerate(eligible):
+                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+                prefix_len, new_node = radix_cache.insert(key, value)
+                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+                radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                radix_cache.add_node_ref_counter(new_node)
+                radix_cache.add_buffer_idx_to_node(new_node, cpu_slots[i].item(), is_hotspot=False)
+                req.extra_need_to_free_token_index.append(
+                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+                )
+                req.shared_kv_node = new_node
+        else:
+            new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(eligible))
+            req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
+            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
+            new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
+            radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+
+            for i, req in enumerate(eligible):
+                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+                prefix_len, new_node = radix_cache.insert(key, value)
+                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+                radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                radix_cache.add_node_ref_counter(new_node)
+                radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=False)
+                req.extra_need_to_free_token_index.append(
+                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+                )
+                req.shared_kv_node = new_node
 
     def _save_promptcache_kvbuffer(self):
         """

@@ -775,6 +775,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="the data type of the model weight",
     )
     parser.add_argument(
+        "--enable_cpu_mamba_cache",
+        action="store_true",
+        help="Offload Mamba state snapshots to CPU shared memory, keeping only active-request buffers on GPU.",
+    )
+    parser.add_argument(
         "--hardware_platform",
         type=str,
         default="cuda",

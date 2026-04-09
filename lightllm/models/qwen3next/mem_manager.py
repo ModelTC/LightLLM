@@ -49,6 +49,45 @@ class Qwen3NextHybridMemManager(MemoryManager):
             head_linear_v_dim=head_linear_v_dim,
         )
 
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        start_args = get_env_start_args()
+        self.enable_cpu_mamba_cache = getattr(start_args, "enable_cpu_mamba_cache", False)
+
+        if self.enable_cpu_mamba_cache:
+            from lightllm.common.mamba_cache_mem_manager.cpu_cache_manager import CpuMambaCacheManager
+
+            # Recreate GPU pool with small fixed size (just for active requests)
+            gpu_pool_size = max_req_num * (getattr(start_args, "mtp_step", 0) + 1)
+            self.mamba_cache_mem_manager = MambaCacheManager(
+                size=gpu_pool_size,
+                layer_num=self.linear_attn_layer_num,
+                conv_state_dtype=conv_state_dtype,
+                ssm_state_dtype=ssm_state_dtype,
+                conv_kernel_size=conv_kernel_size,
+                num_linear_k_heads=num_linear_k_heads,
+                num_linear_v_heads=num_linear_v_heads,
+                head_linear_k_dim=head_linear_k_dim,
+                head_linear_v_dim=head_linear_v_dim,
+            )
+
+            # CPU pool for tree snapshots (large capacity)
+            self.cpu_mamba_cache_manager = CpuMambaCacheManager(
+                size=linear_attn_cache_size,
+                layer_num=self.linear_attn_layer_num,
+                conv_state_dtype=conv_state_dtype,
+                ssm_state_dtype=ssm_state_dtype,
+                conv_kernel_size=conv_kernel_size,
+                num_linear_k_heads=num_linear_k_heads,
+                num_linear_v_heads=num_linear_v_heads,
+                head_linear_k_dim=head_linear_k_dim,
+                head_linear_v_dim=head_linear_v_dim,
+                shm_key_conv=getattr(start_args, "cpu_mamba_conv_shm_id", None),
+                shm_key_ssm=getattr(start_args, "cpu_mamba_ssm_shm_id", None),
+            )
+        else:
+            self.cpu_mamba_cache_manager = None
+
         super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
@@ -64,6 +103,8 @@ class Qwen3NextHybridMemManager(MemoryManager):
     def free_all(self):
         super().free_all()
         self.mamba_cache_mem_manager.free_all()
+        if self.cpu_mamba_cache_manager is not None:
+            self.cpu_mamba_cache_manager.free_all()
         return
 
     def get_cell_size(self):
