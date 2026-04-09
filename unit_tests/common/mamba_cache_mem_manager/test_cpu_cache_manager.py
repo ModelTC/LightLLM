@@ -57,6 +57,25 @@ class TestCpuMambaCacheManagerAllocFree:
         unique = set(slots.tolist())
         assert len(unique) == POOL_SIZE
 
+    def test_alloc_free_alloc_reuse(self):
+        mgr = _make_manager()
+        slots1 = mgr.alloc(3)
+        freed_indices = slots1.tolist()
+        mgr.free(slots1)
+        slots2 = mgr.alloc(3)
+        # The reallocated indices should match the freed ones (stack LIFO order)
+        assert sorted(slots2.tolist()) == sorted(freed_indices)
+
+    def test_free_all(self):
+        mgr = _make_manager()
+        mgr.alloc(5)
+        assert mgr.can_use_mem_size == POOL_SIZE - 5
+        mgr.free_all()
+        assert mgr.can_use_mem_size == POOL_SIZE
+        # Should be able to alloc the full pool again
+        slots = mgr.alloc(POOL_SIZE)
+        assert len(slots) == POOL_SIZE
+
 
 # ---------------------------------------------------------------------------
 # TestCpuMambaCacheTransfer  (requires CUDA)

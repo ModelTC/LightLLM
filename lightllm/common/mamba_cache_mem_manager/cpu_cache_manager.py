@@ -161,6 +161,17 @@ class CpuMambaCacheManager:
         self.mark_start -= free_len
         self.can_use_mem_size += free_len
 
+        # Zero the CPU buffers for freed slots (defensive, mirrors GPU MambaCacheManager)
+        if isinstance(free_index, list):
+            for idx in free_index:
+                self.conv_state_buffer[:, idx] = 0
+                self.ssm_state_buffer[:, idx] = 0
+        else:
+            idx_list = free_index.tolist() if hasattr(free_index, "tolist") else list(free_index)
+            for idx in idx_list:
+                self.conv_state_buffer[:, idx] = 0
+                self.ssm_state_buffer[:, idx] = 0
+
     def free_all(self):
         """Reset pool and zero out buffers."""
         self.conv_state_buffer.zero_()
