@@ -82,13 +82,25 @@ class Qwen3NextHybridMemManager(MemoryManager):
                 num_linear_v_heads=num_linear_v_heads,
                 head_linear_k_dim=head_linear_k_dim,
                 head_linear_v_dim=head_linear_v_dim,
-                shm_key_conv=getattr(start_args, "cpu_mamba_conv_shm_id", None),
-                shm_key_ssm=getattr(start_args, "cpu_mamba_ssm_shm_id", None),
+                shm_key_conv=self._dp_offset_shm_key(getattr(start_args, "cpu_mamba_conv_shm_id", None)),
+                shm_key_ssm=self._dp_offset_shm_key(getattr(start_args, "cpu_mamba_ssm_shm_id", None)),
             )
         else:
             self.cpu_mamba_cache_manager = None
 
         super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
+
+    @staticmethod
+    def _dp_offset_shm_key(key):
+        """Offset SHM key by DP rank so each DP group gets its own shared memory segment."""
+        if key is None:
+            return None
+        try:
+            from lightllm.utils.dist_utils import get_dp_rank_in_node
+
+            return key + get_dp_rank_in_node()
+        except Exception:
+            return key
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         # KV buffer layout: [None, None, None, kv_cache, None, None, None, kv_cache, ...,
