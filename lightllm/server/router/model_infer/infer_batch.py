@@ -230,19 +230,21 @@ class InferenceContext:
 
             if node is not None and node.buffer_idx is None:
                 if cpu_mgr is not None:
-                    # Allocate a CPU slot and offload GPU state to it
-                    cpu_slot = cpu_mgr.alloc(1)
-                    primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                    gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                    cpu_mgr.offload_to_cpu(
-                        self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                        self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                        gpu_idx,
-                        cpu_slot,
-                    )
-                    cpu_mgr.sync_transfer()
-                    self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=False)
-                    # GPU buffer is freed back to working pool
+                    # Evict existing CPU buffers if needed, then allocate
+                    self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                    if cpu_mgr.can_use_mem_size >= 1:
+                        cpu_slot = cpu_mgr.alloc(1)
+                        primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                        gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                        cpu_mgr.offload_to_cpu(
+                            self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                            self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                            gpu_idx,
+                            cpu_slot,
+                        )
+                        cpu_mgr.sync_transfer()
+                        self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=False)
+                    # GPU buffer is freed back to working pool regardless
                     free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
                 else:
                     # Original path: transfer GPU buffer ownership to tree
@@ -274,16 +276,19 @@ class InferenceContext:
         if node is not None and req.cur_kv_len > 0:
             primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
             if cpu_mgr is not None:
-                cpu_slot = cpu_mgr.alloc(1)
-                gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                cpu_mgr.offload_to_cpu(
-                    self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                    self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                    gpu_idx,
-                    cpu_slot,
-                )
-                cpu_mgr.sync_transfer()
-                self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=True)
+                # Evict existing CPU buffers if needed, then allocate
+                self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                if cpu_mgr.can_use_mem_size >= 1:
+                    cpu_slot = cpu_mgr.alloc(1)
+                    gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                    cpu_mgr.offload_to_cpu(
+                        self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                        self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                        gpu_idx,
+                        cpu_slot,
+                    )
+                    cpu_mgr.sync_transfer()
+                    self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=True)
                 free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
             else:
                 self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=True)
