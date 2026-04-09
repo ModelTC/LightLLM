@@ -37,7 +37,6 @@ def autotune(
     run_key_func: Callable,
     run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
     mutates_args: List[str] = [],
-    use_cuda_graph: bool = True,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -72,7 +71,6 @@ def autotune(
             run_key_func=run_key_func,
             run_key_distance_func=run_key_distance_func,
             mutates_args=mutates_args,
-            use_cuda_graph=use_cuda_graph,
         )
 
     return decorator
@@ -104,7 +102,6 @@ class Autotuner:
         run_key_func: Callable,
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
-        use_cuda_graph: bool = True,
     ):
 
         self.configs_gen_func = configs_gen_func
@@ -127,7 +124,6 @@ class Autotuner:
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
-        self.use_cuda_graph = use_cuda_graph
 
         self._static_key_func_param_names = [
             name for name, _ in inspect.signature(self.static_key_func).parameters.items()
@@ -257,39 +253,24 @@ class Autotuner:
             # warmup
             kernel_call()
 
-            if self.use_cuda_graph:
-                torch.cuda.current_stream().synchronize()
-                g = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(g, stream=torch.cuda.Stream()):
-                    for _ in range(n_repeat):
-                        kernel_call()
-                torch.cuda.current_stream().synchronize()
+            torch.cuda.current_stream().synchronize()
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, stream=torch.cuda.Stream()):
+                for _ in range(n_repeat):
+                    kernel_call()
+            torch.cuda.current_stream().synchronize()
 
-                state = _BenchmarkState()
-                for i in range(n_retries):
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    start_event.record()
-                    g.replay()
-                    end_event.record()
-                    end_event.synchronize()
-                    state.update(start_event.elapsed_time(end_event) / n_repeat)
-                del g
-                return state.avg
-            else:
-                # Non-CUDA graph path for kernels with conditional returns
-                state = _BenchmarkState()
-                for i in range(n_retries):
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    torch.cuda.current_stream().synchronize()
-                    start_event.record()
-                    for _ in range(n_repeat):
-                        kernel_call()
-                    end_event.record()
-                    end_event.synchronize()
-                    state.update(start_event.elapsed_time(end_event) / n_repeat)
-                return state.avg
+            state = _BenchmarkState()
+            for i in range(n_retries):
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+                g.replay()
+                end_event.record()
+                end_event.synchronize()
+                state.update(start_event.elapsed_time(end_event) / n_repeat)
+            del g
+            return state.avg
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
