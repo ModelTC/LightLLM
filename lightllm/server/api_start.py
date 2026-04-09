@@ -366,6 +366,8 @@ def normal_or_p_d_start(args):
         )
         if origin_devices:
             os.environ["CUDA_VISIBLE_DEVICES"] = origin_devices
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager
