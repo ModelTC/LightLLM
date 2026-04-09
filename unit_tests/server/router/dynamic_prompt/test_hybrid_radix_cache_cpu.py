@@ -25,6 +25,7 @@ class TestHybridRadixCacheCpuBuffers:
         from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 
         kv_mem = MagicMock()
+        kv_mem.cpu_mamba_cache_manager = cpu_mgr
         kv_mem.mamba_cache_mem_manager = cpu_mgr
         kv_mem.can_use_mem_size = 1000
         cache = HybridRadixCache("test_cpu", 100, 0, kv_mem)
