@@ -8,6 +8,7 @@ from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35Tr
 from lightllm.models.qwen3_5_moe.layer_weights.transformer_layer_weight import Qwen35MOETransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.distributed import all_reduce
 from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.log_utils import init_logger
@@ -181,8 +182,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
-
         mrope_triton_fused(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, : self.tp_k_head_num_, :],
@@ -266,6 +265,7 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
             o = self._token_attention_kernel(q, infer_state, layer_weight)
             q = None
             o = self._tpsp_get_o(o, infer_state, layer_weight)
+        input1 = None
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
         return input_embdings
@@ -283,6 +283,7 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
             o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
             q = None
             o = self._tpsp_get_o(o, infer_state, layer_weight)
+        input1 = None
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
         return input_embdings
