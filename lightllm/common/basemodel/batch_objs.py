@@ -65,25 +65,25 @@ class ModelInput:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-        if not self.is_prefill and (
-            enable_diverse_mode_gqa_decode_fast_kernel() or enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()
-        ):
+        if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():
             batch_size = len(self.b_req_idx)
             if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
+                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
             else:
                 self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
-            # b_shared_seq_len 只在 diverse mode 下使用，动态 MTP mode 不需要
-            if enable_diverse_mode_gqa_decode_fast_kernel():
-                if self.b_shared_seq_len is None:
-                    self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
-                else:
-                    self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+            if self.b_shared_seq_len is None:
+                self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
+            else:
+                self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+        elif not self.is_prefill and (enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
+            batch_size = len(self.b_req_idx)
+            if self.b_mark_shared_group is None:
+                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
+            else:
+                self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
-        if self.original_num_reqs is None:
-            self.original_num_reqs = self.batch_size
 
     def check_input(self):
         assert len(self.multimodal_params) == self.batch_size
