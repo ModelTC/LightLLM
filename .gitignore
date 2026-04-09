@@ -11,3 +11,4 @@ requirements-musa.txt
 hf_datasets_cache/
 wandb/
 datasets/
+trace/

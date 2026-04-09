@@ -222,7 +222,7 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
     
-    @calculate_time(show=True, min_cost_ms=10)
+    # @calculate_time(show=True, min_cost_ms=10)
     def prefill_mtp(
         self,
         event_pack: OverlapEventPack,
@@ -281,9 +281,9 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             b_mtp_index_cpu = model_input.b_mtp_index
             @calculate_time(show=True, min_cost_ms=1)
-            def main_model_decode_forward_func(model_input):
+            def main_model_forward(model_input):
                 return self.model.forward(model_input)
-            model_output = main_model_decode_forward_func(model_input)
+            model_output = main_model_forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
             b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]

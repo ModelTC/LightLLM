@@ -22,17 +22,21 @@ class RequestThread(threading.Thread):
 url = "http://localhost:8088/generate"
 headers = {"Content-Type": "application/json"}
 
-for i in range(1):
+# rsponse = requests.get("http://localhost:8088/profiler_start")
+
+for i in range(100):
     data = {
         "inputs": "San Francisco is a",
         # 'temperature': 0.1,
         "parameters": {
             "do_sample": False,
-            "max_new_tokens": 500,
+            "max_new_tokens": 200,
         },
     }
     thread = RequestThread(url, headers, data)
     thread.start()
+    
+# response = requests.get("http://localhost:8088/profiler_stop")
 
 # time.sleep(2)
 
