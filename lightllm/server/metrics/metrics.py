@@ -65,6 +65,7 @@ class Monitor:
         self.init_metrics(args)
 
     def init_metrics(self, args):
+        self.model_name = args.model_name
 
         self.create_histogram("lightllm_request_duration", self.duration_buckets)
         self.create_histogram("lightllm_request_validation_duration", self.duration_buckets)
@@ -112,42 +113,36 @@ class Monitor:
         self.create_gauge("lightllm_num_running_reqs")
 
     def create_histogram(self, name, buckets, labelnames=None):
-        if labelnames is None:
-            histogram = Histogram(name, MONITOR_INFO[name], buckets=buckets, registry=self.registry)
-        else:
-            histogram = Histogram(
-                name, MONITOR_INFO[name], labelnames=labelnames, buckets=buckets, registry=self.registry
-            )
+        all_labels = ["model_name"] + (labelnames or [])
+        histogram = Histogram(name, MONITOR_INFO[name], labelnames=all_labels, buckets=buckets, registry=self.registry)
         self.monitor_registry[name] = histogram
 
     def create_counter(self, name, labelnames=None):
-        if labelnames is None:
-            histogram = Counter(name, MONITOR_INFO[name], registry=self.registry)
-        else:
-            histogram = Counter(name, MONITOR_INFO[name], labelnames=labelnames, registry=self.registry)
-        self.monitor_registry[name] = histogram
+        all_labels = ["model_name"] + (labelnames or [])
+        counter = Counter(name, MONITOR_INFO[name], labelnames=all_labels, registry=self.registry)
+        self.monitor_registry[name] = counter
 
     def create_gauge(self, name):
-        gauge = Gauge(name, MONITOR_INFO[name], registry=self.registry)
+        gauge = Gauge(name, MONITOR_INFO[name], labelnames=["model_name"], registry=self.registry)
         self.monitor_registry[name] = gauge
 
     def counter_inc(self, name, label=None):
         if label is None:
-            self.monitor_registry[name].inc()
+            self.monitor_registry[name].labels(model_name=self.model_name).inc()
         else:
-            self.monitor_registry[name].labels(method=label).inc()
+            self.monitor_registry[name].labels(model_name=self.model_name, method=label).inc()
 
     def counter_inc_by(self, name, amount):
-        self.monitor_registry[name].inc(amount)
+        self.monitor_registry[name].labels(model_name=self.model_name).inc(amount)
 
     def histogram_observe(self, name, value, label=None):
         if label is None:
-            self.monitor_registry[name].observe(value)
+            self.monitor_registry[name].labels(model_name=self.model_name).observe(value)
         else:
-            self.monitor_registry[name].labels(method=label).observe(value)
+            self.monitor_registry[name].labels(model_name=self.model_name, method=label).observe(value)
 
     def gauge_set(self, name, value):
-        self.monitor_registry[name].set(value)
+        self.monitor_registry[name].labels(model_name=self.model_name).set(value)
 
     def push_metrices(self):
         if self.gateway_url is not None:
