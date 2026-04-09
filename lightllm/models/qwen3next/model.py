@@ -103,6 +103,32 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         self.req_manager = ReqManagerForMamba(self.max_req_num, create_max_seq_len, self.mem_manager)
 
     @torch.no_grad()
+    def _autotune_warmup(self):
+        super()._autotune_warmup()
+
+        from lightllm.common.basemodel.triton_kernel.mamba_buffer_copy import (
+            copy_mamba_buffer,
+            fork_mamba_buffer,
+        )
+        from lightllm.common.triton_utils.autotuner import Autotuner
+
+        Autotuner.start_autotune_warmup()
+        mamba_mgr = self.mem_manager.mamba_cache_mem_manager
+        for cache in (mamba_mgr.conv_state_cache, mamba_mgr.ssm_state_cache):
+            buf = cache.buffer
+            src_idx = torch.zeros(1, dtype=torch.int32, device="cuda")
+            dst_idx_copy = torch.ones(1, dtype=torch.int32, device="cuda")
+            dst_idx_fork = torch.ones(1, 1, dtype=torch.int32, device="cuda")
+            try:
+                copy_mamba_buffer(buf, buf, src_idx, dst_idx_copy)
+                fork_mamba_buffer(buf, buf, src_idx, dst_idx_fork)
+            except Exception as e:
+                logger.warning(f"mamba buffer warmup failed: {e}")
+        torch.cuda.empty_cache()
+        torch.distributed.barrier()
+        Autotuner.end_autotune_warmup()
+
+    @torch.no_grad()
     def _check_max_len_infer(self):
         """Extended memory check for hybrid attention models.
 
