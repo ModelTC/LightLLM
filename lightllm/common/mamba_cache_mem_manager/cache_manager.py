@@ -58,7 +58,8 @@ class MambaCacheManager:
         )
         self.ssm_state_dtype = ssm_state_dtype
         self.conv_state_dtype = conv_state_dtype
-        self.profile_size()
+        if self.size is None:
+            self.profile_size()
         self.mem_state = torch.arange(
             0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
         )
