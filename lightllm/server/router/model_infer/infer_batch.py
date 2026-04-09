@@ -100,10 +100,27 @@ class InferenceContext:
                     for r in req_objs
                     if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
                 ]
-                req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
-                src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
-                dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
-                req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
+
+                cpu_mgr = getattr(req_manager, "cpu_buffer_mem_manager", None)
+
+                if cpu_mgr is not None:
+                    # CPU-offloaded path: load from CPU SHM → GPU working buffers
+                    req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int64)
+                    cpu_slots = torch.tensor(src_buf_ids, dtype=torch.int64)
+                    gpu_dst = req_manager.req_to_buffer_index[req_tensor, 0]
+                    cpu_mgr.load_to_gpu(
+                        req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                        req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                        cpu_slots,
+                        gpu_dst,
+                    )
+                    cpu_mgr.sync_transfer()
+                else:
+                    # Original GPU-to-GPU path
+                    req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
+                    src_tensor = torch.tensor(src_buf_ids, device="cuda", dtype=torch.int32)
+                    dst_buffers = req_manager.req_to_buffer_index[req_tensor[:], 0].view(-1, 1)
+                    req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
