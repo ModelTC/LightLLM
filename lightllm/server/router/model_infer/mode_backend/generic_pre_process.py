@@ -224,18 +224,17 @@ def build_mtp_shared_group_infos(
     num_reqs = b_mtp_index.shape[0]
     if num_reqs == 0:
         return torch.zeros_like(b_mtp_index, dtype=torch.int32, device="cpu")
+    mtp_index = b_mtp_index.detach().cpu().tolist()
     current_group = []
-    for i in range(num_reqs):
-        step = b_mtp_index[i].item()
+    for step in mtp_index:
         if len(current_group) == 0:
-            current_group.append(i)
+            current_group.append(step)
         else:
-            prev_step = b_mtp_index[i - 1].item()
-            if step == prev_step + 1 and len(current_group) < max_batch_shared_group_size:
-                current_group.append(i)
+            if step == current_group[-1] + 1 and len(current_group) < max_batch_shared_group_size:
+                current_group.append(step)
             else:
                 b_mark_shared_group.extend([0] * (len(current_group) - 1) + [len(current_group)])
-                current_group = [i]
+                current_group = [step]
     if current_group:
         b_mark_shared_group.extend([0] * (len(current_group) - 1) + [len(current_group)])
     return torch.tensor(b_mark_shared_group, dtype=torch.int32, device="cpu")
