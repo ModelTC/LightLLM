@@ -192,3 +192,6 @@ class StartArgs:
     mamba_cache_size: Optional[int] = field(default=None)
     mamba_cache_ratio: Optional[float] = field(default=0.5)
     mamba_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+    enable_cpu_mamba_cache: bool = False
+    cpu_mamba_conv_shm_id: int = 0x5F4D4D43
+    cpu_mamba_ssm_shm_id: int = 0x5F4D4D53
