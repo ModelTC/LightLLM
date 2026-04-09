@@ -1,0 +1,512 @@
+import torch
+import torch.distributed as dist
+import triton
+from functools import partial
+from typing import Tuple
+
+from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
+from lightllm.models.qwen3_5_moe.layer_weights.transformer_layer_weight import Qwen35MOETransformerLayerWeight
+from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.distributed import all_reduce
+from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.dist_utils import get_global_world_size
+from lightllm.utils.envs_utils import get_env_start_args
+
+logger = init_logger(__name__)
+
+
+class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
+    def __init__(self, layer_num, network_config):
+        # MoE attributes MUST be set BEFORE super().__init__ because
+        # __init__ -> _bind_func -> _bind_ffn which needs self.is_moe etc.
+        self.n_routed_experts = network_config.get("num_experts", 0)
+        self.is_moe = (
+            network_config.get("num_experts", 0) > 0
+            and layer_num not in network_config.get("mlp_only_layers", [])
+            and (layer_num + 1) % network_config.get("decoder_sparse_step", 1) == 0
+        )
+        self.num_experts_per_tok = network_config.get("num_experts_per_tok", 0)
+        self.norm_topk_prob = network_config.get("norm_topk_prob", True)
+        super().__init__(layer_num, network_config)
+        return
+
+    def _bind_func(self):
+        super()._bind_func()
+        self._bind_ffn()
+        return
+
+    def _bind_ffn(self):
+        if self.is_moe:
+            enable_ep_moe = get_env_start_args().enable_ep_moe
+            if enable_ep_moe:
+                self._ffn = partial(Qwen35MOETransformerLayerInfer._moe_ffn_edp, self)
+                self._tpsp_ffn = self._tpsp_ffn_ep
+            else:
+                self._ffn = partial(Qwen35MOETransformerLayerInfer._moe_ffn, self)
+                self._tpsp_ffn = self._tpsp_ffn_tp
+        else:
+            self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
+            self._tpsp_ffn = self._tpsp_ffn_tp
+
+    # ==================== Shared Expert ====================
+
+    def _compute_shared_expert(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ):
+        input = input.view(-1, self.embed_dim_)
+        shared_expert_out = LlamaTransformerLayerInfer._ffn(self, input, infer_state, layer_weight)
+        gate = layer_weight.ffn_gate.mm(input).sigmoid_()
+        shared_expert_out.mul_(gate)
+        return shared_expert_out
+
+    # ==================== MoE FFN ====================
+
+    def _moe_ffn(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ) -> torch.Tensor:
+        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
+
+        hidden_states = input.view(-1, self.embed_dim_)
+        num_tokens, hidden_dim = hidden_states.shape
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        layer_weight.experts.experts(
+            hidden_states,
+            router_logits=router_logits,
+            top_k=self.num_experts_per_tok,
+            renormalize=self.norm_topk_prob,
+            use_grouped_topk=False,
+            topk_group=None,
+            num_expert_group=None,
+        )
+        hidden_states = hidden_states.view(num_tokens, hidden_dim)
+        hidden_states.add_(shared_expert_out)
+        return hidden_states
+
+    def _moe_ffn_edp(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ) -> torch.Tensor:
+        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
+
+        hidden_states = input
+        token_num, hidden_dim = hidden_states.shape
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
+        ep_output = layer_weight.experts.experts(
+            hidden_states,
+            router_logits=router_logits,
+            top_k=self.num_experts_per_tok,
+            renormalize=self.norm_topk_prob,
+            use_grouped_topk=False,
+            topk_group=None,
+            num_expert_group=None,
+            is_prefill=infer_state.is_prefill,
+        )
+        ep_output = ep_output.view(token_num, hidden_dim)
+        ep_output.add_(shared_expert_out)
+        return ep_output
+
+    # ==================== TPSP FFN ====================
+
+    def _tpsp_ffn_tp(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        if self.tp_world_size_ > 1:
+            sp_token_num, hidden_dim = input.shape
+            gather_input = self.alloc_tensor(
+                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
+            )
+            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
+            input = gather_input
+
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+
+        if self.tp_world_size_ > 1:
+            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
+            reduce_o_tensor = self.alloc_tensor(
+                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
+            )
+            reduce_scatter_tensor(
+                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
+            )
+            ffn2_out = reduce_o_tensor
+        return ffn2_out
+
+    def _tpsp_ffn_ep(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        return ffn2_out
+
+    # ==================== TPSP QKV (for full attention in DP mode) ====================
+
+    def _tpsp_get_qkv(
+        self,
+        input: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.tp_world_size_ > 1:
+            sp_token_num, hidden_dim = input.shape
+            gather_input = self.alloc_tensor(
+                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
+            )
+            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
+            input = gather_input[0 : len(infer_state.input_ids), :]
+
+        input = input.view(-1, self.embed_dim_)
+        q = layer_weight.q_proj.mm(input)
+        cache_kv = layer_weight.kv_proj.mm(input)
+        layer_weight.qk_norm_weight_(
+            q,
+            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
+            eps=self.eps_,
+        )
+        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+
+        from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
+
+        mrope_triton_fused(
+            q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            cache_kv[:, : self.tp_k_head_num_, :],
+            infer_state.position_cos,
+            infer_state.position_sin,
+            self.mrope_section,
+            is_interleaved=True,
+            partial_rotary_factor=self.partial_rotary_factor,
+        )
+
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
+
+        return q, cache_kv
+
+    # ==================== TPSP Forward (hybrid attention) ====================
+
+    def tpsp_context_forward(
+        self,
+        input_embdings: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+
+        if self.is_linear_attention_layer:
+            # GDN layers: use gdn_forward + all_reduce
+            o = self.gdn_forward(input1, infer_state, layer_weight, is_prefill=True)
+            if self.tp_world_size_ > 1:
+                all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        else:
+            # Full attention layers: use standard tpsp attention
+            o = self.tpsp_context_attention_forward(input1, infer_state, layer_weight)
+
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        o = None
+
+        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        ffn_out = self._tpsp_ffn(input1, infer_state, layer_weight)
+        input1 = None
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        return input_embdings
+
+    def tpsp_token_forward(
+        self,
+        input_embdings: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+
+        if self.is_linear_attention_layer:
+            o = self.gdn_forward(input1, infer_state, layer_weight, is_prefill=False)
+            if self.tp_world_size_ > 1:
+                all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        else:
+            o = self.tpsp_token_attention_forward(input1, infer_state, layer_weight)
+
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        o = None
+
+        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        ffn_out = self._tpsp_ffn(input1, infer_state, layer_weight)
+        input1 = None
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        return input_embdings
+
+    # ==================== Overlap Methods ====================
+
+    def _overlap_attention_token(self, input_embdings, infer_state, layer_weight):
+        """Common attention path for overlap token forward (both GDN and full attention)."""
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        if self.is_linear_attention_layer:
+            o = self.gdn_forward(input1, infer_state, layer_weight, is_prefill=False)
+            if self.tp_world_size_ > 1:
+                all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        else:
+            q, cache_kv = self._tpsp_get_qkv(input1, infer_state, layer_weight)
+            self._post_cache_kv(cache_kv, infer_state, layer_weight)
+            o = self._token_attention_kernel(q, infer_state, layer_weight)
+            q = None
+            o = self._tpsp_get_o(o, infer_state, layer_weight)
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        o = None
+        return input_embdings
+
+    def _overlap_attention_context(self, input_embdings, infer_state, layer_weight):
+        """Common attention path for overlap context forward (both GDN and full attention)."""
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        if self.is_linear_attention_layer:
+            o = self.gdn_forward(input1, infer_state, layer_weight, is_prefill=True)
+            if self.tp_world_size_ > 1:
+                all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        else:
+            q, cache_kv = self._tpsp_get_qkv(input1, infer_state, layer_weight)
+            self._post_cache_kv(cache_kv, infer_state, layer_weight)
+            o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+            q = None
+            o = self._tpsp_get_o(o, infer_state, layer_weight)
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        o = None
+        return input_embdings
+
+    def overlap_tpsp_token_forward(
+        self,
+        input_embdings: torch.Tensor,
+        input_embdings1: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        infer_state1: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ):
+        if not self.is_moe:
+            return super().overlap_tpsp_token_forward(
+                input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
+            )
+
+        # 0 attention
+        self._overlap_attention_token(input_embdings, infer_state, layer_weight)
+        _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
+
+        # 1 hook (wait for previous layer's microbatch 1 combine)
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        # 0 dispatch
+        (
+            _0_recv_x,
+            _0_masked_m,
+            _0_topk_idx,
+            _0_topk_weight,
+            _0_handle,
+            _0_hook,
+        ) = layer_weight.experts.low_latency_dispatch(_0_input1, _0_router_logits)
+        infer_state.hook = _0_hook
+
+        # 0 shared expert (computed before attention of microbatch 1 to overlap)
+        _0_shared = self._compute_shared_expert(_0_input1, infer_state, layer_weight)
+
+        # 1 attention
+        self._overlap_attention_token(input_embdings1, infer_state1, layer_weight)
+        _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
+        _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
+
+        # 0 hook (wait for dispatch)
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            infer_state.hook = None
+
+        # 1 dispatch
+        (
+            _1_recv_x,
+            _1_masked_m,
+            _1_topk_idx,
+            _1_topk_weight,
+            _1_handle,
+            _1_hook,
+        ) = layer_weight.experts.low_latency_dispatch(_1_input1, _1_router_logits)
+        infer_state1.hook = _1_hook
+
+        # 1 shared expert
+        _1_shared = self._compute_shared_expert(_1_input1, infer_state1, layer_weight)
+
+        # 0 moe compute
+        expected_m = triton.cdiv(
+            input_embdings.shape[0] * get_global_world_size() * self.num_experts_per_tok, self.n_routed_experts
+        )
+        _0_moe_out = layer_weight.experts.masked_group_gemm(_0_recv_x, _0_masked_m, input_embdings.dtype, expected_m)
+
+        # 1 hook (wait for dispatch)
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        # 0 combine
+        _0_ffn_out, _0_hook = layer_weight.experts.low_latency_combine(
+            _0_moe_out, _0_topk_idx, _0_topk_weight, _0_handle
+        )
+        infer_state.hook = _0_hook
+
+        # 1 moe compute
+        _1_moe_out = layer_weight.experts.masked_group_gemm(_1_recv_x, _1_masked_m, input_embdings1.dtype, expected_m)
+
+        # 0 hook (wait for combine) + add routed + shared expert output
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
+            input_embdings.add_(_0_shared.view(-1, self.embed_dim_))
+            infer_state.hook = None
+
+        # 1 combine
+        _1_ffn_out, _1_hook = layer_weight.experts.low_latency_combine(
+            _1_moe_out, _1_topk_idx, _1_topk_weight, _1_handle
+        )
+
+        def _1_hook_post():
+            _1_hook()
+            nonlocal _1_ffn_out, _1_shared
+            input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
+            input_embdings1.add_(_1_shared.view(-1, self.embed_dim_))
+            return
+
+        infer_state1.hook = _1_hook_post
+
+        return input_embdings, input_embdings1
+
+    def overlap_tpsp_context_forward(
+        self,
+        input_embdings: torch.Tensor,
+        input_embdings1: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        infer_state1: LlamaInferStateInfo,
+        layer_weight: Qwen35MOETransformerLayerWeight,
+    ):
+        if not self.is_moe:
+            return super().overlap_tpsp_context_forward(
+                input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
+            )
+
+        # 0 attention
+        self._overlap_attention_context(input_embdings, infer_state, layer_weight)
+        _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        _0_router_logits = layer_weight.moe_gate.mm(_0_input1)
+
+        # wait last 1 combine
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        _0_topk_weight, _0_topk_idx, _0_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
+            _0_input1, _0_router_logits
+        )
+
+        from deep_ep import Buffer
+
+        _0_overlap_event = Buffer.capture()
+
+        # 0 shared expert (overlap with microbatch 1 attention)
+        _0_shared = self._compute_shared_expert(_0_input1, infer_state, layer_weight)
+
+        # 1 attention
+        self._overlap_attention_context(input_embdings1, infer_state1, layer_weight)
+        _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
+        _1_router_logits = layer_weight.moe_gate.mm(_1_input1)
+
+        # 0 dispatch execute
+        (
+            _0_recv_x,
+            _0_recv_topk_idx,
+            _0_recv_topk_weight,
+            _0_num_recv_tokens_per_expert_list,
+            _0_handle,
+            _0_hook,
+        ) = layer_weight.experts.dispatch(_0_qinput_tensor, _0_topk_idx, _0_topk_weight, overlap_event=_0_overlap_event)
+        infer_state.hook = _0_hook
+
+        # wait 0 dispatch
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            infer_state.hook = None
+
+        _1_topk_weight, _1_topk_idx, _1_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
+            _1_input1, _1_router_logits
+        )
+
+        _1_overlap_event = Buffer.capture()
+
+        # 1 shared expert
+        _1_shared = self._compute_shared_expert(_1_input1, infer_state1, layer_weight)
+
+        # 0 moe compute
+        _0_moe_out = layer_weight.experts.prefilled_group_gemm(
+            _0_num_recv_tokens_per_expert_list, _0_recv_x, _0_recv_topk_idx, _0_recv_topk_weight
+        )
+
+        # 1 dispatch execute
+        (
+            _1_recv_x,
+            _1_recv_topk_idx,
+            _1_recv_topk_weight,
+            _1_num_recv_tokens_per_expert_list,
+            _1_handle,
+            _1_hook,
+        ) = layer_weight.experts.dispatch(_1_qinput_tensor, _1_topk_idx, _1_topk_weight, overlap_event=_1_overlap_event)
+        infer_state1.hook = _1_hook
+
+        # wait 1 dispatch
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        _0_combine_event = Buffer.capture()
+        # 0 combine execute
+        _0_ffn_out, _0_hook = layer_weight.experts.combine(_0_moe_out, _0_handle, _0_combine_event)
+        infer_state.hook = _0_hook
+
+        # 1 moe compute
+        _1_moe_out = layer_weight.experts.prefilled_group_gemm(
+            _1_num_recv_tokens_per_expert_list, _1_recv_x, _1_recv_topk_idx, _1_recv_topk_weight
+        )
+
+        # wait 0 combine
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            infer_state.hook = None
+
+        _1_combine_event = Buffer.capture()
+
+        # Add routed + shared expert output for microbatch 0
+        input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
+        input_embdings.add_(_0_shared.view(-1, self.embed_dim_))
+
+        # 1 combine execute
+        _1_ffn_out, _1_hook = layer_weight.experts.combine(_1_moe_out, _1_handle, _1_combine_event)
+
+        def _1_hook_post():
+            _1_hook()
+            nonlocal _1_ffn_out, _1_shared
+            input_embdings1.add_(_1_ffn_out.view(-1, self.embed_dim_))
+            input_embdings1.add_(_1_shared.view(-1, self.embed_dim_))
+            return
+
+        infer_state1.hook = _1_hook_post
+
+        return input_embdings, input_embdings1
