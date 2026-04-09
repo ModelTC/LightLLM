@@ -1,0 +1,4 @@
+quant_type: "none"
+mix_bits:
+  - name: "fused_moe"
+    quant_type: "deepgemm-fp8w8a8-b128"
