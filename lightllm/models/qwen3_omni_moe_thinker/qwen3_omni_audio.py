@@ -15,6 +15,8 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
 
+QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 500))
+
 logger = init_logger(__name__)
 
 
@@ -159,7 +161,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         activation_function="gelu",
         output_dim=2048,
         n_window_infer=800,
-        conv_chunksize=500,
+        conv_chunksize=QWEN3_OMNI_CONV_CHUNKSIZE,
         encoder_attention_heads=20,
         attention_dropout=0,
         activation_dropout=0,
