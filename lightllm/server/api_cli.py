@@ -550,7 +550,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph_split_batch_size",
         type=int,
-        default=128,
+        default=32,
         help="""
         Controls the interval for generating CUDA graphs during decoding.
         CUDA graphs will be generated continuously for values ranging from 1 up to the specified
@@ -562,7 +562,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--graph_grow_step_size",
         type=int,
-        default=1,
+        default=16,
         help="""
         For batch_size values from graph_split_batch_size to graph_max_batch_size,
         a new CUDA graph will be generated for every increment of graph_grow_step_size.
@@ -792,20 +792,5 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Whether to enable triton implementation for the op.
         If the op is not implemented for the platform and the hardware support triton,
         it will use triton implementation.""",
-    )
-    parser.add_argument(
-        "--enable_profiling",
-        type=str,
-        choices=["torch_profiler", "nvtx"],
-        default=None,
-        help="""Enable profiler support.
-                This will expose '/profiler_start' and '/profiler_stop' API,
-                below profiling features will only be enabled in this range.
-                Options:
-                'torch_profiler': will setup torch.profiler.profile(), trace files will be saved to './trace',
-                or set by 'LIGHTLLM_TRACE_DIR' env;
-                'nvtx': will add NVTX marks for external profiler like NVIDIA Nsight System
-                (you should set it up by yourself).
-                A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
     return parser

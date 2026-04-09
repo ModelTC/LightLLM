@@ -62,9 +62,6 @@ class VisualModelRpcServer(rpyc.Service):
         self.data_type = kvargs["data_type"]
         self.vit_attn_backend = kvargs["vit_attn_backend"]
         set_vit_att_backend(self.vit_attn_backend)
-        prof_mode = get_env_start_args().enable_profiling
-        prof_name = f"lightllm-visual-vit_dp{self.dp_rank_id}_tp{self.tp_rank_id}"
-        self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name) if prof_mode else None
         init_vision_distributed_env(kvargs)
         model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
 
