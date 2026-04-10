@@ -632,6 +632,7 @@ class HttpServerManager:
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -665,6 +666,7 @@ class HttpServerManager:
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+                    sub_req_id_to_mtp_verify_token_num[sub_req_id] = metadata.get("mtp_verify_token_num", 0)
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -691,8 +693,10 @@ class HttpServerManager:
                         cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
                         disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
 
-                        mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
+                        mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+                        mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
+                        mtp_avg_verify_tokens_per_step = sum(sub_req_id_to_mtp_verify_token_num.values()) / max(
+                            mtp_total_step, 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
@@ -712,6 +716,7 @@ class HttpServerManager:
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+                            f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )
                         if group_request_id < 0:
                             # health 探测请求，不记录日志和监控
@@ -843,6 +848,7 @@ class HttpServerManager:
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                                    "mtp_verify_token_num": req.mtp_verify_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:
                                     metadata.update(req.get_all_prompt_metadata())
