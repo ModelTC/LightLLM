@@ -364,6 +364,7 @@ class ChunkedPrefillBackend(ModeBackend):
         assert len(verify_ok_reqs) == dynamic_sizes_cpu.shape[0]
         for req, new_size in zip(verify_ok_reqs, dynamic_sizes_cpu.numpy()):
             req.current_mtp_step = int(new_size)
+            assert req.current_mtp_step <= req.mtp_step
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
