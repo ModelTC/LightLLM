@@ -84,7 +84,7 @@ class TritonPrefillAttState(BasePrefillAttState):
 class TritonDecodeAttState(BaseDecodeAttState):
     # MTP related state variables
     b_mark_shared_group: torch.Tensor = None
-    mtp_size: int = 1
+    mtp_size: int = None
 
     def init_state(self):
         args_mtp_step = get_env_start_args().mtp_step
