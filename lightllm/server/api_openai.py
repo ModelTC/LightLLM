@@ -194,6 +194,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             tools = [item.function.model_dump() for item in request.tools]
 
     prompt = await build_prompt(request, tools)
+    extra_body = request.extra_body if hasattr(request, "extra_body") else {}
     sampling_params_dict = {
         "do_sample": request.do_sample,
         "presence_penalty": request.presence_penalty,
@@ -208,8 +209,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
-        "min_pixels": request.min_pixels,
-        "max_pixels": request.max_pixels,
+        "min_pixels": extra_body.get("min_pixels", -1),
+        "max_pixels": extra_body.get("max_pixels", -1),
     }
 
     # Structured output handling
@@ -524,6 +525,7 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
             "The suffix parameter is not currently supported",
         )
 
+    extra_body = request.extra_body if hasattr(request, "extra_body") else {}
     # Prepare sampling parameters - same as g_generate_stream_func pattern
     sampling_params_dict = {
         "do_sample": request.do_sample,
@@ -539,8 +541,8 @@ async def completions_impl(request: CompletionRequest, raw_request: Request) -> 
         "n": request.n,
         "best_of": request.best_of,
         "add_special_tokens": False,
-        "min_pixels": request.min_pixels,
-        "max_pixels": request.max_pixels,
+        "min_pixels": extra_body.get("min_pixels", -1),
+        "max_pixels": extra_body.get("max_pixels", -1),
     }
 
     if request.response_format:
