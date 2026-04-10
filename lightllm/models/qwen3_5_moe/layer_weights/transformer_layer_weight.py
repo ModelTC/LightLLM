@@ -30,6 +30,24 @@ def split_fused_expert_weights(weights: dict, layer_num: int, moe_intermediate_s
                 weights[f"{prefix}.{expert_idx}.gate_proj.weight"] = gate_weight[expert_idx]
                 weights[f"{prefix}.{expert_idx}.up_proj.weight"] = up_weight[expert_idx]
 
+        if "mlp.experts.gate_proj" in k:
+            gate_weight = weights.pop(k)  # [num_experts, hidden_size, inter_size]
+            num_experts = gate_weight.shape[0]
+
+            prefix = k.rsplit(".gate_proj", 1)[0]
+
+            for expert_idx in range(num_experts):
+                weights[f"{prefix}.{expert_idx}.gate_proj.weight"] = gate_weight[expert_idx]
+
+        elif "mlp.experts.up_proj" in k:
+            up_weight = weights.pop(k)  # [num_experts, hidden_size, inter_size]
+            num_experts = up_weight.shape[0]
+
+            prefix = k.rsplit(".up_proj", 1)[0]
+
+            for expert_idx in range(num_experts):
+                weights[f"{prefix}.{expert_idx}.up_proj.weight"] = up_weight[expert_idx]
+
         elif "mlp.experts.down_proj" in k:
             down_weight = weights.pop(k)  # [num_experts, hidden_size, inter_size]
             num_experts = down_weight.shape[0]
