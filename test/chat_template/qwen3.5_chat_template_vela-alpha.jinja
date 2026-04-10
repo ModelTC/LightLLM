@@ -42,16 +42,22 @@
 {%- if not messages %}
     {{- raise_exception('No messages provided.') }}
 {%- endif %}
-{#- Determine thinking mode based on reasoning_effort #}
+{#- Determine thinking mode based on enable_thinking and reasoning_effort #}
 {%- set thinking_enabled = true %}
 {%- if enable_thinking is defined and enable_thinking is false %}
     {%- set thinking_enabled = false %}
 {%- endif %}
+{#- Build reasoning effort hint for system prompt #}
 {%- if reasoning_effort is defined and reasoning_effort == 'low' %}
-    {%- set thinking_enabled = false %}
+    {%- set thinking_hint = 'Think briefly, keep your reasoning under 100 words, and give the answer quickly.' %}
+{%- elif reasoning_effort is defined and reasoning_effort == 'medium' %}
+    {%- set thinking_hint = 'Think moderately, keep your reasoning under 500 words.' %}
 {%- endif %}
 {#- Built-in system prompt #}
-{%- set default_system_prompt = '你是匿名融合模态大模型（vela-alpha）' %}
+{%- set default_system_prompt = 'You are an anonymous multimodal large model (vela-alpha).' %}
+{%- if thinking_hint is defined %}
+    {%- set default_system_prompt = default_system_prompt + '\n' + thinking_hint %}
+{%- endif %}
 {%- set has_user_system = false %}
 {%- if messages[0].role == 'system' %}
     {%- set has_user_system = true %}
