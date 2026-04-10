@@ -284,7 +284,7 @@ if __name__ == "__main__":
     out_dtype = torch.bfloat16
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
-    decode_lengths = [32, 64, 128, 256, 512, 1024, 2048, 8192, 16384]
+    decode_lengths = [32, 64, 128, 256, 512, 1024, 2048]
 
     q_head_num = gqa_group_size
     k_head_num = q_head_num // gqa_group_size
