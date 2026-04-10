@@ -14,6 +14,8 @@ class MessageContent(BaseModel):
     type: str
     text: Optional[str] = None
     image_url: Optional[ImageURL] = None
+    min_pixels: Optional[int] = -1
+    max_pixels: Optional[int] = -1
 
 
 class Message(BaseModel):
