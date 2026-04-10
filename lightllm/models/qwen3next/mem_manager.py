@@ -34,7 +34,7 @@ class Qwen3NextHybridMemManager(MemoryManager):
 
         self.full_attention_interval = full_attention_interval
         assert layer_num % full_attention_interval == 0
-        self.layer_num = layer_num
+        self.transformer_layer_num = layer_num
         self.full_attn_layer_num = layer_num // full_attention_interval
         self.linear_attn_layer_num = layer_num - self.full_attn_layer_num
         self.linear_attn_cache_size = linear_attn_cache_size
@@ -46,7 +46,9 @@ class Qwen3NextHybridMemManager(MemoryManager):
         self.head_linear_k_dim = head_linear_k_dim
         self.head_linear_v_dim = head_linear_v_dim
 
-        super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            full_attn_cache_size, dtype, num_kv_heads, head_dim, self.full_attn_layer_num, always_copy, mem_fraction
+        )
 
     def profile_size(self, mem_fraction):
         if self.size is not None:
@@ -95,17 +97,10 @@ class Qwen3NextHybridMemManager(MemoryManager):
         return
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        # KV buffer layout: [None, None, None, kv_cache, None, None, None, kv_cache, ...,
-        #                    None, kv_cache, mtp_kv_cache, mtp_kv_cache]
-        # Only full attention layers have KV cache.
-        kv_buffers = [None for _ in range(self.layer_num)]
-        for layer_id in range(self.full_attn_layer_num):
-            kv_buffers[(layer_id + 1) * self.full_attention_interval - 1] = torch.empty(
-                (size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"
-            )
         self.kv_buffer = HybridKvBuffer(
-            kv_buffers,
+            torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"),
             head_num=head_num,
+            transformer_layer_num=self.transformer_layer_num,
             full_attention_interval=self.full_attention_interval,
             mamba_cache_size=self.linear_attn_cache_size,
             linear_attn_layer_num=self.linear_attn_layer_num,
@@ -122,8 +117,3 @@ class Qwen3NextHybridMemManager(MemoryManager):
         super().free_all()
         self.kv_buffer.mamba_cache_manager.free_all()
         return
-
-    def get_cell_size(self):
-        # Only full attention layers and MTP layers have KV cache
-        kv_cache_layer_num = self.full_attn_layer_num
-        return 2 * self.head_num * self.head_dim * kv_cache_layer_num * torch._utils._element_size(self.dtype)

@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import Any
 
 import torch
 
@@ -10,8 +10,9 @@ from .kv_buffer import KvBuffer
 class HybridKvBuffer(KvBuffer):
     def __init__(
         self,
-        buffers: List[Optional[torch.Tensor]],
+        buffer: torch.Tensor,
         head_num: int,
+        transformer_layer_num: int,
         full_attention_interval: int,
         mamba_cache_size: int,
         linear_attn_layer_num: int,
@@ -23,8 +24,8 @@ class HybridKvBuffer(KvBuffer):
         head_linear_k_dim: int,
         head_linear_v_dim: int,
     ):
-        self._buffers = buffers
-        self._head_num = head_num
+        super().__init__(buffer, head_num)
+        self._transformer_layer_num = transformer_layer_num
         self._full_attention_interval = full_attention_interval
         self.mamba_cache_manager = MambaCacheManager(
             size=mamba_cache_size,
@@ -43,53 +44,26 @@ class HybridKvBuffer(KvBuffer):
 
         return HybridKvBufferAdapter(self)
 
+    def _is_full_attention_layer(self, layer_idx: int) -> bool:
+        return (layer_idx + 1) % self._full_attention_interval == 0
+
+    def _get_full_attn_layer_idx(self, layer_idx: int) -> int:
+        assert 0 <= layer_idx < self._transformer_layer_num, f"invalid transformer layer index {layer_idx}"
+        assert self._is_full_attention_layer(layer_idx), f"layer {layer_idx} does not have kv cache storage"
+        return layer_idx // self._full_attention_interval
+
     def get_mamba_cache(self, layer_idx: int):
+        assert 0 <= layer_idx < self._transformer_layer_num, f"invalid transformer layer index {layer_idx}"
+        assert not self._is_full_attention_layer(layer_idx), f"layer {layer_idx} is not a linear attention layer"
         layer_idx_in_linear = layer_idx - (layer_idx // self._full_attention_interval)
         return self.mamba_cache_manager.get_mamba_cache(layer_idx_in_linear)
 
-    def __getitem__(self, item):
-        return self._buffers[item]
-
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor) -> None:
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-        layer_buffer = self._buffers[layer_index]
-        if layer_buffer is None:
-            raise RuntimeError(f"layer {layer_index} does not have kv cache storage")
-        destindex_copy_kv(kv, mem_index, layer_buffer)
+        return super().copy_kv_to_mem_manager(self._get_full_attn_layer_idx(layer_index), mem_index, kv)
 
     def get_att_input_params(self, layer_index: int) -> Any:
-        layer_buffer = self._buffers[layer_index]
-        if layer_buffer is None:
-            raise RuntimeError(f"layer {layer_index} does not have kv cache storage")
-        k = layer_buffer[:, : self._head_num, :]
-        v = layer_buffer[:, self._head_num :, :]
-        return k, v
-
-    def get_index_kv_buffer(self, index: Any) -> dict:
-        return {"kv_buffer": [None if layer_buffer is None else layer_buffer[index] for layer_buffer in self._buffers]}
-
-    def load_index_kv_buffer(self, index: Any, payload: dict) -> None:
-        for layer_index, layer_payload in enumerate(payload["kv_buffer"]):
-            if layer_payload is None:
-                continue
-            layer_buffer = self._buffers[layer_index]
-            if layer_buffer is None:
-                raise RuntimeError(f"layer {layer_index} does not have kv cache storage")
-            layer_buffer[index].copy_(layer_payload)
-
-    def get_device(self) -> int:
-        for layer_buffer in self._buffers:
-            if layer_buffer is not None:
-                return layer_buffer.get_device()
-        raise RuntimeError("HybridKvBuffer does not contain any kv cache tensor")
+        return super().get_att_input_params(self._get_full_attn_layer_idx(layer_index))
 
     def find_layer_index(self, k: torch.Tensor, v: torch.Tensor) -> int:
-        key = min(k.data_ptr(), v.data_ptr())
-        find_dict = {
-            layer_buffer.data_ptr(): layer_index
-            for layer_index, layer_buffer in enumerate(self._buffers)
-            if layer_buffer is not None
-        }
-        assert key in find_dict
-        return find_dict[key]
+        kv_layer_index = super().find_layer_index(k, v)
+        return (kv_layer_index + 1) * self._full_attention_interval - 1

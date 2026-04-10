@@ -20,11 +20,16 @@ class HybridKvBufferAdapter(KvBufferAdapter):
     ) -> None:
         raise NotImplementedError(f"{self.__class__.__name__} does not support paged kv read")
 
-    def write_from_mla_page_buffer(self, mem_indexes: torch.Tensor, page_tensor: torch.Tensor) -> None:
-        raise NotImplementedError(f"{self.__class__.__name__} does not support mla paged kv write")
-
-    def read_from_mla_page_buffer(self, mem_indexes: torch.Tensor, page_tensor: torch.Tensor) -> None:
-        raise NotImplementedError(f"{self.__class__.__name__} does not support mla paged kv read")
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers,
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ) -> None:
+        raise NotImplementedError(f"{self.__class__.__name__} does not support dp kv copy")
 
     def load_from_cpu_cache(
         self,
@@ -50,14 +55,3 @@ class HybridKvBufferAdapter(KvBufferAdapter):
         grid_num: int,
     ) -> None:
         raise NotImplementedError(f"{self.__class__.__name__} does not support cpu cache offload")
-
-    def copy_kv_from_other_dp_ranks(
-        self,
-        mem_managers,
-        move_token_indexes: torch.Tensor,
-        token_dp_indexes: torch.Tensor,
-        mem_indexes: torch.Tensor,
-        dp_size_in_node: int,
-        rank_in_dp: int,
-    ) -> None:
-        raise NotImplementedError(f"{self.__class__.__name__} does not support dp kv copy")
