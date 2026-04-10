@@ -197,15 +197,23 @@ class CpuMambaCacheManager:
         gpu_buffer_indexes: Union[List[int], torch.Tensor],
         cpu_slot_indexes: Union[List[int], torch.Tensor],
     ):
-        """Async GPU -> CPU copy on a dedicated CUDA stream.
+        """Batch GPU -> CPU copy on a dedicated CUDA stream.
 
         gpu_conv_state / gpu_ssm_state have shape (layer_num, buffer_size, *state_shape).
+        Uses index_select + index_copy_ to reduce CUDA kernel launches from 2*N to 2.
         """
         stream = self._get_transfer_stream()
+        if not isinstance(gpu_buffer_indexes, torch.Tensor):
+            gpu_buffer_indexes = torch.tensor(gpu_buffer_indexes, dtype=torch.long, device=gpu_conv_state.device)
+        if not isinstance(cpu_slot_indexes, torch.Tensor):
+            cpu_slot_indexes = torch.tensor(cpu_slot_indexes, dtype=torch.long)
         with torch.cuda.stream(stream):
-            for g, c in zip(gpu_buffer_indexes, cpu_slot_indexes):
-                self.conv_state_buffer[:, c].copy_(gpu_conv_state[:, g], non_blocking=True)
-                self.ssm_state_buffer[:, c].copy_(gpu_ssm_state[:, g], non_blocking=True)
+            self.conv_state_buffer.index_copy_(
+                1, cpu_slot_indexes, gpu_conv_state.index_select(1, gpu_buffer_indexes).cpu()
+            )
+            self.ssm_state_buffer.index_copy_(
+                1, cpu_slot_indexes, gpu_ssm_state.index_select(1, gpu_buffer_indexes).cpu()
+            )
 
     def load_to_gpu(
         self,
@@ -214,12 +222,22 @@ class CpuMambaCacheManager:
         cpu_slot_indexes: Union[List[int], torch.Tensor],
         gpu_buffer_indexes: Union[List[int], torch.Tensor],
     ):
-        """Async CPU -> GPU copy on a dedicated CUDA stream."""
+        """Batch CPU -> GPU copy on a dedicated CUDA stream.
+
+        Uses index_select + index_copy_ to reduce CUDA kernel launches from 2*N to 2.
+        """
         stream = self._get_transfer_stream()
+        if not isinstance(cpu_slot_indexes, torch.Tensor):
+            cpu_slot_indexes = torch.tensor(cpu_slot_indexes, dtype=torch.long)
+        if not isinstance(gpu_buffer_indexes, torch.Tensor):
+            gpu_buffer_indexes = torch.tensor(gpu_buffer_indexes, dtype=torch.long, device=gpu_conv_state.device)
         with torch.cuda.stream(stream):
-            for c, g in zip(cpu_slot_indexes, gpu_buffer_indexes):
-                gpu_conv_state[:, g].copy_(self.conv_state_buffer[:, c], non_blocking=True)
-                gpu_ssm_state[:, g].copy_(self.ssm_state_buffer[:, c], non_blocking=True)
+            gpu_conv_state.index_copy_(
+                1, gpu_buffer_indexes, self.conv_state_buffer.index_select(1, cpu_slot_indexes).cuda()
+            )
+            gpu_ssm_state.index_copy_(
+                1, gpu_buffer_indexes, self.ssm_state_buffer.index_select(1, cpu_slot_indexes).cuda()
+            )
 
     def sync_transfer(self):
         """Synchronize the transfer stream."""
