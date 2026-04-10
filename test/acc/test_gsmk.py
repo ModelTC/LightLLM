@@ -69,22 +69,33 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
 
 
 def call_generate_lightllm(prompt, temperature, max_tokens, stop=None, url=None):
-    """Call LightLLM API for text generation via /v1/chat/completions."""
+    """Call LightLLM API for text generation."""
     assert url is not None
 
     data = {
-        "model": "default",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stop": stop,
-        "top_p": 1.0,
+        "inputs": prompt,
+        "parameters": {
+            "temperature": temperature,
+            "max_new_tokens": max_tokens,
+            "stop_sequences": stop,
+            "repetition_penalty": 1.0,
+            "top_p": 1.0,
+            "top_k": 1,
+        },
     }
     res = requests.post(url, json=data)
     assert res.status_code == 200, f"API request failed with status code {res.status_code}: {res.text}"
 
     response_json = res.json()
-    pred = response_json["choices"][0]["message"]["content"]
+    if "generated_text" not in response_json:
+        raise ValueError(f"Invalid API response format. Expected 'generated_text' key, got: {response_json.keys()}")
+    if not isinstance(response_json["generated_text"], list) or len(response_json["generated_text"]) == 0:
+        raise ValueError(
+            "Invalid API response format. 'generated_text' should be a non-empty list, "
+            f"got: {response_json['generated_text']}"
+        )
+
+    pred = response_json["generated_text"][0]
     return pred
 
 
@@ -136,7 +147,7 @@ def parse_args():
 
 def main(args):
     # LightLLM API URL
-    url = f"{args.host}:{args.port}/v1/chat/completions"
+    url = f"{args.host}:{args.port}/generate"
 
     # Read data
     url_data = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
