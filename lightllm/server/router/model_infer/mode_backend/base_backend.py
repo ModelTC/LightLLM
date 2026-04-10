@@ -170,7 +170,6 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "run_mode": self.run_mode,
             "wait_events": wait_events,
-            "mtp_draft_model_dir": self.args.mtp_draft_model_dir,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -328,7 +327,6 @@ class ModeBackend:
                 "is_mtp_draft_model": True,
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
-                "mtp_draft_model_dir": self.args.mtp_draft_model_dir,
             }
 
             # 对于eagle3模式，需要检查self.args.mtp_draft_model_dir[0]目录下面的model.safetensors或者pytorch_model.bin权重文件里是否有d2t和t2d
@@ -409,7 +407,6 @@ class ModeBackend:
             self._try_read_new_reqs_multinode_tp()
         else:
             self._try_read_new_reqs_normal()
-
         return
 
     def _try_read_new_reqs_normal(self):
@@ -804,12 +801,10 @@ class ModeBackend:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
                 # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
-                # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的_mtp_size
-                if enable_dynamic_mtp_verify():
-                    current_mtp_size = max(0, req.mtp_size)
-                else:
-                    current_mtp_size = self.mtp_step
-                req.update_mtp_verify_token_num(verify_token_num=1 + current_mtp_size)
+                # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的 current_mtp_step
+                # current_mtp_step 在静态 MTP 模式下为 mtp_step，在动态 MTP 模式下会在推理过程中动态设置。
+                assert req.current_mtp_step >= 0
+                req.update_mtp_verify_token_num(verify_token_num=1 + req.current_mtp_step)
         return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):

@@ -9,7 +9,7 @@ from lightllm.utils.envs_utils import (
     enable_triton_mtp_kernel,
     get_diverse_max_batch_shared_group_size,
     enable_dynamic_mtp_verify,
-    get_env_start_args
+    get_env_start_args,
 )
 from lightllm.utils.infer_utils import calculate_time
 
@@ -114,8 +114,9 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        # 动态 MTP 模式：使用动态 mtp_size 构建 batch
-        for step in range(req.mtp_size):
+        # 动态 MTP 模式：使用动态 current_mtp_step 构建 batch
+        # 非动态 MTP 模式：current_mtp_step 为固定的 mtp_step
+        for step in range(req.current_mtp_step):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
@@ -141,7 +142,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mark_shared_group = build_mtp_shared_group_infos(run_reqs=run_reqs)
     else:
         b_shared_seq_len = None
-        b_mark_shared_group = None 
+        b_mark_shared_group = None
 
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
@@ -215,7 +216,7 @@ def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Te
 
 
 def build_mtp_shared_group_infos(run_reqs: List[InferReq]) -> torch.Tensor:
-    # Similar to build_diverse_shared_group_infos, 
+    # Similar to build_diverse_shared_group_infos,
     # but the grouping logic is based on b_mtp_index, which indicates the MTP step of each request
     max_batch_shared_group_size = get_diverse_max_batch_shared_group_size()
     req_ids = [req.req_id for req in run_reqs]
