@@ -78,6 +78,22 @@ def get_layer_num(model_path: str) -> int:
     return None
 
 
+@lru_cache(maxsize=None)
+def get_kv_cache_layer_num(model_path: str) -> int:
+    layer_num = get_layer_num(model_path=model_path)
+    full_attention_interval = _get_config_llm_keyvalue(model_path=model_path, key_name=["full_attention_interval"])
+    linear_num_key_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["linear_num_key_heads"])
+    if (
+        isinstance(layer_num, int)
+        and isinstance(full_attention_interval, int)
+        and linear_num_key_heads is not None
+        and full_attention_interval > 0
+    ):
+        assert layer_num % full_attention_interval == 0
+        return layer_num // full_attention_interval
+    return layer_num
+
+
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     try:
         # qwen3-omini special eos_token_id

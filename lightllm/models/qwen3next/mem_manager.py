@@ -1,9 +1,8 @@
 import torch
-from typing import Tuple
+from typing import Tuple, Any
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
-from lightllm.server.core.objs.start_args_type import StartArgs
 
 logger = init_logger(__name__)
 
@@ -33,7 +32,7 @@ class Qwen3NextHybridMemManager(MemoryManager):
 
         self.full_attention_interval = full_attention_interval
         assert layer_num % full_attention_interval == 0
-        self.layer_num = layer_num
+        self.transformer_layer_num = layer_num
         self.full_attn_layer_num = layer_num // full_attention_interval
         self.linear_attn_layer_num = layer_num - self.full_attn_layer_num
 
@@ -88,7 +87,15 @@ class Qwen3NextHybridMemManager(MemoryManager):
             )
             self.cpu_mamba_cache_manager = None
 
-        super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            full_attn_cache_size,
+            dtype,
+            num_kv_heads,
+            head_dim,
+            self.full_attn_layer_num,
+            always_copy,
+            mem_fraction,
+        )
 
         if self.cpu_mamba_cache_manager is not None:
             self.cpu_mamba_cache_manager.set_gpu_buffers(
@@ -110,14 +117,7 @@ class Qwen3NextHybridMemManager(MemoryManager):
             return key
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        # KV buffer layout: [None, None, None, kv_cache, None, None, None, kv_cache, ...,
-        #                    None, kv_cache, mtp_kv_cache, mtp_kv_cache]
-        # Only full attention layers have KV cache.
-        self.kv_buffer = [None for _ in range(self.layer_num)]
-        for layer_id in range(self.full_attn_layer_num):
-            self.kv_buffer[(layer_id + 1) * self.full_attention_interval - 1] = torch.empty(
-                (size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda"
-            )
+        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
     def free_all(self):
         super().free_all()
@@ -126,11 +126,24 @@ class Qwen3NextHybridMemManager(MemoryManager):
             self.cpu_mamba_cache_manager.free_all()
         return
 
-    def get_cell_size(self):
-        # Only full attention layers and MTP layers have KV cache
-        kv_cache_layer_num = self.full_attn_layer_num
-        return 2 * self.head_num * self.head_dim * kv_cache_layer_num * torch._utils._element_size(self.dtype)
+    def _is_full_attention_layer(self, layer_idx: int) -> bool:
+        return (layer_idx + 1) % self.full_attention_interval == 0
+
+    def _get_full_attn_layer_idx(self, layer_idx: int) -> int:
+        assert 0 <= layer_idx < self.transformer_layer_num, f"invalid transformer layer index {layer_idx}"
+        assert self._is_full_attention_layer(layer_idx), f"layer {layer_idx} is not a full attention layer"
+        return layer_idx // self.full_attention_interval
+
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        kv_layer_index = self._get_full_attn_layer_idx(layer_index)
+        return super().copy_kv_to_mem_manager(kv_layer_index, mem_index, kv)
+
+    def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
+        kv_layer_index = self._get_full_attn_layer_idx(layer_index)
+        return super().get_att_input_params(kv_layer_index)
 
     def get_mamba_cache(self, layer_idx: int):
+        assert 0 <= layer_idx < self.transformer_layer_num, f"invalid transformer layer index {layer_idx}"
+        assert not self._is_full_attention_layer(layer_idx), f"layer {layer_idx} is not a linear attention layer"
         layer_idx_in_linear = layer_idx - (layer_idx // self.full_attention_interval)
         return self.mamba_cache_mem_manager.get_mamba_cache(layer_idx_in_linear)

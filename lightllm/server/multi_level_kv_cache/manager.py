@@ -203,7 +203,7 @@ class MultiLevelKVCacheManager:
                         recv_objs.append(recv_obj)
 
                         start_time = recv_obj.time_mark
-                        logger.info(
+                        logger.debug(
                             f"multi_level_kv_cache recive group req id {recv_obj.group_req_id} "
                             f"cost time {time.time() - start_time} s"
                         )
