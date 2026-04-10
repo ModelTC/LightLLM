@@ -6,6 +6,7 @@ import setproctitle
 import pickle
 import torch
 import time
+import multiprocessing as mp
 import os
 from typing import List
 from lightllm.server.core.objs import StartArgs
@@ -17,6 +18,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType
 from lightllm.utils.dist_utils import set_current_device_id
+from lightllm.utils.start_utils import start_submodule_processes
 from .past_kv_cache_client import PastKVCacheClient
 
 logger = init_logger(__name__)
@@ -29,8 +31,23 @@ manage a generation service,
 3. call llm gen to obtain past key values
 4. call x2v to generate images and pass the key values to it
 5. return the generated images.
-"""
 
+            +-------------------+
+            |   X2IManager      |
+            +---------+---------+
+                      |
+               (broadcast)
+                      |
+        +------+------+------+
+        |             |      |
+     Worker0       Worker1  ...
+     (rank0)       (rank1)
+        |             |
+        +------ allreduce / sync ----+
+                      |
+                 only rank0
+                 returns result
+"""
 
 class X2IManager:
     def __init__(
@@ -40,40 +57,51 @@ class X2IManager:
         context = zmq.Context(2)
         self.args = args
 
+        # from http server
         self.zmq_recv_socket = context.socket(zmq.PULL)
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_port}")
 
+        # to http server
         self.send_to_httpserver = context.socket(zmq.PUSH)
-        self.send_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
+        self.send_to_httpserver.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
+
+        self.use_naive_x2i = args.x2i_use_naive_impl
+        self.world_size = args.x2i_server_used_gpus
+
+        if not self.use_naive_x2i and self.world_size > 1:
+            # send to workers
+            self.worker_pub = context.socket(zmq.PUB)
+            self.worker_pub.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_worker_task_port}")
 
         self.waiting_reqs: List[X2IParams] = []
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
-        self.use_naive_x2i = args.x2i_use_naive_impl
 
     async def wait_to_model_ready(self):
-        if self.use_naive_x2i:
-            from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
 
-            self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
-            return
+        if self.world_size <= 1:
+            if self.use_naive_x2i:
+                from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
+                self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
+            else:
+                from lightx2v import LightX2VPipeline
 
-        from lightx2v import LightX2VPipeline
-
-        self.gen_pipe = LightX2VPipeline(
-            model_path=self.args.model_dir,
-            model_cls="neopp",
-            support_tasks=["t2i", "i2i"],
-        )
-        self.gen_pipe.create_generator(
-            config_json=self.args.x2v_gen_model_config,
-        )
-        self.gen_pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False})
-
-        # from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
-        # self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
-        pass
+                self.gen_pipe = LightX2VPipeline(
+                    model_path=self.args.model_dir,
+                    model_cls="neopp",
+                    support_tasks=["t2i", "i2i"],
+                )
+                self.gen_pipe.create_generator(
+                    config_json=self.args.x2v_gen_model_config,
+                )
+                self.gen_pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False})
+        else:
+            # distribted x2v
+            from lightllm.server.x2i_server.lightx2v.adapter import start_x2v_process
+            funcs = [start_x2v_process] * self.world_size
+            args = [(self.args, rank, self.world_size) for rank in range(self.world_size)]
+            start_submodule_processes(funcs, args)
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
         if self.use_naive_x2i:
@@ -127,38 +155,42 @@ class X2IManager:
 
                 x2i_param = self.waiting_reqs.pop(0)
 
-                past_kv_cache = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                    x2i_param.past_kvcache.get_all(), x2i_param.past_kvcache.token_len, self.use_naive_x2i
-                )
-
-                past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                    x2i_param.past_kvcache_text.get_all(), x2i_param.past_kvcache_text.token_len, self.use_naive_x2i
-                )
-                is_t2i = x2i_param.past_kvcache_img.is_empty()
-
-                past_kv_cache_img = None
-                if not is_t2i:  # t2i
-                    past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                        x2i_param.past_kvcache_img.get_all(), x2i_param.past_kvcache_img.token_len, self.use_naive_x2i
+                if not self.use_naive_x2i and self.world_size > 1:
+                    # broadcast to workers
+                    self.worker_pub.send_pyobj(x2i_param, protocol=pickle.HIGHEST_PROTOCOL)
+                else:
+                    past_kv_cache = self.past_kv_cache_client.get_kv_cache_for_x2i(
+                        x2i_param.past_kvcache.get_all(), x2i_param.past_kvcache.token_len, self.use_naive_x2i
                     )
 
-                # release
-                self.send_to_httpserver.send_pyobj(
-                    X2ICacheRelease(request_id=x2i_param.request_id), protocol=pickle.HIGHEST_PROTOCOL
-                )
+                    past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
+                        x2i_param.past_kvcache_text.get_all(), x2i_param.past_kvcache_text.token_len, self.use_naive_x2i
+                    )
+                    is_t2i = x2i_param.past_kvcache_img.is_empty()
 
-                images = []
-                logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {x2i_param}")
-                start_t = time.time()
-                if is_t2i:
-                    images = await self.t2i_generate(past_kv_cache, past_kv_cache_text, x2i_param)
-                else:
-                    images = await self.it2i_generate(past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param)
-                logger.info(f"generate {len(images)} images done, cost {time.time() - start_t:.2f}s")
+                    past_kv_cache_img = None
+                    if not is_t2i:  # t2i
+                        past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
+                            x2i_param.past_kvcache_img.get_all(), x2i_param.past_kvcache_img.token_len, self.use_naive_x2i
+                        )
 
-                self.send_to_httpserver.send_pyobj(
-                    X2IResponse(request_id=x2i_param.request_id, images=images), protocol=pickle.HIGHEST_PROTOCOL
-                )
+                    # release
+                    self.send_to_httpserver.send_pyobj(
+                        X2ICacheRelease(request_id=x2i_param.request_id), protocol=pickle.HIGHEST_PROTOCOL
+                    )
+
+                    images = []
+                    logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {x2i_param}")
+                    start_t = time.time()
+                    if is_t2i:
+                        images = await self.t2i_generate(past_kv_cache, past_kv_cache_text, x2i_param)
+                    else:
+                        images = await self.it2i_generate(past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param)
+                    logger.info(f"generate {len(images)} images done, cost {time.time() - start_t:.2f}s")
+
+                    self.send_to_httpserver.send_pyobj(
+                        X2IResponse(request_id=x2i_param.request_id, images=images), protocol=pickle.HIGHEST_PROTOCOL
+                    )
 
             except Exception as e:
                 self.send_to_httpserver.send_pyobj(
@@ -190,6 +222,7 @@ def setup_devices(args: StartArgs):
         devices = [int(x.strip()) for x in devices.split(",") if x.strip()]
 
     llm_need_gpus = args.tp * args.dp
+    # llm_need_gpus = 0
     x2i_need_gpus = args.x2i_server_used_gpus
     if len(devices) < llm_need_gpus + x2i_need_gpus:
         raise ValueError(f"devices {devices} not enough, need {llm_need_gpus} and {x2i_need_gpus}")

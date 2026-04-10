@@ -104,7 +104,7 @@ class HttpServerManager:
             self.send_to_x2i = context.socket(zmq.PUSH)
             self.send_to_x2i.connect(f"{args.zmq_mode}127.0.0.1:{args.x2i_port}")
             self.recv_from_x2i = context.socket(zmq.PULL)
-            self.recv_from_x2i.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
+            self.recv_from_x2i.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
             self.req_id_to_x2i_reqs: Dict[int, X2IReqStatus] = {}
 
         self.shm_req_manager = ShmReqManager()
@@ -477,7 +477,7 @@ class HttpServerManager:
             else:
                 # call t2i
                 prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt)
-                logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
+                # logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
                 (con_gen, uncon_gen) = await asyncio.gather(
                     *[
                         generation_wrapper(prompt_condition, sample_params, multimodal_params, request),

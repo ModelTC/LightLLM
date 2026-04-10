@@ -250,7 +250,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=12 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
+        num=14 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -266,8 +266,10 @@ def normal_or_p_d_start(args):
         pd_decode_rpyc_port,
         x2i_port,
         http_server_port_for_x2i,
-    ) = can_use_ports[0:12]
-    can_use_ports = can_use_ports[12:]
+        x2i_worker_nccl_port,
+        x2i_worker_task_port,
+    ) = can_use_ports[0:14]
+    can_use_ports = can_use_ports[14:]
 
     visual_model_tp_ports = []
     visual_nccl_ports = []
@@ -294,6 +296,8 @@ def normal_or_p_d_start(args):
     args.visual_nccl_ports = visual_nccl_ports
     args.x2i_port = x2i_port
     args.http_server_port_for_x2i = http_server_port_for_x2i
+    args.x2i_worker_task_port = x2i_worker_task_port
+    args.x2i_worker_nccl_port = x2i_worker_nccl_port
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id

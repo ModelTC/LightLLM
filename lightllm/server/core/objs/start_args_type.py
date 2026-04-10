@@ -166,6 +166,8 @@ class StartArgs:
     http_server_port_for_x2i: int = field(default=None)
     x2i_server_used_gpus: int = field(default=1)
     x2i_use_naive_impl: bool = field(default=False)
+    x2i_worker_task_port: int = field(default=None)
+    x2i_worker_nccl_port: int = field(default=None)
 
     # multi_modal
     enable_multimodal_x2i: bool = field(default=False)
