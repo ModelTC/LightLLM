@@ -53,7 +53,6 @@ class ChunkedPrefillBackend(ModeBackend):
     def _maybe_snapshot_hybrid_buffers(self, run_reqs: List[InferReq]):
         """Snapshot Mamba states after prefill. Handles both hotspot and opportunistic inserts."""
         if g_infer_context.has_recurrent_state and self.radix_cache is not None:
-            torch.cuda.synchronize()
             g_infer_state_lock.acquire()
             try:
                 g_infer_context.snapshot_hybrid_buffers(run_reqs)
