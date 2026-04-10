@@ -84,17 +84,14 @@ class TritonPrefillAttState(BasePrefillAttState):
 class TritonDecodeAttState(BaseDecodeAttState):
     # MTP related state variables
     b_mark_shared_group: torch.Tensor = None
-    mtp_size: int = None
 
     def init_state(self):
         args_mtp_step = get_env_start_args().mtp_step
 
         if args_mtp_step > 0:
             # MTP mode initialization
-            self.mtp_size = args_mtp_step + 1
             self.b_mark_shared_group = self.infer_state.b_mark_shared_group
         else:
-            self.mtp_size = 1
             self.b_mark_shared_group = None
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
@@ -122,7 +119,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             if args_mtp_step > 0 and (enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
                 # MTP mode: use mtp diverse attention
                 assert q_head_num >= k_head_num, "MTP diverse attention requires q_head_num >= k_head_num"
-                return self._mtp_diverse_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
+                return self._dynamic_mtp_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num == k_head_num:
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
@@ -204,23 +201,13 @@ class TritonDecodeAttState(BaseDecodeAttState):
 
         return out
 
-    def _mtp_diverse_decode_gqa_att(
+    def _dynamic_mtp_decode_gqa_att(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         alloc_func=torch.empty,
     ):
-        """
-        MTP Diverse GQA Attention for static and dynamic MTP mode.
-
-        In static MTP mode, each request has 1 Q token, but the i-th request in a group
-        can only see the first i+1 KV tokens.
-        In dynamic MTP mode, each request has a dynamic mtp_size, and b_mark_shared_group
-        is built dynamically based on the actual mtp_size of each request.
-
-        Input/Output shape: [batch_size, num_heads, head_dim]
-        """
         from ...triton_kernel.att.decode_att.gqa.mtp_diverse import (
             token_decode_attention_mtp_diverse_single_token,
         )
