@@ -201,9 +201,9 @@ class ModeBackend:
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+            self.dp_gather_item_tensor = torch.tensor([0, 0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_all_gather_tensor = torch.zeros(
+                self.global_world_size * 2, dtype=torch.int32, device="cuda", requires_grad=False
             )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
@@ -809,18 +809,14 @@ class ModeBackend:
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Gather the number of prefill requests across all DP ranks.
+        Gather the number of prefill and decode requests across all DP ranks in a single collective.
         """
-        current_dp_prefill_num = len(prefill_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
+        self.dp_gather_item_tensor[0] = len(prefill_reqs)
+        self.dp_gather_item_tensor[1] = len(decode_reqs)
         all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
-        current_dp_decode_num = len(decode_reqs)
-        self.dp_gather_item_tensor.fill_(current_dp_decode_num)
-        all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
-        dp_decode_req_nums = self.dp_all_gather_tensor.cpu().numpy()
-
+        gathered = self.dp_all_gather_tensor.cpu().numpy()
+        dp_prefill_req_nums = gathered[0::2]
+        dp_decode_req_nums = gathered[1::2]
         return dp_prefill_req_nums, dp_decode_req_nums
 
     def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
