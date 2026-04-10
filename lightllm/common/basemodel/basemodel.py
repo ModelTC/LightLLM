@@ -619,7 +619,7 @@ class TpPartBaseModel:
                 mtp_out_hidden_state.add_hidden(
                     layer_index=i,
                     layer_num=self.layers_num,
-                    hidden_state=_input_embs,
+                    hidden=_input_embs,
                 )
 
             capture_hiddens = mtp_out_hidden_state.get_captured_hiddens()
@@ -676,7 +676,7 @@ class TpPartBaseModel:
             layer = self.layers_infer[i]
             layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
             input_embs: torch.Tensor = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
-            mtp_out_hidden_state.add_hidden(layer_index=i, layer_num=self.layers_num, hidden_state=input_embs)
+            mtp_out_hidden_state.add_hidden(layer_index=i, layer_num=self.layers_num, hidden=input_embs)
 
         capture_hiddens = mtp_out_hidden_state.get_captured_hiddens()
         post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]

@@ -29,9 +29,6 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
             input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
-        old_is_mtp_draft_model = infer_state.is_mtp_draft_model
-        infer_state.is_mtp_draft_model = True
-        
         tgt_hidden = infer_state.mtp_draft_input_hiddens
         tgt_hidden1 = self._hidden_norm(tgt_hidden, infer_state, layer_weight)
         
@@ -60,14 +57,10 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         tgt_hidden.add_(ffn_out.view(-1, self.embed_dim_))
-        infer_state.is_mtp_draft_model = old_is_mtp_draft_model
         return tgt_hidden
         
         
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
-        old_is_mtp_draft_model = infer_state.is_mtp_draft_model
-        infer_state.is_mtp_draft_model = True
-        
         tgt_hidden = infer_state.mtp_draft_input_hiddens 
         tgt_hidden1 = self._hidden_norm(tgt_hidden, infer_state, layer_weight)
         
@@ -92,5 +85,4 @@ class Qwen3EagleTransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.tp_world_size_ > 1:
             all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         tgt_hidden.add_(ffn_out.view(-1, self.embed_dim_))
-        infer_state.is_mtp_draft_model = old_is_mtp_draft_model
         return tgt_hidden

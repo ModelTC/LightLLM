@@ -329,39 +329,6 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # 对于eagle3模式，需要检查self.args.mtp_draft_model_dir[0]目录下面的model.safetensors或者pytorch_model.bin权重文件里是否有d2t和t2d
-            # 如有，则加载到self.d2t和self.t2d中
-            if self.args.mtp_mode == "eagle3":
-                if os.path.exists(os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors")):
-                    from safetensors import safe_open
-
-                    with safe_open(
-                        os.path.join(self.args.mtp_draft_model_dir[i], "model.safetensors"),
-                        framework="pt",
-                        device="cuda",
-                    ) as f:
-                        if "d2t" in f.keys() and "t2d" in f.keys():
-                            self.d2t = f.get_tensor("d2t").cuda()
-                            self.t2d = f.get_tensor("t2d").cuda()
-                        else:
-                            self.d2t = None
-                            self.t2d = None
-                elif os.path.exists(os.path.join(self.args.mtp_draft_model_dir[i], "pytorch_model.bin")):
-                    with open(os.path.join(self.args.mtp_draft_model_dir[i], "pytorch_model.bin"), "rb") as f:
-                        weights = torch.load(f)
-                        if "d2t" in weights and "t2d" in weights:
-                            self.d2t = weights["d2t"].cuda()
-                            self.t2d = weights["t2d"].cuda()
-                        else:
-                            self.d2t = None
-                            self.t2d = None
-                else:
-                    logger.warning(
-                        f"Model file not found in {self.args.mtp_draft_model_dir[i]}, d2t and t2d not loaded"
-                    )
-                    self.d2t = None
-                    self.t2d = None
-
             # Select MTP model class based on model type
             model_type = mtp_model_cfg.get("model_type", "")
             if model_type == "deepseek_v3":
@@ -812,9 +779,9 @@ class ModeBackend:
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
 
-        # 如果self.d2t不为None，那么draft的token需要进行相应的转换，转换关系保存在self.d2t和self.t2d中
-        if hasattr(self, "d2t") and self.d2t is not None:
-            draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
+        # 如果self.d2t不为None，那么draft的token需要进行相应的转换
+        if self.args.mtp_mode == "eagle3":
+            draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
 
         return draft_next_token_ids_gpu
 
@@ -823,9 +790,9 @@ class ModeBackend:
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
 
-        # 如果self.d2t不为None，那么draft的token需要进行相应的转换，转换关系保存在self.d2t和self.t2d中
-        if hasattr(self, "d2t") and self.d2t is not None:
-            draft_next_token_ids_gpu = draft_next_token_ids_gpu + self.d2t[draft_next_token_ids_gpu]
+        # 如果self.d2t不为None，那么draft的token需要进行相应的转换
+        if self.args.mtp_mode == "eagle3":
+            draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
 
         return draft_next_token_ids_gpu, probs
 

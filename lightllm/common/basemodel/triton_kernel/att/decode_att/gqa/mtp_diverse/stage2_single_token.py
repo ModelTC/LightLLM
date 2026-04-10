@@ -77,7 +77,7 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
 
     # 计算需要处理的 kv block 数量
     block_n_size = tl.cdiv(cur_batch_seq_len, BLOCK_N)
-    block_n_size = tl.min(block_n_size, mid_out_block_num)
+    block_n_size = tl.minimum(block_n_size, mid_out_block_num)
 
     # 初始化 accumulator
     sum_exp = 0.0

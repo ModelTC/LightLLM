@@ -82,6 +82,14 @@ class Qwen3EagleModel(LlamaTpPartModel):
         super()._init_infer_layer(start_layer_index=total_pre_layers_num)
         return
     
+    # For Eagle3 Model, we need to expose a function to do the mapping of draft vocab and main vocab
+    # Using d2t and t2d weight to do the mapping
+    @torch.no_grad()
+    def map_draft_vocab_to_main_vocab(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
+        if self.pre_post_weight.d2t_weight_ is not None:
+            draft_token_ids = draft_token_ids + self.pre_post_weight.d2t_weight_.weight[draft_token_ids]
+        return draft_token_ids
+
     # Override forward function, for the pre-compute the mtp_draft_input_hiddens
     @torch.no_grad()
     def forward(self, model_input: ModelInput):

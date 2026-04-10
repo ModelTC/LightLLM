@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     EmbeddingWeight,
@@ -7,24 +8,9 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     RMSNormWeight,
 )
 from lightllm.common.quantization import Quantcfg
+from lightllm.utils.log_utils import init_logger
 
-"""Qwen3-eagle Weights List
-d2t	[32000]	
-fc.weight	[2048, 6144]		
-midlayer.hidden_norm.weight	[2048]	
-midlayer.input_layernorm.weight	[2048]	
-midlayer.mlp.down_proj.weight	[2048, 6144]	
-midlayer.mlp.gate_proj.weight	[6144, 2048]	
-midlayer.mlp.up_proj.weight	[6144, 2048]	
-midlayer.post_attention_layernorm.weight	[2048]	
-midlayer.self_attn.k_proj.weight	[512, 4096]	
-midlayer.self_attn.o_proj.weight	[2048, 4096]	
-midlayer.self_attn.q_proj.weight	[4096, 4096]	
-midlayer.self_attn.v_proj.weight	[512, 4096]	
-norm.weight	[2048]	
-t2d	[151936]	
-lm_head.weight	[32000, 2048]	
-"""
+logger = init_logger(__name__)
 
 class Qwen3EaglePreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
@@ -38,6 +24,23 @@ class Qwen3EaglePreAndPostLayerWeight(PreAndPostLayerWeight):
         )
         
         try:
+            self.d2t_weight_: RMSNormWeight = RMSNormWeight(
+                dim=network_config["draft_vocab_size"],
+                weight_name="d2t",
+                data_type=torch.int64
+            )
+            
+            self.t2d_weight_: RMSNormWeight = RMSNormWeight(
+                dim=network_config["target_vocab_size"],
+                weight_name="t2d",
+                data_type=torch.bool
+            )
+        except Exception as e:
+            self.d2t_weight_ = None
+            self.t2d_weight_ = None
+            logger.warning(f"No d2t and t2d weight found in Eagle3 Model.")
+        
+        try:
             self.lm_head_weight_: LMHeadWeight = LMHeadWeight(
                 dim=hidden_size,
                 vocab_size=network_config["draft_vocab_size"],
@@ -46,7 +49,7 @@ class Qwen3EaglePreAndPostLayerWeight(PreAndPostLayerWeight):
             )
         except Exception as e:
             self.lm_head_weight_ = None
-        
+            logger.warning(f"Failed to initialize lm_head_weight_, error: {e}")
         # 与Qwen3模型共享
         self.wte_weight_: EmbeddingWeight = None
         
