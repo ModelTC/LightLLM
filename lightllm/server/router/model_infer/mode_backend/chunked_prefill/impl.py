@@ -422,13 +422,8 @@ class ChunkedPrefillBackend(ModeBackend):
         mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
-        if not self.enable_dynamic_mtp:
-            # 如果是静态MTP验证模式，那么组的大小很容易确定
-            batch_size = main_model_input.batch_size
-            num_reqs = batch_size // (self.mtp_step + 1)
-        else:
-            batch_size = main_model_input.batch_size
-            num_reqs = b_req_mtp_start_loc.shape[0]
+
+        num_reqs = b_req_mtp_start_loc.shape[0]
 
         g_infer_state_lock.acquire()
         if g_infer_context.radix_cache is not None:
