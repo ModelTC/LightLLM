@@ -326,7 +326,6 @@ class InferenceContext:
                 cur_buffers,
                 cpu_slots,
             )
-            cpu_mgr.sync_transfer()
 
             for i, req in enumerate(reqs_to_insert):
                 key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -410,7 +409,6 @@ class InferenceContext:
                 cur_buffers,
                 cpu_slots,
             )
-            cpu_mgr.sync_transfer()
 
             for i, req in enumerate(eligible):
                 key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")

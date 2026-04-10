@@ -244,6 +244,17 @@ class CpuMambaCacheManager:
         if self._transfer_stream is not None:
             self._transfer_stream.synchronize()
 
+    def record_transfer_event(self) -> Optional[torch.cuda.Event]:
+        """Record a CUDA event on the transfer stream for deferred synchronization.
+
+        Returns None if no transfer stream exists (no transfers have been issued).
+        """
+        if self._transfer_stream is None:
+            return None
+        event = torch.cuda.Event()
+        event.record(self._transfer_stream)
+        return event
+
     def wait_for_pin(self):
         """Wait for async cudaHostRegister handles to complete."""
         if self._pin_handle_conv is not None:
