@@ -204,9 +204,13 @@ class CpuMambaCacheManager:
         but the intermediate .cpu() call may block the host briefly.
         """
         stream = self._get_transfer_stream()
-        if not isinstance(gpu_buffer_indexes, torch.Tensor):
+        if isinstance(gpu_buffer_indexes, torch.Tensor):
+            gpu_buffer_indexes = gpu_buffer_indexes.to(dtype=torch.long, device=gpu_conv_state.device)
+        else:
             gpu_buffer_indexes = torch.tensor(gpu_buffer_indexes, dtype=torch.long, device=gpu_conv_state.device)
-        if not isinstance(cpu_slot_indexes, torch.Tensor):
+        if isinstance(cpu_slot_indexes, torch.Tensor):
+            cpu_slot_indexes = cpu_slot_indexes.to(dtype=torch.long, device="cpu")
+        else:
             cpu_slot_indexes = torch.tensor(cpu_slot_indexes, dtype=torch.long)
         with torch.cuda.stream(stream):
             self.conv_state_buffer.index_copy_(
@@ -228,9 +232,13 @@ class CpuMambaCacheManager:
         Uses index_select + index_copy_ to reduce CUDA kernel launches from 2*N to 2.
         """
         stream = self._get_transfer_stream()
-        if not isinstance(cpu_slot_indexes, torch.Tensor):
+        if isinstance(cpu_slot_indexes, torch.Tensor):
+            cpu_slot_indexes = cpu_slot_indexes.to(dtype=torch.long, device="cpu")
+        else:
             cpu_slot_indexes = torch.tensor(cpu_slot_indexes, dtype=torch.long)
-        if not isinstance(gpu_buffer_indexes, torch.Tensor):
+        if isinstance(gpu_buffer_indexes, torch.Tensor):
+            gpu_buffer_indexes = gpu_buffer_indexes.to(dtype=torch.long, device=gpu_conv_state.device)
+        else:
             gpu_buffer_indexes = torch.tensor(gpu_buffer_indexes, dtype=torch.long, device=gpu_conv_state.device)
         with torch.cuda.stream(stream):
             gpu_conv_state.index_copy_(
