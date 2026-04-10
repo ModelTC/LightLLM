@@ -33,7 +33,6 @@ from lightllm.utils.envs_utils import (
 from lightllm.distributed.communication_op import (
     dist_group_manager,
     all_gather_into_tensor,
-    all_reduce,
     broadcast,
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
@@ -200,7 +199,6 @@ class ModeBackend:
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
             self.dp_gather_item_tensor = torch.tensor([0, 0], dtype=torch.int32, device="cuda", requires_grad=False)
             self.dp_all_gather_tensor = torch.zeros(
                 self.global_world_size * 2, dtype=torch.int32, device="cuda", requires_grad=False
@@ -818,16 +816,6 @@ class ModeBackend:
         dp_prefill_req_nums = gathered[0::2]
         dp_decode_req_nums = gathered[1::2]
         return dp_prefill_req_nums, dp_decode_req_nums
-
-    def _dp_all_reduce_decode_req_num(self, decode_reqs: List[InferReq]) -> int:
-        """
-        Reduce the number of decode requests across all DP ranks.
-        """
-        current_dp_decode_num = len(decode_reqs)
-        self.dp_reduce_tensor.fill_(current_dp_decode_num)
-        all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
-        max_decode_num = self.dp_reduce_tensor.item()
-        return max_decode_num
 
     def preload_prompt_cache_kv_buffer(self, model_cfg):
         self.logger.info("Preload prompt cache kv buffer.")
