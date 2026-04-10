@@ -197,10 +197,11 @@ class CpuMambaCacheManager:
         gpu_buffer_indexes: Union[List[int], torch.Tensor],
         cpu_slot_indexes: Union[List[int], torch.Tensor],
     ):
-        """Batch GPU -> CPU copy on a dedicated CUDA stream.
+        """Batched GPU -> CPU copy using index_select + index_copy_.
 
         gpu_conv_state / gpu_ssm_state have shape (layer_num, buffer_size, *state_shape).
-        Uses index_select + index_copy_ to reduce CUDA kernel launches from 2*N to 2.
+        Reduces CUDA kernel launches from 2*N to 2. Runs on a dedicated transfer stream
+        but the intermediate .cpu() call may block the host briefly.
         """
         stream = self._get_transfer_stream()
         if not isinstance(gpu_buffer_indexes, torch.Tensor):
@@ -243,17 +244,6 @@ class CpuMambaCacheManager:
         """Synchronize the transfer stream."""
         if self._transfer_stream is not None:
             self._transfer_stream.synchronize()
-
-    def record_transfer_event(self) -> Optional[torch.cuda.Event]:
-        """Record a CUDA event on the transfer stream for deferred synchronization.
-
-        Returns None if no transfer stream exists (no transfers have been issued).
-        """
-        if self._transfer_stream is None:
-            return None
-        event = torch.cuda.Event()
-        event.record(self._transfer_stream)
-        return event
 
     def wait_for_pin(self):
         """Wait for async cudaHostRegister handles to complete."""

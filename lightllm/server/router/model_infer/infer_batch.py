@@ -326,6 +326,9 @@ class InferenceContext:
                 cur_buffers,
                 cpu_slots,
             )
+            # No sync_transfer() needed: the slot index is stored in the tree node below,
+            # but the CPU buffer data is only read later via load_to_gpu on the same
+            # transfer stream, so CUDA stream ordering guarantees the offload completes first.
 
             for i, req in enumerate(reqs_to_insert):
                 key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -409,6 +412,9 @@ class InferenceContext:
                 cur_buffers,
                 cpu_slots,
             )
+            # No sync_transfer() needed: the slot index is stored in the tree node below,
+            # but the CPU buffer data is only read later via load_to_gpu on the same
+            # transfer stream, so CUDA stream ordering guarantees the offload completes first.
 
             for i, req in enumerate(eligible):
                 key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
