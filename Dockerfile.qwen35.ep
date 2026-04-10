@@ -1,0 +1,163 @@
+# ============================================================================
+# Dockerfile.qwen35.ep — Qwen3.5 MoE with DeepEP on H100/H200
+#
+# Build (with proxy):
+#   docker build -f docker/Dockerfile.qwen35.ep \
+#     --build-arg HTTP_PROXY="http://user:pass@proxy:3128" \
+#     --build-arg HTTPS_PROXY="http://user:pass@proxy:3128" \
+#     --network=host -t lightllm:qwen35-ep .
+#
+# Build (without proxy):
+#   docker build -f docker/Dockerfile.qwen35.ep -t lightllm:qwen35-ep .
+#
+# Run:
+#   docker run --gpus all --privileged --network=host --ipc=host \
+#     -v /path/to/models:/nvme/models \
+#     -e MODEL_DIR=/nvme/models/Qwen3.5-122B-A10B \
+#     lightllm:qwen35-ep
+# ============================================================================
+
+ARG CUDA_VERSION=12.8.0
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
+
+ARG PYTHON_VERSION=3.12
+ARG TORCH_VERSION=2.9.1+cu128
+ARG DEEPEP_COMMIT=b6ce310bb0b75079682d09bc2ebc063a074fbd58
+ARG NVSHMEM_VERSION=3.3.9
+
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1 \
+    http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY}
+
+# ── Switch to Aliyun mirror (HTTP — squid proxy blocks HTTPS to some hosts) ─
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g; s|http://security.ubuntu.com|http://mirrors.aliyun.com|g; s|https://archive.ubuntu.com|http://mirrors.aliyun.com|g; s|https://security.ubuntu.com|http://mirrors.aliyun.com|g' \
+      /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
+    sed -i 's|http://archive.ubuntu.com|http://mirrors.aliyun.com|g; s|http://security.ubuntu.com|http://mirrors.aliyun.com|g' \
+      /etc/apt/sources.list 2>/dev/null
+
+# ── System deps + redis ─────────────────────────────────────────────────────
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates libssl-dev curl g++ make git wget \
+      libnuma-dev \
+      ibverbs-providers infiniband-diags perftest rdma-core \
+      libibverbs-dev librdmacm-dev \
+      devscripts debhelper dh-make build-essential dkms fakeroot \
+      libgmp-dev libmpfr-dev libmpc-dev libffi-dev \
+      libsndfile1-dev liblapack-dev libblas-dev gfortran \
+      redis-server && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Python + uv ─────────────────────────────────────────────────────────────
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+      python3-pip && \
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
+    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.local/bin:${PATH}" \
+    UV_INDEX_URL=http://mirrors.aliyun.com/pypi/simple/ \
+    UV_EXTRA_INDEX_URL=http://mirrors.aliyun.com/pypi/simple/ \
+    PIP_INDEX_URL=http://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com
+
+RUN uv pip install --system --no-cache -U pip setuptools wheel ninja cmake
+
+# ── PyTorch (must query pytorch index first, unset global mirror for this step)
+RUN UV_INDEX_URL="" UV_EXTRA_INDEX_URL="" \
+    uv pip install --system --no-cache \
+      torch==${TORCH_VERSION} \
+      torchvision \
+      --index-url https://download.pytorch.org/whl/cu128 \
+      --extra-index-url http://mirrors.aliyun.com/pypi/simple/ \
+      --index-strategy unsafe-best-match
+
+# ── GDRCopy (needed by NVSHMEM / DeepEP) ────────────────────────────────────
+ENV GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/
+RUN cd /tmp && \
+    git clone https://github.com/NVIDIA/gdrcopy.git -b v2.4.4 && \
+    cd gdrcopy/packages && \
+    CUDA=/usr/local/cuda ./build-deb-packages.sh && \
+    dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb && \
+    cd / && rm -rf /tmp/gdrcopy
+
+# ── NVSHMEM (needed by DeepEP low-latency) ──────────────────────────────────
+RUN ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so && \
+    cd /root && \
+    wget -q https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz && \
+    tar -xf nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz && \
+    mv nvshmem_src nvshmem && \
+    rm nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz && \
+    cd nvshmem && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_USE_GDRCOPY=1 \
+    cmake -S . -B build/ \
+      -DCMAKE_INSTALL_PREFIX=/root/nvshmem/install \
+      -DCMAKE_CUDA_ARCHITECTURES=90 && \
+    cmake --build build --target install -j$(nproc)
+
+# ── DeepEP (patched: add hidden=3072 for Qwen3.5 MoE 122B) ─────────────────
+COPY docker/patches/deepep_add_hidden_3072.patch /tmp/deepep.patch
+RUN cd /root && \
+    git clone https://github.com/deepseek-ai/DeepEP.git && \
+    cd DeepEP && \
+    git checkout ${DEEPEP_COMMIT} && \
+    git apply /tmp/deepep.patch && \
+    NVSHMEM_DIR=/root/nvshmem/install python setup.py install && \
+    rm /tmp/deepep.patch
+
+# ── Deep-GeMM (shallow clone + no build isolation so it finds torch) ─────────
+RUN cd /root && \
+    git clone --depth 1 https://github.com/deepseek-ai/DeepGEMM.git && \
+    cd DeepGEMM && \
+    git submodule update --init --recursive --depth 1 --jobs 4 && \
+    pip install --no-cache-dir --no-build-isolation -e .
+
+# ── Flash Attention 4, FlashInfer, Flash-Linear-Attention, SGL-Kernel ───────
+RUN uv pip install --system --no-cache --prerelease=allow \
+      flash-attn-4 \
+      flashinfer-python==0.6.6 \
+      flash-linear-attention==0.4.2 \
+      sgl-kernel==0.3.21
+
+# ── vllm (provides custom CUDA ops used by some kernels) ────────────────────
+RUN uv pip install --system --no-cache vllm==0.19.0
+
+# ── LightLLM ────────────────────────────────────────────────────────────────
+COPY requirements.txt /lightllm/requirements.txt
+# Pre-install Python 3.12-compatible versions of packages pinned too old in requirements.txt
+RUN uv pip install --system --no-cache \
+      "numpy>=1.26.0,<2.0" \
+      "gmpy2>=2.2.0" \
+      "cffi>=1.16.0" \
+      "ruamel.yaml.clib>=0.2.8" \
+      "uvloop>=0.19.0" && \
+    grep -v -E '^(cchardet|numpy|gmpy2|cffi|ruamel[.]yaml[.]clib|uvloop)==' /lightllm/requirements.txt > /tmp/requirements_filtered.txt && \
+    uv pip install --system --no-cache -r /tmp/requirements_filtered.txt
+
+COPY . /lightllm
+RUN uv pip install --system --no-cache -e /lightllm
+
+# ── Clear proxy from runtime image (credentials should not persist) ──────────
+ENV http_proxy="" \
+    https_proxy=""
+
+
+WORKDIR /lightllm
