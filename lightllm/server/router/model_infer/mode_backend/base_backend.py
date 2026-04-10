@@ -767,6 +767,12 @@ class ModeBackend:
         if self.is_master_in_dp:
             for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
+
+        return
+
+    def _update_mtp_verify_token_num(self, decode_reqs: List[InferReq]):
+        if self.is_master_in_dp:
+            for req in decode_reqs:
                 # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
                 # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的 current_mtp_step
                 # current_mtp_step 在静态 MTP 模式下为 mtp_step，在动态 MTP 模式下会在推理过程中动态设置。
@@ -788,13 +794,13 @@ class ModeBackend:
     def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
-        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
 
         # 如果self.d2t不为None，那么draft的token需要进行相应的转换
         if self.args.mtp_mode == "eagle3":
             draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
 
-        return draft_next_token_ids_gpu, probs
+        return draft_next_token_ids_gpu, max_probs
 
     def _sample_and_scatter_token(
         self,
