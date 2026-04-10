@@ -18,8 +18,6 @@ class ModelInput:
     # 在 decode 阶段， max_q_seq_len 必定是 1，
     max_q_seq_len: int
     max_kv_seq_len: int
-    # 用于记录原始请求数量，主要是为了动态MTP mode下保留原始请求数
-    original_num_reqs: int = None
     max_cache_len: int = None
     prefix_total_token_num: int = None
     input_ids: torch.Tensor = None

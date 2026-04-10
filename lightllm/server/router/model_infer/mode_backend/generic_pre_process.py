@@ -86,7 +86,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_ready_cache_len=b_ready_cache_len,
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
-        original_num_reqs=len(req_objs),
         b_prefill_has_output_cpu=b_prefill_has_output,
         prefix_total_token_num=prefix_total_token_num,
         multimodal_params=batch_multimodal_params,
@@ -164,7 +163,6 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
-        original_num_reqs=len(req_objs),
         multimodal_params=multimodal_params,
     )
     return model_input, run_reqs
