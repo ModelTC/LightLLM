@@ -62,6 +62,17 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.classed_req_strict_prefill = False
         return
 
+    def _maybe_snapshot_hybrid_buffers(self, run_reqs: List[InferReq]):
+        """Snapshot Mamba states after prefill. Handles both hotspot and opportunistic inserts."""
+        if g_infer_context.has_recurrent_state and self.radix_cache is not None:
+            torch.cuda.synchronize()
+            g_infer_state_lock.acquire()
+            try:
+                g_infer_context.snapshot_hybrid_buffers(run_reqs)
+                g_infer_context.snapshot_prefill_complete_buffers(run_reqs)
+            finally:
+                g_infer_state_lock.release()
+
     def _init_reqs(self, reqs: List[Tuple]):
         if not self.args.enable_dp_prompt_cache_fetch:
             return super()._init_reqs(reqs)
@@ -174,6 +185,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
             )
+            # Buffer snapshot for hotspot requests (between Stage 3 and Stage 4)
+            self._maybe_snapshot_hybrid_buffers(run_reqs)
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
@@ -283,6 +296,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
             )
+            # Buffer snapshot for hotspot requests (between Stage 3 and Stage 4)
+            self._maybe_snapshot_hybrid_buffers(run_reqs)
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
@@ -405,6 +420,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
             )
+            # Buffer snapshot for hotspot requests (between Stage 3 and Stage 4)
+            self._maybe_snapshot_hybrid_buffers(run_reqs)
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -705,6 +722,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
                 nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
             )
+            # Buffer snapshot for hotspot requests (between Stage 3 and Stage 4)
+            self._maybe_snapshot_hybrid_buffers(run_reqs)
             event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
