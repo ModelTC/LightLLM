@@ -240,7 +240,8 @@ class LlamaTpPartModel(TpPartBaseModel):
         beta_fast = 32.0
         beta_slow = 1.0
 
-        pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)
+        pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)[::2]
+        dim = dim // 2
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scale * pos_freqs)
         low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings)
