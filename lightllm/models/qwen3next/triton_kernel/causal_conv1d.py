@@ -4,9 +4,6 @@ from typing import Optional
 
 import torch
 
-from sgl_kernel import causal_conv1d_fwd
-from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
-
 
 def causal_conv1d_fn(
     x: torch.Tensor,
@@ -51,6 +48,8 @@ def causal_conv1d_fn(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
+    from sgl_kernel import causal_conv1d_fwd
+
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
@@ -103,6 +102,8 @@ def causal_conv1d_update(
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError(f"activation must be None, silu, or swish, actual: {activation}")
+    from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
+
     activation_val = activation in ["silu", "swish"]
     unsqueeze = x.dim() == 2
     if unsqueeze:
