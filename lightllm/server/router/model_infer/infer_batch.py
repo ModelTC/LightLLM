@@ -89,6 +89,8 @@ class InferenceContext:
 
         req_idx_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
         req_manager.alloc_buffer_for_req(req_idx_gpu)
+        for req in req_objs:
+            req.shm_req.shm_cur_mamba_buffer_idx = int(req_manager.req_to_buffer_index[req.req_idx, 0].item())
 
         if radix_cache is not None:
             fork_req_ids = [r.req_idx for r in req_objs if r.shared_kv_node is not None]
@@ -222,6 +224,7 @@ class InferenceContext:
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
             self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+            req.shm_req.shm_cur_mamba_buffer_idx = -1
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
             req.shm_req.shm_infer_released = True
@@ -269,6 +272,7 @@ class InferenceContext:
                 self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
+                req.shm_req.shm_cur_mamba_buffer_idx = -1
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True

@@ -122,6 +122,9 @@ class Req(ctypes.Structure):
         ("cpu_cache_match_page_indexes", CpuCachePageList),
         # 分块hash的块大小
         ("cpu_cache_token_page_size", ctypes.c_int),
+        # hybrid attention(mamba/qwen3next)请求当前持有的基础 recurrent state buffer 索引。
+        # 非 hybrid attention 模型保持为 -1。
+        ("shm_cur_mamba_buffer_idx", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -157,6 +160,7 @@ class Req(ctypes.Structure):
         self.prompt_cache_len = 0
         self.cpu_prompt_cache_len = 0
         self.disk_prompt_cache_len = 0
+        self.shm_cur_mamba_buffer_idx = -1
         self.finish_token_index = -1
         self.can_released_mark = False
         self.reward_score = math.nan
@@ -232,6 +236,9 @@ class Req(ctypes.Structure):
 
     def get_prompt_ids_numpy(self):
         return self.shm_prompt_ids.arr[: self.input_len]
+
+    def get_mamba_buffer_idx(self) -> int:
+        return int(self.shm_cur_mamba_buffer_idx)
 
     def to_router_rpc_obj(self):
         assert hasattr(self, "multimodal_params")
