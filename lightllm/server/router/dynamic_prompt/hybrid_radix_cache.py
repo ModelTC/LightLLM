@@ -25,18 +25,13 @@ class HybridRadixCache(RadixCache):
         assert len(key) != 0
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
-        miss_prefix_len = 0
+        unbuffered_prefix_pos = 0
         while tree_node != self.root_node and tree_node.buffer_idx is None:
-            miss_prefix_len += len(ans_value_list[-1]) if ans_value_list else 0
+            unbuffered_prefix_pos += len(ans_value_list[-1]) if ans_value_list else 0
 
             next_node = tree_node.parent
 
             if update_refs:
-                # Undo the ref increment from _match_prefix_helper.
-                # Do NOT destroy nodes here — that caused a cascade where each
-                # destroyed child turned its parent into a leaf, which was then
-                # also destroyed, silently wiping the entire prefix chain.
-                # Unreferenced leaves will be reclaimed by the normal eviction path.
                 if tree_node.is_leaf():
                     self.evict_tree_set.discard(tree_node)
                 if tree_node.ref_counter == 1:
@@ -48,13 +43,8 @@ class HybridRadixCache(RadixCache):
             ans_value_list.pop()
             tree_node = next_node
 
-        # Stash miss_prefix_len for callers that need it (e.g. hotspot detection).
-        # The second return value stays as kv_len for backward compatibility with
-        # diverse_backend, pd_mode, and other callers that expect total prefix length.
-        self._last_miss_prefix_len = miss_prefix_len
-
         if tree_node == self.root_node:
-            return None, 0, None
+            return None, 0, None, unbuffered_prefix_pos
 
         update_node = tree_node
         while update_node != self.root_node:
@@ -66,7 +56,7 @@ class HybridRadixCache(RadixCache):
 
         kv_len = tree_node.node_prefix_total_len
         value = torch.concat(ans_value_list)
-        return tree_node, kv_len, value
+        return tree_node, kv_len, value, unbuffered_prefix_pos
 
     def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int):
         """Set buffer_idx for a node and add it to evict_buffer_set."""

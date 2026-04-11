@@ -122,11 +122,11 @@ def test_match_prefix_walkback_does_not_destroy_nodes():
     cache.add_buffer_idx_to_node(node_12, 42)
 
     # match_prefix with [1,2,3,4] — should walk back from [3,4] to [1,2]
-    share_node, kv_len, value_tensor = cache.match_prefix(key, update_refs=True)
+    share_node, kv_len, value_tensor, unbuffered_prefix_pos = cache.match_prefix(key, update_refs=True)
 
     assert share_node is node_12, "Should match at [1,2] which has buffer"
     assert kv_len == 2, "kv_len should be the matched node's prefix total len"
-    # unbuffered_prefix_pos assertion will be added in Task 3
+    assert unbuffered_prefix_pos == 2, "Missed 2 tokens in [3,4] node"
 
     # Critical: the [3,4] node must still exist in the tree
     assert 3 in node_12.children, "Child [3,4] must not be destroyed during walk-back"
@@ -150,3 +150,53 @@ def test_no_adaptive_threshold_fields():
     ]
     for attr in removed_attrs:
         assert not hasattr(cache, attr), f"{attr} should be removed"
+
+
+def test_match_prefix_returns_unbuffered_prefix_pos():
+    """match_prefix should return (node, kv_len, value, unbuffered_prefix_pos)."""
+    cache = _make_hybrid_cache("return_pos")
+
+    # Build chain: root -> [1,2] -> [3,4]
+    cache.insert(torch.tensor([1, 2], dtype=torch.int64), torch.tensor([10, 11], dtype=torch.int64))
+    cache.insert(torch.tensor([1, 2, 3, 4], dtype=torch.int64), torch.tensor([10, 11, 12, 13], dtype=torch.int64))
+
+    # Attach buffer only to [1,2] node
+    node_12 = cache.root_node.children[1]
+    cache.add_buffer_idx_to_node(node_12, 42)
+
+    # Match [1,2,3,4] — walks back from [3,4] to [1,2]
+    result = cache.match_prefix(torch.tensor([1, 2, 3, 4], dtype=torch.int64), update_refs=True)
+    assert len(result) == 4, "match_prefix should return 4 values"
+    share_node, kv_len, value_tensor, unbuffered_prefix_pos = result
+    assert share_node is node_12
+    assert kv_len == 2
+    assert unbuffered_prefix_pos == 2
+
+    cache.dec_node_ref_counter(share_node)
+
+
+def test_match_prefix_no_walkback_returns_zero():
+    """When matched node has a buffer, unbuffered_prefix_pos should be 0."""
+    cache = _make_hybrid_cache("no_walkback")
+
+    cache.insert(torch.tensor([1, 2, 3], dtype=torch.int64), torch.tensor([10, 11, 12], dtype=torch.int64))
+    node = cache.root_node.children[1]
+    cache.add_buffer_idx_to_node(node, 42)
+
+    share_node, kv_len, value_tensor, unbuffered_prefix_pos = cache.match_prefix(
+        torch.tensor([1, 2, 3], dtype=torch.int64), update_refs=True
+    )
+    assert share_node is node
+    assert unbuffered_prefix_pos == 0
+
+    cache.dec_node_ref_counter(share_node)
+
+
+def test_match_prefix_no_match_returns_zero():
+    """When nothing matches, unbuffered_prefix_pos should be 0."""
+    cache = _make_hybrid_cache("no_match")
+
+    result = cache.match_prefix(torch.tensor([1, 2, 3], dtype=torch.int64), update_refs=False)
+    node, kv_len, value_tensor, unbuffered_prefix_pos = result
+    assert node is None
+    assert unbuffered_prefix_pos == 0
