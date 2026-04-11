@@ -51,12 +51,12 @@ class ChunkedPrefillBackend(ModeBackend):
         return
 
     def _maybe_snapshot_hybrid_buffers(self, run_reqs: List[InferReq]):
-        """Snapshot Mamba states after prefill. Handles both hotspot and opportunistic inserts."""
+        """Snapshot Mamba states after prefill. Handles both unbuffered prefix and full-input inserts."""
         if g_infer_context.has_recurrent_state and self.radix_cache is not None:
             g_infer_state_lock.acquire()
             try:
-                g_infer_context.snapshot_hybrid_buffers(run_reqs)
-                g_infer_context.snapshot_prefill_complete_buffers(run_reqs)
+                g_infer_context._maybe_snapshot_unbuffered_prefix(run_reqs)
+                g_infer_context._maybe_snapshot_full_input(run_reqs)
             finally:
                 g_infer_state_lock.release()
 

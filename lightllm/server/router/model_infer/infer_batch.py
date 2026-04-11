@@ -210,11 +210,6 @@ class InferenceContext:
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
 
-        # Drain deferred frees from hotspot buffer insertion
-        if len(req.extra_need_to_free_token_index) > 0:
-            free_token_index.extend(req.extra_need_to_free_token_index)
-            req.extra_need_to_free_token_index = []
-
         return node
 
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
@@ -224,229 +219,115 @@ class InferenceContext:
     def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
         """释放请求的 KV cache 和 buffer 内存"""
         if self.has_recurrent_state:
-            node = self._insert_kv_for_mamba(free_token_index, req)
+            self._insert_kv_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
-            cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
-
-            if node is not None and node.buffer_idx is None:
-                if cpu_mgr is not None:
-                    # Evict existing CPU buffers if needed, then allocate
-                    self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
-                    if cpu_mgr.can_use_mem_size >= 1:
-                        cpu_slot = cpu_mgr.alloc(1)
-                        primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                        gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                        cpu_mgr.offload_to_cpu(
-                            self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                            self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                            gpu_idx,
-                            cpu_slot,
-                        )
-                        cpu_mgr.sync_transfer()
-                        self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=False)
-                    # GPU buffer is freed back to working pool regardless
-                    free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-                else:
-                    # Original path: transfer GPU buffer ownership to tree
-                    primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                    self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=False)
-            else:
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            # Buffer was already attached at snapshot moments — just free GPU buffer
+            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
         else:
             self.free_a_req_mem(free_token_index, req)
 
     def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
-        """Free request memory during pause, transferring the Mamba buffer to the
-        tree node so that recovery can find it via match_prefix.
-
-        Without this, pause inserts KV tokens into the radix tree but attaches
-        no buffer.  On recovery, match_prefix walks back and finds no buffer,
-        returns None, and the request must fully re-prefill.
-        """
+        """Free request memory during pause. Buffer is already on the tree node
+        from the snapshot moments, so no transfer needed."""
         if not self.has_recurrent_state or self.radix_cache is None:
             self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
             return
 
-        node = self._insert_kv_for_mamba(free_token_index, req)
+        self._insert_kv_for_mamba(free_token_index, req)
+        req_to_buffer_index = self.req_manager.req_to_buffer_index
+        free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
 
-        # Transfer primary buffer to the tree node as hotspot
+    def _make_buffer_snapshot_fn(self, req: "InferReq"):
+        """Create a buffer_snapshot_fn callback for insert_with_buffer.
+
+        The callback handles CPU-offload or GPU-to-GPU copy depending on
+        whether a CPU buffer manager is available.
+        """
+        radix_cache = self.radix_cache
         req_to_buffer_index = self.req_manager.req_to_buffer_index
         cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
 
-        if node is not None and req.cur_kv_len > 0:
+        def snapshot(node):
+            if node.buffer_idx is not None:
+                return
             primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
             if cpu_mgr is not None:
-                # Evict existing CPU buffers if needed, then allocate
-                self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
-                if cpu_mgr.can_use_mem_size >= 1:
-                    cpu_slot = cpu_mgr.alloc(1)
-                    gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                    cpu_mgr.offload_to_cpu(
-                        self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                        self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                        gpu_idx,
-                        cpu_slot,
-                    )
-                    cpu_mgr.sync_transfer()
-                    self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=True)
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+                radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                if cpu_mgr.can_use_mem_size < 1:
+                    return  # no buffer available
+                cpu_slot = cpu_mgr.alloc(1)
+                gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                cpu_mgr.offload_to_cpu(
+                    self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                    self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                    gpu_idx,
+                    cpu_slot,
+                )
+                radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
             else:
-                self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx, is_hotspot=True)
-                # Free only the non-primary buffers; primary is now owned by the tree
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
-        else:
-            # No valid node — free all buffers normally
-            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+                radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                if radix_cache.buffer_mem_manager.can_use_mem_size < 1:
+                    return  # no buffer available
+                new_buf = radix_cache.buffer_mem_manager.alloc(1)
+                cur_buf = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                new_buf_cuda = new_buf.to(device="cuda", dtype=torch.int64).contiguous()
+                radix_cache.buffer_mem_manager.copy_state_buffers(cur_buf, new_buf_cuda)
+                radix_cache.add_buffer_idx_to_node(node, new_buf[0].item())
 
-    def snapshot_hybrid_buffers(self, run_reqs: List["InferReq"]):
-        """Snapshot Mamba states for hotspot requests after they reach mamba_buffer_target_len."""
-        reqs_to_insert = [r for r in run_reqs if r.is_hotspot_prefill and r.cur_kv_len >= r.mamba_buffer_target_len]
-        if not reqs_to_insert:
+        return snapshot
+
+    def _maybe_snapshot_unbuffered_prefix(self, run_reqs: List["InferReq"]):
+        """Snapshot Mamba state at the unbuffered prefix boundary (system prompt)."""
+        reqs = [r for r in run_reqs if r.unbuffered_prefix_pos > 0 and r.cur_kv_len >= r.unbuffered_prefix_pos]
+        if not reqs:
             return
-        radix_cache: HybridRadixCache = self.radix_cache
-        radix_cache.free_radix_cache_to_get_enough_buffer(len(reqs_to_insert))
-
-        if radix_cache.buffer_mem_manager.can_use_mem_size < len(reqs_to_insert):
-            # Not enough buffers even after eviction — skip snapshot, clear hotspot flags
-            for r in reqs_to_insert:
-                r.is_hotspot_prefill = False
-                r.mamba_buffer_target_len = 0
-            return
-
-        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
-
-        if cpu_mgr is not None:
-            # CPU-offloaded path: offload current GPU buffers to CPU slots
-            cpu_slots = cpu_mgr.alloc(len(reqs_to_insert))
-            req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
-            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
-            cpu_mgr.offload_to_cpu(
-                self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                cur_buffers,
-                cpu_slots,
-            )
-            # No sync_transfer() needed: the slot index is stored in the tree node below,
-            # but the CPU buffer data is only read later via load_to_gpu on the same
-            # transfer stream, so CUDA stream ordering guarantees the offload completes first.
-
-            for i, req in enumerate(reqs_to_insert):
-                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-                prefix_len, new_node = radix_cache.insert(key, value)
-                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        radix_cache = self.radix_cache
+        for req in reqs:
+            key = torch.tensor(req.get_input_token_ids()[: req.unbuffered_prefix_pos], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.unbuffered_prefix_pos].cpu()
+            snapshot_fn = self._make_buffer_snapshot_fn(req)
+            prefix_len, new_node = radix_cache.insert(key, value)
+            if new_node is not None and new_node.buffer_idx is None:
+                snapshot_fn(new_node)
+            # Update shared_kv_node ref counting
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            if req.shared_kv_node is not None:
                 radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                radix_cache.add_node_ref_counter(new_node)
-                radix_cache.add_buffer_idx_to_node(new_node, cpu_slots[i].item(), is_hotspot=True)
-                req.extra_need_to_free_token_index.append(
+            radix_cache.add_node_ref_counter(new_node)
+            req.shared_kv_node = new_node
+            # Free overlapping tokens
+            if old_prefix_len < prefix_len:
+                self.req_manager.free_token(
                     self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
                 )
-                req.shared_kv_node = new_node
-                req.is_hotspot_prefill = False
-                req.mamba_buffer_target_len = 0
-        else:
-            # Original GPU-to-GPU path
-            new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(reqs_to_insert))
-            req_idxes = torch.tensor([r.req_idx for r in reqs_to_insert], dtype=torch.int64, device="cuda")
-            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
-            new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
-            radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
+            req.unbuffered_prefix_pos = 0
 
-            for i, req in enumerate(reqs_to_insert):
-                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-                prefix_len, new_node = radix_cache.insert(key, value)
-                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+    def _maybe_snapshot_full_input(self, run_reqs: List["InferReq"]):
+        """Snapshot Mamba state for the full input after prefill completes."""
+        reqs = [r for r in run_reqs if r.cur_kv_len + 1 >= r.get_cur_total_len() and r.cur_output_len == 0]
+        if not reqs:
+            return
+        radix_cache = self.radix_cache
+        for req in reqs:
+            # Skip if shared node already has a buffer and covers the full input
+            if req.shared_kv_node is not None and req.shared_kv_node.buffer_idx is not None:
+                if req.shared_kv_node.node_prefix_total_len >= req.cur_kv_len:
+                    continue
+            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
+            snapshot_fn = self._make_buffer_snapshot_fn(req)
+            prefix_len, new_node = radix_cache.insert(key, value)
+            if new_node is not None and new_node.buffer_idx is None:
+                snapshot_fn(new_node)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            if req.shared_kv_node is not None:
                 radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                radix_cache.add_node_ref_counter(new_node)
-                radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=True)
-                req.extra_need_to_free_token_index.append(
+            radix_cache.add_node_ref_counter(new_node)
+            req.shared_kv_node = new_node
+            if old_prefix_len < prefix_len:
+                self.req_manager.free_token(
                     self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
                 )
-                req.shared_kv_node = new_node
-                req.is_hotspot_prefill = False
-                req.mamba_buffer_target_len = 0
-
-    def snapshot_prefill_complete_buffers(self, run_reqs: List["InferReq"]):
-        """Opportunistically snapshot Mamba states for requests that just completed prefill."""
-        radix_cache: HybridRadixCache = self.radix_cache
-
-        eligible = []
-        for r in run_reqs:
-            # Skip: still in chunked prefill
-            if r.cur_kv_len + 1 < r.get_cur_total_len():
-                continue
-            # Skip: already in decode phase (has generated output tokens)
-            if r.cur_output_len > 0:
-                continue
-            # Skip: shared node already has a buffer
-            if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None:
-                continue
-            eligible.append(r)
-
-        if not eligible:
-            return
-
-        max_buffers = radix_cache.available_opportunistic_buffer_count()
-        eligible = eligible[:max_buffers]
-        if not eligible:
-            return
-
-        radix_cache.free_radix_cache_to_get_enough_buffer(len(eligible))
-
-        if radix_cache.buffer_mem_manager.can_use_mem_size < len(eligible):
-            # Not enough buffers — reduce to what's available
-            eligible = eligible[: radix_cache.buffer_mem_manager.can_use_mem_size]
-        if not eligible:
-            return
-
-        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
-
-        if cpu_mgr is not None:
-            cpu_slots = cpu_mgr.alloc(len(eligible))
-            req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
-            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
-            cpu_mgr.offload_to_cpu(
-                self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                cur_buffers,
-                cpu_slots,
-            )
-            # No sync_transfer() needed: the slot index is stored in the tree node below,
-            # but the CPU buffer data is only read later via load_to_gpu on the same
-            # transfer stream, so CUDA stream ordering guarantees the offload completes first.
-
-            for i, req in enumerate(eligible):
-                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-                prefix_len, new_node = radix_cache.insert(key, value)
-                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-                radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                radix_cache.add_node_ref_counter(new_node)
-                radix_cache.add_buffer_idx_to_node(new_node, cpu_slots[i].item(), is_hotspot=False)
-                req.extra_need_to_free_token_index.append(
-                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-                )
-                req.shared_kv_node = new_node
-        else:
-            new_buffer_indexes = radix_cache.buffer_mem_manager.alloc(len(eligible))
-            req_idxes = torch.tensor([r.req_idx for r in eligible], dtype=torch.int64, device="cuda")
-            cur_buffers = self.req_manager.req_to_buffer_index[req_idxes, 0].contiguous()
-            new_buffers_cuda = new_buffer_indexes.to(device="cuda", dtype=torch.int64).contiguous()
-            radix_cache.buffer_mem_manager.copy_state_buffers(cur_buffers, new_buffers_cuda)
-
-            for i, req in enumerate(eligible):
-                key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-                value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-                prefix_len, new_node = radix_cache.insert(key, value)
-                old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-                radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                radix_cache.add_node_ref_counter(new_node)
-                radix_cache.add_buffer_idx_to_node(new_node, new_buffer_indexes[i].item(), is_hotspot=False)
-                req.extra_need_to_free_token_index.append(
-                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-                )
-                req.shared_kv_node = new_node
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -731,10 +612,9 @@ class InferReq:
 
         self.finish_status = FinishStatus()
 
-        # Hybrid radix cache hotspot detection
-        self.mamba_buffer_target_len = 0  # absolute token position for buffer snapshot
-        self.is_hotspot_prefill = False
-        self.extra_need_to_free_token_index = []
+        # Position of unbuffered prefix node (from match_prefix walk-back).
+        # 0 means no mid-prefill snapshot needed.
+        self.unbuffered_prefix_pos = 0
         return
 
     def _match_radix_cache(self):
@@ -744,28 +624,29 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
-            # For hybrid models, retrieve the walk-back miss length stashed by match_prefix
-            miss_prefix_len = getattr(g_infer_context.radix_cache, "_last_miss_prefix_len", 0)
-            if share_node is not None:
-                self.shared_kv_node = share_node
-                ready_cache_len = share_node.node_prefix_total_len
-                # 从 cpu 到 gpu 是流内阻塞操作
-                g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
-                if g_infer_context.has_recurrent_state:
-                    threshold = g_infer_context.radix_cache.min_insert_threshold
-                    if miss_prefix_len > threshold:
-                        self.mamba_buffer_target_len = self.cur_kv_len + miss_prefix_len
-                        self.is_hotspot_prefill = True
-            elif g_infer_context.has_recurrent_state and miss_prefix_len > 0:
-                # Bootstrap case: tree had KV structure but no buffer anywhere.
-                threshold = g_infer_context.radix_cache.min_insert_threshold
-                if miss_prefix_len > threshold:
-                    self.mamba_buffer_target_len = miss_prefix_len
-                    self.is_hotspot_prefill = True
+            if g_infer_context.has_recurrent_state:
+                share_node, kv_len, value_tensor, unbuffered_prefix_pos = g_infer_context.radix_cache.match_prefix(
+                    key, update_refs=True
+                )
+                if share_node is not None:
+                    self.shared_kv_node = share_node
+                    ready_cache_len = share_node.node_prefix_total_len
+                    g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                    self.cur_kv_len = int(ready_cache_len)
+                    self.shm_req.prompt_cache_len = self.cur_kv_len
+                    self.unbuffered_prefix_pos = self.cur_kv_len + unbuffered_prefix_pos
+                elif unbuffered_prefix_pos > 0:
+                    # Bootstrap: tree had KV but no buffer anywhere
+                    self.unbuffered_prefix_pos = unbuffered_prefix_pos
+            else:
+                share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+                if share_node is not None:
+                    self.shared_kv_node = share_node
+                    ready_cache_len = share_node.node_prefix_total_len
+                    g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                    self.cur_kv_len = int(ready_cache_len)
+                    self.shm_req.prompt_cache_len = self.cur_kv_len
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -819,12 +700,12 @@ class InferReq:
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
-        if self.mamba_buffer_target_len > 0 and chunked_start < self.mamba_buffer_target_len:
-            # Use mamba_buffer_target_len as the endpoint, but still respect chunk size
+        if self.unbuffered_prefix_pos > 0 and chunked_start < self.unbuffered_prefix_pos:
+            # Use unbuffered_prefix_pos as the endpoint, but still respect chunk size
             # to avoid exceeding batch_max_tokens and causing a scheduling deadlock.
             chunked_end = min(
                 self.get_cur_total_len(),
-                self.mamba_buffer_target_len,
+                self.unbuffered_prefix_pos,
                 chunked_start + self.shm_req.chunked_prefill_size,
             )
         else:

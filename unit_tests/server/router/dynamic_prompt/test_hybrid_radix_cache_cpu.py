@@ -38,7 +38,7 @@ class TestHybridRadixCacheCpuBuffers:
         val = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
         _, node = cache.insert(key, val)
         cpu_slot = cpu_mgr.alloc(1)
-        cache.add_buffer_idx_to_node(node, cpu_slot[0].item(), is_hotspot=False)
+        cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
         assert node.buffer_idx == cpu_slot[0].item()
         assert node.buffer_idx < cpu_mgr.size
 
