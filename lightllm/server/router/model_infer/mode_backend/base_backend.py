@@ -169,6 +169,7 @@ class ModeBackend:
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
+        self._validate_cpu_cache_support()
         set_random_seed(2147483647)
 
         radix_cache_class = self.model.radix_cache_class
@@ -250,6 +251,22 @@ class ModeBackend:
 
     def init_custom(self):
         pass
+
+    def _validate_cpu_cache_support(self):
+        if not self.args.enable_cpu_cache:
+            return
+
+        kv_buffer = getattr(self.model.mem_manager, "kv_buffer", None)
+        if isinstance(kv_buffer, torch.Tensor):
+            return
+
+        raise ValueError(
+            "--enable_cpu_cache requires a dense GPU KV tensor layout. "
+            f"Got {type(kv_buffer).__name__} from {self.model.mem_manager.__class__.__name__}, "
+            "which is not supported by the CPU KV cache offload/load kernels. "
+            "Disable --enable_cpu_cache for hybrid models such as Qwen3Next; "
+            "use --enable_cpu_mamba_cache for recurrent-state offload instead."
+        )
 
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle

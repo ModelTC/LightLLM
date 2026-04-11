@@ -61,6 +61,17 @@ class MultiLevelKvCacheModule(object):
         logger.info("MultiLevelKvCacheModule: no need sync compute stream.")
         return False
 
+    def _get_gpu_kv_cache_tensor(self) -> torch.Tensor:
+        kv_buffer = getattr(self.backend.model.mem_manager, "kv_buffer", None)
+        if isinstance(kv_buffer, torch.Tensor):
+            return kv_buffer
+
+        raise ValueError(
+            "--enable_cpu_cache requires mem_manager.kv_buffer to be a dense torch.Tensor, "
+            f"got {type(kv_buffer).__name__} from {self.backend.model.mem_manager.__class__.__name__}. "
+            "This CPU KV cache path does not support hybrid/sparse KV layouts."
+        )
+
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
         token_page_size = self.args.cpu_cache_token_page_size
@@ -96,6 +107,7 @@ class MultiLevelKvCacheModule(object):
                     grid_num = 16
 
                     mem_manager = self.backend.model.mem_manager
+                    gpu_kv_cache = self._get_gpu_kv_cache_tensor()
                     if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
                         cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
                         cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[
@@ -117,7 +129,7 @@ class MultiLevelKvCacheModule(object):
                     # 将 cpu page 的内容拷贝到 gpu 页面中
                     load_cpu_kv_to_gpu(
                         gpu_mem_indexes=mem_indexes_cuda,
-                        gpu_kv_cache=mem_manager.kv_buffer,
+                        gpu_kv_cache=gpu_kv_cache,
                         gpu_kv_cache_scale=gpu_kv_cache_scale,
                         cpu_kv_cache=cpu_kv_cache,
                         cpu_kv_cache_scale=cpu_kv_cache_scale,
@@ -260,6 +272,7 @@ class MultiLevelKvCacheModule(object):
             grid_num = 16
 
             mem_manager = self.backend.model.mem_manager
+            gpu_kv_cache = self._get_gpu_kv_cache_tensor()
             if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
                 cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
                 cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
@@ -275,7 +288,7 @@ class MultiLevelKvCacheModule(object):
             # assert max(page_list) < self.cpu_cache_client.cpu_kv_cache_tensor.shape[0]
             offload_gpu_kv_to_cpu(
                 token_indexes=token_indexes,
-                gpu_kv_cache=mem_manager.kv_buffer,
+                gpu_kv_cache=gpu_kv_cache,
                 gpu_kv_cache_scale=gpu_kv_cache_scale,
                 cpu_kv_cache=cpu_kv_cache,
                 cpu_kv_cache_scale=cpu_kv_cache_scale,

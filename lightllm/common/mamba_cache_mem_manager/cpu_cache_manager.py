@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -73,6 +73,10 @@ class CpuMambaCacheManager:
 
         # Lazy transfer stream for async offload
         self._transfer_stream: Optional[torch.cuda.Stream] = None
+        self._gpu_conv: Optional[torch.Tensor] = None
+        self._gpu_ssm: Optional[torch.Tensor] = None
+        self._slot_transfer_events: Dict[int, torch.cuda.Event] = {}
+        self._pin_ready = self._pin_handle_conv is None and self._pin_handle_ssm is None
 
     # ------------------------------------------------------------------
     # Buffer initialisation helpers
@@ -148,41 +152,30 @@ class CpuMambaCacheManager:
 
     def free(self, free_index: Union[torch.Tensor, List[int]]):
         """Return slots back to the pool."""
-        if isinstance(free_index, list):
-            free_len = len(free_index)
-        else:
-            free_len = free_index.numel()
+        cpu_slots = self._to_cpu_long(free_index)
+        free_len = cpu_slots.numel()
 
         if free_len == 0:
             return
+
+        self._wait_for_slots(cpu_slots)
 
         end = self.mark_start
         start = end - free_len
         assert start >= 0, f"error free cpu state: mark_start={self.mark_start}, free_len={free_len}"
 
-        if isinstance(free_index, list):
-            self.mem_state[start:end] = torch.tensor(free_index, dtype=torch.int32)
-        elif free_index.device.type == "cpu":
-            self.mem_state[start:end] = free_index.to(dtype=torch.int32)
-        else:
-            self.mem_state[start:end] = free_index.cpu().to(dtype=torch.int32)
+        self.mem_state[start:end] = cpu_slots.to(dtype=torch.int32)
 
         self.mark_start -= free_len
         self.can_use_mem_size += free_len
 
-        # Zero freed slots — buffer[slot] is contiguous, fast.
-        if isinstance(free_index, list):
-            for idx in free_index:
-                self.conv_state_buffer[idx] = 0
-                self.ssm_state_buffer[idx] = 0
-        else:
-            idx_list = free_index.tolist() if hasattr(free_index, "tolist") else list(free_index)
-            for idx in idx_list:
-                self.conv_state_buffer[idx] = 0
-                self.ssm_state_buffer[idx] = 0
+        self.conv_state_buffer[cpu_slots] = 0
+        self.ssm_state_buffer[cpu_slots] = 0
 
     def free_all(self):
         """Reset pool and zero out buffers."""
+        if self._slot_transfer_events:
+            self.sync_transfer()
         self.conv_state_buffer.zero_()
         self.ssm_state_buffer.zero_()
         self.mem_state[:] = torch.arange(0, self.size, dtype=torch.int32)
@@ -202,6 +195,10 @@ class CpuMambaCacheManager:
         self._gpu_conv = gpu_conv_buffer
         self._gpu_ssm = gpu_ssm_buffer
 
+    def _ensure_gpu_buffers_bound(self):
+        if self._gpu_conv is None or self._gpu_ssm is None:
+            raise RuntimeError("CpuMambaCacheManager requires set_gpu_buffers() before transfer operations")
+
     def _get_transfer_stream(self) -> torch.cuda.Stream:
         if self._transfer_stream is None:
             self._transfer_stream = torch.cuda.Stream()
@@ -213,9 +210,25 @@ class CpuMambaCacheManager:
         return idx.to(dtype=torch.long, device="cpu")
 
     def _to_gpu_long(self, idx: Union[List[int], torch.Tensor]) -> torch.Tensor:
+        self._ensure_gpu_buffers_bound()
         if isinstance(idx, list):
             return torch.tensor(idx, dtype=torch.long, device=self._gpu_conv.device)
         return idx.to(dtype=torch.long, device=self._gpu_conv.device)
+
+    def _wait_for_pin_ready(self):
+        if not self._pin_ready:
+            self.wait_for_pin()
+
+    def _wait_for_slots(self, cpu_slot_indexes: Union[List[int], torch.Tensor]):
+        cpu_slot_indexes = self._to_cpu_long(cpu_slot_indexes)
+        for slot in cpu_slot_indexes.tolist():
+            event = self._slot_transfer_events.pop(int(slot), None)
+            if event is not None:
+                event.synchronize()
+
+    def _record_slot_transfer_event(self, cpu_slot_indexes: torch.Tensor, event: torch.cuda.Event):
+        for slot in cpu_slot_indexes.tolist():
+            self._slot_transfer_events[int(slot)] = event
 
     def offload_to_cpu(
         self,
@@ -237,8 +250,11 @@ class CpuMambaCacheManager:
             the GPU slot can be freed, and the actual wait only happens when
             the slot is about to be zeroed or reused.
         """
-        gpu_buffer_indexes = self._to_gpu_long(gpu_buffer_indexes)
+        self._ensure_gpu_buffers_bound()
+        self._wait_for_pin_ready()
         cpu_slot_indexes = self._to_cpu_long(cpu_slot_indexes)
+        self._wait_for_slots(cpu_slot_indexes)
+        gpu_buffer_indexes = self._to_gpu_long(gpu_buffer_indexes)
 
         n = int(gpu_buffer_indexes.shape[0])
         if n == 0:
@@ -261,6 +277,7 @@ class CpuMambaCacheManager:
                     self.conv_state_buffer[c].copy_(self._gpu_conv[:, g], non_blocking=True)
                     self.ssm_state_buffer[c].copy_(self._gpu_ssm[:, g], non_blocking=True)
                 dma_done = stream.record_event()
+                self._record_slot_transfer_event(cpu_slot_indexes, dma_done)
 
             # GPU-side barrier: the default stream won't execute past this
             # point until the DMA finishes.  The host returns immediately.
@@ -286,6 +303,8 @@ class CpuMambaCacheManager:
                     snapshots_conv[i].record_stream(stream)
                     self.ssm_state_buffer[c].copy_(snapshots_ssm[i], non_blocking=True)
                     snapshots_ssm[i].record_stream(stream)
+                dma_done = stream.record_event()
+                self._record_slot_transfer_event(cpu_slot_indexes, dma_done)
 
     def load_to_gpu(
         self,
@@ -298,6 +317,8 @@ class CpuMambaCacheManager:
         in-place modification by subsequent compute kernels (guaranteed by
         CUDA stream ordering on the default stream).
         """
+        self._ensure_gpu_buffers_bound()
+        self._wait_for_pin_ready()
         cpu_slot_indexes = self._to_cpu_long(cpu_slot_indexes)
         gpu_buffer_indexes = self._to_gpu_long(gpu_buffer_indexes)
 
@@ -306,7 +327,7 @@ class CpuMambaCacheManager:
             return
 
         # Ensure any pending offload DMA is complete so CPU buffer is up-to-date.
-        self.sync_transfer()
+        self._wait_for_slots(cpu_slot_indexes)
 
         # Per-slot DMA on the default (compute) stream.
         # cpu_buffer[c] is contiguous pinned — efficient DMA source.
@@ -320,6 +341,10 @@ class CpuMambaCacheManager:
         """Block until any pending async offload DMA completes."""
         if self._transfer_stream is not None:
             self._transfer_stream.synchronize()
+        elif self._slot_transfer_events:
+            for event in list(self._slot_transfer_events.values()):
+                event.synchronize()
+        self._slot_transfer_events.clear()
 
     def wait_for_pin(self):
         """Wait for async cudaHostRegister handles to complete."""
@@ -327,3 +352,4 @@ class CpuMambaCacheManager:
             self._pin_handle_conv.wait()
         if self._pin_handle_ssm is not None:
             self._pin_handle_ssm.wait()
+        self._pin_ready = True

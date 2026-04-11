@@ -108,13 +108,7 @@ class InferenceContext:
                     req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int64)
                     cpu_slots = torch.tensor(src_buf_ids, dtype=torch.int64)
                     gpu_dst = req_manager.req_to_buffer_index[req_tensor, 0]
-                    cpu_mgr.load_to_gpu(
-                        req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                        req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                        cpu_slots,
-                        gpu_dst,
-                    )
-                    cpu_mgr.sync_transfer()
+                    cpu_mgr.load_to_gpu(cpu_slots, gpu_dst)
                 else:
                     # Original GPU-to-GPU path
                     req_tensor = torch.tensor(fork_req_ids, device="cuda", dtype=torch.int32)
@@ -190,199 +184,113 @@ class InferenceContext:
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
 
-    def _insert_kv_for_mamba(self, free_token_index: List, req: "InferReq"):
-        """Insert KV tokens into radix tree for a mamba/hybrid request.
+    def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
+        """Free KV tokens for a hybrid-model request at completion/pause.
 
-        Returns the tree node where KV was inserted, or None if no radix cache.
+        Chunk-boundary inserts already placed tokens into the radix cache
+        during prefill.  This method only frees tokens beyond the cached
+        prefix and any deferred orphaned indices.  Always returns True
+        (working buffer is always freed by the caller).
         """
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
-            return None
+            return True
 
-        input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-        prefix_len, node = self.radix_cache.insert(key, value)
-        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+        # Free deferred orphaned indices (from chunk inserts where tree
+        # already had a prefix from another request)
+        free_token_index.extend(req.deferred_free_token_indices)
+        req.deferred_free_token_indices.clear()
+
+        # Free tokens beyond what the tree owns
+        shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        if shared_len < req.cur_kv_len:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_len : req.cur_kv_len])
+
         if req.shared_kv_node is not None:
-            assert req.shared_kv_node.node_prefix_total_len <= prefix_len
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
 
-        # Drain deferred frees from mid-prefill snapshots
-        if len(req.extra_need_to_free_token_index) > 0:
-            free_token_index.extend(req.extra_need_to_free_token_index)
-            req.extra_need_to_free_token_index = []
-
-        return node
-
-    def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
-        self._insert_kv_for_mamba(free_token_index, req)
-        return True  # always free request's buffer back to pool
+        return True
 
     def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
-        """释放请求的 KV cache 和 buffer 内存"""
+        """Free KV cache and buffer memory for a completed request."""
         if self.has_recurrent_state:
-            node = self._insert_kv_for_mamba(free_token_index, req)
-            req_to_buffer_index = self.req_manager.req_to_buffer_index
-            cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
-
-            # Fallback: if snapshot moments failed to attach a buffer, try now
-            if node is not None and node.buffer_idx is None:
-                if cpu_mgr is not None:
-                    self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
-                    if cpu_mgr.can_use_mem_size >= 1:
-                        cpu_slot = cpu_mgr.alloc(1)
-                        primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                        gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                        cpu_mgr.offload_to_cpu(
-                            self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                            self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                            gpu_idx,
-                            cpu_slot,
-                        )
-                        self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
-                    free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-                else:
-                    primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-                    self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx)
-            else:
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            self.free_a_req_mem_for_mamba(free_token_index, req)
+            free_buffer_index.extend(self.req_manager.req_to_buffer_index[req.req_idx, :].tolist())
         else:
             self.free_a_req_mem(free_token_index, req)
 
     def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
-        """Free request memory during pause, transferring the Mamba buffer to the
-        tree node so that recovery can find it via match_prefix."""
+        """Free request memory during pause.  Chunk-boundary inserts already
+        placed cached tokens in the tree; this just frees the remainder."""
+        self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+
+    def _insert_prefill_chunk_to_cache(self, run_reqs: List["InferReq"]):
+        """Insert completed prefill chunks into radix cache with GDN buffer.
+
+        Called after _pre_post_handle for NON-FINAL chunks only
+        (cur_output_len == 0 and cur_kv_len > 0).  Each insert creates a
+        cache checkpoint at the chunk boundary with the correct cumulative
+        GDN state.
+        """
         if not self.has_recurrent_state or self.radix_cache is None:
-            self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
             return
 
-        node = self._insert_kv_for_mamba(free_token_index, req)
-        req_to_buffer_index = self.req_manager.req_to_buffer_index
-        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
+        reqs = [r for r in run_reqs if r.cur_output_len == 0 and r.cur_kv_len > 0]
+        if not reqs:
+            return
 
-        if node is not None and req.cur_kv_len > 0:
-            primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
-            if cpu_mgr is not None:
-                self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
-                if cpu_mgr.can_use_mem_size >= 1:
-                    cpu_slot = cpu_mgr.alloc(1)
-                    gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                    cpu_mgr.offload_to_cpu(
-                        self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                        self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                        gpu_idx,
-                        cpu_slot,
-                    )
-                    self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-            else:
-                self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx)
-                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
-        else:
-            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
-
-    def _make_buffer_snapshot_fn(self, req: "InferReq"):
-        """Create a buffer_snapshot_fn callback for insert_with_buffer.
-
-        The callback handles CPU-offload or GPU-to-GPU copy depending on
-        whether a CPU buffer manager is available.
-        """
         radix_cache = self.radix_cache
         req_to_buffer_index = self.req_manager.req_to_buffer_index
         cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
 
-        def snapshot(node):
+        for req in reqs:
+            insert_len = req.cur_kv_len
+            input_token_ids = req.get_input_token_ids()
+            key = torch.tensor(input_token_ids[0:insert_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][:insert_len].detach().cpu()
+
+            prefix_len, node = radix_cache.insert(key, value)
+            if node is None:
+                continue
+
+            # Handle overlapping indices: tree already had [old_shared:prefix_len]
+            # from another request.  Our indices for that range differ — defer
+            # freeing until request completion (can't free mid-prefill).
+            old_shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            if prefix_len > old_shared_len:
+                req.deferred_free_token_indices.append(
+                    self.req_manager.req_to_token_indexs[req.req_idx][old_shared_len:prefix_len].detach().clone()
+                )
+
+            # Update shared_kv_node with ref counting
+            if req.shared_kv_node is not None:
+                radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            radix_cache.add_node_ref_counter(node)
+            req.shared_kv_node = node
+
+            # Snapshot GDN buffer and attach to tree node
             if node.buffer_idx is not None:
-                return
-            primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                continue
+
+            primary = req_to_buffer_index[req.req_idx, 0].item()
             if cpu_mgr is not None:
                 radix_cache.free_radix_cache_to_get_enough_buffer(1)
                 if cpu_mgr.can_use_mem_size < 1:
-                    return  # no buffer available
+                    continue
                 cpu_slot = cpu_mgr.alloc(1)
-                gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
-                cpu_mgr.offload_to_cpu(
-                    self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
-                    self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
-                    gpu_idx,
-                    cpu_slot,
-                )
+                gpu_idx = torch.tensor([primary], dtype=torch.int64, device="cuda")
+                cpu_mgr.offload_to_cpu(gpu_idx, cpu_slot)
                 radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
             else:
                 radix_cache.free_radix_cache_to_get_enough_buffer(1)
                 if radix_cache.buffer_mem_manager.can_use_mem_size < 1:
-                    return  # no buffer available
+                    continue
                 new_buf = radix_cache.buffer_mem_manager.alloc(1)
-                cur_buf = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                cur_buf = torch.tensor([primary], dtype=torch.int64, device="cuda")
                 new_buf_cuda = new_buf.to(device="cuda", dtype=torch.int64).contiguous()
                 radix_cache.buffer_mem_manager.copy_state_buffers(cur_buf, new_buf_cuda)
                 radix_cache.add_buffer_idx_to_node(node, new_buf[0].item())
-
-        return snapshot
-
-    def _maybe_snapshot_unbuffered_prefix(self, run_reqs: List["InferReq"]):
-        """Snapshot Mamba state when prefill reaches the unbuffered prefix boundary.
-
-        The GPU Mamba state reflects cur_kv_len tokens (recurrent — state is
-        cumulative), so the tree key must cover [0:cur_kv_len] to stay
-        consistent with the stored state.  Using a shorter key
-        (unbuffered_prefix_pos) would associate the wrong state with a prefix,
-        causing accuracy degradation for future requests that match it.
-        """
-        reqs = [r for r in run_reqs if r.unbuffered_prefix_pos > 0 and r.cur_kv_len >= r.unbuffered_prefix_pos]
-        if not reqs:
-            return
-        radix_cache = self.radix_cache
-        for req in reqs:
-            # Use cur_kv_len as key length — Mamba state is at this position
-            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-            snapshot_fn = self._make_buffer_snapshot_fn(req)
-            prefix_len, new_node = radix_cache.insert(key, value)
-            if new_node is not None and new_node.buffer_idx is None:
-                snapshot_fn(new_node)
-            # Update shared_kv_node ref counting
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            if req.shared_kv_node is not None:
-                radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            radix_cache.add_node_ref_counter(new_node)
-            req.shared_kv_node = new_node
-            # Defer overlapping token frees — these slots are still in
-            # req_to_token_indexs and used by attention during prefill.
-            req.extra_need_to_free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-            )
-            req.unbuffered_prefix_pos = 0
-
-    def _maybe_snapshot_full_input(self, run_reqs: List["InferReq"]):
-        """Snapshot Mamba state for the full input after prefill completes."""
-        reqs = [r for r in run_reqs if r.cur_kv_len + 1 >= r.get_cur_total_len() and r.cur_output_len == 0]
-        if not reqs:
-            return
-        radix_cache = self.radix_cache
-        for req in reqs:
-            # Skip if shared node already has a buffer and covers the full input
-            if req.shared_kv_node is not None and req.shared_kv_node.buffer_idx is not None:
-                if req.shared_kv_node.node_prefix_total_len >= req.cur_kv_len:
-                    continue
-            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
-            snapshot_fn = self._make_buffer_snapshot_fn(req)
-            prefix_len, new_node = radix_cache.insert(key, value)
-            if new_node is not None and new_node.buffer_idx is None:
-                snapshot_fn(new_node)
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            if req.shared_kv_node is not None:
-                radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            radix_cache.add_node_ref_counter(new_node)
-            req.shared_kv_node = new_node
-            # Defer overlapping token frees — slots still in use during prefill.
-            req.extra_need_to_free_token_index.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-            )
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -455,7 +363,7 @@ class InferenceContext:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
+                self._pause_req_mem_and_buffers(free_token_index, free_buffer_index, req)
                 req.cur_kv_len = 0
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
@@ -667,13 +575,9 @@ class InferReq:
 
         self.finish_status = FinishStatus()
 
-        # Position of unbuffered prefix node (from match_prefix walk-back).
-        # 0 means no mid-prefill snapshot needed.
-        self.unbuffered_prefix_pos = 0
-        # Deferred token frees from mid-prefill snapshots. These tokens overlap
-        # with the radix tree but are still referenced by req_to_token_indexs
-        # during prefill. They must not be freed until request completion.
-        self.extra_need_to_free_token_index = []
+        # Token indices that overlap with tree entries from other requests,
+        # discovered during chunk-boundary inserts.  Freed at request completion.
+        self.deferred_free_token_indices: List = []
         return
 
     def _match_radix_cache(self):
@@ -685,19 +589,13 @@ class InferReq:
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
 
             if g_infer_context.has_recurrent_state:
-                share_node, kv_len, value_tensor, unbuffered_prefix_pos = g_infer_context.radix_cache.match_prefix(
-                    key, update_refs=True
-                )
+                share_node, kv_len, value_tensor, _ = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
                 if share_node is not None:
                     self.shared_kv_node = share_node
                     ready_cache_len = share_node.node_prefix_total_len
                     g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                     self.cur_kv_len = int(ready_cache_len)
                     self.shm_req.prompt_cache_len = self.cur_kv_len
-                    self.unbuffered_prefix_pos = self.cur_kv_len + unbuffered_prefix_pos
-                elif unbuffered_prefix_pos > 0:
-                    # Bootstrap: tree had KV but no buffer anywhere
-                    self.unbuffered_prefix_pos = unbuffered_prefix_pos
             else:
                 share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
                 if share_node is not None:
@@ -759,16 +657,7 @@ class InferReq:
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
-        if self.unbuffered_prefix_pos > 0 and chunked_start < self.unbuffered_prefix_pos:
-            # Use unbuffered_prefix_pos as the endpoint, but still respect chunk size
-            # to avoid exceeding batch_max_tokens and causing a scheduling deadlock.
-            chunked_end = min(
-                self.get_cur_total_len(),
-                self.unbuffered_prefix_pos,
-                chunked_start + self.shm_req.chunked_prefill_size,
-            )
-        else:
-            chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
         return chunked_end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):

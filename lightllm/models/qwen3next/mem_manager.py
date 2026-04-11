@@ -90,6 +90,13 @@ class Qwen3NextHybridMemManager(MemoryManager):
 
         super().__init__(full_attn_cache_size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
 
+        if self.cpu_mamba_cache_manager is not None:
+            self.cpu_mamba_cache_manager.set_gpu_buffers(
+                self.mamba_cache_mem_manager.conv_state_cache.buffer,
+                self.mamba_cache_mem_manager.ssm_state_cache.buffer,
+            )
+            self.cpu_mamba_cache_manager.wait_for_pin()
+
     @staticmethod
     def _dp_offset_shm_key(key):
         """Offset SHM key by DP rank so each DP group gets its own shared memory segment."""
