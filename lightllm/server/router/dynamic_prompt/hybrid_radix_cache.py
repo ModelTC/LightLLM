@@ -58,6 +58,35 @@ class HybridRadixCache(RadixCache):
         value = torch.concat(ans_value_list)
         return tree_node, kv_len, value, unbuffered_prefix_pos
 
+    def insert_with_buffer(self, key, value, unbuffered_prefix_pos, buffer_snapshot_fn):
+        """Insert tokens and ensure buffers at the boundary and leaf.
+
+        Args:
+            key: full input token ids (int64 tensor)
+            value: corresponding KV cache memory indices (int64 tensor)
+            unbuffered_prefix_pos: token position of prefix needing a buffer.
+                                   0 means no boundary snapshot needed.
+            buffer_snapshot_fn: callable(node) -> None, called for nodes needing
+                                a buffer. Must check node.buffer_idx before acting.
+
+        Returns:
+            (prefix_len, leaf_node)
+        """
+        if unbuffered_prefix_pos > 0:
+            # First insert the prefix portion to ensure a node exists at the boundary
+            boundary_key = key[:unbuffered_prefix_pos]
+            boundary_value = value[:unbuffered_prefix_pos]
+            _, boundary_node = self.insert(boundary_key, boundary_value)
+            if boundary_node is not None and boundary_node.buffer_idx is None:
+                buffer_snapshot_fn(boundary_node)
+
+        # Insert the full key
+        prefix_len, leaf_node = self.insert(key, value)
+        if leaf_node is not None and leaf_node.buffer_idx is None:
+            buffer_snapshot_fn(leaf_node)
+
+        return prefix_len, leaf_node
+
     def add_buffer_idx_to_node(self, node: TreeNode, buffer_idx: int):
         """Set buffer_idx for a node and add it to evict_buffer_set."""
         self.evict_buffer_set.discard(node)

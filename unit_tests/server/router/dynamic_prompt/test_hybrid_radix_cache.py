@@ -136,6 +136,77 @@ def test_match_prefix_walkback_does_not_destroy_nodes():
     cache.dec_node_ref_counter(share_node)
 
 
+def test_insert_with_buffer_attaches_buffer_to_leaf():
+    """insert_with_buffer should attach a buffer to the inserted leaf node."""
+    cache = _make_hybrid_cache("iwb_leaf")
+
+    buffer_calls = []
+
+    def snapshot_fn(node):
+        buffer_calls.append(node)
+        cache.add_buffer_idx_to_node(node, 100 + len(buffer_calls))
+
+    key = torch.tensor([1, 2, 3, 4], dtype=torch.int64)
+    val = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+    prefix_len, leaf_node = cache.insert_with_buffer(key, val, 0, snapshot_fn)
+
+    assert leaf_node.buffer_idx is not None, "Leaf node should have a buffer"
+    assert len(buffer_calls) == 1, "snapshot_fn should be called once (for leaf only)"
+
+
+def test_insert_with_buffer_splits_at_boundary():
+    """insert_with_buffer should ensure a split at unbuffered_prefix_pos and attach buffer there."""
+    cache = _make_hybrid_cache("iwb_split")
+
+    buffer_nodes = []
+
+    def snapshot_fn(node):
+        buffer_nodes.append(node)
+        cache.add_buffer_idx_to_node(node, 200 + len(buffer_nodes))
+
+    key = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int64)
+    val = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int64)
+    prefix_len, leaf_node = cache.insert_with_buffer(key, val, 3, snapshot_fn)
+
+    # Should have called snapshot_fn twice: once for boundary node, once for leaf
+    assert len(buffer_nodes) == 2
+
+    # Check the boundary node at position 3
+    boundary_node = buffer_nodes[0]
+    assert boundary_node.node_prefix_total_len == 3
+    assert boundary_node.buffer_idx is not None
+
+    # Check the leaf node
+    assert leaf_node.buffer_idx is not None
+    assert leaf_node.node_prefix_total_len == 6
+
+
+def test_insert_with_buffer_skips_existing_buffer():
+    """insert_with_buffer should not call snapshot_fn for nodes that already have buffers."""
+    cache = _make_hybrid_cache("iwb_skip")
+
+    # Pre-insert the prefix with a buffer
+    prefix_key = torch.tensor([1, 2, 3], dtype=torch.int64)
+    prefix_val = torch.tensor([10, 11, 12], dtype=torch.int64)
+    _, prefix_node = cache.insert(prefix_key, prefix_val)
+    cache.add_buffer_idx_to_node(prefix_node, 42)
+
+    buffer_calls = []
+
+    def snapshot_fn(node):
+        buffer_calls.append(node)
+        cache.add_buffer_idx_to_node(node, 300 + len(buffer_calls))
+
+    # Insert longer key with boundary at 3 (where buffer already exists)
+    key = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int64)
+    val = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int64)
+    prefix_len, leaf_node = cache.insert_with_buffer(key, val, 3, snapshot_fn)
+
+    # Only the leaf should get a snapshot call — boundary already has a buffer
+    assert len(buffer_calls) == 1
+    assert buffer_calls[0] is leaf_node
+
+
 def test_no_adaptive_threshold_fields():
     """HybridRadixCache should not have adaptive threshold or hotspot tracking fields."""
     cache = _make_hybrid_cache("no_adaptive")
