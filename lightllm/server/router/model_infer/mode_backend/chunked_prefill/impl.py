@@ -256,36 +256,29 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="accepted_index",
                 gpu_tensor=accepted_index,
             )
-            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="mtp_accept_len",
-                gpu_tensor=mtp_accept_len,
-            )
+
             verify_event = torch.cuda.Event()
             verify_event.record()
 
             if self.enable_dynamic_mtp:
-                additional_mem_indexes_cpu, draft_probs_list = self._draft_decode_func(
+                all_next_token_ids, additional_mem_indexes_cpu, draft_probs_list = self._draft_decode_func(
                     main_model_input=model_input,
                     main_model_output=model_output,
                     next_token_ids=next_token_ids,
-                    mtp_accept_len=mtp_accept_len,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                 )
             else:
-                additional_mem_indexes_cpu = self._draft_decode_func(
+                all_next_token_ids, additional_mem_indexes_cpu = self._draft_decode_func(
                     main_model_input=model_input,
                     main_model_output=model_output,
                     next_token_ids=next_token_ids,
-                    mtp_accept_len=mtp_accept_len,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                 )
 
             # dynamic_sizes_gpu 用于第二阶段更新 req 的 mtp_size
             if self.enable_dynamic_mtp:
                 draft_probs_tensor = torch.cat(draft_probs_list, dim=-1).view(self.mtp_step, b_mtp_index_cpu.shape[0])
-                dynamic_sizes_gpu = self._compute_dynamic_mtp_size_gpu_part(
-                    draft_probs_tensor=draft_probs_tensor[:, accepted_index == 1]
-                )
+                dynamic_sizes_gpu = self._compute_dynamic_mtp_size_gpu_part(draft_probs_tensor=draft_probs_tensor)
                 # 异步拷贝回 CPU Pin Memory
                 dynamic_sizes_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="dynamic_mtp_sizes", gpu_tensor=dynamic_sizes_gpu
@@ -293,6 +286,14 @@ class ChunkedPrefillBackend(ModeBackend):
 
                 dynamic_mtp_event = torch.cuda.Event()
                 dynamic_mtp_event.record()
+
+            mtp_scatter_next_token_ids(
+                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                all_next_token_ids=all_next_token_ids,
+                b_req_idx=model_input.b_req_idx,
+                mtp_accept_len=mtp_accept_len,
+            )
 
             next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
                 next_token_ids, next_token_logprobs
@@ -302,6 +303,11 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 next_token_ids=next_token_ids,
                 mask=accepted_index == 1,
+            )
+
+            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="mtp_accept_len",
+                gpu_tensor=mtp_accept_len,
             )
 
             sync_event = torch.cuda.Event()
@@ -315,7 +321,9 @@ class ChunkedPrefillBackend(ModeBackend):
         verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
         if self.enable_dynamic_mtp:
             dynamic_mtp_event.synchronize()
-            self._update_dynamic_mtp_size_cpu_part(verify_ok_reqs, dynamic_sizes_cpu)
+            self._update_dynamic_mtp_size_cpu_part(
+                run_reqs=run_reqs, dynamic_sizes_cpu=dynamic_sizes_cpu, accepted_index_cpu=accepted_index_cpu
+            )
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
@@ -358,13 +366,15 @@ class ChunkedPrefillBackend(ModeBackend):
 
     def _update_dynamic_mtp_size_cpu_part(
         self,
-        verify_ok_reqs: List[InferReq],
+        run_reqs: List[InferReq],
         dynamic_sizes_cpu: torch.Tensor,
+        accepted_index_cpu: torch.Tensor,
     ):
-        assert len(verify_ok_reqs) == dynamic_sizes_cpu.shape[0]
-        for req, new_size in zip(verify_ok_reqs, dynamic_sizes_cpu.numpy()):
-            req.current_mtp_step = int(new_size)
-            assert req.current_mtp_step <= req.mtp_step
+        assert len(run_reqs) == dynamic_sizes_cpu.shape[0] == accepted_index_cpu.shape[0]
+        for req, new_size, accepted in zip(run_reqs, dynamic_sizes_cpu.numpy(), accepted_index_cpu.numpy()):
+            if int(accepted) == 1:
+                req.current_mtp_step = int(new_size)
+                assert req.current_mtp_step <= req.mtp_step
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
@@ -386,7 +396,6 @@ class ChunkedPrefillBackend(ModeBackend):
         main_model_input: ModelInput,
         main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
         # share some inference info with the main model
@@ -406,21 +415,13 @@ class ChunkedPrefillBackend(ModeBackend):
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
 
-        mtp_scatter_next_token_ids(
-            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            all_next_token_ids=all_next_token_ids,
-            b_req_idx=main_model_input.b_req_idx,
-            mtp_accept_len=mtp_accept_len,
-        )
-        return None
+        return all_next_token_ids, None
 
     def _draft_decode_eagle(
         self,
         main_model_input: ModelInput,
         main_model_output: ModelOutput,
         next_token_ids: torch.Tensor,
-        mtp_accept_len: torch.Tensor,
         b_req_mtp_start_loc: torch.Tensor,
     ):
 
@@ -476,15 +477,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
 
-        mtp_scatter_next_token_ids(
-            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            all_next_token_ids=all_next_token_ids,
-            b_req_idx=main_model_input.b_req_idx,
-            mtp_accept_len=mtp_accept_len,
-        )
-
         if self.enable_dynamic_mtp:
-            return eagle_mem_indexes_cpu, draft_probs_list
+            return all_next_token_ids, eagle_mem_indexes_cpu, draft_probs_list
         else:
-            return eagle_mem_indexes_cpu
+            return all_next_token_ids, eagle_mem_indexes_cpu
