@@ -318,7 +318,8 @@ class ChunkedPrefillBackend(ModeBackend):
         self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
 
         verify_event.synchronize()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
+        accepted_index_cpu_numpy = accepted_index_cpu.numpy()
+        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
         if self.enable_dynamic_mtp:
             dynamic_mtp_event.synchronize()
             self._update_dynamic_mtp_size_cpu_part(

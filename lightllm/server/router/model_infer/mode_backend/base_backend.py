@@ -717,6 +717,11 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
+        if isinstance(next_token_ids, torch.Tensor):
+            next_token_ids = next_token_ids.numpy()
+        if isinstance(next_token_logprobs, torch.Tensor):
+            next_token_logprobs = next_token_logprobs.numpy()
+
         for req_obj, next_token_id, next_token_logprob, pack in zip(
             run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
         ):
@@ -765,7 +770,7 @@ class ModeBackend:
         mtp_accept_len_cpu: torch.Tensor,
     ):
         if self.is_master_in_dp:
-            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu.numpy()):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
 
         return
