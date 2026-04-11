@@ -76,6 +76,14 @@ class TestCpuMambaCacheManagerAllocFree:
         slots = mgr.alloc(POOL_SIZE)
         assert len(slots) == POOL_SIZE
 
+    def test_cpu_buffer_shape_is_slot_first(self):
+        """CPU buffers must have shape (size, layer_num, *state_shape)."""
+        mgr = _make_manager()
+        assert mgr.conv_state_buffer.shape[0] == POOL_SIZE
+        assert mgr.conv_state_buffer.shape[1] == LAYER_NUM
+        assert mgr.ssm_state_buffer.shape[0] == POOL_SIZE
+        assert mgr.ssm_state_buffer.shape[1] == LAYER_NUM
+
 
 # ---------------------------------------------------------------------------
 # TestCpuMambaCacheTransfer  (requires CUDA)
@@ -85,49 +93,42 @@ _has_cuda = torch.cuda.is_available()
 
 @pytest.mark.skipif(not _has_cuda, reason="CUDA not available")
 class TestCpuMambaCacheTransfer:
-    def _make_gpu_buffers(self, mgr):
-        """Create GPU-side conv / ssm buffers matching the manager's shapes."""
+    def _setup_mgr(self, size=POOL_SIZE):
+        """Create manager + GPU buffers and bind them via set_gpu_buffers."""
+        mgr = _make_manager(size)
         conv_shape = (mgr.layer_num, mgr.size, *mgr.conv_state_shape)
         ssm_shape = (mgr.layer_num, mgr.size, *mgr.ssm_state_shape)
         gpu_conv = torch.randn(conv_shape, dtype=mgr.conv_state_dtype, device="cuda")
         gpu_ssm = torch.randn(ssm_shape, dtype=mgr.ssm_state_dtype, device="cuda")
-        return gpu_conv, gpu_ssm
+        mgr.set_gpu_buffers(gpu_conv, gpu_ssm)
+        return mgr, gpu_conv, gpu_ssm
 
     def test_offload_and_load_roundtrip(self):
-        mgr = _make_manager()
-        gpu_conv, gpu_ssm = self._make_gpu_buffers(mgr)
+        mgr, gpu_conv, gpu_ssm = self._setup_mgr()
 
-        # Pick GPU buffer indices 0 and 3 to offload
         gpu_indices = [0, 3]
         cpu_slots = mgr.alloc(2)
         cpu_slot_list = cpu_slots.tolist()
 
-        # Save expected values
         expected_conv = gpu_conv[:, gpu_indices, ...].clone()
         expected_ssm = gpu_ssm[:, gpu_indices, ...].clone()
 
-        # Offload GPU -> CPU
-        mgr.offload_to_cpu(gpu_conv, gpu_ssm, gpu_indices, cpu_slot_list)
+        mgr.offload_to_cpu(gpu_indices, cpu_slot_list)
         mgr.sync_transfer()
 
-        # Zero out the GPU slots to prove load_to_gpu actually restores data
         for g in gpu_indices:
             gpu_conv[:, g, ...] = 0
             gpu_ssm[:, g, ...] = 0
 
-        # Load CPU -> GPU
-        mgr.load_to_gpu(gpu_conv, gpu_ssm, cpu_slot_list, gpu_indices)
-        mgr.sync_transfer()
+        mgr.load_to_gpu(cpu_slot_list, gpu_indices)
 
-        # Verify
         for i, g in enumerate(gpu_indices):
             torch.testing.assert_close(gpu_conv[:, g, ...], expected_conv[:, i, ...])
             torch.testing.assert_close(gpu_ssm[:, g, ...], expected_ssm[:, i, ...])
 
     def test_batched_offload_and_load_multiple_slots(self):
-        """Verify batch transfer works with multiple non-contiguous GPU indices."""
-        mgr = _make_manager()
-        gpu_conv, gpu_ssm = self._make_gpu_buffers(mgr)
+        """Verify transfer works with multiple non-contiguous GPU indices."""
+        mgr, gpu_conv, gpu_ssm = self._setup_mgr()
 
         gpu_indices = [1, 3, 5, 7]
         cpu_slots = mgr.alloc(4)
@@ -136,45 +137,60 @@ class TestCpuMambaCacheTransfer:
         expected_conv = gpu_conv[:, gpu_indices, ...].clone()
         expected_ssm = gpu_ssm[:, gpu_indices, ...].clone()
 
-        mgr.offload_to_cpu(gpu_conv, gpu_ssm, gpu_indices, cpu_slot_list)
+        mgr.offload_to_cpu(gpu_indices, cpu_slot_list)
         mgr.sync_transfer()
 
-        # Verify CPU buffers received correct data
         for i, c in enumerate(cpu_slot_list):
-            torch.testing.assert_close(
-                mgr.conv_state_buffer[:, c, ...],
-                expected_conv[:, i, ...].cpu(),
-            )
-            torch.testing.assert_close(
-                mgr.ssm_state_buffer[:, c, ...],
-                expected_ssm[:, i, ...].cpu(),
-            )
+            torch.testing.assert_close(mgr.conv_state_buffer[c], expected_conv[:, i, ...].cpu())
+            torch.testing.assert_close(mgr.ssm_state_buffer[c], expected_ssm[:, i, ...].cpu())
 
-        # Zero GPU slots and restore
         for g in gpu_indices:
             gpu_conv[:, g, ...] = 0
             gpu_ssm[:, g, ...] = 0
 
-        mgr.load_to_gpu(gpu_conv, gpu_ssm, cpu_slot_list, gpu_indices)
+        mgr.load_to_gpu(cpu_slot_list, gpu_indices)
+
+        for i, g in enumerate(gpu_indices):
+            torch.testing.assert_close(gpu_conv[:, g, ...], expected_conv[:, i, ...])
+            torch.testing.assert_close(gpu_ssm[:, g, ...], expected_ssm[:, i, ...])
+
+    def test_direct_offload_roundtrip(self):
+        """Verify the direct=True path (no snapshot) produces correct data."""
+        mgr, gpu_conv, gpu_ssm = self._setup_mgr()
+
+        gpu_indices = [0, 2, 4, 6]
+        cpu_slots = mgr.alloc(4)
+        cpu_slot_list = cpu_slots.tolist()
+
+        expected_conv = gpu_conv[:, gpu_indices, ...].clone()
+        expected_ssm = gpu_ssm[:, gpu_indices, ...].clone()
+
+        mgr.offload_to_cpu(gpu_indices, cpu_slot_list, direct=True)
         mgr.sync_transfer()
+
+        for i, c in enumerate(cpu_slot_list):
+            torch.testing.assert_close(mgr.conv_state_buffer[c], expected_conv[:, i, ...].cpu())
+            torch.testing.assert_close(mgr.ssm_state_buffer[c], expected_ssm[:, i, ...].cpu())
+
+        for g in gpu_indices:
+            gpu_conv[:, g, ...] = 0
+            gpu_ssm[:, g, ...] = 0
+
+        mgr.load_to_gpu(cpu_slot_list, gpu_indices)
 
         for i, g in enumerate(gpu_indices):
             torch.testing.assert_close(gpu_conv[:, g, ...], expected_conv[:, i, ...])
             torch.testing.assert_close(gpu_ssm[:, g, ...], expected_ssm[:, i, ...])
 
     def test_offload_does_not_corrupt_other_slots(self):
-        mgr = _make_manager()
-        gpu_conv, gpu_ssm = self._make_gpu_buffers(mgr)
+        mgr, gpu_conv, gpu_ssm = self._setup_mgr()
 
-        # Save slot 5's original data
         orig_conv_5 = gpu_conv[:, 5, ...].clone()
         orig_ssm_5 = gpu_ssm[:, 5, ...].clone()
 
-        # Offload only slot 2
         cpu_slots = mgr.alloc(1)
-        mgr.offload_to_cpu(gpu_conv, gpu_ssm, [2], cpu_slots.tolist())
+        mgr.offload_to_cpu([2], cpu_slots.tolist())
         mgr.sync_transfer()
 
-        # Slot 5 should be unchanged
         torch.testing.assert_close(gpu_conv[:, 5, ...], orig_conv_5)
         torch.testing.assert_close(gpu_ssm[:, 5, ...], orig_ssm_5)
