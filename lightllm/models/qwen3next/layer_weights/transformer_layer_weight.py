@@ -1,5 +1,6 @@
 import torch
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
@@ -86,14 +87,19 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             return
         prefix = f"model.layers.{self.layer_num_}.mlp.shared_expert"
         inter_size = self.network_config_["shared_expert_intermediate_size"]
+        # In EP mode, replicate shared expert weights on every rank (no TP
+        # splitting) so the output is already complete — no all-reduce needed.
+        # In non-EP (TP) mode, keep standard TP splitting so the base-class
+        # blanket all-reduce works on the combined routed + shared output.
+        enable_ep_moe = get_env_start_args().enable_ep_moe
+        tp_kwargs = dict(tp_rank=0, tp_world_size=1) if enable_ep_moe else {}
         self.gate_up_proj = ROWMMWeight(
             in_dim=hidden_size,
             out_dims=[inter_size, inter_size],
             weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
             data_type=self.data_type_,
             quant_method=self.get_quant_method("gate_up_proj"),
-            tp_rank=0,
-            tp_world_size=1,
+            **tp_kwargs,
         )
         self.down_proj = COLMMWeight(
             in_dim=inter_size,
@@ -101,8 +107,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             weight_names=f"{prefix}.down_proj.weight",
             data_type=self.data_type_,
             quant_method=self.get_quant_method("down_proj"),
-            tp_rank=0,
-            tp_world_size=1,
+            **tp_kwargs,
         )
         self.ffn_gate = ROWMMWeight(
             in_dim=hidden_size,
