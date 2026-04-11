@@ -230,5 +230,17 @@ def test_case9():
     assert torch.equal(unmerged_node_d.token_id_key, torch.tensor([6], dtype=torch.int64))
 
 
+def test_tree_node_has_no_hotspot_fields():
+    """TreeNode should not have is_hotspot or was_hit after redesign."""
+    from lightllm.server.router.dynamic_prompt.radix_cache import TreeNode
+
+    node = TreeNode()
+    assert not hasattr(node, "is_hotspot"), "is_hotspot should be removed"
+    assert not hasattr(node, "was_hit"), "was_hit should be removed"
+    # buffer_idx and buffer_time should still exist
+    assert hasattr(node, "buffer_idx")
+    assert hasattr(node, "buffer_time")
+
+
 if __name__ == "__main__":
     pytest.main()
