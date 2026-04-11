@@ -27,23 +27,23 @@ def _make_hybrid_cache(unique_suffix, kv_size=1000, buf_size=50):
     return cache
 
 
-def test_evict_buffer_set_hotspot_sort_order():
-    cache = _make_hybrid_cache("hotspot_sort")
+def test_evict_buffer_set_lru_sort_order():
+    """Eviction should be purely LRU by buffer_time."""
+    cache = _make_hybrid_cache("lru_sort")
 
-    # Insert two nodes with tokens
     key1 = torch.tensor([1, 2], dtype=torch.int64)
     val1 = torch.tensor([10, 11], dtype=torch.int64)
     _, node1 = cache.insert(key1, val1)
-    cache.add_buffer_idx_to_node(node1, 100, is_hotspot=True)
+    cache.add_buffer_idx_to_node(node1, 100)
 
     key2 = torch.tensor([3, 4], dtype=torch.int64)
     val2 = torch.tensor([20, 21], dtype=torch.int64)
     _, node2 = cache.insert(key2, val2)
-    cache.add_buffer_idx_to_node(node2, 200, is_hotspot=False)
+    cache.add_buffer_idx_to_node(node2, 200)
 
-    # Non-hotspot should be evicted first (sorted before hotspot)
+    # node1 was inserted first, so it should be evicted first (lower buffer_time)
     first = cache.evict_buffer_set[0]
-    assert first is node2, "Non-hotspot node should sort first for eviction"
+    assert first is node1, "Older buffer should sort first for LRU eviction"
 
 
 def test_two_pass_eviction_skips_referenced():
@@ -126,7 +126,7 @@ def test_match_prefix_walkback_does_not_destroy_nodes():
 
     assert share_node is node_12, "Should match at [1,2] which has buffer"
     assert kv_len == 2, "kv_len should be the matched node's prefix total len"
-    assert cache._last_miss_prefix_len == 2, "Missed 2 tokens in [3,4] node"
+    # unbuffered_prefix_pos assertion will be added in Task 3
 
     # Critical: the [3,4] node must still exist in the tree
     assert 3 in node_12.children, "Child [3,4] must not be destroyed during walk-back"
@@ -134,3 +134,19 @@ def test_match_prefix_walkback_does_not_destroy_nodes():
     assert child.ref_counter == 0, "Walk-back should have decremented ref"
 
     cache.dec_node_ref_counter(share_node)
+
+
+def test_no_adaptive_threshold_fields():
+    """HybridRadixCache should not have adaptive threshold or hotspot tracking fields."""
+    cache = _make_hybrid_cache("no_adaptive")
+    removed_attrs = [
+        "min_insert_threshold",
+        "MIN_THRESHOLD",
+        "MAX_THRESHOLD",
+        "adjust_interval",
+        "buffer_insert_count",
+        "buffer_hit_count",
+        "buffer_waste_count",
+    ]
+    for attr in removed_attrs:
+        assert not hasattr(cache, attr), f"{attr} should be removed"
