@@ -210,6 +210,11 @@ class InferenceContext:
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
 
+        # Drain deferred frees from mid-prefill snapshots
+        if len(req.extra_need_to_free_token_index) > 0:
+            free_token_index.extend(req.extra_need_to_free_token_index)
+            req.extra_need_to_free_token_index = []
+
         return node
 
     def free_a_req_mem_for_mamba(self, free_token_index: List, req: "InferReq") -> bool:
@@ -345,11 +350,11 @@ class InferenceContext:
                 radix_cache.dec_node_ref_counter(req.shared_kv_node)
             radix_cache.add_node_ref_counter(new_node)
             req.shared_kv_node = new_node
-            # Free overlapping tokens
-            if old_prefix_len < prefix_len:
-                self.req_manager.free_token(
-                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-                )
+            # Defer overlapping token frees — these slots are still in
+            # req_to_token_indexs and used by attention during prefill.
+            req.extra_need_to_free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+            )
             req.unbuffered_prefix_pos = 0
 
     def _maybe_snapshot_full_input(self, run_reqs: List["InferReq"]):
@@ -374,10 +379,10 @@ class InferenceContext:
                 radix_cache.dec_node_ref_counter(req.shared_kv_node)
             radix_cache.add_node_ref_counter(new_node)
             req.shared_kv_node = new_node
-            if old_prefix_len < prefix_len:
-                self.req_manager.free_token(
-                    self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
-                )
+            # Defer overlapping token frees — slots still in use during prefill.
+            req.extra_need_to_free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len]
+            )
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -665,6 +670,10 @@ class InferReq:
         # Position of unbuffered prefix node (from match_prefix walk-back).
         # 0 means no mid-prefill snapshot needed.
         self.unbuffered_prefix_pos = 0
+        # Deferred token frees from mid-prefill snapshots. These tokens overlap
+        # with the radix tree but are still referenced by req_to_token_indexs
+        # during prefill. They must not be freed until request completion.
+        self.extra_need_to_free_token_index = []
         return
 
     def _match_radix_cache(self):
