@@ -43,15 +43,12 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
             if enable_ep_moe:
                 self._ffn = partial(Qwen35MOETransformerLayerInfer._moe_ffn_edp, self)
                 self._tpsp_ffn = self._tpsp_ffn_ep
-                self._ep_moe_mode = True
             else:
                 self._ffn = partial(Qwen35MOETransformerLayerInfer._moe_ffn, self)
                 self._tpsp_ffn = self._tpsp_ffn_tp
-                self._ep_moe_mode = False
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
             self._tpsp_ffn = self._tpsp_ffn_tp
-            self._ep_moe_mode = False
 
     # ==================== Shared Expert ====================
 
@@ -100,12 +97,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
         layer_weight: Qwen35MOETransformerLayerWeight,
     ) -> torch.Tensor:
         shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
-        # Shared expert uses TP-sliced weights, producing a partial sum that
-        # must be all-reduced.  EP output is already fully communicated via
-        # all-to-all and must NOT be all-reduced, so we reduce the shared
-        # expert output here instead of relying on an external all-reduce.
-        if self.tp_world_size_ > 1:
-            all_reduce(shared_expert_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
@@ -123,38 +114,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
         ep_output = ep_output.view(token_num, hidden_dim)
         ep_output.add_(shared_expert_out)
         return ep_output
-
-    # ==================== Standard Forward (non-TPSP) ====================
-
-    def context_forward(self, input_embdings, infer_state, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        o = self.context_attention_forward(input1, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
-
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
-        input1 = None
-        # In EP MoE mode, _moe_ffn_edp already all-reduces the shared expert
-        # internally.  The EP output must NOT be all-reduced (it is already
-        # fully communicated via all-to-all), so skip the external all-reduce.
-        if not self._ep_moe_mode and self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-        return input_embdings
-
-    def token_forward(self, input_embdings, infer_state, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        o = self.token_attention_forward(input1, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
-
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
-        if not self._ep_moe_mode and self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-        return input_embdings
 
     # ==================== TPSP FFN ====================
 
@@ -347,8 +306,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
 
         # 0 shared expert (computed before attention of microbatch 1 to overlap)
         _0_shared = self._compute_shared_expert(_0_input1, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(_0_shared, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
         # 1 attention
         self._overlap_attention_token(input_embdings1, infer_state1, layer_weight)
@@ -373,8 +330,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
 
         # 1 shared expert
         _1_shared = self._compute_shared_expert(_1_input1, infer_state1, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(_1_shared, op=dist.ReduceOp.SUM, group=infer_state1.dist_group, async_op=False)
 
         # 0 moe compute
         expected_m = triton.cdiv(
@@ -452,8 +407,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
 
         # 0 shared expert (overlap with microbatch 1 attention)
         _0_shared = self._compute_shared_expert(_0_input1, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(_0_shared, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
         # 1 attention
         self._overlap_attention_context(input_embdings1, infer_state1, layer_weight)
@@ -484,8 +437,6 @@ class Qwen35MOETransformerLayerInfer(Qwen35TransformerLayerInfer):
 
         # 1 shared expert
         _1_shared = self._compute_shared_expert(_1_input1, infer_state1, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(_1_shared, op=dist.ReduceOp.SUM, group=infer_state1.dist_group, async_op=False)
 
         # 0 moe compute
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(

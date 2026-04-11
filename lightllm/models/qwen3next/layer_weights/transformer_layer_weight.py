@@ -92,6 +92,8 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             weight_names=[f"{prefix}.gate_proj.weight", f"{prefix}.up_proj.weight"],
             data_type=self.data_type_,
             quant_method=self.get_quant_method("gate_up_proj"),
+            tp_rank=0,
+            tp_world_size=1,
         )
         self.down_proj = COLMMWeight(
             in_dim=inter_size,
@@ -99,6 +101,8 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
             weight_names=f"{prefix}.down_proj.weight",
             data_type=self.data_type_,
             quant_method=self.get_quant_method("down_proj"),
+            tp_rank=0,
+            tp_world_size=1,
         )
         self.ffn_gate = ROWMMWeight(
             in_dim=hidden_size,
