@@ -219,23 +219,65 @@ class InferenceContext:
     def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
         """释放请求的 KV cache 和 buffer 内存"""
         if self.has_recurrent_state:
-            self._insert_kv_for_mamba(free_token_index, req)
+            node = self._insert_kv_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
-            # Buffer was already attached at snapshot moments — just free GPU buffer
-            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
+
+            # Fallback: if snapshot moments failed to attach a buffer, try now
+            if node is not None and node.buffer_idx is None:
+                if cpu_mgr is not None:
+                    self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                    if cpu_mgr.can_use_mem_size >= 1:
+                        cpu_slot = cpu_mgr.alloc(1)
+                        primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                        gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                        cpu_mgr.offload_to_cpu(
+                            self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                            self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                            gpu_idx,
+                            cpu_slot,
+                        )
+                        self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
+                    free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+                else:
+                    primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+                    self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx)
+            else:
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
         else:
             self.free_a_req_mem(free_token_index, req)
 
     def _pause_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
-        """Free request memory during pause. Buffer is already on the tree node
-        from the snapshot moments, so no transfer needed."""
+        """Free request memory during pause, transferring the Mamba buffer to the
+        tree node so that recovery can find it via match_prefix."""
         if not self.has_recurrent_state or self.radix_cache is None:
             self._free_req_mem_and_buffers(free_token_index, free_buffer_index, req)
             return
 
-        self._insert_kv_for_mamba(free_token_index, req)
+        node = self._insert_kv_for_mamba(free_token_index, req)
         req_to_buffer_index = self.req_manager.req_to_buffer_index
-        free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+        cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
+
+        if node is not None and req.cur_kv_len > 0:
+            primary_buffer_idx = req_to_buffer_index[req.req_idx, 0].item()
+            if cpu_mgr is not None:
+                self.radix_cache.free_radix_cache_to_get_enough_buffer(1)
+                if cpu_mgr.can_use_mem_size >= 1:
+                    cpu_slot = cpu_mgr.alloc(1)
+                    gpu_idx = torch.tensor([primary_buffer_idx], dtype=torch.int64, device="cuda")
+                    cpu_mgr.offload_to_cpu(
+                        self.req_manager.buffer_mem_manager.conv_state_cache.buffer,
+                        self.req_manager.buffer_mem_manager.ssm_state_cache.buffer,
+                        gpu_idx,
+                        cpu_slot,
+                    )
+                    self.radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
+            else:
+                self.radix_cache.add_buffer_idx_to_node(node, primary_buffer_idx)
+                free_buffer_index.extend(req_to_buffer_index[req.req_idx, 1:].tolist())
+        else:
+            free_buffer_index.extend(req_to_buffer_index[req.req_idx, :].tolist())
 
     def _make_buffer_snapshot_fn(self, req: "InferReq"):
         """Create a buffer_snapshot_fn callback for insert_with_buffer.
@@ -277,14 +319,22 @@ class InferenceContext:
         return snapshot
 
     def _maybe_snapshot_unbuffered_prefix(self, run_reqs: List["InferReq"]):
-        """Snapshot Mamba state at the unbuffered prefix boundary (system prompt)."""
+        """Snapshot Mamba state when prefill reaches the unbuffered prefix boundary.
+
+        The GPU Mamba state reflects cur_kv_len tokens (recurrent — state is
+        cumulative), so the tree key must cover [0:cur_kv_len] to stay
+        consistent with the stored state.  Using a shorter key
+        (unbuffered_prefix_pos) would associate the wrong state with a prefix,
+        causing accuracy degradation for future requests that match it.
+        """
         reqs = [r for r in run_reqs if r.unbuffered_prefix_pos > 0 and r.cur_kv_len >= r.unbuffered_prefix_pos]
         if not reqs:
             return
         radix_cache = self.radix_cache
         for req in reqs:
-            key = torch.tensor(req.get_input_token_ids()[: req.unbuffered_prefix_pos], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.unbuffered_prefix_pos].cpu()
+            # Use cur_kv_len as key length — Mamba state is at this position
+            key = torch.tensor(req.get_input_token_ids()[: req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].cpu()
             snapshot_fn = self._make_buffer_snapshot_fn(req)
             prefix_len, new_node = radix_cache.insert(key, value)
             if new_node is not None and new_node.buffer_idx is None:
