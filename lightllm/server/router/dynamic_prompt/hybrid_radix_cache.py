@@ -1,4 +1,4 @@
-from typing import Set, Protocol, List, Optional, Tuple
+from typing import Set, List, Optional
 
 import torch
 from sortedcontainers import SortedSet
@@ -101,7 +101,7 @@ class HybridRadixCache(RadixCache):
             self.evict_tree_set.add(node)
         return
 
-    def free_radix_cache_to_get_enough_buffer(self, need_buffer_num):
+    def free_radix_cache_to_get_enough_buffer(self, need_buffer_num, protected_nodes: Optional[Set[TreeNode]] = None):
         if need_buffer_num > self.buffer_mem_manager.can_use_mem_size:
             need_evict_buffer_num = need_buffer_num - self.buffer_mem_manager.can_use_mem_size
             release_buffers = []
@@ -110,20 +110,31 @@ class HybridRadixCache(RadixCache):
                 release_buffers.append(buffer_idx)
                 return
 
-            self._evict_buffer(need_evict_buffer_num, release_buffer)
+            self._evict_buffer(need_evict_buffer_num, release_buffer, protected_nodes=protected_nodes)
             if len(release_buffers) > 0:
                 self.buffer_mem_manager.free(release_buffers)
         return
 
-    def _evict_buffer(self, need_evict_buffer_num, evict_buffer_callback):
+    def _evict_buffer(
+        self,
+        need_evict_buffer_num,
+        evict_buffer_callback,
+        protected_nodes: Optional[Set[TreeNode]] = None,
+    ):
         # Two-pass eviction: first evict buffers from unreferenced nodes,
         # then from referenced nodes only if necessary.
+        protected_nodes = protected_nodes or set()
         deferred_referenced = []
+        deferred_protected = []
         while need_evict_buffer_num > 0:
             if not self.evict_buffer_set:
                 break
             node = self.evict_buffer_set.pop(0)
             assert node.buffer_idx is not None
+
+            if node in protected_nodes:
+                deferred_protected.append(node)
+                continue
 
             if node.ref_counter > 0:
                 deferred_referenced.append(node)
@@ -141,9 +152,16 @@ class HybridRadixCache(RadixCache):
                 self.evict_buffer_set.add(node)
                 continue
 
+            if node in protected_nodes:
+                deferred_protected.append(node)
+                continue
+
             evict_buffer_callback(node.buffer_idx)
             node.buffer_idx = None
             need_evict_buffer_num -= 1
+
+        for node in deferred_protected:
+            self.evict_buffer_set.add(node)
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):

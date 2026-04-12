@@ -88,6 +88,44 @@ def test_two_pass_eviction_falls_back_to_referenced():
     assert node1.buffer_idx is None
 
 
+def test_eviction_protects_newly_matched_node():
+    cache = _make_hybrid_cache("protected")
+
+    key1 = torch.tensor([1, 2], dtype=torch.int64)
+    val1 = torch.tensor([10, 11], dtype=torch.int64)
+    _, node1 = cache.insert(key1, val1)
+    cache.add_buffer_idx_to_node(node1, 100)
+    cache.add_node_ref_counter(node1)
+
+    key2 = torch.tensor([3, 4], dtype=torch.int64)
+    val2 = torch.tensor([20, 21], dtype=torch.int64)
+    _, node2 = cache.insert(key2, val2)
+    cache.add_buffer_idx_to_node(node2, 200)
+
+    evicted = []
+    cache._evict_buffer(1, lambda buf: evicted.append(buf), protected_nodes={node1})
+
+    assert evicted == [200]
+    assert node1.buffer_idx == 100
+    assert node2.buffer_idx is None
+
+
+def test_eviction_keeps_protected_node_even_when_only_candidate():
+    cache = _make_hybrid_cache("protected_only")
+
+    key1 = torch.tensor([1, 2], dtype=torch.int64)
+    val1 = torch.tensor([10, 11], dtype=torch.int64)
+    _, node1 = cache.insert(key1, val1)
+    cache.add_buffer_idx_to_node(node1, 100)
+    cache.add_node_ref_counter(node1)
+
+    evicted = []
+    cache._evict_buffer(1, lambda buf: evicted.append(buf), protected_nodes={node1})
+
+    assert evicted == []
+    assert node1.buffer_idx == 100
+
+
 def test_node_stays_alive_after_buffer_eviction():
     cache = _make_hybrid_cache("alive")
 

@@ -65,6 +65,9 @@ class DPChunkedPrefillBackend(ModeBackend):
     def _maybe_insert_hybrid_chunk(self, run_reqs: List[InferReq]):
         """Insert non-final prefill chunks into radix cache with GDN buffer."""
         if g_infer_context.has_recurrent_state and self.radix_cache is not None:
+            # The forward pass updates GDN state buffers on the overlap stream.
+            # Wait for it to finish before snapshotting those buffers to the cache.
+            g_infer_context.get_overlap_stream().synchronize()
             g_infer_state_lock.acquire()
             try:
                 g_infer_context._insert_prefill_chunk_to_cache(run_reqs)

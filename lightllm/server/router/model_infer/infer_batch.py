@@ -85,12 +85,37 @@ class InferenceContext:
             return
 
         if radix_cache is not None:
-            radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs))
+            # GPU-only hybrid caching shares one pool between request working
+            # buffers and radix-tree snapshots, so free tree buffers first.
+            #
+            # CPU-offloaded hybrid caching keeps tree snapshots in a separate
+            # pool; evicting there is both unnecessary for request admission
+            # and unsafe because it can discard a just-matched cache entry
+            # before we restore it into the request buffer.
+            if radix_cache.buffer_mem_manager is req_manager.buffer_mem_manager:
+                protected_nodes = {
+                    r.shared_kv_node
+                    for r in req_objs
+                    if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
+                }
+                radix_cache.free_radix_cache_to_get_enough_buffer(len(req_objs), protected_nodes=protected_nodes)
 
         req_idx_gpu = torch.tensor([r.req_idx for r in req_objs], device="cuda", dtype=torch.int64)
         req_manager.alloc_buffer_for_req(req_idx_gpu)
 
         if radix_cache is not None:
+            # If a matched node lost its buffer before restore, drop the cache
+            # hit and fall back to full prefill instead of using an incomplete
+            # hybrid state.
+            for req in req_objs:
+                if req.shared_kv_node is None or req.shared_kv_node.buffer_idx is not None:
+                    continue
+                radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
+                req.cur_kv_len = 0
+                req.shm_req.shm_cur_kv_len = 0
+                req.shm_req.prompt_cache_len = 0
+
             fork_req_ids = [
                 r.req_idx for r in req_objs if r.shared_kv_node is not None and r.shared_kv_node.buffer_idx is not None
             ]
