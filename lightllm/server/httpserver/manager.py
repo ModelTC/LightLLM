@@ -495,6 +495,11 @@ class HttpServerManager:
                     ]
                 )
                 generation_params.update_t2i(con_gen, uncon_gen)
+                if input_image_num > 0:
+                    # for it2i, the output image size is the same as the input image size
+                    generation_params.update_hw(
+                        multimodal_params.images[0].image_w, multimodal_params.images[0].image_h
+                    )
             # use the first request id as the gen image request id
             x2i_req_id = generate_req_ids[0]
             generation_params.request_id = x2i_req_id

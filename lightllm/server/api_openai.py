@@ -630,8 +630,9 @@ async def _chat_completion_image_only(
     from .api_http import g_objs
 
     created_time = int(time.time())
+    input_image_num = len(multimodal_params.images)
     images = await g_objs.httpserver_manager.generate_image(
-        prompt, x2i_params, multimodal_params.clone(), request=raw_request
+        prompt, x2i_params, multimodal_params.clone(), request=raw_request, input_image_num=input_image_num
     )
     response_images = _message_contents_from_raw_images(images, request.image_config.image_type)
     chat_message = ChatMessage(

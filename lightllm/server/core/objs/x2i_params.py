@@ -78,6 +78,7 @@ class X2IParams(ctypes.Structure):
         self.past_kvcache_img = PastKVCachePageList()
         self.total_prompt_tokens = 0
         self.request_id = 0
+        self.has_updated_hw = False
 
     def init_from_image_config(self, image_config: Any) -> None:
         """从 HTTP `image_config`（api_models.ImageConfig）填充，与 `init(**kwargs)` 共用默认值逻辑。"""
@@ -103,6 +104,17 @@ class X2IParams(ctypes.Structure):
                     kwargs["cfg_norm"] = e
                     break
         self.init(**kwargs)
+
+    def update_hw(self, width: int, height: int):
+        if self.has_updated_hw:
+            return
+        from lightllm.models.neo_chat_moe.vision_process import smart_resize
+
+        h, w = smart_resize(height, width, factor=32, min_pixels=512 * 512, max_pixels=2048 * 2048)
+        self.width = w
+        self.height = h
+        self.has_updated_hw = True
+        return
 
     def update(self, past_kv: PastKVCachePageList, meta: Dict):
         item: PastKVCacheItem = meta.get("kv_cache_item")
