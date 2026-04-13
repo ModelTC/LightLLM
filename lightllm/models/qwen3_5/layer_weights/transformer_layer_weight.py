@@ -59,9 +59,10 @@ class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
         # re-saved through standard HF transformers store o_gate_proj as a separate
         # tensor; in that case the q_proj weight is already plain Q and de-interleaving
         # would scramble its rows. Detect the separate layout and skip the split.
-        if self._o_gate_weight_name in weights:
-            return
         if self._q_weight_name not in weights:
+            # Linear-attention layers don't have q_proj and never set _o_gate_weight_name.
+            return
+        if getattr(self, "_o_gate_weight_name", None) in weights:
             return
         q_weight = weights[self._q_weight_name]
         expected_packed_rows = self.q_head_num_ * self.head_dim * 2
