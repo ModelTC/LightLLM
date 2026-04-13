@@ -218,8 +218,7 @@ def setup_devices(args: StartArgs):
     else:
         devices = [int(x.strip()) for x in devices.split(",") if x.strip()]
 
-    llm_need_gpus = args.tp * args.dp
-    # llm_need_gpus = 0
+    llm_need_gpus = 0 if args.x2i_server_deploy_mode == "colocate" else args.tp * args.dp
     x2i_need_gpus = args.x2i_server_used_gpus
     if len(devices) < llm_need_gpus + x2i_need_gpus:
         raise ValueError(f"devices {devices} not enough, need {llm_need_gpus} and {x2i_need_gpus}")

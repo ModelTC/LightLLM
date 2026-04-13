@@ -1,3 +1,4 @@
+import datetime
 import inspect
 import torch
 import torch.distributed as dist
@@ -38,7 +39,7 @@ class LightX2VServer:
         torch.cuda.set_device(rank)
         self._init_pipeline()
 
-        self.task_dist_group = dist.new_group(backend="gloo")
+        self.task_dist_group = dist.new_group(backend="gloo", timeout=datetime.timedelta(days=30))
 
     def _init_pipeline(self):
         os.environ["MASTER_ADDR"] = "127.0.0.1"

@@ -314,6 +314,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Number of GPUs to use for x2i server (requird --enable_multimodal_x2i).",
     )
     parser.add_argument(
+        "--x2i_server_deploy_mode",
+        type=str,
+        choices=["colocate", "separate"],
+        default="colocate",
+        help="Deployment mode for the x2i server. 'colocate' means the x2i server will run on the same gpus as the llm server, ",
+    )
+    parser.add_argument(
         "--x2i_use_naive_impl",
         action="store_true",
         help="""Whether to use the native backend for x2i generation.

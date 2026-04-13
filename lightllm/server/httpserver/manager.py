@@ -454,6 +454,9 @@ class HttpServerManager:
             # 1. construct 3 or 2 generate based on the multimodel_parmas
             sample_params = SamplingParams()
             sample_params.init(self.tokenizer, **{"img_gen_prefill": True})
+            sample_params1 = SamplingParams()
+            sample_params1.init(self.tokenizer, **{"img_gen_prefill": True})
+
             img_len = len(multimodal_params.images)
             image_guidance_scale = generation_params.image_guidance_scale
 
@@ -466,11 +469,13 @@ class HttpServerManager:
                 prompt_condition, prompt_text_uncondition, prompt_img_uncondition = self.tokenizer.get_query_for_it2i(
                     prompt
                 )
+                sample_params2 = SamplingParams()
+                sample_params2.init(self.tokenizer, **{"img_gen_prefill": True})
                 (con_gen, text_uncon_gen, img_uncon_gen) = await asyncio.gather(
                     *[
                         generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
-                        generation_wrapper(prompt_text_uncondition, sample_params, multimodal_params.clone(), request),
-                        generation_wrapper(prompt_img_uncondition, sample_params, MultimodalParams(), request),
+                        generation_wrapper(prompt_text_uncondition, sample_params1, multimodal_params.clone(), request),
+                        generation_wrapper(prompt_img_uncondition, sample_params2, MultimodalParams(), request),
                     ]
                 )
                 generation_params.update_it2i(con_gen, text_uncon_gen, img_uncon_gen)
@@ -481,7 +486,7 @@ class HttpServerManager:
                 (con_gen, uncon_gen) = await asyncio.gather(
                     *[
                         generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
-                        generation_wrapper(prompt_uncondition, sample_params, multimodal_params.clone(), request),
+                        generation_wrapper(prompt_uncondition, sample_params1, multimodal_params.clone(), request),
                     ]
                 )
                 generation_params.update_t2i(con_gen, uncon_gen)
