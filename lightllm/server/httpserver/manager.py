@@ -435,7 +435,12 @@ class HttpServerManager:
         return
 
     async def generate_image(
-        self, prompt: str, generation_params: X2IParams, multimodal_params: MultimodalParams, request: Request
+        self,
+        prompt: str,
+        generation_params: X2IParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        input_image_num: int = 0,
     ):
         generate_req_ids = []
 
@@ -481,7 +486,7 @@ class HttpServerManager:
                 generation_params.update_it2i(con_gen, text_uncon_gen, img_uncon_gen)
             else:
                 # call t2i
-                prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt)
+                prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt, input_image_num)
                 # logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
                 (con_gen, uncon_gen) = await asyncio.gather(
                     *[

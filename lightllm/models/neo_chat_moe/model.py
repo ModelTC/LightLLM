@@ -154,11 +154,13 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         question_img_uncondition = self._build_t2i_query("")
         return query_condition, query_text_uncondition, question_img_uncondition
 
-    def get_query_for_t2i(self, prompt: str):
+    def get_query_for_t2i(self, prompt: str, input_image_num: int = 0):
         # prompt is already applied
         image_len = prompt.count(IMG_TOKEN)
         query_condition = prompt + IMG_START_TOKEN if not prompt.endswith(IMG_START_TOKEN) else prompt
-        query_uncondition = self._build_t2i_query("", thinking_content=IMG_TOKEN * image_len)
+        query_uncondition = self._build_t2i_query(
+            IMG_TOKEN * input_image_num, thinking_content=IMG_TOKEN * (image_len - input_image_num)
+        )
         return query_condition, query_uncondition
 
 
