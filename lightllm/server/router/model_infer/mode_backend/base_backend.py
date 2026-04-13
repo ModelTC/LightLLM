@@ -29,6 +29,7 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
+    enable_dynamic_mtp_verify,
 )
 from lightllm.distributed.communication_op import (
     dist_group_manager,
@@ -46,6 +47,8 @@ from lightllm.server.router.model_infer.mode_backend.generic_post_process import
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
+
+logger = init_logger(__name__)
 
 
 class ModeBackend:
@@ -295,7 +298,7 @@ class ModeBackend:
 
         if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle3"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
@@ -321,6 +324,7 @@ class ModeBackend:
                 "quant_type": main_kvargs.get("quant_type", None),
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "run_mode": "normal",
+                "is_mtp_draft_model": True,
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
@@ -339,6 +343,11 @@ class ModeBackend:
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "llama":
+                assert self.args.mtp_mode in ["eagle3"]
+                from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
+
+                self.draft_models.append(Qwen3EagleModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 
@@ -708,6 +717,11 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
+        if isinstance(next_token_ids, torch.Tensor):
+            next_token_ids = next_token_ids.numpy()
+        if isinstance(next_token_logprobs, torch.Tensor):
+            next_token_logprobs = next_token_logprobs.numpy()
+
         for req_obj, next_token_id, next_token_logprob, pack in zip(
             run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
         ):
@@ -756,15 +770,42 @@ class ModeBackend:
         mtp_accept_len_cpu: torch.Tensor,
     ):
         if self.is_master_in_dp:
-            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu):
+            for req, accept_len in zip(decode_reqs, mtp_accept_len_cpu.numpy()):
                 req.update_mtp_accepted_token_num(accept_token_num=accept_len - 1)
+
+        return
+
+    def _update_mtp_verify_token_num(self, decode_reqs: List[InferReq]):
+        if self.is_master_in_dp:
+            for req in decode_reqs:
+                # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
+                # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的 current_mtp_step
+                # current_mtp_step 在静态 MTP 模式下为 mtp_step，在动态 MTP 模式下会在推理过程中动态设置。
+                assert req.current_mtp_step >= 0
+                req.update_mtp_verify_token_num(verify_token_num=1 + req.current_mtp_step)
         return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
         probs = torch.softmax(logits, dim=-1)
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+
+        # 如果self.d2t不为None，那么draft的token需要进行相应的转换
+        if self.args.mtp_mode == "eagle3":
+            draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
+
         return draft_next_token_ids_gpu
+
+    def _gen_argmax_token_ids_and_prob(self, model_output: ModelOutput):
+        logits = model_output.logits
+        probs = torch.softmax(logits, dim=-1)
+        max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
+
+        # 如果self.d2t不为None，那么draft的token需要进行相应的转换
+        if self.args.mtp_mode == "eagle3":
+            draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
+
+        return draft_next_token_ids_gpu, max_probs
 
     def _sample_and_scatter_token(
         self,

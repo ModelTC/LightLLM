@@ -110,8 +110,9 @@ class ReqSamplingParamsManager:
         self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
         self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        assert get_env_start_args().mtp_step <= 15, "mtp_step must be less than or equal to 15"
         self.req_to_next_token_ids = torch.zeros(
-            (max_request_num + 1, 8),
+            (max_request_num + 1, 16),
             dtype=torch.int64,
             device="cuda",
         )

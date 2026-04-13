@@ -2,7 +2,11 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional
 from typing import List
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import (
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_dynamic_mtp_verify,
+    enable_triton_mtp_kernel,
+)
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -69,6 +73,12 @@ class ModelInput:
                 self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
             else:
                 self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+        elif not self.is_prefill and (enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
+            batch_size = len(self.b_req_idx)
+            if self.b_mark_shared_group is None:
+                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
+            else:
+                self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
@@ -96,3 +106,29 @@ class ModelOutput:
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.mtp_main_output_hiddens is not None:
             self.mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.mtp_main_output_hiddens)
+
+
+class OutHiddenState:
+    def __init__(self, selected_layers: List[int]):
+        self.selected_layers = selected_layers
+        self.capture_hiddens = []
+
+    def add_hidden(self, layer_index: int, layer_num: int, hidden: torch.Tensor):
+        if layer_index in self.selected_layers:
+            is_last_layer = layer_index == layer_num - 1
+            if not is_last_layer:
+                self.capture_hiddens.append(hidden.clone())
+            else:
+                # 最后一层可以不clone，直接使用提升性能
+                self.capture_hiddens.append(hidden)
+
+    def get_captured_hiddens(self) -> Optional[torch.Tensor]:
+        if self.capture_hiddens:
+            if len(self.capture_hiddens) > 1:
+                self.capture_hiddens = torch.cat(self.capture_hiddens, dim=-1)
+            else:
+                # 减少一次 clone 操作， 可以提升性能
+                self.capture_hiddens = self.capture_hiddens[0]
+        else:
+            self.capture_hiddens = None
+        return self.capture_hiddens

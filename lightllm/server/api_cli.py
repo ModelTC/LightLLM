@@ -655,13 +655,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=[
-            "vanilla_with_att",
-            "eagle_with_att",
-            "vanilla_no_att",
-            "eagle_no_att",
-            None,
-        ],
+        choices=["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att", "eagle3", None],
         default=None,
         help="""Supported MTP modes.
         None: Disables MTP.
@@ -685,6 +679,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         Increasing this value allows for more predictions,
         but ensure that the model is compatible with the specified step count.
         currently, deepseekv3 model only support 1 step""",
+    )
+    parser.add_argument(
+        "--mtp_dynamic_verify",
+        action="store_true",
+        help="""Whether to enable dynamic verification for MTP multi-prediction results.""" 
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

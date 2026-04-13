@@ -1,5 +1,7 @@
 import dataclasses
 import torch
+
+from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_env_start_args, enable_triton_mtp_kernel
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
 
@@ -80,8 +82,17 @@ class TritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
+    # MTP related state variables
+    b_mark_shared_group: torch.Tensor = None
+
     def init_state(self):
-        pass
+        args_mtp_step = get_env_start_args().mtp_step
+
+        if args_mtp_step > 0:
+            # MTP mode initialization
+            self.b_mark_shared_group = self.infer_state.b_mark_shared_group
+        else:
+            self.b_mark_shared_group = None
 
     def copy_for_decode_cuda_graph(self, new_state: "TritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -99,9 +110,17 @@ class TritonDecodeAttState(BaseDecodeAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
+
+            args_mtp_step = get_env_start_args().mtp_step
+
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
-            if q_head_num == k_head_num:
+
+            if args_mtp_step > 0 and (enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
+                # MTP mode: use mtp diverse attention
+                assert q_head_num >= k_head_num, "MTP diverse attention requires q_head_num >= k_head_num"
+                return self._dynamic_mtp_decode_gqa_att(q=q, k=k, v=v, alloc_func=alloc_func)
+            elif q_head_num == k_head_num:
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
                 return self._normal_decode_gqa_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
@@ -177,6 +196,34 @@ class TritonDecodeAttState(BaseDecodeAttState):
             cache_k=k,
             cache_v=v,
             out=out,
+            alloc_tensor_func=alloc_func,
+        )
+
+        return out
+
+    def _dynamic_mtp_decode_gqa_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        alloc_func=torch.empty,
+    ):
+        from ...triton_kernel.att.decode_att.gqa.mtp_diverse import (
+            token_decode_attention_mtp_diverse_single_token,
+        )
+
+        b_seq_len = self.infer_state.b_seq_len
+        # 在动态 MTP 验证模式下，使用 infer_state.b_mark_shared_group（从 model_input 传递）
+        # 在静态 MTP 模式下，使用 self.b_mark_shared_group（在 init_state 中初始化）
+        b_mark_shared_group = self.infer_state.b_mark_shared_group
+        out = token_decode_attention_mtp_diverse_single_token(
+            q=q,
+            k=k,
+            v=v,
+            Req_to_tokens=self.infer_state.req_manager.req_to_token_indexs,
+            B_req_idx=self.infer_state.b_req_idx,
+            b_seq_len=b_seq_len,
+            b_mark_shared_group=b_mark_shared_group,
             alloc_tensor_func=alloc_func,
         )
 

@@ -396,9 +396,8 @@ class HttpServerManagerForPDMaster:
         x_session_id = request.headers.get("X-Session-Id", "")
         prompt_cache_len = metadata.pop("prompt_cache_len", 0)
         prompt_cache_ratio = prompt_cache_len / prompt_tokens
-        mtp_avg_token_per_step = out_token_counter / max(
-            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
-        )
+        mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+        mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             f"X-Request-Id:{x_request_id} "

@@ -144,7 +144,8 @@ def sample_requests(
     for i in range(len(built_examples)):
         messages, _ = built_examples[i]
         prompt_len = len(prompt_token_ids[i])
-        output_len = min(len(completion_token_ids[i]), 128)
+        # output_len = min(len(completion_token_ids[i]), 128)
+        output_len = 128
         tokenized_dataset.append((messages, rendered_prompts[i], prompt_len, output_len))
 
     # Filter out too long or too short sequences.

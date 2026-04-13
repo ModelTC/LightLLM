@@ -197,6 +197,23 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 
 
 @lru_cache(maxsize=None)
+def enable_dynamic_mtp_verify() -> bool:
+    """
+    启用动态 MTP 长度验证功能
+    在 MTP 模式下，根据每步的 prob 分布动态调整验证长度
+    通过启动参数 --mtp_dynamic_verify 控制
+    """
+    return get_env_start_args().mtp_dynamic_verify
+
+@lru_cache(maxsize=None)
+def enable_triton_mtp_kernel() -> bool:
+    """
+    启用 Triton MTP 解码专用 kernel
+    通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
+    """
+    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
+
+@lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 

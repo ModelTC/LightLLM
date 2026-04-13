@@ -435,6 +435,10 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+        # current_mtp_step 用来记录当前的 MTP 验证长度（<= mtp_step）
+        # 在启用动态 MTP 验证时，每步会根据 prob 分布重新设置该值
+        # 静态模式下为 mtp_step，动态模式下为动态计算的 MTP 验证长度
+        self.current_mtp_step: int = self.mtp_step
         if self.mtp_step > 0:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
@@ -559,6 +563,10 @@ class InferReq:
     def update_mtp_accepted_token_num(self, accept_token_num: int):
         # 用于统计 mtp 的接受率
         self.shm_req.mtp_accepted_token_num += accept_token_num
+
+    def update_mtp_verify_token_num(self, verify_token_num: int):
+        # 用于统计 mtp 验证时发送给主模型的 token 总数
+        self.shm_req.mtp_verify_token_num += verify_token_num
 
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
