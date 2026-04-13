@@ -236,14 +236,36 @@ class TpRMSNormWeight(RMSNormWeight):
 
 
 class NoTpGEMMANormWeight(RMSNormWeight):
+    """Gemma/Qwen3-Next zero-centered RMSNorm: stored weight is centered around 0,
+    the effective scale is (weight + 1) and is added at compute time so the raw
+    checkpoint values remain in self.weight."""
+
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
 
-    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.weight_name in weights:
-            self.weight.copy_(weights[self.weight_name])
-            self.weight += 1
-            self.weight.load_ok = True
+    def _native_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        assert input.ndim == 2 and self.weight.ndim == 1
+        assert input.shape[-1] == self.dim, f"Expected hidden_size to be {self.dim}, but found: {input.shape[-1]}"
+        x = input.to(torch.float32)
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + eps)
+        x = (x * (self.weight + 1)).to(self.data_type_)
+        if out is not None:
+            out.copy_(x)
+            return out
+        return x
+
+    def _triton_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        assert (
+            input.ndim in [2, 3] and self.weight.ndim == 1
+        ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
+        if out is None:
+            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        return rmsnorm_forward(x=input, weight=self.weight + 1, eps=eps, out=out)
 
 
 class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
@@ -330,15 +352,30 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class QKGEMMANormWeight(QKRMSNORMWeight):
-    def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
-        if self.q_weight_name in weights:
-            self.q_weight.copy_(weights[self.q_weight_name])
-            self.q_weight += 1
-            self.q_weight.load_ok = True
-        if self.k_weight_name in weights:
-            self.k_weight.copy_(weights[self.k_weight_name])
-            self.k_weight += 1
-            self.k_weight.load_ok = True
+    """Gemma/Qwen3-Next zero-centered q/k RMSNorm: stored weights are centered around
+    0, the effective scale is (weight + 1) and is added at compute time so the raw
+    checkpoint values remain in self.q_weight / self.k_weight."""
+
+    def _native_forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        eps: float,
+    ) -> None:
+        assert q.ndim == 2 and self.q_weight.ndim == 1
+        assert k.ndim == 2 and self.k_weight.ndim == 1
+        head_dim = self.q_weight.shape[0]
+
+        def _norm_inplace(t: torch.Tensor, weight: torch.Tensor):
+            t_fp32 = t.to(torch.float32).view(-1, head_dim)
+            variance = t_fp32.pow(2).mean(dim=-1, keepdim=True)
+            t_fp32 = t_fp32 * torch.rsqrt(variance + eps)
+            t_fp32 = (t_fp32 * (weight + 1)).to(self.data_type_)
+            t.copy_(t_fp32.view(-1, t.shape[-1]))
+
+        _norm_inplace(q, self.q_weight)
+        _norm_inplace(k, self.k_weight)
+        return
 
     def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
         assert q.ndim == 2 and self.q_weight.ndim == 1
@@ -346,4 +383,6 @@ class QKGEMMANormWeight(QKRMSNORMWeight):
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
         # So we need to set fp32_multiply to True here.
-        return qk_rmsnorm_fused_forward(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps, fp32_multiply=True)
+        return qk_rmsnorm_fused_forward(
+            q=q, k=k, w_q=self.q_weight + 1, w_k=self.k_weight + 1, eps=eps, fp32_multiply=True
+        )
