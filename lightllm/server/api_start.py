@@ -168,6 +168,9 @@ def normal_or_p_d_start(args):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
+        args.enable_tpsp_mix_mode = True
+
     # mtp params check
     if args.mtp_mode is not None:
         assert args.mtp_draft_model_dir is not None
