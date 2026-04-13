@@ -731,21 +731,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 )
                 yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
 
-        if request.stream_options and request.stream_options.include_usage:
-            usage = UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
-            )
-            usage_chunk = ChatCompletionStreamResponse(
-                id=chat_completion_id,
-                created=created_time,
-                choices=[],  # Empty choices array as per OpenAI spec
-                model=request.model,
-                usage=usage,
-            )
-            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+        )
+        usage_chunk = ChatCompletionStreamResponse(
+            id=chat_completion_id,
+            created=created_time,
+            choices=[],  # Empty choices array as per OpenAI spec
+            model=request.model,
+            usage=usage,
+        )
+        yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
 
         yield "data: [DONE]\n\n".encode("utf-8")
 
@@ -940,23 +939,22 @@ async def _handle_streaming_completion(
             )
             yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
 
-        yield "data: [DONE]\n\n".encode("utf-8")
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+        )
+        usage_chunk = CompletionStreamResponse(
+            id=group_request_id,
+            created=created_time,
+            choices=[],  # Empty choices array as per OpenAI spec
+            model=request.model,
+            usage=usage,
+        )
+        yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
-        if request.stream_options and request.stream_options.include_usage:
-            usage = UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
-            )
-            usage_chunk = CompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                choices=[],  # Empty choices array as per OpenAI spec
-                model=request.model,
-                usage=usage,
-            )
-            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+        yield "data: [DONE]\n\n".encode("utf-8")
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(
