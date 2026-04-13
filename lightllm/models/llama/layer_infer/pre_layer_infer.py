@@ -15,8 +15,6 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         return
 
     def context_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
-        if get_env_start_args().enable_dp_prefill_balance:
-            input_ids = infer_state.prefill_dp_balance(input_ids=input_ids)
 
         input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
