@@ -641,7 +641,7 @@ class TpPartBaseModel:
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
 
         predict_logits: torch.Tensor = self.post_infer.token_forward(
-            input_embs=input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
+            input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
         if self.is_mtp_mode:
