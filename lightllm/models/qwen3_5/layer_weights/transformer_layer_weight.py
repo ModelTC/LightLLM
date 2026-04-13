@@ -12,6 +12,9 @@ logger = init_logger(__name__)
 class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
     def _init_weight_names(self):
         super()._init_weight_names()
+        # Ensure attribute exists for all layers (incl. linear-attention layers where
+        # _init_qkv is never called) so _split_q_with_gate can reference it safely.
+        self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
         self._gate_weight_name = f"model.layers.{self.layer_num_}.mlp.gate_proj.weight"
         self._gate_bias_name = None
         self._up_weight_name = f"model.layers.{self.layer_num_}.mlp.up_proj.weight"
@@ -60,9 +63,8 @@ class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
         # tensor; in that case the q_proj weight is already plain Q and de-interleaving
         # would scramble its rows. Detect the separate layout and skip the split.
         if self._q_weight_name not in weights:
-            # Linear-attention layers don't have q_proj and never set _o_gate_weight_name.
             return
-        if getattr(self, "_o_gate_weight_name", None) in weights:
+        if self._o_gate_weight_name in weights:
             return
         q_weight = weights[self._q_weight_name]
         expected_packed_rows = self.q_head_num_ * self.head_dim * 2
