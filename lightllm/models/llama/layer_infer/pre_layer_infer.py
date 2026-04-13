@@ -18,32 +18,15 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
             all_reduce(input_embdings, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
         return input_embdings
 
     def token_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
             all_reduce(input_embdings, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
         return input_embdings
-
-    def tpsp_context_forward(
-        self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
-    ):
-        if get_env_start_args().enable_dp_prefill_balance:
-            input_ids = infer_state.prefill_dp_balance(input_ids=input_ids)
-
-        input_embdings = self.context_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
-        from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
-
-        padded_input_embdings = sp_pad_copy(input_embdings, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_)
-        return padded_input_embdings
-
-    def tpsp_token_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
-        input_embdings = self.token_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
-        from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
-
-        padded_input_embdings = sp_pad_copy(input_embdings, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_)
-        return padded_input_embdings
 
     def overlap_tpsp_token_forward(
         self,
@@ -55,18 +38,9 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
     ):
 
         input_embdings = self.token_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
-        from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
-
-        padded_input_embdings = sp_pad_copy(input_embdings, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_)
-
         input_embdings1 = self.token_forward(input_ids=input_ids1, infer_state=infer_state1, layer_weight=layer_weight)
-        from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
 
-        padded_input_embdings1 = sp_pad_copy(
-            input_embdings1, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_
-        )
-
-        return padded_input_embdings, padded_input_embdings1
+        return input_embdings, input_embdings1
 
     def overlap_tpsp_context_forward(
         self,
@@ -80,9 +54,7 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
             input_ids = infer_state.prefill_dp_balance(input_ids=input_ids)
 
         input_embdings = self.context_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
-        from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
-
-        padded_input_embdings = sp_pad_copy(input_embdings, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_)
+        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
 
         if get_env_start_args().enable_dp_prefill_balance:
             input_ids1 = infer_state1.prefill_dp_balance(input_ids=input_ids1)
@@ -90,10 +62,6 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         input_embdings1 = self.context_forward(
             input_ids=input_ids1, infer_state=infer_state1, layer_weight=layer_weight
         )
-        from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
+        input_embdings1 = self._tpsp_sp_split(input=input_embdings1, infer_state=infer_state1)
 
-        padded_input_embdings1 = sp_pad_copy(
-            input_embdings1, sp_rank_id=self.tp_rank_, sp_world_size=self.tp_world_size_
-        )
-
-        return padded_input_embdings, padded_input_embdings1
+        return input_embdings, input_embdings1

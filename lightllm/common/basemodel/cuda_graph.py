@@ -2,6 +2,7 @@ import os
 import torch
 import copy
 import bisect
+import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
@@ -16,8 +17,9 @@ logger = init_logger(__name__)
 class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, max_batch_size=8, max_len_in_batch=8192):
+    def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
         self.graph = {}
+        self.tp_world_size = tp_world_size
         self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
         self.args = get_env_start_args()
         self.mtp_step = self.args.mtp_step
@@ -40,6 +42,11 @@ class CudaGraph:
         batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
         batch_sizes.append(max_batch_size)
         batch_sizes.sort()
+        if self.args.enable_tpsp_mix_mode:
+            batch_sizes = [triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in batch_sizes]
+            batch_sizes = list(set(batch_sizes))
+            batch_sizes.sort()
+
         self.cuda_graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")

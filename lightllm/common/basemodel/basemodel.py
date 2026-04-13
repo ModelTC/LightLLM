@@ -6,6 +6,7 @@ import copy
 import json
 import torch
 import torch.nn.functional as F
+import triton
 from typing import final, List
 from tqdm import tqdm
 
@@ -257,7 +258,13 @@ class TpPartBaseModel:
 
     def _init_cudagraph(self):
         self.graph = (
-            None if self.disable_cudagraph else CudaGraph(self.graph_max_batch_size, self.graph_max_len_in_batch)
+            None
+            if self.disable_cudagraph
+            else CudaGraph(
+                max_batch_size=self.graph_max_batch_size,
+                max_len_in_batch=self.graph_max_len_in_batch,
+                tp_world_size=self.tp_world_size_,
+            )
         )
         if self.graph is not None:
             if get_env_start_args().enable_decode_microbatch_overlap:
@@ -269,7 +276,7 @@ class TpPartBaseModel:
         self.prefill_graph = (
             None
             if not get_env_start_args().enable_prefill_cudagraph
-            else PrefillCudaGraph(decode_cuda_graph=self.graph)
+            else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
         )
         if self.prefill_graph is not None:
             if get_env_start_args().enable_prefill_microbatch_overlap:
@@ -389,6 +396,9 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
+        if model_input.total_token_num - model_input.prefix_total_token_num == new_handle_token_num:
+            return model_input
+
         assert model_input.total_token_num - model_input.prefix_total_token_num < new_handle_token_num
 
         padded_token_num = new_handle_token_num - (model_input.total_token_num - model_input.prefix_total_token_num)
@@ -446,14 +456,16 @@ class TpPartBaseModel:
 
         return new_model_output
 
-    def _create_unpad_prefill_model_output(self, padded_model_output: ModelOutput, origin_handle_token_num: int):
+    def _create_unpad_prefill_model_output(
+        self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
+    ):
         if self.return_all_prompt_logics:
             new_model_output = copy.copy(padded_model_output)
             new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
         else:
             new_model_output = copy.copy(padded_model_output)
             # 移除多余的pad 的那个 req 对应的 logics
-            new_model_output.logits = new_model_output.logits[0:-1]
+            new_model_output.logits = new_model_output.logits[0:origin_batch_size]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
@@ -467,17 +479,21 @@ class TpPartBaseModel:
         model_input: ModelInput,
     ):
         origin_handle_token_num = model_input.total_token_num - model_input.prefix_total_token_num
+        origin_batch_size = model_input.batch_size
 
-        is_padded_model_input = False
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=origin_handle_token_num):
-            finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=origin_handle_token_num
+        if self.args.enable_tpsp_mix_mode:
+            infer_handle_token_num = triton.cdiv(origin_handle_token_num, self.tp_world_size_) * self.tp_world_size_
+        else:
+            infer_handle_token_num = origin_handle_token_num
+
+        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
+            infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
+                handle_token_num=infer_handle_token_num
             )
-            if finded_handle_token_num != origin_handle_token_num:
-                is_padded_model_input = True
-                model_input = self._create_padded_prefill_model_input(
-                    model_input=model_input, new_handle_token_num=finded_handle_token_num
-                )
+
+        model_input = self._create_padded_prefill_model_input(
+            model_input=model_input, new_handle_token_num=infer_handle_token_num
+        )
 
         infer_state = self._create_inferstate(model_input)
         init_req_to_token_indexes(
@@ -495,10 +511,12 @@ class TpPartBaseModel:
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
         model_output = self._context_forward(infer_state)
-        if is_padded_model_input:
-            model_output = self._create_unpad_prefill_model_output(
-                model_output, origin_handle_token_num=origin_handle_token_num
-            )
+
+        model_output = self._create_unpad_prefill_model_output(
+            padded_model_output=model_output,
+            origin_handle_token_num=origin_handle_token_num,
+            origin_batch_size=origin_batch_size,
+        )
         model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         return model_output
 
@@ -514,10 +532,20 @@ class TpPartBaseModel:
                 model_input.b_mtp_index,
             )
 
-        if self.graph is not None and self.graph.can_run(model_input.batch_size, model_input.max_kv_seq_len):
-            find_graph_batch_size = self.graph.find_closest_graph_batch_size(model_input.batch_size)
-            padded_model_input = self._create_padded_decode_model_input(model_input, find_graph_batch_size)
-            infer_state = self._create_inferstate(padded_model_input)
+        origin_batch_size = model_input.batch_size
+        if self.args.enable_tpsp_mix_mode:
+            infer_batch_size = triton.cdiv(model_input.batch_size, self.tp_world_size_) * self.tp_world_size_
+        else:
+            infer_batch_size = model_input.batch_size
+
+        if self.graph is not None and self.graph.can_run(
+            batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
+        ):
+            infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
+            model_input = self._create_padded_decode_model_input(
+                model_input=model_input, new_batch_size=infer_batch_size
+            )
+            infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
                 infer_state.b_req_idx,
@@ -527,16 +555,17 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
-            if self.graph.need_capture(find_graph_batch_size):
+            if self.graph.need_capture(infer_batch_size):
                 infer_state.is_cuda_graph = True
                 model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
                 model_output: ModelOutput = self.graph.replay(infer_state)
 
-            model_output = self._create_unpad_decode_model_output(
-                model_output, origin_batch_size=model_input.batch_size
-            )
+            model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
         else:
+            model_input = self._create_padded_decode_model_input(
+                model_input=model_input, new_batch_size=infer_batch_size
+            )
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -547,25 +576,23 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
+            model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
 
         return model_output
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-        run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
 
-        pre_method = (self.pre_infer.context_forward, self.pre_infer.tpsp_context_forward)[run_mode_index]
-        input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         input_tensors = [input_embs]
 
         def prefill_func(input_tensors, infer_state):
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
-                layer_method = (layer.context_forward, layer.tpsp_context_forward)[run_mode_index]
-                _input_embs = layer_method(_input_embs, infer_state, self.trans_layers_weight[i])
+                _input_embs = layer.context_forward(_input_embs, infer_state, self.trans_layers_weight[i])
             return [_input_embs]
 
         handle_token_num = input_ids.shape[0]
@@ -574,6 +601,7 @@ class TpPartBaseModel:
             finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
                 handle_token_num=handle_token_num
             )
+            assert finded_handle_token_num == handle_token_num
             if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
                 output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
                     prefill_func=prefill_func,
@@ -591,8 +619,7 @@ class TpPartBaseModel:
             g_cache_manager.cache_env_out()
 
         input_embs = output_tensors[0]
-        post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
-        predict_logits = post_method(input_embs, infer_state, self.pre_post_weight)
+        predict_logits = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight)
         model_output = ModelOutput(logits=predict_logits)
 
         # 特殊模型特殊模式的额外输出
@@ -606,18 +633,16 @@ class TpPartBaseModel:
 
     @final
     def _token_forward(self, infer_state: InferStateInfo):
-        run_mode_index = 1 if self.enable_tpsp_mix_mode else 0
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
-        pre_method = (self.pre_infer.token_forward, self.pre_infer.tpsp_token_forward)[run_mode_index]
-        input_embs = pre_method(cuda_input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
-            layer_method = (layer.token_forward, layer.tpsp_token_forward)[run_mode_index]
-            input_embs: torch.Tensor = layer_method(input_embs, infer_state, self.trans_layers_weight[i])
+            input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
 
-        post_method = (self.post_infer.token_forward, self.post_infer.tpsp_token_forward)[run_mode_index]
-        predict_logits: torch.Tensor = post_method(input_embs, infer_state, self.pre_post_weight)
+        predict_logits: torch.Tensor = self.post_infer.token_forward(
+            input_embs=input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
+        )
 
         if self.is_mtp_mode:
             graph_out_hiddens = input_embs.contiguous()
@@ -641,6 +666,22 @@ class TpPartBaseModel:
 
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
+
+        assert self.args.enable_tpsp_mix_mode
+        origin_handle_token_num0 = model_input0.total_token_num - model_input0.prefix_total_token_num
+        origin_handle_token_num1 = model_input1.total_token_num - model_input1.prefix_total_token_num
+        infer_handle_token_num0 = triton.cdiv(model_input0.total_token_num, self.tp_world_size_) * self.tp_world_size_
+        infer_handle_token_num1 = triton.cdiv(model_input1.total_token_num, self.tp_world_size_) * self.tp_world_size_
+        origin_batch_size0 = model_input0.batch_size
+        origin_batch_size1 = model_input1.batch_size
+
+        model_input0 = self._create_padded_prefill_model_input(
+            model_input=model_input0, new_handle_token_num=infer_handle_token_num0
+        )
+        model_input1 = self._create_padded_prefill_model_input(
+            model_input=model_input1, new_handle_token_num=infer_handle_token_num1
+        )
+
         infer_state0 = self._create_inferstate(model_input0, 0)
         init_req_to_token_indexes(
             req_to_token_indexs=self.req_manager.req_to_token_indexs,
@@ -672,6 +713,16 @@ class TpPartBaseModel:
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
 
+        model_output0 = self._create_unpad_prefill_model_output(
+            padded_model_output=model_output0,
+            origin_handle_token_num=origin_handle_token_num0,
+            origin_batch_size=origin_batch_size0,
+        )
+        model_output1 = self._create_unpad_prefill_model_output(
+            padded_model_output=model_output1,
+            origin_handle_token_num=origin_handle_token_num1,
+            origin_batch_size=origin_batch_size1,
+        )
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
         dist_group_manager.clear_deepep_buffer()
@@ -683,6 +734,7 @@ class TpPartBaseModel:
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
         model_input0.to_cuda()
         model_input1.to_cuda()
+        assert self.args.enable_tpsp_mix_mode
 
         if model_input0.input_ids is None:
             model_input0.input_ids = gather_token(
@@ -703,13 +755,14 @@ class TpPartBaseModel:
 
         origin_batch_size = model_input0.batch_size
         max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
+        infer_batch_size = triton.cdiv(origin_batch_size, self.tp_world_size_) * self.tp_world_size_
 
-        if self.graph is not None and self.graph.can_run(origin_batch_size, max_len_in_batch):
-            find_graph_batch_size = self.graph.find_closest_graph_batch_size(origin_batch_size)
+        if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
+            infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
             # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
-            padded_model_input0 = self._create_padded_decode_model_input(model_input0, find_graph_batch_size)
-            padded_model_input1 = self._create_padded_decode_model_input(model_input1, find_graph_batch_size)
+            padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
+            padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -730,7 +783,7 @@ class TpPartBaseModel:
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
-            if self.graph.need_capture(find_graph_batch_size):
+            if self.graph.need_capture(infer_batch_size):
                 infer_state0.is_cuda_graph = True
                 infer_state1.is_cuda_graph = True
 
@@ -749,6 +802,8 @@ class TpPartBaseModel:
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
             model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
         else:
+            model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
+            model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -770,6 +825,9 @@ class TpPartBaseModel:
             infer_state1.init_att_state()
 
             model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
+            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)
+            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size)
+
         return model_output0, model_output1
 
     @final

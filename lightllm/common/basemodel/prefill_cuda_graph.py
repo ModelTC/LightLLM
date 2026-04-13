@@ -18,9 +18,9 @@ logger = init_logger(__name__)
 class PrefillCudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, decode_cuda_graph: CudaGraph):
+    def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int):
         self.graph = {}
-
+        self.tp_world_size = tp_world_size
         if decode_cuda_graph is not None:
             self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
         else:
@@ -33,7 +33,8 @@ class PrefillCudaGraph:
         graph_handle_token_nums = []
         for i in range(2048):
             token_num = int(2 ** (2 * i))
-            if 1 < token_num < self.max_handle_token_num:
+            # 兼容 tpsp 模式下，token_num 需要是 tp_world_size 的倍数
+            if 1 < token_num < self.max_handle_token_num and (token_num % self.tp_world_size) == 0:
                 graph_handle_token_nums.append(token_num)
         graph_handle_token_nums.append(self.max_handle_token_num)
         self.graph_handle_token_nums = graph_handle_token_nums
