@@ -20,6 +20,12 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
+    def _init_weight_names(self):
+        super()._init_weight_names()
+        # Must exist on every layer (including linear-attention layers where _init_qkv
+        # is never called) so _split_q_with_gate can reference it safely.
+        self._o_gate_weight_name = f"model.layers.{self.layer_num_}.self_attn.o_gate_proj.weight"
+
     def _init_qkv(self):
         in_dim = self.n_embed
         q_out_dim = self.q_head_num_ * self.head_dim
@@ -121,14 +127,25 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         )
 
     def _split_q_with_gate(self, weights):
-        if self._q_weight_name in weights:
-            weight = weights[self._q_weight_name]
-            num_heads = self.q_head_num_
-            weight = weight.view(num_heads * 2, self.head_dim, -1)
-            _q_proj = weight[0::2].reshape(-1, weight.shape[-1])
-            _gate_proj = weight[1::2].reshape(-1, weight.shape[-1])
-            weights[self._q_weight_name] = _q_proj
-            weights[self._o_gate_weight_name] = _gate_proj
+        # Official Qwen3-Next/Qwen3.5 base checkpoints pack o_gate_proj into q_proj with
+        # an interleaved per-head layout, so we de-interleave it here. Fine-tuned
+        # checkpoints re-saved through standard HF transformers store o_gate_proj as a
+        # separate tensor; in that case q_proj is already plain Q and de-interleaving
+        # would scramble its rows. Detect the separate layout and skip.
+        if self._q_weight_name not in weights:
+            return
+        if self._o_gate_weight_name in weights:
+            return
+        weight = weights[self._q_weight_name]
+        expected_packed_rows = self.q_head_num_ * self.head_dim * 2
+        if weight.shape[0] != expected_packed_rows:
+            return
+        num_heads = self.q_head_num_
+        weight = weight.view(num_heads * 2, self.head_dim, -1)
+        _q_proj = weight[0::2].reshape(-1, weight.shape[-1])
+        _gate_proj = weight[1::2].reshape(-1, weight.shape[-1])
+        weights[self._q_weight_name] = _q_proj
+        weights[self._o_gate_weight_name] = _gate_proj
 
     def _parse_config(self):
         super()._parse_config()
