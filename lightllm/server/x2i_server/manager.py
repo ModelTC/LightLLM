@@ -31,22 +31,6 @@ manage a generation service,
 3. call llm gen to obtain past key values
 4. call x2v to generate images and pass the key values to it
 5. return the generated images.
-
-            +-------------------+
-            |   X2IManager      |
-            +---------+---------+
-                      |
-               (broadcast)
-                      |
-        +------+------+------+
-        |             |      |
-     Worker0       Worker1  ...
-     (rank0)       (rank1)
-        |             |
-        +------ allreduce / sync ----+
-                      |
-                 only rank0
-                 returns result
 """
 
 class X2IManager:
@@ -70,7 +54,7 @@ class X2IManager:
 
         if not self.use_naive_x2i and self.world_size > 1:
             # send to workers
-            self.worker_pub = context.socket(zmq.PUB)
+            self.worker_pub = context.socket(zmq.PUSH)
             self.worker_pub.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_worker_task_port}")
 
         self.waiting_reqs: List[X2IParams] = []

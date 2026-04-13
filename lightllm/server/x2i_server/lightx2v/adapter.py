@@ -2,6 +2,7 @@ import inspect
 import torch
 import torch.distributed as dist
 import zmq
+import zmq.asyncio
 import setproctitle
 import asyncio
 import os
@@ -23,14 +24,13 @@ class LightX2VServer:
         self.rank = rank
         self.world_size = world_size
 
-        context = zmq.Context(2)
-
         # receive task from manager
-        self.task_socket = context.socket(zmq.SUB)
-        self.task_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.x2i_worker_task_port}")
-        self.task_socket.setsockopt(zmq.SUBSCRIBE, b"")
-
         if self.rank == 0:
+            context = zmq.asyncio.Context(2)
+            self.task_socket = context.socket(zmq.PULL)
+            self.task_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.x2i_worker_task_port}")
+            # self.task_socket.setsockopt(zmq.SUBSCRIBE, b"")
+
             # send result back
             self.result_socket = context.socket(zmq.PUSH)
             self.result_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.http_server_port_for_x2i}")
@@ -38,6 +38,8 @@ class LightX2VServer:
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=False)
         torch.cuda.set_device(rank)
         self._init_pipeline()
+
+        self.task_dist_group = dist.new_group(backend="gloo")
 
     def _init_pipeline(self):
         os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -59,20 +61,29 @@ class LightX2VServer:
 
     async def run(self):
         while True:
-            param: X2IParams = self.task_socket.recv_pyobj()
 
             try:
-                images = self._process(param)
+                if self.rank == 0:
+                    param: X2IParams = await self.task_socket.recv_pyobj()
+                    dist.broadcast_object_list([param], src=0, group=self.task_dist_group)
+                else:
+                    params = [None]
+                    dist.broadcast_object_list(params, src=0, group=self.task_dist_group)
+                    param: X2IParams = params[0]
+
+                assert param is not None, "Received None param in x2v worker, this should not happen."
+
+                images = await self._process(param)
 
                 if self.rank == 0:
-                    self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=images))
+                    await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=images))
 
             except Exception as e:
                 logger.error(f"Error processing request {param.request_id}: {str(e)}", exc_info=e)
                 if self.rank == 0:
-                    self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=None))
+                    await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=None))
 
-    def _process(self, param: X2IParams):
+    async def _process(self, param: X2IParams):
         is_t2i = param.past_kvcache_img.is_empty()
 
         self.pipe.runner.set_inference_params(
@@ -96,7 +107,7 @@ class LightX2VServer:
 
         if self.rank == 0:
             # release
-            self.result_socket.send_pyobj(X2ICacheRelease(request_id=param.request_id))
+            await self.result_socket.send_pyobj(X2ICacheRelease(request_id=param.request_id))
 
         if is_t2i:
             self.pipe.runner.set_kvcache(
