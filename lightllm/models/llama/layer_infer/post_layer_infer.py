@@ -92,7 +92,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-        self._tpsp_allgather(input=input_embdings, infer_state=infer_state)
+        input_embdings = self._tpsp_allgather(input=input_embdings, infer_state=infer_state)
 
         if infer_state.need_dp_prefill_balance:
             input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)

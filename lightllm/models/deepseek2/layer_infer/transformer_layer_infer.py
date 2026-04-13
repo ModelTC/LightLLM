@@ -1,6 +1,5 @@
 import os
 import torch
-import torch.distributed as dist
 import triton
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.common.basemodel.attention.base_att import AttControl
@@ -10,7 +9,6 @@ from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
-from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor, all_reduce, reduce_scatter_tensor
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.log_utils import init_logger
@@ -65,14 +63,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.is_moe:
             enable_ep_moe = get_env_start_args().enable_ep_moe
             if enable_ep_moe:
-                self._ffn = self._moe_ffn_edp
-                self._tpsp_ffn = self._tpsp_ffn_ep
+                self._ffn = self._ffn_ep
             else:
-                self._ffn = self._moe_ffn
-                self._tpsp_ffn = self._tpsp_ffn_tp
+                self._ffn = self._ffn_tp
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
-            self._tpsp_ffn = self._tpsp_ffn_tp
 
     def _context_attention_kernel(
         self,
@@ -151,51 +146,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         return sampled_k_nope, sampled_k_rope, sampled_v
 
     def _get_qkv(
-        self,
-        input: torch.Tensor,
-        infer_state: Deepseek2InferStateInfo,
-        layer_weight: Deepseek2TransformerLayerWeight,
-    ) -> torch.Tensor:
-        input = input.view(-1, self.embed_dim_)
-
-        if self.q_lora_rank is None:
-            q = layer_weight.q_weight_.mm(input)
-            cache_kv = layer_weight.kv_a_proj_with_mqa_.mm(input).view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
-        else:
-            q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
-            )
-            q = layer_weight.q_a_layernorm_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
-            q = layer_weight.q_b_proj_.mm(q)
-            cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim)
-        q = q.view(-1, self.tp_q_head_num_, self.qk_nope_head_dim + self.qk_rope_head_dim)
-        q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-
-        layer_weight.kv_a_layernorm_(
-            cache_kv[:, :, : self.kv_lora_rank], eps=self.eps_, out=cache_kv[:, :, : self.kv_lora_rank]
-        )
-
-        rotary_emb_fwd(
-            q_rope,
-            cache_kv[:, :, self.kv_lora_rank :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-        )
-        return q, cache_kv
-
-    def _tpsp_get_qkv(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         if self.q_lora_rank is None:
             # q_lora_rank is None 的时候，当前不支持低rank通信优化。
-            if self.tp_world_size_ > 1:
-                sp_token_num, hidden_dim = input.shape
-                gather_input = self.alloc_tensor(
-                    (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-                )
-                all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-                input = gather_input[0 : len(infer_state.input_ids), :]
+            input = self._tpsp_allgather(input=input, infer_state=infer_state)
 
             input = input.view(-1, self.embed_dim_)
             q = layer_weight.q_weight_.mm(input)
@@ -219,13 +175,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             input = input.view(-1, self.embed_dim_)
             qkv = layer_weight.qkv_a_proj_with_mqa_.mm(input)
             # 在 lora rank 之后，进行通信，可以减少通信量。
-            if self.tp_world_size_ > 1:
-                sp_token_num, qkv_dim = qkv.shape
-                gather_qkv = self.alloc_tensor(
-                    (sp_token_num * self.tp_world_size_, qkv_dim), dtype=qkv.dtype, device=qkv.device
-                )
-                all_gather_into_tensor(gather_qkv, qkv, group=infer_state.dist_group, async_op=False)
-                qkv = gather_qkv[0 : len(infer_state.input_ids), :]
+            qkv = self._tpsp_allgather(input=qkv, infer_state=infer_state)
 
             if infer_state.need_dp_prefill_balance:
                 qkv = infer_state._all_to_all_unbalance_get(data=qkv)
@@ -255,43 +205,16 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_o(
         self, input: torch.Tensor, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
-        if input.shape[2] == self.kv_lora_rank:
-            input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-        o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
-        return o_tensor
-
-    def _tpsp_get_o(
-        self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
-    ) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
 
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-
-        input = input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim)
-        dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
-        o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
-        layer_weight.o_weight_.mm(input, out=o_tensor[0 : len(infer_state.input_ids), :])
-        e_o_tensor = o_tensor[len(infer_state.input_ids) :, :]
-        if e_o_tensor.shape[0] > 0:
-            e_o_tensor.fill_(0)
-
-        if self.tp_world_size_ > 1:
-            sp_token_num = o_tensor.shape[0] // self.tp_world_size_
-            reduce_o_tensor = self.alloc_tensor((sp_token_num, self.embed_dim_), dtype=input.dtype, device=input.device)
-            reduce_scatter_tensor(
-                output=reduce_o_tensor,
-                input=o_tensor,
-                op=dist.ReduceOp.SUM,
-                group=infer_state.dist_group,
-                async_op=False,
-            )
-            o_tensor = reduce_o_tensor
-
+        o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
+        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
-    def _moe_ffn(
+    def _moe_ffn_tp(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
 
@@ -347,40 +270,24 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
 
-    def _tpsp_ffn(self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight):
-        raise Exception("need bind to real impl")
-
-    def _tpsp_ffn_tp(
+    def _ffn_tp(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
-        if self.tp_world_size_ > 1:
-            sp_token_num, hidden_dim = input.shape
-            gather_input = self.alloc_tensor(
-                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-            )
-            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        ffn2_out = self._moe_ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
 
-        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
 
-        if self.tp_world_size_ > 1:
-            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
-            reduce_o_tensor = self.alloc_tensor(
-                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
-            )
-            reduce_scatter_tensor(
-                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
-            )
-            ffn2_out = reduce_o_tensor
         return ffn2_out
 
-    def _tpsp_ffn_ep(
+    def _ffn_ep(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
+        # ep 本身就是一种 sp 兼容，所以不需要再进行 allgather 和 reduce
         input = input.view(-1, self.embed_dim_)
 
-        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        ffn2_out = self._moe_ffn_edp(input=input, infer_state=infer_state, layer_weight=layer_weight)
 
         return ffn2_out
 
@@ -398,12 +305,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         # 0 attention
         _0_input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        _0_q, _0_cache_kv = self._tpsp_get_qkv(_0_input1, infer_state, layer_weight)
+        _0_q, _0_cache_kv = self._get_qkv(_0_input1, infer_state, layer_weight)
         _0_input1 = None
         self._post_cache_kv(_0_cache_kv, infer_state, layer_weight)
         _0_o = self._token_attention_kernel(_0_q, infer_state, layer_weight)
         _0_q = None
-        _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
+        _0_o = self._get_o(_0_o, infer_state, layer_weight)
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
         _0_o = None
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
@@ -431,12 +338,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
-        _1_q, _1_cache_kv = self._tpsp_get_qkv(_1_input1, infer_state1, layer_weight)
+        _1_q, _1_cache_kv = self._get_qkv(_1_input1, infer_state1, layer_weight)
         _1_input1 = None
         self._post_cache_kv(_1_cache_kv, infer_state1, layer_weight)
         _1_o = self._token_attention_kernel(_1_q, infer_state1, layer_weight)
         _1_q = None
-        _1_o = self._tpsp_get_o(_1_o, infer_state1, layer_weight)
+        _1_o = self._get_o(_1_o, infer_state1, layer_weight)
         input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
         _1_o = None
         _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
@@ -524,12 +431,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         # 0 attention
         _0_input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        _0_q, _0_cache_kv = self._tpsp_get_qkv(_0_input1, infer_state, layer_weight)
+        _0_q, _0_cache_kv = self._get_qkv(_0_input1, infer_state, layer_weight)
         _0_input1 = None
         self._post_cache_kv(_0_cache_kv, infer_state, layer_weight)
         _0_o = self._context_attention_kernel(_0_q, _0_cache_kv, infer_state, layer_weight)
         _0_q = None
-        _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
+        _0_o = self._get_o(_0_o, infer_state, layer_weight)
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
         _0_o = None
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
@@ -550,12 +457,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
-        _1_q, _1_cache_kv = self._tpsp_get_qkv(_1_input1, infer_state1, layer_weight)
+        _1_q, _1_cache_kv = self._get_qkv(_1_input1, infer_state1, layer_weight)
         _1_input1 = None
         self._post_cache_kv(_1_cache_kv, infer_state1, layer_weight)
         _1_o = self._context_attention_kernel(_1_q, _1_cache_kv, infer_state1, layer_weight)
         _1_q = None
-        _1_o = self._tpsp_get_o(_1_o, infer_state1, layer_weight)
+        _1_o = self._get_o(_1_o, infer_state1, layer_weight)
         input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
         _1_o = None
         _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)

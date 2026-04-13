@@ -1,6 +1,5 @@
 import torch
 from functools import partial
-from typing import Tuple
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.stablelm.layer_weights.transformer_layer_weight import StablelmTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -21,6 +20,7 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
+        input = self._tpsp_allgather(input, infer_state)
         q = layer_weight.q_proj.mm(input.view(-1, self.embed_dim_))
         cache_kv = layer_weight.kv_proj.mm(
             input.view(-1, self.embed_dim_),
@@ -32,23 +32,21 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_sin,
             self.partial_rotary_factor,
         )
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
         return q, cache_kv
-
-    def _tpsp_get_qkv(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
-        # TODO
-        raise Exception("not impl")
 
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
     ) -> torch.Tensor:
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
         o_tensor = layer_weight.o_proj.mm(
             input.view(-1, self.tp_o_head_num_ * self.head_dim_),
         )
+        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
-
-    def _tpsp_get_o(self, input, infer_state, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
-        # TODO
-        raise Exception("not impl")
 
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight

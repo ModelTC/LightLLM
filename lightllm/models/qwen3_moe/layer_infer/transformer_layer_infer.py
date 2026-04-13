@@ -1,23 +1,13 @@
-import os
 import torch
-import torch.functional as F
-import torch.distributed as dist
-import numpy as np
 import triton
+from functools import partial
 from typing import Tuple
-from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
-from functools import partial
-from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_global_world_size
-from lightllm.distributed.communication_op import all_gather_into_tensor, reduce_scatter_tensor
 from lightllm.utils.envs_utils import get_env_start_args
-
-logger = init_logger(__name__)
 
 
 class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -45,14 +35,11 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.is_moe:
             enable_ep_moe = get_env_start_args().enable_ep_moe
             if enable_ep_moe:
-                self._ffn = partial(Qwen3MOETransformerLayerInfer._moe_ffn_edp, self)
-                self._tpsp_ffn = self._tpsp_ffn_ep
+                self._ffn = self._ffn_ep
             else:
-                self._ffn = partial(Qwen3MOETransformerLayerInfer._moe_ffn, self)
-                self._tpsp_ffn = self._tpsp_ffn_tp
+                self._ffn = self._ffn_tp
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
-            self._tpsp_ffn = self._tpsp_ffn_tp
 
     def _get_qkv(
         self,
@@ -61,6 +48,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Qwen3MOETransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+
         qkv = layer_weight.qkv_proj.mm(input)
         q, cache_kv = qkv.split(
             [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
@@ -77,49 +66,14 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_cos,
             infer_state.position_sin,
         )
-        return q, cache_kv
-
-    def _tpsp_get_qkv(
-        self,
-        input: torch.Tensor,
-        infer_state: LlamaInferStateInfo,
-        layer_weight: Qwen3MOETransformerLayerWeight,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.tp_world_size_ > 1:
-            sp_token_num, hidden_dim = input.shape
-            gather_input = self.alloc_tensor(
-                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-            )
-            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input[0 : len(infer_state.input_ids), :]
-
-        input = input.view(-1, self.embed_dim_)
-        q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input)
-        layer_weight.qk_norm_weight_(
-            q,
-            cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
-            eps=self.eps_,
-        )
-        cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        rotary_emb_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-        )
-
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)
             cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
-
         return q, cache_kv
 
-    def _moe_ffn(
+    def _moe_ffn_tp(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
-
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -137,7 +91,6 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_edp(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
-
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
 
@@ -156,44 +109,21 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
 
-    def _tpsp_ffn(
-        self, input: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
-    ):
-        raise Exception("need bind to real impl")
-
-    def _tpsp_ffn_tp(
-        self, input: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
-    ) -> torch.Tensor:
-        input = input.view(-1, self.embed_dim_)
-        if self.tp_world_size_ > 1:
-            sp_token_num, hidden_dim = input.shape
-            gather_input = self.alloc_tensor(
-                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-            )
-            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input
-
-        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
-
-        if self.tp_world_size_ > 1:
-            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
-            reduce_o_tensor = self.alloc_tensor(
-                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
-            )
-            reduce_scatter_tensor(
-                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
-            )
-            ffn2_out = reduce_o_tensor
-        return ffn2_out
-
-    def _tpsp_ffn_ep(
+    def _ffn_tp(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
-
-        ffn2_out = self._ffn(input=input, infer_state=infer_state, layer_weight=layer_weight)
-
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        ffn2_out = self._moe_ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
         return ffn2_out
+
+    def _ffn_ep(
+        self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
+    ) -> torch.Tensor:
+        # ep 本身就是一种 sp 兼容，所以不需要再进行 allgather 和 reduce
+        input = input.view(-1, self.embed_dim_)
+        return self._moe_ffn_edp(input=input, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
         self,
@@ -209,12 +139,12 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         # 0 attention
         _0_input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        _0_q, _0_cache_kv = self._tpsp_get_qkv(_0_input1, infer_state, layer_weight)
+        _0_q, _0_cache_kv = self._get_qkv(_0_input1, infer_state, layer_weight)
         _0_input1 = None
         self._post_cache_kv(_0_cache_kv, infer_state, layer_weight)
         _0_o = self._token_attention_kernel(_0_q, infer_state, layer_weight)
         _0_q = None
-        _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
+        _0_o = self._get_o(_0_o, infer_state, layer_weight)
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
         _0_o = None
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
@@ -237,12 +167,12 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
-        _1_q, _1_cache_kv = self._tpsp_get_qkv(_1_input1, infer_state1, layer_weight)
+        _1_q, _1_cache_kv = self._get_qkv(_1_input1, infer_state1, layer_weight)
         _1_input1 = None
         self._post_cache_kv(_1_cache_kv, infer_state1, layer_weight)
         _1_o = self._token_attention_kernel(_1_q, infer_state1, layer_weight)
         _1_q = None
-        _1_o = self._tpsp_get_o(_1_o, infer_state1, layer_weight)
+        _1_o = self._get_o(_1_o, infer_state1, layer_weight)
         input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
         _1_o = None
         _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
@@ -321,12 +251,12 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             )
         # 0 attention
         _0_input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        _0_q, _0_cache_kv = self._tpsp_get_qkv(_0_input1, infer_state, layer_weight)
+        _0_q, _0_cache_kv = self._get_qkv(_0_input1, infer_state, layer_weight)
         _0_input1 = None
         self._post_cache_kv(_0_cache_kv, infer_state, layer_weight)
         _0_o = self._context_attention_kernel(_0_q, _0_cache_kv, infer_state, layer_weight)
         _0_q = None
-        _0_o = self._tpsp_get_o(_0_o, infer_state, layer_weight)
+        _0_o = self._get_o(_0_o, infer_state, layer_weight)
         input_embdings.add_(_0_o.view(-1, self.embed_dim_))
         _0_o = None
         _0_input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
@@ -346,12 +276,12 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
-        _1_q, _1_cache_kv = self._tpsp_get_qkv(_1_input1, infer_state1, layer_weight)
+        _1_q, _1_cache_kv = self._get_qkv(_1_input1, infer_state1, layer_weight)
         _1_input1 = None
         self._post_cache_kv(_1_cache_kv, infer_state1, layer_weight)
         _1_o = self._context_attention_kernel(_1_q, _1_cache_kv, infer_state1, layer_weight)
         _1_q = None
-        _1_o = self._tpsp_get_o(_1_o, infer_state1, layer_weight)
+        _1_o = self._get_o(_1_o, infer_state1, layer_weight)
         input_embdings1.add_(_1_o.view(-1, self.embed_dim_))
         _1_o = None
         _1_input1 = self._ffn_norm(input_embdings1, infer_state1, layer_weight)
