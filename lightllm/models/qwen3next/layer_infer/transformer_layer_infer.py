@@ -26,7 +26,11 @@ logger = init_logger(__name__)
 
 class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
-        self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
+        assert "partial_rotary_factor" in network_config, (
+            "partial_rotary_factor missing from network_config — check _init_config "
+            "resolved it from the checkpoint (text_config.rope_parameters / text_config / root)."
+        )
+        self.partial_rotary_factor = network_config["partial_rotary_factor"]
         self.n_routed_experts = network_config.get("num_experts", 0)
         self.is_moe = (
             network_config.get("num_experts", 0) > 0

@@ -75,14 +75,39 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
 
-        rope_parameters = self.config.get("rope_parameters")
-        if isinstance(rope_parameters, dict):
-            if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
-                self.config["rope_theta"] = rope_parameters["rope_theta"]
-            if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in self.config:
-                self.config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
-            if "rope_scaling" not in self.config:
-                self.config["rope_scaling"] = rope_parameters
+        # Rope parameters may live in three different places across HF / fine-tune
+        # checkpoints: text_config.rope_parameters.<k>, text_config.<k>, or the root
+        # all_config.<k>. Resolve each field by searching in that order and promote
+        # into self.config. Missing rope parameters silently default to full rotary
+        # in downstream code, which scrambles attention for models with
+        # partial_rotary_factor != 1.0 — log the resolved value loudly.
+        text_rope = self.config.get("rope_parameters") if isinstance(self.config.get("rope_parameters"), dict) else {}
+        root_rope = all_config.get("rope_parameters") if isinstance(all_config.get("rope_parameters"), dict) else {}
+
+        def _resolve(key):
+            if key in text_rope:
+                return text_rope[key], "text_config.rope_parameters"
+            if key in self.config:
+                return self.config[key], "text_config"
+            if key in root_rope:
+                return root_rope[key], "rope_parameters (root)"
+            if key in all_config:
+                return all_config[key], "root"
+            return None, None
+
+        for key in ("rope_theta", "partial_rotary_factor"):
+            value, source = _resolve(key)
+            if value is not None:
+                self.config[key] = value
+                logger.info(f"qwen3_5 _init_config: {key}={value} resolved from {source}")
+            else:
+                logger.warning(f"qwen3_5 _init_config: {key} NOT FOUND in config — downstream will use default")
+
+        if "rope_scaling" not in self.config:
+            if text_rope:
+                self.config["rope_scaling"] = text_rope
+            elif root_rope:
+                self.config["rope_scaling"] = root_rope
 
         # MoE routing parameters - set defaults for Qwen3.5 compatibility
         if "norm_topk_prob" not in self.config:
