@@ -582,8 +582,13 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-        input_ids = infer_state.input_ids
-        cuda_input_ids = input_ids
+        if not self.args.enable_dp_prefill_balance:
+            assert not self.args.enable_prefill_cudagraph, "not support now"
+            input_ids = infer_state.input_ids
+            cuda_input_ids = input_ids
+        else:
+            input_ids = infer_state.prefill_dp_balance(input_ids=infer_state.input_ids)
+            cuda_input_ids = input_ids
 
         input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         input_tensors = [input_embs]
@@ -833,8 +838,16 @@ class TpPartBaseModel:
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
         g_cache_manager.cache_env_in()
+        # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
+        if get_env_start_args().enable_dp_prefill_balance:
+            _input_ids = infer_state.prefill_dp_balance(input_ids=infer_state.input_ids)
+            _input_ids1 = infer_state1.prefill_dp_balance(input_ids=infer_state1.input_ids)
+        else:
+            _input_ids = infer_state.input_ids
+            _input_ids1 = infer_state1.input_ids
+
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
-            infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
+            _input_ids, _input_ids1, infer_state, infer_state1, self.pre_post_weight
         )
         for i in range(self.layers_num):
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(

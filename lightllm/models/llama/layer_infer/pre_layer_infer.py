@@ -53,18 +53,10 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: LlamaPreAndPostLayerWeight,
     ):
-        if get_env_start_args().enable_dp_prefill_balance:
-            input_ids = infer_state.prefill_dp_balance(input_ids=input_ids)
 
         input_embdings = self.context_forward(input_ids=input_ids, infer_state=infer_state, layer_weight=layer_weight)
-        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
-
-        if get_env_start_args().enable_dp_prefill_balance:
-            input_ids1 = infer_state1.prefill_dp_balance(input_ids=input_ids1)
-
         input_embdings1 = self.context_forward(
             input_ids=input_ids1, infer_state=infer_state1, layer_weight=layer_weight
         )
-        input_embdings1 = self._tpsp_sp_split(input=input_embdings1, infer_state=infer_state1)
 
         return input_embdings, input_embdings1
