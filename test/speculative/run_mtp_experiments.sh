@@ -6,7 +6,7 @@
 # =============================================================================
 
 set -e
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=1,2,3,4,6
 
 # =============================================================================
 # Configurable Parameters (can be overridden via command line arguments)

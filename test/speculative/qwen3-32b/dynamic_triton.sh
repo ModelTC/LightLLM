@@ -22,6 +22,7 @@ LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
 --mtp_mode eagle3 \
 --disable_dynamic_prompt_cache \
 --mtp_draft_model_dir ${DRAFT_MODEL_DIR} \
+--graph_grow_step_size 1 \
 --mtp_step ${MTP_STEP}  \
 --llm_decode_att_backend triton \
 --mtp_dynamic_verify

@@ -24,7 +24,7 @@ headers = {"Content-Type": "application/json"}
 
 # rsponse = requests.get("http://localhost:8088/profiler_start")
 
-for i in range(1):
+for i in range(10):
     data = {
         "inputs": "San Francisco is a",
         # 'temperature': 0.1,
