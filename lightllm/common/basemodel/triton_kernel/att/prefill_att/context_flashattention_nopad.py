@@ -123,9 +123,10 @@ def _fwd_kernel(
 def context_attention_fwd(
     q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b_prompt_cache_len, max_input_len, req_to_token_indexs
 ):
-    BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+    BLOCK_M = 64 if Lk >= 256 else (128 if not is_tesla() else 64)
+
     assert Lq == Lk and Lk == Lv
     assert Lk in {16, 32, 64, 128, 256}
 
@@ -286,10 +287,10 @@ def _fwd_kernel_no_prompt_cache(
 
 @torch.no_grad()
 def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
-
-    BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+    BLOCK_M = 64 if Lk >= 256 else (128 if not is_tesla() else 64)
+
     assert Lq == Lk and Lk == Lv
     assert Lk in {16, 32, 64, 128, 256}
 
@@ -459,9 +460,9 @@ def _fwd_kernel_contiguous_kv(
 def context_attention_fwd_contiguous_kv(
     q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, max_q_input_len, b_prompt_cache_len
 ):
-    BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+    BLOCK_M = 64 if Lk >= 256 else (128 if not is_tesla() else 64)
     assert Lq == Lk and Lk == Lv
     assert Lk in {16, 32, 64, 128, 256}
 
