@@ -186,14 +186,26 @@ class VisualModelRpcServer(rpyc.Service):
     def _forward(self, images: List[ImageItem]):
         return self.model.encode(images)
 
-    def _get_image_items_from_infer_queue(self, max_num: int, force_same: bool = False) -> List[ImageItem]:
+    def _get_image_items_from_infer_queue(
+        self, max_num: int, force_same: bool = False, timeout: float = None
+    ) -> List[ImageItem]:
         """
         从队列中批量获取任务，直到达到 max_num 或队列为空。
+        timeout 仅对首个任务的阻塞等待生效；超时返回空列表。
         """
         tasks = []
         # 至少获取一个任务，阻塞
-        self.sempare.acquire()
-        task = self.infer_queue.get(block=True)
+        if timeout is not None:
+            if not self.sempare.acquire(timeout=timeout):
+                return tasks
+            try:
+                task = self.infer_queue.get(timeout=timeout)
+            except queue.Empty:
+                self.sempare.release()
+                return tasks
+        else:
+            self.sempare.acquire()
+            task = self.infer_queue.get(block=True)
         tasks.append(task)
 
         if not force_same:
@@ -240,12 +252,18 @@ class VisualModelRpcServer(rpyc.Service):
         while True:
             try:
                 # 从队列获取任务, 阻塞等待
+                # rank 0 用带超时的 get, 空闲时也会广播 [0] 当作心跳,
+                # 避免其他 rank 在 gloo broadcast 上长时间无响应而触发 30 分钟超时崩溃。
                 if self.tp_rank_id == 0:
-                    images = self._get_image_items_from_infer_queue(max_num=self.infer_max_batch_size)
+                    images = self._get_image_items_from_infer_queue(max_num=self.infer_max_batch_size, timeout=60.0)
                     dist.broadcast_object_list([len(images)], src=0, group=self.gloo_group)
+                    if len(images) == 0:
+                        continue
                 else:
                     ans = [None]
                     dist.broadcast_object_list(ans, src=0, group=self.gloo_group)
+                    if ans[0] == 0:
+                        continue
                     images = self._get_image_items_from_infer_queue(max_num=ans[0], force_same=True)
 
                 for image in images:
