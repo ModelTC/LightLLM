@@ -842,10 +842,17 @@ class HttpServerManager:
         return
 
     async def loop_for_x2i(self):
+        poller = zmq.asyncio.Poller()
+        poller.register(self.recv_from_x2i, zmq.POLLIN)
 
         while True:
             try:
-                recv_obj = await asyncio.wait_for(self.recv_from_x2i.recv_pyobj(), timeout=0.05)
+                events = dict(await poller.poll(timeout=50))
+
+                if self.recv_from_x2i in events:
+                    recv_obj = await self.recv_from_x2i.recv_pyobj()
+                else:
+                    continue
 
                 if isinstance(recv_obj, X2ICacheRelease):
                     status = self.req_id_to_x2i_reqs[recv_obj.request_id]

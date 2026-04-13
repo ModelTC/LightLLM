@@ -29,7 +29,6 @@ class LightX2VServer:
             context = zmq.asyncio.Context(2)
             self.task_socket = context.socket(zmq.PULL)
             self.task_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.x2i_worker_task_port}")
-            # self.task_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
             # send result back
             self.result_socket = context.socket(zmq.PUSH)
