@@ -1,4 +1,3 @@
-import os
 import torch
 
 import torch.distributed as dist
@@ -87,14 +86,29 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _bind_ffn(self):
         if self.is_moe:
-            moe_mode = os.environ.get("MOE_MODE", "TP")
-            if moe_mode == "EP":
-                self._ffn = partial(Qwen3NextTransformerLayerInfer._moe_ffn_edp, self)
+            enable_ep_moe = get_env_start_args().enable_ep_moe
+            if enable_ep_moe:
+                self._ffn = self._ffn_ep
             else:
-                self._ffn = partial(Qwen3NextTransformerLayerInfer._moe_ffn, self)
+                self._ffn = self._ffn_tp
         else:
             self._ffn = partial(Qwen3NextTransformerLayerInfer._ffn, self)
         return
+
+    def _ffn_tp(
+        self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+    ) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        ffn2_out = self._moe_ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        return self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
+
+    def _ffn_ep(
+        self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
+    ) -> torch.Tensor:
+        # ep 本身就是一种 sp 兼容，所以不需要再进行 allgather 和 reduce
+        input = input.view(-1, self.embed_dim_)
+        return self._moe_ffn_edp(input=input, infer_state=infer_state, layer_weight=layer_weight)
 
     def _compute_shared_expert(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
@@ -105,7 +119,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         shared_expert_out.mul_(gate)
         return shared_expert_out
 
-    def _moe_ffn(
+    def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
 
@@ -155,6 +169,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
         qkv_out = layer_weight.qkv_proj.mm(input)
         q, cache_kv = qkv_out.split(
             [self.tp_q_head_num_ * self.head_dim_ * 2, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_],
@@ -175,6 +190,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_sin,
             partial_rotary_factor=self.partial_rotary_factor,
         )
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
         return q, cache_kv
 
     def _get_o(
@@ -184,10 +202,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> torch.Tensor:
         """Output projection with gating (in-place multiply to save one allocation)."""
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_balance_get(data=input)
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         input.mul_(infer_state.gate_value)
         infer_state.gate_value = None
         o_tensor = layer_weight.o_proj.mm(input)
+        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
     # ==================== GDN Helper Methods ====================

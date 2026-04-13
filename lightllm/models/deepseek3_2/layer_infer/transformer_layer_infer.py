@@ -30,6 +30,14 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_unbalance_get(data=input)
+            position_cos = infer_state._unbalance_position_cos
+            position_sin = infer_state._unbalance_position_sin
+        else:
+            position_cos = infer_state.position_cos
+            position_sin = infer_state.position_sin
 
         q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -55,8 +63,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         rotary_emb_fwd(
             q_rope,
             cache_kv[:, :, self.kv_lora_rank :],
-            infer_state.position_cos,
-            infer_state.position_sin,
+            position_cos,
+            position_sin,
         )
         return q, cache_kv
 
@@ -269,11 +277,18 @@ class NsaInfer:
         # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
         from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
+        if infer_state.need_dp_prefill_balance:
+            position_cos = infer_state._unbalance_position_cos
+            position_sin = infer_state._unbalance_position_sin
+        else:
+            position_cos = infer_state.position_cos
+            position_sin = infer_state.position_sin
+
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],
             k[:, None, : self.qk_rope_head_dim],
-            infer_state.position_cos,
-            infer_state.position_sin,
+            position_cos,
+            position_sin,
         )
 
         q = self._rotate_activation(q)

@@ -1,8 +1,6 @@
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.distributed import all_reduce
 from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -24,6 +22,7 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Gemma3TransformerLayerWeight
     ) -> torch.Tensor:
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
         q = layer_weight.q_proj.mm(input)
         # kv = layer_weight.kv_proj.mm(input)
         # kv = kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
@@ -58,17 +57,22 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
                 infer_state.position_cos_global.to(q.dtype),
                 infer_state.position_sin_global.to(q.dtype),
             )
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
         return q, cache_kv
 
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: Gemma3TransformerLayerWeight) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
-        gate = layer_weight.gate_proj.mm(input.view(-1, self.embed_dim_))
-        up = layer_weight.up_proj.mm(input.view(-1, self.embed_dim_))
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        gate = layer_weight.gate_proj.mm(input)
+        up = layer_weight.up_proj.mm(input)
         # gelu_and_mul_fwd(up_gate_out, ffn1_out)
         ffn1_out = nn.functional.gelu(gate, approximate="tanh") * up
         input = None
         ffn2_out = layer_weight.down_proj.mm(ffn1_out)
         ffn1_out = None
+        ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
         return ffn2_out
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma3TransformerLayerWeight):
@@ -82,8 +86,6 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
@@ -94,8 +96,6 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
         ffn_out = layer_weight.post_feedforward_layernorm_weight_(
             input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
@@ -115,8 +115,6 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
@@ -127,8 +125,6 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
 
         ffn_out = layer_weight.post_feedforward_layernorm_weight_(
             input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor

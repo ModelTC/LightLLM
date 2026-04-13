@@ -17,9 +17,10 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight: MixtralTransformerLayerWeight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
+        hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
         num_tokens, hidden_dim = hidden_states.shape
 
-        router_logits = layer_weight.moe_gate.mm(input.view(-1, self.embed_dim_))
+        router_logits = layer_weight.moe_gate.mm(hidden_states)
         topk_weights, topk_ids = fused_topk(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -29,7 +30,7 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         from lightllm.common.fused_moe.grouped_fused_moe import fused_experts_impl
 
-        return fused_experts_impl(
+        ffn2_out = fused_experts_impl(
             hidden_states=hidden_states,
             w1=layer_weight.experts.w1[0],
             w2=layer_weight.experts.w2[0],
@@ -41,3 +42,4 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
             w2_scale=None,
             alloc_tensor_func=self.alloc_tensor,
         )
+        return self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
