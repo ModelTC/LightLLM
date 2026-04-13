@@ -113,7 +113,7 @@ def _fwd_kernel_mtp_diverse_stage2_single_token(
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
-    mutates_args=["O"],
+    mutates_args=["out"],
 )
 @torch.no_grad()
 def mtp_diverse_stage2_single_token(
@@ -196,7 +196,7 @@ if __name__ == "__main__":
                     mid_out=mid_out,
                     mid_out_logsumexp=mid_out_logsumexp,
                     B_Seqlen=B_Seqlen,
-                    O=out,
+                    out=out,
                     block_n=block_n,
                 )
 

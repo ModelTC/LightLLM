@@ -1,15 +1,9 @@
 """
-MTP Diverse Triton Kernel 性能基准测试 - 动态 MTP vs 静态 MTP vs FA3
+静态 MTP vs FA3 速度比较测试
 
 测试目标:
-- 动态 MTP (Triton): 验证组大小为 2 个 token
-- 静态 MTP (Triton): 验证组大小固定为 4/8/12 个 token
-- FA3 Decode: 每个验证组做 group_size 次 decode attention
-
-关键：num_groups 相同，total_reqs 不同
-- 动态 MTP: total_reqs = num_groups × 2
-- 静态 MTP: total_reqs = num_groups × 4/8/12
-- FA3: total_reqs = num_groups (每个请求做 group_size 次 attention)
+- 静态 MTP (Triton): group_size = 1, 2, 3, 4
+- FA3 Decode: group_size = 1, 2, 3, 4
 
 模型配置：Qwen3-8B
 - num_attention_heads: 32
@@ -189,7 +183,6 @@ def benchmark_mtp_diverse(data, block_seq=256, num_warmup=10, num_iters=100):
             B_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
             b_mark_shared_group=b_mark_shared_group,
-            block_seq=block_seq,
         )
 
     torch.cuda.synchronize()
@@ -202,7 +195,6 @@ def benchmark_mtp_diverse(data, block_seq=256, num_warmup=10, num_iters=100):
             B_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
             b_mark_shared_group=b_mark_shared_group,
-            block_seq=block_seq,
         )
 
     torch.cuda.synchronize()
@@ -312,37 +304,24 @@ def main():
     print(f"模型：Qwen3-8B (num_heads={config['num_heads']}, kv_head_num={config['kv_head_num']}, head_dim={config['head_dim']})")
 
     base_len = 1024
-    dynamic_gs = 2      # 动态 MTP: 每次验证 2 个 token
-    static_gs_list = [1, 2, 3, 4]  # 静态 MTP: 每次验证 1, 2, 3, 4 个 token
+    static_gs_list = [1, 2, 3, 4]
     num_groups_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
-    print(f"\nbase_len={base_len}, 动态 MTP group_size={dynamic_gs}")
+    print(f"\nbase_len={base_len}")
     print(f"静态 MTP group_size={static_gs_list}")
     print(f"FA3 group_size=与静态 MTP 相同 (每个验证组做 static_gs 次 decode)")
-    print(f"\n注意：num_groups 相同，total_reqs 不同")
-    print(f"  动态 MTP: total_reqs = num_groups × {dynamic_gs}")
-    print(f"  静态 MTP: total_reqs = num_groups × static_gs")
-    print(f"  FA3:      total_reqs = num_groups (但每个请求做 {dynamic_gs} 次 attention)")
 
     for static_gs in static_gs_list:
-        print(f"\n{'='*140}")
-        print(f"动态 MTP (gs={dynamic_gs}) vs 静态 MTP (gs={static_gs}) vs FA3 (gs={static_gs})")
-        print(f"{'='*140}")
-        print(f"{'num_groups':<12} {'dyn_reqs':<10} {'stat_reqs':<10} {'fa3_reqs':<10} {'dyn(ms)':<10} {'stat(ms)':<10} {'fa3(ms)':<10} {'dyn<stat':<8} {'dyn<fa3'}")
-        print(f"{'-'*140}")
+        print(f"\n{'='*100}")
+        print(f"静态 MTP (gs={static_gs}) vs FA3 (gs={static_gs})")
+        print(f"{'='*100}")
+        print(f"{'num_groups':<12} {'total_reqs':<12} {'static(ms)':<12} {'fa3(ms)':<12} {'static<fa3'}")
+        print(f"{'-'*100}")
 
-        crossover_stat = None
-        crossover_fa3 = None
+        crossover = None
 
         for num_groups in num_groups_list:
             # Setup data
-            dynamic_data = setup_mtp_diverse_data(
-                base_len=base_len,
-                group_size=dynamic_gs,
-                num_groups=num_groups,
-                config=config,
-            )
-
             static_data = setup_mtp_diverse_data(
                 base_len=base_len,
                 group_size=static_gs,
@@ -352,42 +331,31 @@ def main():
 
             fa3_data = setup_fa3_data(
                 base_len=base_len,
-                group_size=static_gs,  # FA3 gs 与静态 MTP 相同
+                group_size=static_gs,
                 num_groups=num_groups,
                 config=config,
             )
 
             # Benchmark
-            dynamic_time = benchmark_mtp_diverse(dynamic_data, block_seq=256)
             static_time = benchmark_mtp_diverse(static_data, block_seq=256)
             fa3_time = benchmark_fa3_decode(fa3_data)
 
-            dynamic_total_reqs = num_groups * dynamic_gs
-            static_total_reqs = num_groups * static_gs
-            fa3_total_reqs = num_groups
+            total_reqs = num_groups * static_gs
 
-            dyn_wins_stat = dynamic_time < static_time
-            dyn_wins_fa3 = dynamic_time < fa3_time
+            static_wins = static_time < fa3_time
 
-            if dyn_wins_stat and crossover_stat is None:
-                crossover_stat = num_groups
-            if dyn_wins_fa3 and crossover_fa3 is None:
-                crossover_fa3 = num_groups
+            if static_wins and crossover is None:
+                crossover = num_groups
 
-            print(f"{num_groups:<12} {dynamic_total_reqs:<10} {static_total_reqs:<10} {fa3_total_reqs:<10} {dynamic_time:<10.4f} {static_time:<10.4f} {fa3_time:<10.4f} {str(dyn_wins_stat):<8} {dyn_wins_fa3}")
+            print(f"{num_groups:<12} {total_reqs:<12} {static_time:<12.4f} {fa3_time:<12.4f} {str(static_wins)}")
 
         print()
-        if crossover_stat:
-            print(f"--> 拐点 (vs 静态 MTP gs={static_gs}): num_groups >= {crossover_stat} 时动态 MTP 更快")
+        if crossover:
+            print(f"--> 拐点：num_groups >= {crossover} 时静态 MTP 更快")
         else:
-            print(f"--> 拐点 (vs 静态 MTP gs={static_gs}): 测试范围内动态 MTP 未超越静态 MTP")
+            print(f"--> 拐点：测试范围内静态 MTP 未超越 FA3")
 
-        if crossover_fa3:
-            print(f"--> 拐点 (vs FA3 gs={static_gs}): num_groups >= {crossover_fa3} 时动态 MTP 更快")
-        else:
-            print(f"--> 拐点 (vs FA3 gs={static_gs}): 测试范围内动态 MTP 未超越 FA3")
-
-    print(f"\n{'='*140}")
+    print(f"\n{'='*100}")
     print("测试完成!")
 
 

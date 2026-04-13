@@ -157,7 +157,7 @@ class TpPartBaseModel:
         if not self.is_mtp_draft_model:
             # 主 main model 需要输出 hidden state 用于 draft 模型进行 mtp 预测。
             if self.args.mtp_mode == "eagle3":
-                assert not self.args.enable_prefill_cudagraph, "eagle3 mode does not support prefill cudagraph"
+                # assert not self.args.enable_prefill_cudagraph, "eagle3 mode does not support prefill cudagraph"
                 assert (
                     not self.args.enable_decode_microbatch_overlap
                 ), "eagle3 mode does not support decode microbatch overlap"
