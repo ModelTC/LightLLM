@@ -84,6 +84,7 @@ def _qk_rms_norm_fused_kernel(
     head_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     FP32_MULTIPLY: tl.constexpr,
+    ADD_UNIT_OFFSET: tl.constexpr,
 ):
     # PID 0: 处理第几个 Token (Row)
     row_idx = tl.program_id(0)
@@ -115,6 +116,9 @@ def _qk_rms_norm_fused_kernel(
         w = tl.load(WQ_ptr + offs)
         if FP32_MULTIPLY:
             w = w.to(tl.float32)
+            if ADD_UNIT_OFFSET:
+                # Gemma-style zero-centered: (1 + w) in fp32 after the cast.
+                w = w + 1.0
         else:
             x = x.to(Q_ptr.dtype.element_ty)
         y = (x * w).to(Q_ptr.dtype.element_ty)
@@ -141,6 +145,8 @@ def _qk_rms_norm_fused_kernel(
         w = tl.load(WK_ptr + offs)
         if FP32_MULTIPLY:
             w = w.to(tl.float32)
+            if ADD_UNIT_OFFSET:
+                w = w + 1.0
         else:
             x = x.to(K_ptr.dtype.element_ty)
         y = (x * w).to(K_ptr.dtype.element_ty)
@@ -155,6 +161,7 @@ def qk_rmsnorm_fused_forward(
     w_k: torch.Tensor,
     eps: float = 1e-6,
     fp32_multiply: bool = False,
+    add_unit_offset: bool = False,
 ):
     """
     In-place RMSNorm for both Q and K in a single kernel launch.
@@ -197,6 +204,10 @@ def qk_rmsnorm_fused_forward(
     # Grid: (Token数量, Q头数 + K头数)
     grid = (M, num_heads_q + num_heads_k)
 
+    # add_unit_offset requires fp32 multiply to preserve the precision of 1 + w
+    if add_unit_offset:
+        assert fp32_multiply, "add_unit_offset requires fp32_multiply=True"
+
     _qk_rms_norm_fused_kernel[grid](
         q_view,
         w_q,
@@ -210,6 +221,7 @@ def qk_rmsnorm_fused_forward(
         head_dim=head_dim,
         eps=eps,
         FP32_MULTIPLY=fp32_multiply,
+        ADD_UNIT_OFFSET=add_unit_offset,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=4,
     )

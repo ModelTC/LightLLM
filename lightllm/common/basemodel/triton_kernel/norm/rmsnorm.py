@@ -19,6 +19,7 @@ def _rms_norm_fwd_fused(
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     BLOCK_SIZE: tl.constexpr,
+    ADD_UNIT_OFFSET: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -37,6 +38,11 @@ def _rms_norm_fwd_fused(
         cols = off + tl.arange(0, BLOCK_SIZE)
         mask = cols < N
         w = tl.load(W + cols, mask=mask).to(tl.float32)
+        if ADD_UNIT_OFFSET:
+            # Gemma-style zero-centered RMSNorm: effective scale is (1 + w) and the
+            # addition must happen in fp32 after the cast to preserve precision for
+            # weights stored in bf16/fp16. Matches vLLM's GemmaRMSNorm semantics.
+            w = w + 1.0
         x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
         x_hat = x * rstd
         y = x_hat * w
@@ -44,7 +50,7 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None):
+def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None, add_unit_offset: bool = False):
     # allocate output
     y = torch.empty_like(x) if out is None else out
     # reshape input data into 2D tensor
@@ -74,6 +80,7 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
         N,
         eps,
         BLOCK_SIZE=BLOCK_SIZE,
+        ADD_UNIT_OFFSET=add_unit_offset,
         num_warps=rmsnorm_num_warps,
     )
     return y

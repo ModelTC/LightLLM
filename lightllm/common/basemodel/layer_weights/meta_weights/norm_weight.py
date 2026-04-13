@@ -236,9 +236,13 @@ class TpRMSNormWeight(RMSNormWeight):
 
 
 class NoTpGEMMANormWeight(RMSNormWeight):
-    """Gemma/Qwen3-Next zero-centered RMSNorm: stored weight is centered around 0,
-    the effective scale is (weight + 1) and is added at compute time so the raw
-    checkpoint values remain in self.weight."""
+    """Gemma-style zero-centered RMSNorm (matches vLLM's GemmaRMSNorm).
+
+    The checkpoint stores a weight centered around 0; the effective scale is (1 + w)
+    and the +1 must be applied in fp32 after casting from bf16/fp16 to preserve the
+    precision of small weight values — adding 1 in bf16 rounds tiny perturbations
+    away (1 + 0.001 → 1.0 in bf16). We therefore keep the raw checkpoint value in
+    self.weight and let the triton kernel add 1.0 in fp32 via ADD_UNIT_OFFSET."""
 
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
@@ -248,10 +252,12 @@ class NoTpGEMMANormWeight(RMSNormWeight):
     ) -> torch.Tensor:
         assert input.ndim == 2 and self.weight.ndim == 1
         assert input.shape[-1] == self.dim, f"Expected hidden_size to be {self.dim}, but found: {input.shape[-1]}"
+        orig_dtype = input.dtype
         x = input.to(torch.float32)
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + eps)
-        x = (x * (self.weight + 1)).to(self.data_type_)
+        x = x * (1.0 + self.weight.to(torch.float32))
+        x = x.to(orig_dtype)
         if out is not None:
             out.copy_(x)
             return out
@@ -265,7 +271,7 @@ class NoTpGEMMANormWeight(RMSNormWeight):
         ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
-        return rmsnorm_forward(x=input, weight=self.weight + 1, eps=eps, out=out)
+        return rmsnorm_forward(x=input, weight=self.weight, eps=eps, out=out, add_unit_offset=True)
 
 
 class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
@@ -352,9 +358,10 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class QKGEMMANormWeight(QKRMSNORMWeight):
-    """Gemma/Qwen3-Next zero-centered q/k RMSNorm: stored weights are centered around
-    0, the effective scale is (weight + 1) and is added at compute time so the raw
-    checkpoint values remain in self.q_weight / self.k_weight."""
+    """Gemma-style zero-centered q/k RMSNorm (matches vLLM's GemmaRMSNorm).
+
+    See NoTpGEMMANormWeight for the rationale on why the +1 must be applied in fp32
+    at compute time rather than baked into the stored weight."""
 
     def _native_forward(
         self,
@@ -367,11 +374,12 @@ class QKGEMMANormWeight(QKRMSNORMWeight):
         head_dim = self.q_weight.shape[0]
 
         def _norm_inplace(t: torch.Tensor, weight: torch.Tensor):
+            orig_dtype = t.dtype
             t_fp32 = t.to(torch.float32).view(-1, head_dim)
             variance = t_fp32.pow(2).mean(dim=-1, keepdim=True)
             t_fp32 = t_fp32 * torch.rsqrt(variance + eps)
-            t_fp32 = (t_fp32 * (weight + 1)).to(self.data_type_)
-            t.copy_(t_fp32.view(-1, t.shape[-1]))
+            t_fp32 = t_fp32 * (1.0 + weight.to(torch.float32))
+            t.copy_(t_fp32.to(orig_dtype).view(-1, t.shape[-1]))
 
         _norm_inplace(q, self.q_weight)
         _norm_inplace(k, self.k_weight)
@@ -380,9 +388,14 @@ class QKGEMMANormWeight(QKRMSNORMWeight):
     def _triton_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
         assert q.ndim == 2 and self.q_weight.ndim == 1
         assert k.ndim == 2 and self.k_weight.ndim == 1
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
+        # Gemma order: (x * (1 + w)).to(orig_dtype) — the (1 + w) must be in fp32.
         # See https://github.com/huggingface/transformers/pull/29402
-        # So we need to set fp32_multiply to True here.
         return qk_rmsnorm_fused_forward(
-            q=q, k=k, w_q=self.q_weight + 1, w_k=self.k_weight + 1, eps=eps, fp32_multiply=True
+            q=q,
+            k=k,
+            w_q=self.q_weight,
+            w_k=self.k_weight,
+            eps=eps,
+            fp32_multiply=True,
+            add_unit_offset=True,
         )
