@@ -1,0 +1,1 @@
+{"3072": {"1": {"BLOCK_N": 32, "num_warps": 8, "num_stages": 10}, "4": {"BLOCK_N": 32, "num_warps": 4, "num_stages": 5}, "10": {"BLOCK_N": 32, "num_warps": 4, "num_stages": 10}, "16": {"BLOCK_N": 64, "num_warps": 2, "num_stages": 4}, "24": {"BLOCK_N": 32, "num_warps": 8, "num_stages": 10}, "32": {"BLOCK_N": 32, "num_warps": 4, "num_stages": 5}}}
