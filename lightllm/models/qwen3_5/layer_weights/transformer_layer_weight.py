@@ -53,6 +53,23 @@ class Qwen35TransformerLayerWeight(Qwen3NextTransformerLayerWeight):
             quant_method=self.get_quant_method("in_proj_weight"),
         )
 
+    def _split_q_with_gate(self, weights):
+        # The official Qwen3.5 base checkpoint packs o_gate_proj into q_proj with an
+        # interleaved per-head layout, so the parent de-interleaves it. Fine-tunes
+        # re-saved through standard HF transformers store o_gate_proj as a separate
+        # tensor; in that case the q_proj weight is already plain Q and de-interleaving
+        # would scramble its rows. Detect the separate layout and skip the split.
+        if self._o_gate_weight_name in weights:
+            return
+        if self._q_weight_name not in weights:
+            return
+        q_weight = weights[self._q_weight_name]
+        expected_packed_rows = self.q_head_num_ * self.head_dim * 2
+        if q_weight.shape[0] != expected_packed_rows:
+            # Already plain Q (rows == q_head_num * head_dim) — nothing to split.
+            return
+        super()._split_q_with_gate(weights)
+
     def _preprocess_weight(self, weights):
         # Keep parent conv1d preprocessing path.
         linear_conv1d_weight_name = f"model.layers.{self.layer_num_}.linear_attn.conv1d.weight"
