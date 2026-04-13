@@ -97,7 +97,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if infer_state.need_dp_prefill_balance:
             input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)
 
-        return self.token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
+        return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
         self,
