@@ -1,3 +1,4 @@
+import os
 import torch
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
@@ -127,25 +128,44 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         )
 
     def _split_q_with_gate(self, weights):
-        # Official Qwen3-Next/Qwen3.5 base checkpoints pack o_gate_proj into q_proj with
-        # an interleaved per-head layout, so we de-interleave it here. Fine-tuned
-        # checkpoints re-saved through standard HF transformers store o_gate_proj as a
-        # separate tensor; in that case q_proj is already plain Q and de-interleaving
-        # would scramble its rows. Detect the separate layout and skip.
+        # Qwen3-Next / Qwen3.5 fuse Q and the output gate into the q_proj weight with
+        # rows = num_heads * head_dim * 2. We support three checkpoint layouts:
+        #
+        #   1. "interleaved" (HF official): per-head [q_features ; gate_features], i.e.
+        #      memory order [h0_q, h0_gate, h1_q, h1_gate, ...]. View as
+        #      (num_heads, 2, head_dim, hidden) and slice on dim=1.
+        #   2. "concat": all Q heads then all gate heads, i.e.
+        #      [h0_q, h1_q, ..., h{H-1}_q, h0_gate, h1_gate, ..., h{H-1}_gate].
+        #      View as (2, num_heads, head_dim, hidden) and slice on dim=0.
+        #   3. "separate": q_proj already plain Q (rows = num_heads * head_dim) and a
+        #      stand-alone o_gate_proj weight is present in the checkpoint. Skip split.
+        #
+        # Layouts 2 and 3 come from non-HF training stacks (Megatron / custom forks).
+        # Override the default "interleaved" with QWEN3_Q_GATE_LAYOUT=concat when your
+        # fine-tune uses the concatenated layout — using the wrong layout silently
+        # scrambles Q across heads and produces correct-looking but degraded outputs.
         if self._q_weight_name not in weights:
             return
         if self._o_gate_weight_name in weights:
             return
         weight = weights[self._q_weight_name]
-        expected_packed_rows = self.q_head_num_ * self.head_dim * 2
+        num_heads = self.q_head_num_
+        expected_packed_rows = num_heads * self.head_dim * 2
         if weight.shape[0] != expected_packed_rows:
             return
-        num_heads = self.q_head_num_
-        weight = weight.view(num_heads * 2, self.head_dim, -1)
-        _q_proj = weight[0::2].reshape(-1, weight.shape[-1])
-        _gate_proj = weight[1::2].reshape(-1, weight.shape[-1])
-        weights[self._q_weight_name] = _q_proj
-        weights[self._o_gate_weight_name] = _gate_proj
+
+        layout = os.environ.get("QWEN3_Q_GATE_LAYOUT", "interleaved").lower()
+        hidden = weight.shape[-1]
+        if layout == "concat":
+            w = weight.view(2, num_heads, self.head_dim, hidden)
+            _q_proj = w[0].reshape(-1, hidden)
+            _gate_proj = w[1].reshape(-1, hidden)
+        else:
+            w = weight.view(num_heads, 2, self.head_dim, hidden)
+            _q_proj = w[:, 0, :, :].reshape(-1, hidden)
+            _gate_proj = w[:, 1, :, :].reshape(-1, hidden)
+        weights[self._q_weight_name] = _q_proj.contiguous()
+        weights[self._o_gate_weight_name] = _gate_proj.contiguous()
 
     def _parse_config(self):
         super()._parse_config()
