@@ -33,6 +33,7 @@ manage a generation service,
 5. return the generated images.
 """
 
+
 class X2IManager:
     def __init__(
         self,
@@ -61,12 +62,12 @@ class X2IManager:
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
-
     async def wait_to_model_ready(self):
 
         if self.world_size <= 1:
             if self.use_naive_x2i:
                 from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
+
                 self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
             else:
                 from lightx2v import LightX2VPipeline
@@ -79,10 +80,13 @@ class X2IManager:
                 self.gen_pipe.create_generator(
                     config_json=self.args.x2v_gen_model_config,
                 )
-                self.gen_pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False})
+                self.gen_pipe.modify_config(
+                    {"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False}
+                )
         else:
             # distribted x2v
             from lightllm.server.x2i_server.lightx2v.adapter import start_x2v_process
+
             funcs = [start_x2v_process] * self.world_size
             args = [(self.args, rank, self.world_size) for rank in range(self.world_size)]
             start_submodule_processes(funcs, args)
@@ -100,14 +104,16 @@ class X2IManager:
             cfg_norm=CfgNormType(param.cfg_norm).as_str(),
             timestep_shift=param.timestep_shift,
         )
-        self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
-        image = self.gen_pipe.generate(
-            seed=param.seed + param.past_kvcache.img_len,
-            save_result_path="",  # 返回base64，不需要指定路径了
-            target_shape=[param.height, param.width],  # Height, Width
-        )
-        # images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
-        return [image]
+        images = []
+        for i in range(param.num_images):
+            self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
+            image = self.gen_pipe.generate(
+                seed=param.seed + param.past_kvcache.img_len + i,
+                save_result_path="",  # 返回base64，不需要指定路径了
+                target_shape=[param.height, param.width],  # Height, Width
+            )
+            images.append(image)
+        return images
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
         if self.use_naive_x2i:
@@ -122,13 +128,16 @@ class X2IManager:
             cfg_norm=CfgNormType(param.cfg_norm).as_str(),
             timestep_shift=param.timestep_shift,
         )
-        self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
-        image = self.gen_pipe.generate(
-            seed=param.seed + param.past_kvcache_img.img_len,
-            save_result_path="",  # 返回base64，不需要指定路径了
-            target_shape=[param.height, param.width],  # Height, Width
-        )
-        return [image]
+        images = []
+        for i in range(param.num_images):
+            self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
+            image = self.gen_pipe.generate(
+                seed=param.seed + param.past_kvcache_img.img_len + i,
+                save_result_path="",  # 返回base64，不需要指定路径了
+                target_shape=[param.height, param.width],  # Height, Width
+            )
+            images.append(image)
+        return images
 
     async def loop_for_fwd(self):
         while True:
@@ -155,7 +164,9 @@ class X2IManager:
                     past_kv_cache_img = None
                     if not is_t2i:  # t2i
                         past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                            x2i_param.past_kvcache_img.get_all(), x2i_param.past_kvcache_img.token_len, self.use_naive_x2i
+                            x2i_param.past_kvcache_img.get_all(),
+                            x2i_param.past_kvcache_img.token_len,
+                            self.use_naive_x2i,
                         )
 
                     # release
@@ -169,7 +180,9 @@ class X2IManager:
                     if is_t2i:
                         images = await self.t2i_generate(past_kv_cache, past_kv_cache_text, x2i_param)
                     else:
-                        images = await self.it2i_generate(past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param)
+                        images = await self.it2i_generate(
+                            past_kv_cache, past_kv_cache_text, past_kv_cache_img, x2i_param
+                        )
                     logger.info(f"generate {len(images)} images done, cost {time.time() - start_t:.2f}s")
 
                     self.send_to_httpserver.send_pyobj(
