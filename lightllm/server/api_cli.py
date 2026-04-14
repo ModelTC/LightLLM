@@ -451,6 +451,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--use_tgi_api", action="store_true", help="use tgi input and ouput format")
     parser.add_argument(
+        "--enable_anthropic_api",
+        action="store_true",
+        help="""Expose an Anthropic Messages API compatible endpoint (/v1/messages)
+        that translates requests into the internal chat completions path. Requires
+        the 'litellm' package to be installed. When enabled, clients written against
+        the Anthropic SDK can use this server by setting base_url to the server address.""",
+    )
+    parser.add_argument(
         "--health_monitor", action="store_true", help="check the health of service and restart when error"
     )
     parser.add_argument("--metric_gateway", type=str, default=None, help="address for collecting monitoring metrics")
