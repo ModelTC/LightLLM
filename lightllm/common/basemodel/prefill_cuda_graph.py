@@ -2,6 +2,7 @@ import os
 import torch
 import copy
 import bisect
+import triton
 from typing import List, Tuple
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
@@ -33,10 +34,19 @@ class PrefillCudaGraph:
         graph_handle_token_nums = []
         for i in range(2048):
             token_num = int(2 ** (2 * i))
-            # 兼容 tpsp 模式下，token_num 需要是 tp_world_size 的倍数
-            if 1 < token_num < self.max_handle_token_num and (token_num % self.tp_world_size) == 0:
+            if 1 < token_num < self.max_handle_token_num:
                 graph_handle_token_nums.append(token_num)
         graph_handle_token_nums.append(self.max_handle_token_num)
+
+        graph_handle_token_nums = list(set(graph_handle_token_nums))
+        graph_handle_token_nums.sort()
+        if self.args.enable_tpsp_mix_mode:
+            graph_handle_token_nums = [
+                triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in graph_handle_token_nums
+            ]
+            graph_handle_token_nums = list(set(graph_handle_token_nums))
+            graph_handle_token_nums.sort()
+
         self.graph_handle_token_nums = graph_handle_token_nums
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
 

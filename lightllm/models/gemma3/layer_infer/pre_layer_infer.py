@@ -81,8 +81,7 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
         input_dtype = out.dtype
         if self.tp_world_size_ > 1:
             all_reduce(out, group=infer_state.dist_group, op=torch.distributed.ReduceOp.SUM, async_op=False)
-        out = (out.float() * weight_mask.unsqueeze(1).float()).to(input_dtype)
-        return out
+        return (out.float() * weight_mask.unsqueeze(1).float()).to(input_dtype)
 
     def token_forward(self, input_ids, infer_state, layer_weight):
         input_embedding = super().token_forward(input_ids, infer_state, layer_weight)
