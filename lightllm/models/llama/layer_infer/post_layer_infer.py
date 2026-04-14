@@ -92,10 +92,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-        input_embdings = self._tpsp_allgather(input=input_embdings, infer_state=infer_state)
-
-        if infer_state.need_dp_prefill_balance:
-            input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)
 
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
@@ -107,15 +103,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ):
-        if getattr(infer_state, "hook", None) is not None:
-            infer_state.hook()
-            infer_state.hook = None
 
         logics = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
-
-        if getattr(infer_state1, "hook", None) is not None:
-            infer_state1.hook()
-            infer_state1.hook = None
 
         logics1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
 

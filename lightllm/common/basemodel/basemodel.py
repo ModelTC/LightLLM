@@ -625,7 +625,12 @@ class TpPartBaseModel:
             g_cache_manager.cache_env_out()
 
         input_embs = output_tensors[0]
-        predict_logits = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight)
+
+        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        if infer_state.need_dp_prefill_balance:
+            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
+
+        predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         model_output = ModelOutput(logits=predict_logits)
 
         # 特殊模型特殊模式的额外输出
@@ -649,8 +654,9 @@ class TpPartBaseModel:
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
 
+        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(
-            input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
+            last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
         model_output = ModelOutput(logits=predict_logits.contiguous())
@@ -858,8 +864,24 @@ class TpPartBaseModel:
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
+
+        # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            infer_state.hook = None
+
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+        if infer_state.need_dp_prefill_balance:
+            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
+            last_input_embs1 = infer_state1._all_to_all_unbalance_get(data=last_input_embs1)
+
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
-            input_embs, input_embs1, infer_state, infer_state1, self.pre_post_weight
+            last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
         g_cache_manager.cache_env_out()
 
@@ -887,8 +909,20 @@ class TpPartBaseModel:
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
             )
 
+        # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
+        if getattr(infer_state, "hook", None) is not None:
+            infer_state.hook()
+            infer_state.hook = None
+
+        if getattr(infer_state1, "hook", None) is not None:
+            infer_state1.hook()
+            infer_state1.hook = None
+
+        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+        last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+
         predict_logits, predict_logits1 = self.post_infer.overlap_tpsp_token_forward(
-            input_embs, input_embs1, infer_state, infer_state1, self.pre_post_weight
+            last_input_embs, last_input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
         model_output = ModelOutput(logits=predict_logits.contiguous())

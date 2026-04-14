@@ -9,9 +9,6 @@ class Qwen2RewardPostLayerInfer(LlamaPostLayerInfer):
     def token_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: Qwen2RewardPreAndPostLayerWeight
     ):
-        input_embdings = self._tpsp_allgather(input=input_embdings, infer_state=infer_state)
-        if infer_state.need_dp_prefill_balance:
-            input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
 
         input_embdings = None
