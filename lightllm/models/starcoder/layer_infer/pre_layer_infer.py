@@ -20,7 +20,6 @@ class StarcoderPreLayerInfer(PreLayerInfer):
 
         position_embeds = layer_weight.wpe_weight_(input_ids=infer_state.position_ids, alloc_func=self.alloc_tensor)
         input_embdings.add_(position_embeds)
-        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
         return input_embdings
 
     def token_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: StarcoderPreAndPostLayerWeight):
@@ -30,5 +29,4 @@ class StarcoderPreLayerInfer(PreLayerInfer):
 
         position_embeds = layer_weight.wpe_weight_(input_ids=infer_state.position_ids, alloc_func=self.alloc_tensor)
         input_embdings.add_(position_embeds)
-        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
         return input_embdings

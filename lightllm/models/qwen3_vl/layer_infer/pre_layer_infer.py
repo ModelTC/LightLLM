@@ -72,5 +72,4 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         )
         if self.tp_world_size_ > 1:
             all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
-        out = self._tpsp_sp_split(input=out, infer_state=infer_state)
         return out

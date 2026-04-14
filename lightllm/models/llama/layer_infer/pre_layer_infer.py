@@ -19,14 +19,12 @@ class LlamaPreLayerInfer(PreLayerInferTpl):
         input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
             all_reduce(input_embdings, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
         return input_embdings
 
     def token_forward(self, input_ids, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         input_embdings = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)
         if self.tp_world_size_ > 1:
             all_reduce(input_embdings, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
         return input_embdings
 
     def overlap_tpsp_token_forward(
