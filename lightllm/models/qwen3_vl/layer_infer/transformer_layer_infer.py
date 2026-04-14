@@ -62,11 +62,15 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+
+        input_embdings = self._tpsp_allgather(input=input_embdings, infer_state=infer_state)
         self._apply_deepstack_features_wrapper_run(
             input_embeddings=input_embdings,
             infer_state=infer_state,
             layer_num=self.layer_num_,
         )
+        input_embdings = self._tpsp_sp_split(input=input_embdings, infer_state=infer_state)
+
         return input_embdings
 
     def _apply_deepstack_features_wrapper_run(
