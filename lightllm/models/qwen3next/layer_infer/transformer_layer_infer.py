@@ -92,7 +92,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             else:
                 self._ffn = self._ffn_tp_impl
         else:
-            self._ffn = partial(Qwen3NextTransformerLayerInfer._ffn, self)
+            self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
         return
 
     def _ffn_tp_impl(
