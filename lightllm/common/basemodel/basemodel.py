@@ -635,7 +635,7 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
+            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
@@ -663,7 +663,7 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
+            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
@@ -889,8 +889,8 @@ class TpPartBaseModel:
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_all_gather(input=input_embs1, infer_state=infer_state1)
+            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
@@ -929,8 +929,8 @@ class TpPartBaseModel:
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
-            input_embs1 = self.pre_infer._tpsp_all_gather(input=input_embs1, infer_state=infer_state1)
+            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
