@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 
 # Known-good LiteLLM versions. Bump explicitly after retesting.
 _MIN_LITELLM_VERSION = "1.52.0"
-_MAX_TESTED_LITELLM_VERSION = "1.60.0"
+_MAX_TESTED_LITELLM_VERSION = "1.84.0"
 
 _cached_adapter: Any = None
 _cached_stream_wrapper_cls: Any = None
