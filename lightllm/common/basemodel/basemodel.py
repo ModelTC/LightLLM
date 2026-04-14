@@ -1054,6 +1054,9 @@ class TpPartBaseModel:
                     is_prefill=True,
                     b_ready_cache_len=b_ready_cache_len,
                     b_prefill_start_loc=b_prefill_start_loc,
+                    b_prefill_has_output_cpu=[
+                        False,
+                    ],
                     multimodal_params=[{"images": [], "audios": []}],
                     **self._gen_special_model_input(total_token_num),
                 )
