@@ -35,9 +35,9 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         if self.is_moe:
             enable_ep_moe = get_env_start_args().enable_ep_moe
             if enable_ep_moe:
-                self._ffn = self._ffn_ep
+                self._ffn = self._ffn_ep_impl
             else:
-                self._ffn = self._ffn_tp
+                self._ffn = self._ffn_tp_impl
         else:
             self._ffn = partial(LlamaTransformerLayerInfer._ffn, self)
 
@@ -109,7 +109,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         ep_output = ep_output.view(token_num, hidden_dim)
         return ep_output
 
-    def _ffn_tp(
+    def _ffn_tp_impl(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
@@ -118,7 +118,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
         return ffn2_out
 
-    def _ffn_ep(
+    def _ffn_ep_impl(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: Qwen3MOETransformerLayerWeight
     ) -> torch.Tensor:
         # ep 本身就是一种 sp 兼容，所以不需要再进行 allgather 和 reduce
