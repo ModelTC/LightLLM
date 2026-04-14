@@ -19,7 +19,6 @@ _MIN_LITELLM_VERSION = "1.52.0"
 _MAX_TESTED_LITELLM_VERSION = "1.84.0"
 
 _cached_adapter: Any = None
-_cached_stream_wrapper_cls: Any = None
 _import_checked: bool = False
 
 
@@ -87,8 +86,9 @@ def get_anthropic_messages_adapter() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "Failed to import LiteLLMAnthropicMessagesAdapter from LiteLLM. "
-            "The experimental_pass_through module may have been relocated. "
+            "The experimental_pass_through module may have been relocated in a newer release. "
             f"Tested with LiteLLM {_MIN_LITELLM_VERSION}..{_MAX_TESTED_LITELLM_VERSION}. "
+            f"To pin to a known-good version: pip install 'litellm<={_MAX_TESTED_LITELLM_VERSION}'. "
             f"Original error: {exc}"
         ) from exc
 
