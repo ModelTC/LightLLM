@@ -591,6 +591,7 @@ class TpPartBaseModel:
             cuda_input_ids = input_ids
 
         input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
 
         def prefill_func(input_tensors, infer_state):
@@ -629,7 +630,8 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            model_output.mtp_main_output_hiddens = input_embs
+            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
+            model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -641,6 +643,8 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
@@ -649,14 +653,12 @@ class TpPartBaseModel:
             input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
         )
 
-        if self.is_mtp_mode:
-            graph_out_hiddens = input_embs.contiguous()
-
         model_output = ModelOutput(logits=predict_logits.contiguous())
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            model_output.mtp_main_output_hiddens = graph_out_hiddens
+            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
+            model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -849,6 +851,9 @@ class TpPartBaseModel:
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
             _input_ids, _input_ids1, infer_state, infer_state1, self.pre_post_weight
         )
+        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
+
         for i in range(self.layers_num):
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_context_forward(
                 input_embs, input_embs1, infer_state, infer_state1, self.trans_layers_weight[i]
@@ -862,6 +867,8 @@ class TpPartBaseModel:
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
+            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
+            input_embs1 = self.pre_infer._tpsp_all_gather(input=input_embs1, infer_state=infer_state1)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
@@ -872,6 +879,8 @@ class TpPartBaseModel:
         input_embs, input_embs1 = self.pre_infer.overlap_tpsp_token_forward(
             infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
         )
+        input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
+        input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
 
         for i in range(self.layers_num):
             input_embs, input_embs1 = self.layers_infer[i].overlap_tpsp_token_forward(
@@ -882,16 +891,14 @@ class TpPartBaseModel:
             input_embs, input_embs1, infer_state, infer_state1, self.pre_post_weight
         )
 
-        if self.is_mtp_mode:
-            graph_out_hiddens = input_embs.contiguous()
-            graph_out_hiddens1 = input_embs1.contiguous()
-
         model_output = ModelOutput(logits=predict_logits.contiguous())
         model_output1 = ModelOutput(logits=predict_logits1.contiguous())
 
         if self.is_mtp_mode:
-            model_output.mtp_main_output_hiddens = graph_out_hiddens
-            model_output1.mtp_main_output_hiddens = graph_out_hiddens1
+            input_embs = self.pre_infer._tpsp_all_gather(input=input_embs, infer_state=infer_state)
+            input_embs1 = self.pre_infer._tpsp_all_gather(input=input_embs1, infer_state=infer_state1)
+            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
