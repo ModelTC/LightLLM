@@ -102,3 +102,62 @@ def test_adapter_round_trip_minimal_text():
     assert "Hi" in content[0].get("text", "")
     # Stop reasons: Anthropic uses end_turn/tool_use/max_tokens/stop_sequence
     assert resp_dict.get("stop_reason") in {"end_turn", "stop_sequence", None}
+
+
+def test_anthropic_to_chat_request_dict_minimal_text():
+    """_anthropic_to_chat_request should return a dict suitable for
+    constructing a LightLLM ChatCompletionRequest."""
+    from lightllm.server.api_anthropic import _anthropic_to_chat_request
+
+    anthropic_body = {
+        "model": "claude-opus-4-6",
+        "max_tokens": 64,
+        "system": "Be terse.",
+        "messages": [{"role": "user", "content": "hello"}],
+        "temperature": 0.4,
+    }
+    chat_request_dict, tool_name_mapping = _anthropic_to_chat_request(anthropic_body)
+
+    assert "messages" in chat_request_dict
+    assert any(m.get("role") == "system" for m in chat_request_dict["messages"])
+    assert any(m.get("role") == "user" for m in chat_request_dict["messages"])
+    # max_tokens must be propagated
+    assert chat_request_dict.get("max_tokens") == 64 or chat_request_dict.get("max_completion_tokens") == 64
+    assert isinstance(tool_name_mapping, dict)
+
+
+def test_chat_response_to_anthropic_minimal_text():
+    """_chat_response_to_anthropic should wrap a ChatCompletionResponse
+    into an Anthropic message dict."""
+    from lightllm.server.api_anthropic import _chat_response_to_anthropic
+    from lightllm.server.api_models import (
+        ChatCompletionResponse,
+        ChatCompletionResponseChoice,
+        ChatMessage,
+        UsageInfo,
+    )
+
+    chat_resp = ChatCompletionResponse(
+        id="chatcmpl-xyz",
+        model="local-model",
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0,
+                message=ChatMessage(role="assistant", content="Hello."),
+                finish_reason="stop",
+            )
+        ],
+        usage=UsageInfo(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+    )
+    anthropic_dict = _chat_response_to_anthropic(chat_resp, tool_name_mapping={}, requested_model="claude-opus-4-6")
+
+    assert anthropic_dict["type"] == "message"
+    assert anthropic_dict["role"] == "assistant"
+    assert anthropic_dict["model"] == "claude-opus-4-6"
+    content = anthropic_dict["content"]
+    assert isinstance(content, list) and len(content) >= 1
+    assert content[0]["type"] == "text"
+    assert "Hello" in content[0]["text"]
+    assert anthropic_dict["stop_reason"] in {"end_turn", "stop_sequence"}
+    assert anthropic_dict["usage"]["input_tokens"] == 3
+    assert anthropic_dict["usage"]["output_tokens"] == 2
