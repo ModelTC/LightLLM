@@ -590,6 +590,10 @@ class InferReqUpdatePack:
             # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
             shm_req.shm_cur_output_len = self.output_len
 
+            if shm_req.sample_params.img_gen_prefill:
+                # img gen prefill 需要等待 kv cache 卸载到 cpu 后才更新detokenization需要的信息
+                return
+
             if finish_status.is_finished():
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
                 shm_req.finish_status = req_obj.finish_status

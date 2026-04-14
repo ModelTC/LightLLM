@@ -20,16 +20,18 @@ logger = init_logger(__name__)
 class TransTask:
     req_obj: InferReq
     sync_event: torch.cuda.Event
-
+    buffer_index: int
 
 class PastKVCacheModule(object):
     def __init__(self, backend):
         from .base_backend import ModeBackend
         self.backend: ModeBackend = backend
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=False)
-        self.page_index_buffer = torch.empty((LIGHTLLM_TOKEN_HASH_LIST_SIZE * 2,), dtype=torch.int32, device="cuda")
+        self.page_index_buffer = torch.empty((1024 * LIGHTLLM_TOKEN_HASH_LIST_SIZE,), dtype=torch.int32, device="cuda")
+        self.page_index_buffer_free_index = list(range(1024))
         self.past_kv_cache_task: Deque[TransTask] = deque()
         self.sync_task_status_group = create_new_group_for_current_dp("gloo")
+
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -51,7 +53,6 @@ class PastKVCacheModule(object):
         logger.info("PastKVCacheModule: no need sync compute stream.")
         return False
 
-
     def offload_finished_reqs_to_past_kv_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
         Offload the finished reqs to past kv cache, and return the truly finished reqs that can be freed in infer batch.
@@ -70,28 +71,37 @@ class PastKVCacheModule(object):
             if req.past_kv_cache_task_status.is_running():
                 continue
 
-            assert req.past_kv_cache_task_status.is_not_started()
+            assert req.past_kv_cache_task_status.is_not_started(), \
+                f"req {req.req_id} has invalid past kv cache task status {req.past_kv_cache_task_status}"
 
             if self.need_sync_compute_stream():
                 g_infer_context.get_overlap_stream().synchronize()
 
             trans_task = self._start_kv_cache_offload(req=req)
-            assert trans_task is not None
+            assert trans_task is not None, f"req {req.req_id} start kv cache offload failed"
             self.past_kv_cache_task.append(trans_task)
-
 
         return true_finished_reqs
 
     def _start_kv_cache_offload(self, req: InferReq) -> Optional[TransTask]:
 
         with torch.cuda.stream(g_infer_context.get_cpu_kv_cache_stream()):
+            if len(self.page_index_buffer_free_index) == 0:
+                raise RuntimeError("No free page index for offloading past kv cache to CPU.")
+
+            assert req.shm_req.past_kv_cache_page_indexes.size <= LIGHTLLM_TOKEN_HASH_LIST_SIZE
+
+            free_index = self.page_index_buffer_free_index.pop(0)
+            start = free_index * LIGHTLLM_TOKEN_HASH_LIST_SIZE
+            end = start + req.shm_req.past_kv_cache_page_indexes.size
+
             page_indexes = torch.tensor(req.shm_req.past_kv_cache_page_indexes.get_all(), dtype=torch.int32, device='cpu', pin_memory=True)
             num_tokens = req.shm_req.input_len
 
             assert req.cur_kv_len >= num_tokens
             assert num_tokens <= len(page_indexes) * self.past_kv_cache_client.token_page_size
 
-            cuda_page_indexes = self.page_index_buffer[:len(page_indexes)]
+            cuda_page_indexes = self.page_index_buffer[start:end]
             cuda_page_indexes.copy_(page_indexes)
 
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0: num_tokens]
@@ -102,7 +112,7 @@ class PastKVCacheModule(object):
                 cpu_cache_meta = self.past_kv_cache_client.kv_cache_tensor_meta
                 cpu_kv_cache = self.past_kv_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0:cpu_cache_meta.head_dim]
                 cpu_kv_cache_scale = self.past_kv_cache_client.cpu_kv_cache_tensor[
-                    :, :, :, :, cpu_cache_meta.head_dim
+                    :, :, :, :, cpu_cache_meta.head_dim :
                 ].view(mem_manager.scale_buffer.dtype)
                 gpu_kv_cache_scale = mem_manager.scale_buffer
             else:
@@ -124,10 +134,12 @@ class PastKVCacheModule(object):
             )
             sync_event = torch.cuda.Event()
             sync_event.record()
+            # sync_event.synchronize()
             req.past_kv_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             return TransTask(
                 req_obj=req,
                 sync_event=sync_event,
+                buffer_index=free_index
             )
 
     def update_past_kv_cache_task_states(self):
@@ -148,3 +160,14 @@ class PastKVCacheModule(object):
             self.past_kv_cache_task.extendleft(reversed(unfinished))
             for task in finished:
                 task.req_obj.past_kv_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
+                self.page_index_buffer_free_index.append(task.buffer_index)
+
+                if self.backend.is_master_in_dp:
+                    shm_req = task.req_obj.shm_req
+                    assert task.req_obj.finish_status.is_finished()
+                    shm_req.finish_token_index = shm_req.input_len + shm_req.shm_cur_output_len - 1
+                    shm_req.finish_status = task.req_obj.finish_status
+                    shm_req.candetoken_out_len = shm_req.shm_cur_output_len
+        else:
+            if len(trans_ok_tasks) > 0:
+                self.past_kv_cache_task.extendleft(reversed(trans_ok_tasks))

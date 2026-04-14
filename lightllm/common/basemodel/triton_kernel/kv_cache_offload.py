@@ -916,7 +916,7 @@ def offload_gpu_kv_to_cpu_for_x2i(
             assert gpu_heads == 1
             assert cpu_heads == 1
 
-            need_offload == tp_index == 0
+            need_offload = tp_index == 0
             cpu_k_start_head_index = 0
             cpu_k_head_num = 1
             gpu_k_start_head_index = 0
