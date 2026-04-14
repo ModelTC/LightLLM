@@ -7,10 +7,15 @@ import librosa
 import numpy as np
 from io import BytesIO
 from torch import Tensor, nn
-from safetensors import safe_open
 from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
 from rpyc.utils.classic import obtain
+
+from lightllm.common.basemodel.layer_weights.weight_crypto import (
+    filter_shards_by_prefix,
+    smart_load_safetensors,
+    smart_load_torch,
+)
 
 from transformers.activations import ACT2FN
 
@@ -252,20 +257,26 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:
+            target_bins = filter_shards_by_prefix(weight_dir, "thinker.audio_tower", ".bin")
+            if target_bins is None:
+                target_bins = bin_weight_files
             weight_dict = {}
-            for file_ in bin_weight_files:
-                f = torch.load(os.path.join(weight_dir, file_), "cpu")
+            for file_ in target_bins:
+                f = smart_load_torch(os.path.join(weight_dir, file_), map_location="cpu")
                 for k, v in f.items():
                     if "thinker.audio_tower" in k:
                         weight_dict[k[len("thinker.audio_tower.") :]] = v
         else:
             hf_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".safetensors")]
+            target_shards = filter_shards_by_prefix(weight_dir, "thinker.audio_tower", ".safetensors")
+            if target_shards is None:
+                target_shards = hf_weight_files
             weight_dict = {}
-            for file_ in hf_weight_files:
-                f = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
-                for k in f.keys():
+            for file_ in target_shards:
+                f = smart_load_safetensors(os.path.join(weight_dir, file_))
+                for k, v in f.items():
                     if "thinker.audio_tower" in k:
-                        weight_dict[k[len("thinker.audio_tower.") :]] = f.get_tensor(k)
+                        weight_dict[k[len("thinker.audio_tower.") :]] = v
 
         self.load_state_dict(weight_dict)
 

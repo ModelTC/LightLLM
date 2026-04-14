@@ -1,10 +1,13 @@
 import torch
 import os
 import gc
-from safetensors import safe_open
 from tqdm import tqdm
 import lightllm.utils.petrel_helper as utils
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.basemodel.layer_weights.weight_crypto import (
+    smart_load_safetensors,
+    smart_load_torch,
+)
 
 
 def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
@@ -14,10 +17,9 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
     torch.cuda.set_device(get_current_device_id())
 
     if use_safetensors:
-        weights = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
-        weights = {k: weights.get_tensor(k) for k in weights.keys()}
+        weights = smart_load_safetensors(os.path.join(weight_dir, file_))
     else:
-        weights = utils.PetrelHelper.load(os.path.join(weight_dir, file_), map_location="cpu")
+        weights = smart_load_torch(os.path.join(weight_dir, file_), map_location="cpu")
 
     if pre_post_layer is not None:
         pre_post_layer.load_hf_weights(weights)
