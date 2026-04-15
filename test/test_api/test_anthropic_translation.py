@@ -219,3 +219,88 @@ def test_stream_bridge_emits_anthropic_event_sequence_text_only():
     assert "end_turn" in joined
     # Final usage output_tokens is included in message_delta
     assert '"output_tokens"' in joined
+
+
+def test_anthropic_to_chat_request_with_tools():
+    from lightllm.server.api_anthropic import _anthropic_to_chat_request
+
+    anthropic_body = {
+        "model": "claude-opus-4-6",
+        "max_tokens": 256,
+        "messages": [{"role": "user", "content": "What's the weather in SF?"}],
+        "tools": [
+            {
+                "name": "get_weather",
+                "description": "Return the current weather for a city",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        ],
+    }
+    chat_dict, tool_name_mapping = _anthropic_to_chat_request(anthropic_body)
+
+    assert "tools" in chat_dict
+    assert isinstance(chat_dict["tools"], list) and len(chat_dict["tools"]) == 1
+    tool_entry = chat_dict["tools"][0]
+    # OpenAI tool format: {"type": "function", "function": {"name", "description", "parameters"}}
+    assert tool_entry.get("type") == "function"
+    fn = tool_entry.get("function") or {}
+    assert fn.get("name") in {"get_weather", "get_weather"[:64]}
+    # input_schema should have been renamed to parameters
+    assert "parameters" in fn
+    assert fn["parameters"]["properties"]["city"]["type"] == "string"
+
+
+def test_chat_response_to_anthropic_with_tool_call():
+    from lightllm.server.api_anthropic import _chat_response_to_anthropic
+    from lightllm.server.api_models import (
+        ChatCompletionResponse,
+        ChatCompletionResponseChoice,
+        ChatMessage,
+        FunctionResponse,
+        ToolCall,
+        UsageInfo,
+    )
+
+    chat_resp = ChatCompletionResponse(
+        id="chatcmpl-tool",
+        model="local-model",
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0,
+                message=ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_abc123",
+                            index=0,
+                            type="function",
+                            function=FunctionResponse(
+                                name="get_weather",
+                                arguments='{"city":"San Francisco"}',
+                            ),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        ],
+        usage=UsageInfo(prompt_tokens=20, completion_tokens=12, total_tokens=32),
+    )
+    anthropic_dict = _chat_response_to_anthropic(
+        chat_resp, tool_name_mapping={}, requested_model="claude-opus-4-6"
+    )
+
+    assert anthropic_dict["stop_reason"] == "tool_use"
+    content = anthropic_dict["content"]
+    tool_blocks = [b for b in content if b.get("type") == "tool_use"]
+    assert len(tool_blocks) == 1
+    tool_block = tool_blocks[0]
+    assert tool_block["name"] == "get_weather"
+    assert isinstance(tool_block["input"], dict)
+    assert tool_block["input"].get("city") == "San Francisco"
+    assert tool_block.get("id", "").startswith("toolu_") or tool_block.get("id") == "call_abc123"
