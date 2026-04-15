@@ -10,7 +10,7 @@ from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_global_dp_rank
+from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
@@ -182,9 +182,21 @@ class InferStateInfo:
         dp_input_lens = dp_input_lens.detach().cpu()
         self.dp_origin_lens = dp_input_lens.tolist()
         sum_input_len = dp_input_lens.sum().item()
-        dp_handle_lens = [sum_input_len // args.dp for _ in range(args.dp)]
-        for i in range(sum_input_len % args.dp):
-            dp_handle_lens[i] += 1
+        if not args.enable_tpsp_mix_mode:
+            dp_handle_lens = [sum_input_len // args.dp for _ in range(args.dp)]
+            for i in range(sum_input_len % args.dp):
+                dp_handle_lens[i] += 1
+        else:
+            # tpsp mix mode 需要让每个dp 的处理长度是 tp_world_size 的整数倍
+            tp_world_size = get_dp_world_size()
+            assert all(e % tp_world_size == 0 for e in dp_input_lens)
+            _dp_input_lens = [e // tp_world_size for e in dp_input_lens]
+            _sum_input_len = sum(_dp_input_lens)
+            _dp_input_lens = [_sum_input_len // args.dp for _ in range(args.dp)]
+            for i in range(_sum_input_len % args.dp):
+                _dp_input_lens[i] += 1
+            dp_handle_lens = [_dp_input_len * tp_world_size for _dp_input_len in _dp_input_lens]
+            assert sum(dp_handle_lens) == sum_input_len
 
         self.dp_handle_lens = dp_handle_lens.copy()
 
