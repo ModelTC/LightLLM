@@ -10,6 +10,7 @@ rejects stream=true with 501.
 from __future__ import annotations
 
 import uuid
+import ujson as json
 from http import HTTPStatus
 from typing import Any, Dict, Tuple
 
@@ -150,16 +151,143 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
 
 
 # ---------------------------------------------------------------------------
-# HTTP entry point (non-streaming only in this task)
+# Streaming bridge
+# ---------------------------------------------------------------------------
+
+
+def _sse_event(event_type: str, data_obj: Dict[str, Any]) -> bytes:
+    """Encode an Anthropic-style SSE event."""
+    return f"event: {event_type}\ndata: {json.dumps(data_obj)}\n\n".encode("utf-8")
+
+
+async def _openai_sse_to_anthropic_events(
+    openai_body_iterator,
+    requested_model: str,
+    message_id: str,
+):
+    """Async generator: consume OpenAI-format SSE bytes and yield
+    Anthropic-format SSE event bytes.
+
+    Only the text-only path is implemented here. Tool-use streaming
+    requires additional state tracking and is handled in Task 7.
+    """
+    # State
+    message_started = False
+    text_block_open = False
+    text_block_index = 0
+    final_stop_reason = "end_turn"
+    final_output_tokens = 0
+    final_input_tokens = 0
+
+    _OPENAI_TO_ANTHROPIC_STOP = {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "tool_calls": "tool_use",
+    }
+
+    async for raw_line in openai_body_iterator:
+        if not raw_line:
+            continue
+        # A single StreamingResponse chunk may contain multiple SSE lines.
+        for line in raw_line.split(b"\n"):
+            line = line.strip()
+            if not line or not line.startswith(b"data: "):
+                continue
+            payload = line[len(b"data: "):]
+            if payload == b"[DONE]":
+                continue
+            try:
+                chunk = json.loads(payload.decode("utf-8"))
+            except Exception:
+                logger.debug("Skipping non-JSON SSE payload: %r", payload)
+                continue
+
+            # Usage-only chunk (emitted when stream_options.include_usage is set)
+            usage = chunk.get("usage")
+            if usage:
+                final_input_tokens = int(usage.get("prompt_tokens", 0))
+                final_output_tokens = int(usage.get("completion_tokens", final_output_tokens))
+
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            finish_reason = choice.get("finish_reason")
+
+            # Emit message_start the first time we see any content
+            if not message_started:
+                message_started = True
+                yield _sse_event(
+                    "message_start",
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "id": message_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "model": requested_model,
+                            "content": [],
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {
+                                "input_tokens": final_input_tokens,
+                                "output_tokens": 0,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 0,
+                            },
+                        },
+                    },
+                )
+
+            content_piece = delta.get("content")
+            if content_piece:
+                if not text_block_open:
+                    text_block_open = True
+                    yield _sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": text_block_index,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
+                yield _sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": text_block_index,
+                        "delta": {"type": "text_delta", "text": content_piece},
+                    },
+                )
+                final_output_tokens += 1
+
+            if finish_reason:
+                final_stop_reason = _OPENAI_TO_ANTHROPIC_STOP.get(finish_reason, "end_turn")
+
+    # Close any open content block
+    if text_block_open:
+        yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": text_block_index})
+
+    # message_delta carries the final stop_reason and cumulative output_tokens
+    if message_started:
+        yield _sse_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": final_stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": final_output_tokens},
+            },
+        )
+        yield _sse_event("message_stop", {"type": "message_stop"})
+
+
+# ---------------------------------------------------------------------------
+# HTTP entry point
 # ---------------------------------------------------------------------------
 
 
 async def anthropic_messages_impl(raw_request: Request) -> Response:
-    """Handle POST /v1/messages.
-
-    Streaming support is added in a later task; this function currently
-    rejects ``stream=true`` with a clear error.
-    """
     # Lazy imports to avoid pulling in heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
     from .api_openai import chat_completions_impl, create_error_response
@@ -172,13 +300,8 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
     if not isinstance(raw_body, dict):
         return create_error_response(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object")
 
-    if raw_body.get("stream"):
-        return create_error_response(
-            HTTPStatus.NOT_IMPLEMENTED,
-            "Streaming is not yet implemented for /v1/messages",
-        )
-
     requested_model = raw_body.get("model", "default")
+    is_stream = bool(raw_body.get("stream"))
 
     try:
         chat_dict, tool_name_mapping = _anthropic_to_chat_request(raw_body)
@@ -186,19 +309,31 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         logger.exception("Failed to translate Anthropic request")
         return create_error_response(HTTPStatus.BAD_REQUEST, f"Request translation failed: {exc}")
 
+    # Force the downstream path to stream if the client asked for stream.
+    chat_dict["stream"] = is_stream
+
     try:
         chat_request = ChatCompletionRequest(**chat_dict)
     except Exception as exc:
         logger.exception("Failed to build ChatCompletionRequest")
         return create_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}")
 
-    chat_response_or_err = await chat_completions_impl(chat_request, raw_request)
+    downstream = await chat_completions_impl(chat_request, raw_request)
 
-    if not isinstance(chat_response_or_err, ChatCompletionResponse):
-        # chat_completions_impl returned a JSONResponse (error). Pass through.
-        return chat_response_or_err
+    if is_stream:
+        from fastapi.responses import StreamingResponse
 
-    anthropic_dict = _chat_response_to_anthropic(
-        chat_response_or_err, tool_name_mapping, requested_model
-    )
+        if not isinstance(downstream, StreamingResponse):
+            return downstream  # error path
+
+        message_id = f"msg_{uuid.uuid4().hex[:24]}"
+        anthropic_stream = _openai_sse_to_anthropic_events(
+            downstream.body_iterator, requested_model=requested_model, message_id=message_id
+        )
+        return StreamingResponse(anthropic_stream, media_type="text/event-stream")
+
+    if not isinstance(downstream, ChatCompletionResponse):
+        return downstream  # JSONResponse error
+
+    anthropic_dict = _chat_response_to_anthropic(downstream, tool_name_mapping, requested_model)
     return JSONResponse(anthropic_dict)

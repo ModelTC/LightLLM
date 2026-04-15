@@ -161,3 +161,62 @@ def test_chat_response_to_anthropic_minimal_text():
     assert anthropic_dict["stop_reason"] in {"end_turn", "stop_sequence"}
     assert anthropic_dict["usage"]["input_tokens"] == 3
     assert anthropic_dict["usage"]["output_tokens"] == 2
+
+
+import asyncio
+
+
+def _run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro) if not asyncio.get_event_loop().is_running() else asyncio.run(coro)
+
+
+def test_stream_bridge_emits_anthropic_event_sequence_text_only():
+    """Feed a canned OpenAI SSE stream through the bridge and assert we
+    get the expected Anthropic event sequence."""
+    from lightllm.server.api_anthropic import _openai_sse_to_anthropic_events
+
+    # Simulate three OpenAI chunks: 'Hel', 'lo', finish_reason=stop.
+    openai_chunks = [
+        b'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}\n\n',
+        b'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}\n\n',
+        b'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        b'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+
+    async def fake_body_iterator():
+        for c in openai_chunks:
+            yield c
+
+    async def collect():
+        out = []
+        async for event_bytes in _openai_sse_to_anthropic_events(
+            fake_body_iterator(), requested_model="claude-opus-4-6", message_id="msg_test"
+        ):
+            out.append(event_bytes.decode("utf-8"))
+        return out
+
+    events = asyncio.get_event_loop().run_until_complete(collect()) if not asyncio.get_event_loop().is_running() else asyncio.run(collect())
+    joined = "".join(events)
+
+    # Required event types appear in order
+    must_appear_in_order = [
+        "event: message_start",
+        "event: content_block_start",
+        'content_block_delta',
+        "event: content_block_stop",
+        "event: message_delta",
+        "event: message_stop",
+    ]
+    last_idx = -1
+    for needle in must_appear_in_order:
+        idx = joined.find(needle, last_idx + 1)
+        assert idx > last_idx, f"missing or out-of-order event: {needle}\nfull:\n{joined}"
+        last_idx = idx
+
+    # Text deltas preserve the original content
+    assert "Hel" in joined and "lo" in joined
+    # end_turn stop reason is surfaced
+    assert "end_turn" in joined
+    # Final usage output_tokens is included in message_delta
+    assert '"output_tokens"' in joined
