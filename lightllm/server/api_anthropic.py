@@ -169,13 +169,26 @@ async def _openai_sse_to_anthropic_events(
     """Async generator: consume OpenAI-format SSE bytes and yield
     Anthropic-format SSE event bytes.
 
-    Only the text-only path is implemented here. Tool-use streaming
-    requires additional state tracking and is handled in Task 7.
+    Handles both text deltas (emitted as text_delta content blocks) and
+    tool-call deltas (emitted as tool_use content blocks whose arguments
+    stream as input_json_delta events). Anthropic's protocol opens one
+    content block at a time — when switching between a text block and a
+    tool_use block (or between tool_use blocks) the current block is
+    closed before the next is opened.
     """
-    # State
     message_started = False
-    text_block_open = False
-    text_block_index = 0  # always 0 on the text-only path; multi-block streaming lands with tool_use support.
+    next_content_index = 0
+
+    # Currently open content block, if any.
+    # current_open is either None or a tuple ("text"|"tool_use", anthropic_index).
+    current_open = None
+
+    text_block_index = None  # Anthropic index of the active text block.
+
+    # Per-tool-call state keyed by OpenAI streaming tool_calls[i].index.
+    # Each entry: {anthropic_index, id, name, started, buffered_args}
+    tool_state: Dict[int, Dict[str, Any]] = {}
+
     final_stop_reason = "end_turn"
     final_output_tokens = 0
     final_input_tokens = 0
@@ -255,10 +268,18 @@ async def _openai_sse_to_anthropic_events(
                     },
                 )
 
+            # ---- Text delta ----
             content_piece = delta.get("content")
             if content_piece:
-                if not text_block_open:
-                    text_block_open = True
+                if current_open is None or current_open[0] != "text":
+                    if current_open is not None:
+                        yield _sse_event(
+                            "content_block_stop",
+                            {"type": "content_block_stop", "index": current_open[1]},
+                        )
+                    text_block_index = next_content_index
+                    next_content_index += 1
+                    current_open = ("text", text_block_index)
                     yield _sse_event(
                         "content_block_start",
                         {
@@ -276,14 +297,99 @@ async def _openai_sse_to_anthropic_events(
                     },
                 )
 
+            # ---- Tool-call deltas ----
+            for tc in delta.get("tool_calls") or []:
+                tc_idx = tc.get("index", 0)
+                fn = tc.get("function") or {}
+                state = tool_state.setdefault(
+                    tc_idx,
+                    {
+                        "anthropic_index": None,
+                        "id": None,
+                        "name": None,
+                        "started": False,
+                        "buffered_args": "",
+                    },
+                )
+                if tc.get("id"):
+                    state["id"] = tc["id"]
+                if fn.get("name"):
+                    state["name"] = fn["name"]
+                new_args = fn.get("arguments") or ""
+
+                if not state["started"]:
+                    # Buffer args until we know the tool name (required for
+                    # content_block_start).
+                    state["buffered_args"] += new_args
+                    if not state["name"]:
+                        continue
+                    # Close whatever block is currently open (text or a
+                    # previous tool_use) before opening this one.
+                    if current_open is not None:
+                        yield _sse_event(
+                            "content_block_stop",
+                            {"type": "content_block_stop", "index": current_open[1]},
+                        )
+                    state["anthropic_index"] = next_content_index
+                    next_content_index += 1
+                    current_open = ("tool_use", state["anthropic_index"])
+                    state["started"] = True
+                    yield _sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": state["anthropic_index"],
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": state["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
+                                "name": state["name"],
+                                "input": {},
+                            },
+                        },
+                    )
+                    if state["buffered_args"]:
+                        yield _sse_event(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": state["anthropic_index"],
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": state["buffered_args"],
+                                },
+                            },
+                        )
+                        state["buffered_args"] = ""
+                else:
+                    # Already started. If deltas for a different block are
+                    # now arriving (unusual interleaving), close whatever's
+                    # currently open and reopen... but in practice OpenAI
+                    # streams tool_calls sequentially per index, so the
+                    # current_open is this same block.
+                    if new_args:
+                        yield _sse_event(
+                            "content_block_delta",
+                            {
+                                "type": "content_block_delta",
+                                "index": state["anthropic_index"],
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": new_args,
+                                },
+                            },
+                        )
+
             if finish_reason:
                 final_stop_reason = _OPENAI_TO_ANTHROPIC_STOP.get(finish_reason, "end_turn")
 
-    # Close any open content block
-    if text_block_open:
-        yield _sse_event("content_block_stop", {"type": "content_block_stop", "index": text_block_index})
+    # Close any still-open content block.
+    if current_open is not None:
+        yield _sse_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": current_open[1]},
+        )
 
-    # message_delta carries the final stop_reason and cumulative output_tokens
+    # message_delta carries the final stop_reason and cumulative output_tokens.
     if message_started:
         yield _sse_event(
             "message_delta",

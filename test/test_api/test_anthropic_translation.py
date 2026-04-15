@@ -221,6 +221,82 @@ def test_stream_bridge_emits_anthropic_event_sequence_text_only():
     assert '"output_tokens"' in joined
 
 
+def test_stream_bridge_emits_tool_use_content_block():
+    """Regression for Task 6 gap: the bridge must translate OpenAI
+    streaming tool_calls deltas into Anthropic tool_use content blocks.
+    Without this, clients see stop_reason=tool_use but zero content blocks
+    and report 'tool call could not be parsed'."""
+    from lightllm.server.api_anthropic import _openai_sse_to_anthropic_events
+
+    # Simulate OpenAI emitting a single tool call in three chunks:
+    #   chunk 1: id + name
+    #   chunk 2: first args slice
+    #   chunk 3: second args slice, then finish_reason=tool_calls
+    openai_chunks = [
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m",'
+        '"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":['
+        '{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":""}}'
+        ']},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m",'
+        '"choices":[{"index":0,"delta":{"tool_calls":['
+        '{"index":0,"function":{"arguments":"{\\"city\\":"}}'
+        ']},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m",'
+        '"choices":[{"index":0,"delta":{"tool_calls":['
+        '{"index":0,"function":{"arguments":" \\"San Francisco\\"}"}}'
+        ']},"finish_reason":"tool_calls"}]}\n\n',
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m",'
+        '"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":12,"total_tokens":32}}\n\n',
+        "data: [DONE]\n\n",
+    ]
+
+    async def fake_body_iterator():
+        for c in openai_chunks:
+            yield c
+
+    async def collect():
+        return [b.decode("utf-8") async for b in _openai_sse_to_anthropic_events(
+            fake_body_iterator(), requested_model="claude-opus-4-6", message_id="msg_tool_test"
+        )]
+
+    events = _run(collect())
+    joined = "".join(events)
+
+    # The event sequence must contain a tool_use content_block_start,
+    # at least one input_json_delta, a content_block_stop, and
+    # message_delta with stop_reason=tool_use.
+    must_appear_in_order = [
+        "event: message_start",
+        '"type":"tool_use"',            # content_block_start carries tool_use
+        '"name":"get_weather"',         # ...with the right name
+        '"input_json_delta"',           # and at least one input_json_delta
+        "event: content_block_stop",
+        "event: message_delta",
+        '"stop_reason":"tool_use"',
+        "event: message_stop",
+    ]
+    last_idx = -1
+    for needle in must_appear_in_order:
+        idx = joined.find(needle, last_idx + 1)
+        assert idx > last_idx, f"missing or out-of-order event: {needle}\n----- full:\n{joined}"
+        last_idx = idx
+
+    # Arguments must be transmitted in one or more deltas that together
+    # reconstruct the original JSON.
+    partials = []
+    for line in joined.splitlines():
+        if '"input_json_delta"' in line and "partial_json" in line:
+            # crude extraction of the partial_json field
+            m = line.split('"partial_json":"', 1)
+            if len(m) == 2:
+                # unescape backslashes from JSON string encoding
+                raw = m[1].rsplit('"', 1)[0]
+                partials.append(raw.encode("utf-8").decode("unicode_escape"))
+    joined_args = "".join(partials)
+    assert '"city"' in joined_args and "San Francisco" in joined_args, \
+        f"tool-call arguments not reconstructed: {joined_args!r}"
+
+
 def test_stream_bridge_accepts_str_iterator():
     """Regression: chat_completions_impl yields str chunks, not bytes.
     The bridge must accept either without raising on split()."""
