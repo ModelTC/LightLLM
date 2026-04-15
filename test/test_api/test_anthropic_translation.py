@@ -165,6 +165,87 @@ def test_chat_response_to_anthropic_minimal_text():
     assert anthropic_dict["usage"]["output_tokens"] == 2
 
 
+def test_normalize_anthropic_response_cosmetic_cleanups():
+    """_normalize_anthropic_response must:
+      - force the message id into the Anthropic msg_* format,
+      - echo the client-supplied model name,
+      - drop empty leading text blocks,
+      - strip the LiteLLM-specific provider_specific_fields key from
+        every content block,
+      - leave well-formed fields alone.
+    """
+    from lightllm.server.api_anthropic import _normalize_anthropic_response
+
+    raw = {
+        "id": "56",
+        "type": "message",
+        "role": "assistant",
+        "model": "local-model",
+        "content": [
+            {"type": "text", "text": ""},
+            {
+                "type": "tool_use",
+                "id": "call_abc123",
+                "name": "get_weather",
+                "input": {"city": "San Francisco"},
+                "provider_specific_fields": None,
+            },
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    result = _normalize_anthropic_response(raw, requested_model="claude-opus-4-6")
+
+    assert result["id"].startswith("msg_"), result["id"]
+    assert result["model"] == "claude-opus-4-6"
+
+    # Empty text block dropped; tool_use preserved and cleaned.
+    assert all(
+        not (b.get("type") == "text" and not b.get("text")) for b in result["content"]
+    )
+    tool_blocks = [b for b in result["content"] if b.get("type") == "tool_use"]
+    assert len(tool_blocks) == 1
+    assert "provider_specific_fields" not in tool_blocks[0]
+    assert tool_blocks[0]["name"] == "get_weather"
+    assert tool_blocks[0]["input"] == {"city": "San Francisco"}
+    # Non-empty fields are untouched.
+    assert result["stop_reason"] == "tool_use"
+    assert result["usage"]["input_tokens"] == 10
+
+
+def test_normalize_anthropic_response_preserves_good_id():
+    """If the adapter already produced a msg_* id, don't replace it."""
+    from lightllm.server.api_anthropic import _normalize_anthropic_response
+
+    good_id = "msg_01abcd1234"
+    result = _normalize_anthropic_response(
+        {"id": good_id, "content": [{"type": "text", "text": "hi"}]},
+        requested_model="claude-opus-4-6",
+    )
+    assert result["id"] == good_id
+
+
+def test_anthropic_error_response_shape():
+    """Error responses must match Anthropic's envelope so Claude Code and
+    other SDKs surface the real message instead of a generic failure."""
+    from lightllm.server.api_anthropic import _anthropic_error_response
+    from http import HTTPStatus
+    import json as _json
+
+    resp = _anthropic_error_response(HTTPStatus.BAD_REQUEST, "max_tokens must be positive")
+    assert resp.status_code == 400
+    body = _json.loads(bytes(resp.body).decode("utf-8"))
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["message"] == "max_tokens must be positive"
+
+    # Unknown status falls back to api_error
+    resp2 = _anthropic_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, "boom")
+    body2 = _json.loads(bytes(resp2.body).decode("utf-8"))
+    assert body2["error"]["type"] == "api_error"
+
+
 def _run(coro):
     return asyncio.run(coro)
 

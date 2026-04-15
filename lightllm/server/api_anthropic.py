@@ -107,13 +107,42 @@ def _chat_response_to_anthropic(
     else:
         result = dict(anthropic_obj)
 
-    # Echo the client-provided model name.
+    return _normalize_anthropic_response(result, requested_model)
+
+
+def _normalize_anthropic_response(
+    result: Dict[str, Any], requested_model: str
+) -> Dict[str, Any]:
+    """Cosmetic clean-ups applied to every non-streaming Anthropic response:
+
+    - echo the client-supplied model name (LiteLLM sometimes emits the
+      upstream model id instead);
+    - force the Anthropic ``msg_`` id prefix (LiteLLM passes LightLLM's
+      raw numeric request id through, which confuses strict clients);
+    - set default ``type`` / ``role`` / ``stop_sequence`` when missing;
+    - drop empty text blocks (LiteLLM sometimes produces a leading
+      ``{"type":"text","text":""}`` before a tool_use block);
+    - strip the LiteLLM-specific ``provider_specific_fields`` leak from
+      every content block.
+    """
     result["model"] = requested_model
 
-    result.setdefault("id", f"msg_{uuid.uuid4().hex[:24]}")
+    if not str(result.get("id", "")).startswith("msg_"):
+        result["id"] = f"msg_{uuid.uuid4().hex[:24]}"
     result.setdefault("type", "message")
     result.setdefault("role", "assistant")
     result.setdefault("stop_sequence", None)
+
+    cleaned_content = []
+    for block in result.get("content") or []:
+        if not isinstance(block, dict):
+            cleaned_content.append(block)
+            continue
+        if block.get("type") == "text" and not block.get("text"):
+            continue
+        block.pop("provider_specific_fields", None)
+        cleaned_content.append(block)
+    result["content"] = cleaned_content
 
     return result
 
@@ -403,6 +432,53 @@ async def _openai_sse_to_anthropic_events(
 
 
 # ---------------------------------------------------------------------------
+# Error response helper
+# ---------------------------------------------------------------------------
+
+
+# HTTP status → Anthropic error type. Derived from
+# https://docs.anthropic.com/en/api/errors ; values outside this map fall
+# back to "api_error".
+_STATUS_TO_ERROR_TYPE = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    500: "api_error",
+    529: "overloaded_error",
+}
+
+
+def _anthropic_error_response(status: HTTPStatus, message: str) -> JSONResponse:
+    """Return an Anthropic-shaped error envelope.
+
+    Anthropic clients (including Claude Code) parse the {"type":"error",
+    "error":{"type":..., "message":...}} shape; the OpenAI-style envelope
+    from create_error_response hides the real message from them.
+    """
+    err_type = _STATUS_TO_ERROR_TYPE.get(int(status), "api_error")
+    return JSONResponse(
+        {"type": "error", "error": {"type": err_type, "message": message}},
+        status_code=int(status),
+    )
+
+
+def _rewrap_openai_error_as_anthropic(resp: JSONResponse) -> JSONResponse:
+    """Convert an OpenAI-format JSONResponse produced by create_error_response
+    into Anthropic's error envelope. Best-effort: if we can't decode the body
+    we leave the response alone so the caller still sees something."""
+    try:
+        body = json.loads(bytes(resp.body).decode("utf-8"))
+        inner = (body or {}).get("error") or {}
+        message = inner.get("message") or "request failed"
+    except Exception:
+        return resp
+    return _anthropic_error_response(HTTPStatus(resp.status_code), message)
+
+
+# ---------------------------------------------------------------------------
 # HTTP entry point
 # ---------------------------------------------------------------------------
 
@@ -410,15 +486,15 @@ async def _openai_sse_to_anthropic_events(
 async def anthropic_messages_impl(raw_request: Request) -> Response:
     # Lazy imports to avoid pulling in heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
-    from .api_openai import chat_completions_impl, create_error_response
+    from .api_openai import chat_completions_impl
 
     try:
         raw_body = await raw_request.json()
     except Exception as exc:
-        return create_error_response(HTTPStatus.BAD_REQUEST, f"Invalid JSON body: {exc}")
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Invalid JSON body: {exc}")
 
     if not isinstance(raw_body, dict):
-        return create_error_response(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object")
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object")
 
     requested_model = raw_body.get("model", "default")
     is_stream = bool(raw_body.get("stream"))
@@ -427,7 +503,9 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         chat_dict, tool_name_mapping = _anthropic_to_chat_request(raw_body)
     except Exception as exc:
         logger.exception("Failed to translate Anthropic request")
-        return create_error_response(HTTPStatus.BAD_REQUEST, f"Request translation failed: {exc}")
+        return _anthropic_error_response(
+            HTTPStatus.BAD_REQUEST, f"Request translation failed: {exc}"
+        )
 
     # Force the downstream path to stream if the client asked for stream.
     chat_dict["stream"] = is_stream
@@ -436,7 +514,9 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         chat_request = ChatCompletionRequest(**chat_dict)
     except Exception as exc:
         logger.exception("Failed to build ChatCompletionRequest")
-        return create_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}")
+        return _anthropic_error_response(
+            HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}"
+        )
 
     downstream = await chat_completions_impl(chat_request, raw_request)
 
@@ -444,7 +524,10 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         from fastapi.responses import StreamingResponse
 
         if not isinstance(downstream, StreamingResponse):
-            return downstream  # error path
+            # chat_completions_impl returned an OpenAI-format error — rewrap it.
+            if isinstance(downstream, JSONResponse):
+                return _rewrap_openai_error_as_anthropic(downstream)
+            return downstream
 
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         anthropic_stream = _openai_sse_to_anthropic_events(
@@ -453,7 +536,9 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         return StreamingResponse(anthropic_stream, media_type="text/event-stream")
 
     if not isinstance(downstream, ChatCompletionResponse):
-        return downstream  # JSONResponse error
+        if isinstance(downstream, JSONResponse):
+            return _rewrap_openai_error_as_anthropic(downstream)
+        return downstream
 
     anthropic_dict = _chat_response_to_anthropic(downstream, tool_name_mapping, requested_model)
     return JSONResponse(anthropic_dict)
