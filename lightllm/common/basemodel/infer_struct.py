@@ -233,20 +233,20 @@ class InferStateInfo:
         if hasattr(self, "position_ids") and self.position_ids is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_ids, 用于减少通信量
             self._unbalance_position_ids = self.position_ids
-            self._balance_position_ids = self._all_to_all_balance_get(self.position_ids)
+            self._balance_position_ids = self._all_to_all_balance_get(self.position_ids, change_state=False)
 
         if hasattr(self, "position_cos") and self.position_cos is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_cos, 用于减少通信量
             self._unbalance_position_cos = self.position_cos
-            self._balance_position_cos = self._all_to_all_balance_get(self.position_cos)
+            self._balance_position_cos = self._all_to_all_balance_get(self.position_cos, change_state=False)
 
         if hasattr(self, "position_sin") and self.position_sin is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_sin, 用于减少通信量
             self._unbalance_position_sin = self.position_sin
-            self._balance_position_sin = self._all_to_all_balance_get(self.position_sin)
+            self._balance_position_sin = self._all_to_all_balance_get(self.position_sin, change_state=False)
 
         self._unbalance_input_ids = self.input_ids
-        self._balance_input_ids = self._all_to_all_balance_get(input_ids)
+        self._balance_input_ids = self._all_to_all_balance_get(input_ids, change_state=False)
 
         return
 
@@ -270,8 +270,9 @@ class InferStateInfo:
             self.position_sin = self._balance_position_sin
         return
 
-    def _all_to_all_balance_get(self, data: torch.Tensor):
-        self.__change_to_balance()
+    def _all_to_all_balance_get(self, data: torch.Tensor, change_state: bool = True):
+        if change_state:
+            self.__change_to_balance()
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -299,8 +300,10 @@ class InferStateInfo:
         )
         return dest_data.view(-1, *old_shape[1:])
 
-    def _all_to_all_unbalance_get(self, data: torch.Tensor):
-        self.__change_to_unbalance()
+    def _all_to_all_unbalance_get(self, data: torch.Tensor, change_state: bool = True):
+        if change_state:
+            self.__change_to_unbalance()
+
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
