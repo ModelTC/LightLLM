@@ -4,8 +4,9 @@ Translates incoming /v1/messages requests into LightLLM's internal chat
 completions pipeline by delegating the hard parts (content-block parsing,
 tool schema normalisation, stop-reason mapping) to LiteLLM's adapter.
 
-The streaming path is added in a later task; this module currently
-rejects stream=true with 501.
+The streaming path intercepts the OpenAI-format SSE stream from
+chat_completions_impl and re-emits it as the Anthropic event sequence
+(message_start, content_block_*, message_delta, message_stop).
 """
 from __future__ import annotations
 
@@ -202,7 +203,10 @@ async def _openai_sse_to_anthropic_events(
                 logger.debug("Skipping non-JSON SSE payload: %r", payload)
                 continue
 
-            # Usage-only chunk (emitted when stream_options.include_usage is set)
+            # final_output_tokens is sourced exclusively from the trailing usage
+            # chunk emitted by chat_completions_impl; we intentionally do not
+            # estimate it per delta because that would diverge from the
+            # tokenizer-accurate count on any upstream change.
             usage = chunk.get("usage")
             if usage:
                 final_input_tokens = int(usage.get("prompt_tokens", 0))
@@ -215,7 +219,13 @@ async def _openai_sse_to_anthropic_events(
             delta = choice.get("delta") or {}
             finish_reason = choice.get("finish_reason")
 
-            # Emit message_start the first time we see any content
+            # Emit message_start the first time we see any content.
+            # NOTE: The upstream usage chunk arrives AFTER all content chunks, so
+            # final_input_tokens is still 0 here. message_start.message.usage.input_tokens
+            # will always be 0 on this path — Anthropic clients that care about prompt
+            # token counts should read message_delta.usage instead. Fixing this would
+            # require buffering until the usage chunk arrives, trading streaming
+            # latency for accurate prompt-token reporting at message_start time.
             if not message_started:
                 message_started = True
                 yield _sse_event(
@@ -260,7 +270,6 @@ async def _openai_sse_to_anthropic_events(
                         "delta": {"type": "text_delta", "text": content_piece},
                     },
                 )
-                final_output_tokens += 1
 
             if finish_reason:
                 final_stop_reason = _OPENAI_TO_ANTHROPIC_STOP.get(finish_reason, "end_turn")
@@ -276,7 +285,7 @@ async def _openai_sse_to_anthropic_events(
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": final_stop_reason, "stop_sequence": None},
-                "usage": {"output_tokens": final_output_tokens},
+                "usage": {"input_tokens": final_input_tokens, "output_tokens": final_output_tokens},
             },
         )
         yield _sse_event("message_stop", {"type": "message_stop"})

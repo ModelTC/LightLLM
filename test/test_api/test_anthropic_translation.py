@@ -4,6 +4,8 @@ These tests import the translation helpers directly and do not require
 a running LightLLM server. They do require 'litellm' to be installed —
 tests are skipped if it is not available.
 """
+import asyncio
+
 import pytest
 
 litellm = pytest.importorskip("litellm")
@@ -163,11 +165,8 @@ def test_chat_response_to_anthropic_minimal_text():
     assert anthropic_dict["usage"]["output_tokens"] == 2
 
 
-import asyncio
-
-
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) if not asyncio.get_event_loop().is_running() else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 def test_stream_bridge_emits_anthropic_event_sequence_text_only():
@@ -196,7 +195,7 @@ def test_stream_bridge_emits_anthropic_event_sequence_text_only():
             out.append(event_bytes.decode("utf-8"))
         return out
 
-    events = asyncio.get_event_loop().run_until_complete(collect()) if not asyncio.get_event_loop().is_running() else asyncio.run(collect())
+    events = _run(collect())
     joined = "".join(events)
 
     # Required event types appear in order
