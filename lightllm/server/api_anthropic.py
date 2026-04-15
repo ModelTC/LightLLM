@@ -95,9 +95,7 @@ def _chat_response_to_anthropic(
         from litellm import ModelResponse  # type: ignore
 
         model_response = ModelResponse(**openai_dict)
-        anthropic_obj = adapter.translate_openai_response_to_anthropic(
-            model_response, tool_name_mapping
-        )
+        anthropic_obj = adapter.translate_openai_response_to_anthropic(model_response, tool_name_mapping)
     except Exception as exc:
         logger.warning("LiteLLM response translation failed (%s); using fallback", exc)
         return _fallback_openai_to_anthropic(openai_dict, requested_model)
@@ -110,9 +108,7 @@ def _chat_response_to_anthropic(
     return _normalize_anthropic_response(result, requested_model)
 
 
-def _normalize_anthropic_response(
-    result: Dict[str, Any], requested_model: str
-) -> Dict[str, Any]:
+def _normalize_anthropic_response(result: Dict[str, Any], requested_model: str) -> Dict[str, Any]:
     """Cosmetic clean-ups applied to every non-streaming Anthropic response:
 
     - echo the client-supplied model name (LiteLLM sometimes emits the
@@ -157,9 +153,7 @@ def _fallback_openai_to_anthropic(openai_dict: Dict[str, Any], requested_model: 
     choice = (openai_dict.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     if message.get("tool_calls"):
-        raise RuntimeError(
-            "Fallback translator cannot handle tool_calls; LiteLLM adapter path is required."
-        )
+        raise RuntimeError("Fallback translator cannot handle tool_calls; LiteLLM adapter path is required.")
     text = message.get("content") or ""
     usage = openai_dict.get("usage") or {}
     finish_reason = choice.get("finish_reason")
@@ -241,7 +235,7 @@ async def _openai_sse_to_anthropic_events(
             line = line.strip()
             if not line or not line.startswith("data: "):
                 continue
-            payload = line[len("data: "):]
+            payload = line[len("data: ") :]
             if payload == "[DONE]":
                 continue
             try:
@@ -503,9 +497,7 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         chat_dict, tool_name_mapping = _anthropic_to_chat_request(raw_body)
     except Exception as exc:
         logger.exception("Failed to translate Anthropic request")
-        return _anthropic_error_response(
-            HTTPStatus.BAD_REQUEST, f"Request translation failed: {exc}"
-        )
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Request translation failed: {exc}")
 
     # Force the downstream path to stream if the client asked for stream.
     chat_dict["stream"] = is_stream
@@ -514,9 +506,7 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         chat_request = ChatCompletionRequest(**chat_dict)
     except Exception as exc:
         logger.exception("Failed to build ChatCompletionRequest")
-        return _anthropic_error_response(
-            HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}"
-        )
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}")
 
     downstream = await chat_completions_impl(chat_request, raw_request)
 

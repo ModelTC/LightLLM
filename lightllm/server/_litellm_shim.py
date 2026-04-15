@@ -37,12 +37,14 @@ def _get_litellm_version() -> str:
     """
     try:
         import importlib.metadata
+
         return importlib.metadata.version("litellm")
     except Exception:
         pass
     # Fallback: some older builds do expose it.
     try:
         import litellm
+
         return getattr(litellm, "__version__", "unknown")
     except Exception:
         return "unknown"
@@ -59,8 +61,7 @@ def _check_import_once() -> None:
     else:
         version = _get_litellm_version()
         logger.info(
-            "LiteLLM detected (version=%s) for Anthropic API compatibility layer. "
-            "Tested range: %s..%s",
+            "LiteLLM detected (version=%s) for Anthropic API compatibility layer. " "Tested range: %s..%s",
             version,
             _MIN_LITELLM_VERSION,
             _MAX_TESTED_LITELLM_VERSION,
