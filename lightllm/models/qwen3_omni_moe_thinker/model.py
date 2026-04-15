@@ -18,6 +18,7 @@ from lightllm.models.qwen3_omni_moe_thinker.layer_weights.transformers_layer_wei
 )
 
 from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel
+from lightllm.models.qwen3_omni_moe_thinker.audio_process import MAX_AUDIO_DURATION_SECONDS
 from lightllm.models.qwen3_omni_moe_thinker.infer_struct import Qwen3OmniMOEInferStateInfo
 from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
 from lightllm.server.core.objs import SamplingParams
@@ -44,7 +45,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         self.sampling_rate = self.audio_processor.sampling_rate
         self.n_samples = self.audio_processor.n_samples
         self.hop_length = self.audio_processor.hop_length
-        self.max_audio_len = self.audio_processor.max_audio_len
+        self.max_audio_len = MAX_AUDIO_DURATION_SECONDS * self.sampling_rate
 
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]
