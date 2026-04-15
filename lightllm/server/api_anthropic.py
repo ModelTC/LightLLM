@@ -175,7 +175,7 @@ async def _openai_sse_to_anthropic_events(
     # State
     message_started = False
     text_block_open = False
-    text_block_index = 0
+    text_block_index = 0  # always 0 on the text-only path; multi-block streaming lands with tool_use support.
     final_stop_reason = "end_turn"
     final_output_tokens = 0
     final_input_tokens = 0

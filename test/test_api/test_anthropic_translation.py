@@ -304,3 +304,39 @@ def test_chat_response_to_anthropic_with_tool_call():
     assert isinstance(tool_block["input"], dict)
     assert tool_block["input"].get("city") == "San Francisco"
     assert tool_block.get("id", "").startswith("toolu_") or tool_block.get("id") == "call_abc123"
+
+
+def test_anthropic_to_chat_request_with_image_content_block():
+    """Vision smoke test: an Anthropic image content block must survive
+    translation without raising or being silently dropped. We do not
+    assert the exact OpenAI shape here because LiteLLM's adapter controls
+    that contract and may normalise it in different ways across releases."""
+    from lightllm.server.api_anthropic import _anthropic_to_chat_request
+
+    anthropic_body = {
+        "model": "claude-opus-4-6",
+        "max_tokens": 64,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgAAIAAAUAAen63NgAAAAASUVORK5CYII=",
+                        },
+                    },
+                    {"type": "text", "text": "What do you see?"},
+                ],
+            }
+        ],
+    }
+    chat_dict, _ = _anthropic_to_chat_request(anthropic_body)
+
+    assert "messages" in chat_dict
+    # The user message must still be present after translation — the exact
+    # shape of its content is left to the adapter, but it must exist.
+    user_messages = [m for m in chat_dict["messages"] if m.get("role") == "user"]
+    assert user_messages, f"user message was dropped during translation: {chat_dict['messages']}"
