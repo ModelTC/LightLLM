@@ -248,7 +248,7 @@ def test_anthropic_to_chat_request_with_tools():
     # OpenAI tool format: {"type": "function", "function": {"name", "description", "parameters"}}
     assert tool_entry.get("type") == "function"
     fn = tool_entry.get("function") or {}
-    assert fn.get("name") in {"get_weather", "get_weather"[:64]}
+    assert fn.get("name") == "get_weather"
     # input_schema should have been renamed to parameters
     assert "parameters" in fn
     assert fn["parameters"]["properties"]["city"]["type"] == "string"
