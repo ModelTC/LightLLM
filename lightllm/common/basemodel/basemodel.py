@@ -583,10 +583,10 @@ class TpPartBaseModel:
     @final
     def _context_forward(self, infer_state: InferStateInfo):
         if not self.args.enable_dp_prefill_balance:
-            assert not self.args.enable_prefill_cudagraph, "not support now"
             input_ids = infer_state.input_ids
             cuda_input_ids = input_ids
         else:
+            assert not self.args.enable_prefill_cudagraph, "not support now"
             input_ids = infer_state.prefill_dp_balance(input_ids=infer_state.input_ids)
             cuda_input_ids = input_ids
 
