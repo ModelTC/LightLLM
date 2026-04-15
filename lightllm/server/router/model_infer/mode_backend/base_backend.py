@@ -802,7 +802,7 @@ class ModeBackend:
                 paused_reqs.append(req_obj)
                 continue
 
-            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+            if req_obj.finish_status.is_finished():
                 if support_overlap:
                     # 延迟处理
                     req_obj.filter_mark = True
