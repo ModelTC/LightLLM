@@ -540,5 +540,9 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
             return _rewrap_openai_error_as_anthropic(downstream)
         return downstream
 
-    anthropic_dict = _chat_response_to_anthropic(downstream, tool_name_mapping, requested_model)
+    try:
+        anthropic_dict = _chat_response_to_anthropic(downstream, tool_name_mapping, requested_model)
+    except Exception as exc:
+        logger.error("Failed to translate response to Anthropic format: %s", exc)
+        return JSONResponse(_anthropic_error_response(500, str(exc)), status_code=500)
     return JSONResponse(anthropic_dict)
