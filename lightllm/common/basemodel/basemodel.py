@@ -867,13 +867,8 @@ class TpPartBaseModel:
             )
 
         # 折叠模式调用完infer_state 和 infer_state1 上的hook函数后，input_embs 和 input_embs1 才具备正确的运算数据。
-        if getattr(infer_state, "hook", None) is not None:
-            infer_state.hook()
-            infer_state.hook = None
-
-        if getattr(infer_state1, "hook", None) is not None:
-            infer_state1.hook()
-            infer_state1.hook = None
+        infer_state.call_overlap_hook()
+        infer_state1.call_overlap_hook()
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
@@ -911,13 +906,8 @@ class TpPartBaseModel:
             )
 
         # 折叠模式调用完infer_state 上的hook函数后，input_embs 和 input_embs 才具备正确的运算数据。
-        if getattr(infer_state, "hook", None) is not None:
-            infer_state.hook()
-            infer_state.hook = None
-
-        if getattr(infer_state1, "hook", None) is not None:
-            infer_state1.hook()
-            infer_state1.hook = None
+        infer_state.call_overlap_hook()
+        infer_state1.call_overlap_hook()
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         last_input_embs1 = self.post_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)

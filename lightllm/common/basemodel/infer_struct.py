@@ -144,6 +144,18 @@ class InferStateInfo:
             self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
 
+    def call_overlap_hook(self):
+        """
+        overlap_hook 是在 microbatch overlap 的运行模式下，用于调用绑定在inferstate上的hook函数，用于
+        实现折叠通信和计算的效果，普通模式并不调用这个函数。这是个快速调用函数，用于减少重复代码。
+        """
+        if getattr(self, "hook", None) is not None:
+            self.hook()
+            self.hook = None
+        return
+
+    ##### prefill dp balance 相关的函数 #####
+
     def prefill_dp_balance(self, input_ids: torch.Tensor):
         """
         在prefill的时候, 对于处于 dp 模式下的时候，对输入的数据进行重新的调整和分配，降低各个dp处理数据量过于不一致的时候,导致
