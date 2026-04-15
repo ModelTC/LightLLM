@@ -110,6 +110,16 @@ class G_Objs:
             if self.model_created is None:
                 self.model_created = int(time.time())
 
+        if getattr(args, "enable_anthropic_api", False):
+            from ._litellm_shim import ensure_available
+
+            try:
+                ensure_available()
+                logger.info("Anthropic Messages API enabled at POST /v1/messages")
+            except RuntimeError as exc:
+                logger.error("Cannot enable Anthropic API: %s", exc)
+                raise
+
 
 g_objs = G_Objs()
 
@@ -264,6 +274,22 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
     resp = await completions_impl(request, raw_request)
     return resp
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(raw_request: Request) -> Response:
+    if not getattr(g_objs.args, "enable_anthropic_api", False):
+        return create_error_response(
+            HTTPStatus.NOT_FOUND,
+            "Anthropic API is not enabled. Start the server with --enable_anthropic_api.",
+        )
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+    from .api_anthropic import anthropic_messages_impl
+
+    return await anthropic_messages_impl(raw_request)
 
 
 @app.get("/v1/models", response_model=ModelListResponse)
