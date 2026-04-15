@@ -156,13 +156,15 @@ class InferStateInfo:
 
     ##### prefill dp balance 相关的函数 #####
 
-    def prefill_dp_balance(self, input_ids: torch.Tensor):
+    def prepare_prefill_dp_balance(self):
         """
         在prefill的时候, 对于处于 dp 模式下的时候，对输入的数据进行重新的调整和分配，降低各个dp处理数据量过于不一致的时候,导致
         的prefill 推理性能下降
         """
         assert self.is_prefill
         import torch.distributed as dist
+
+        input_ids = self.input_ids  # 原始输入的input_ids
 
         self.need_dp_prefill_balance = True
 
@@ -228,29 +230,48 @@ class InferStateInfo:
         self.dp_input_split_sizes = dp_input_split_sizes
         self.dp_output_split_sizes = dp_output_split_sizes
 
-        new_input_ids = self._all_to_all_balance_get(input_ids)
         if hasattr(self, "position_ids") and self.position_ids is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_ids, 用于减少通信量
             self._unbalance_position_ids = self.position_ids
+            self._balance_position_ids = self._all_to_all_balance_get(self.position_ids)
 
-            self.position_ids = self._all_to_all_balance_get(self.position_ids)
         if hasattr(self, "position_cos") and self.position_cos is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_cos, 用于减少通信量
             self._unbalance_position_cos = self.position_cos
+            self._balance_position_cos = self._all_to_all_balance_get(self.position_cos)
 
-            self.position_cos = self._all_to_all_balance_get(self.position_cos)
         if hasattr(self, "position_sin") and self.position_sin is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_sin, 用于减少通信量
             self._unbalance_position_sin = self.position_sin
-
-            self.position_sin = self._all_to_all_balance_get(self.position_sin)
+            self._balance_position_sin = self._all_to_all_balance_get(self.position_sin)
 
         self._unbalance_input_ids = self.input_ids
-        self.input_ids = new_input_ids
+        self._balance_input_ids = self._all_to_all_balance_get(input_ids)
 
-        return new_input_ids
+        return
+
+    def __change_to_unbalance(self):
+        self.input_ids = self._unbalance_input_ids
+        if hasattr(self, "position_ids"):
+            self.position_ids = self._unbalance_position_ids
+        if hasattr(self, "position_cos"):
+            self.position_cos = self._unbalance_position_cos
+        if hasattr(self, "position_sin"):
+            self.position_sin = self._unbalance_position_sin
+        return
+
+    def __change_to_balance(self):
+        self.input_ids = self._balance_input_ids
+        if hasattr(self, "position_ids"):
+            self.position_ids = self._balance_position_ids
+        if hasattr(self, "position_cos"):
+            self.position_cos = self._balance_position_cos
+        if hasattr(self, "position_sin"):
+            self.position_sin = self._balance_position_sin
+        return
 
     def _all_to_all_balance_get(self, data: torch.Tensor):
+        self.__change_to_balance()
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -279,6 +300,7 @@ class InferStateInfo:
         return dest_data.view(-1, *old_shape[1:])
 
     def _all_to_all_unbalance_get(self, data: torch.Tensor):
+        self.__change_to_unbalance()
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager

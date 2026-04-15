@@ -582,15 +582,13 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-        if not self.args.enable_dp_prefill_balance:
-            input_ids = infer_state.input_ids
-            cuda_input_ids = input_ids
-        else:
-            assert not self.args.enable_prefill_cudagraph, "not support now"
-            input_ids = infer_state.prefill_dp_balance(input_ids=infer_state.input_ids)
-            cuda_input_ids = input_ids
 
-        input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
+        if self.args.enable_dp_prefill_balance:
+            assert not self.args.enable_prefill_cudagraph, "not support now"
+            infer_state.prepare_prefill_dp_balance()
+            input_embs = infer_state._all_to_all_balance_get(data=input_embs)
+
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_tensors = [input_embs]
 
@@ -601,7 +599,7 @@ class TpPartBaseModel:
                 _input_embs = layer.context_forward(_input_embs, infer_state, self.trans_layers_weight[i])
             return [_input_embs]
 
-        handle_token_num = input_ids.shape[0]
+        handle_token_num = infer_state.input_ids.shape[0]
 
         if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
             finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
@@ -636,6 +634,8 @@ class TpPartBaseModel:
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            if infer_state.need_dp_prefill_balance:
+                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
@@ -846,18 +846,19 @@ class TpPartBaseModel:
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
         g_cache_manager.cache_env_in()
+
+        input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
+            infer_state.input_ids, infer_state1.input_ids, infer_state, infer_state1, self.pre_post_weight
+        )
+
         # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
         if get_env_start_args().enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
-            _input_ids = infer_state.prefill_dp_balance(input_ids=infer_state.input_ids)
-            _input_ids1 = infer_state1.prefill_dp_balance(input_ids=infer_state1.input_ids)
-        else:
-            _input_ids = infer_state.input_ids
-            _input_ids1 = infer_state1.input_ids
+            infer_state.prepare_prefill_dp_balance()
+            infer_state1.prepare_prefill_dp_balance()
+            input_embs = infer_state._all_to_all_balance_get(data=input_embs)
+            input_embs1 = infer_state1._all_to_all_balance_get(data=input_embs1)
 
-        input_embs, input_embs1 = self.pre_infer.overlap_tpsp_context_forward(
-            _input_ids, _input_ids1, infer_state, infer_state1, self.pre_post_weight
-        )
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
         input_embs1 = self.pre_infer._tpsp_sp_split(input=input_embs1, infer_state=infer_state1)
 
@@ -887,6 +888,9 @@ class TpPartBaseModel:
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
+            if infer_state.need_dp_prefill_balance:
+                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
+                input_embs1 = infer_state._all_to_all_unbalance_get(data=input_embs1)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 

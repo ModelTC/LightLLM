@@ -170,6 +170,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             if infer_state.need_dp_prefill_balance:
                 q = infer_state._all_to_all_unbalance_get(data=q)
                 cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
+
             return q, cache_kv
         else:
             input = input.view(-1, self.embed_dim_)
@@ -179,11 +180,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
 
             if infer_state.need_dp_prefill_balance:
                 qkv = infer_state._all_to_all_unbalance_get(data=qkv)
-                position_cos = infer_state._unbalance_position_cos
-                position_sin = infer_state._unbalance_position_sin
-            else:
-                position_cos = infer_state.position_cos
-                position_sin = infer_state.position_sin
 
             q, cache_kv = qkv.split([self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1)
             q = layer_weight.q_a_layernorm_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
@@ -197,8 +193,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             rotary_emb_fwd(
                 q_rope,
                 cache_kv[:, :, self.kv_lora_rank :],
-                position_cos,
-                position_sin,
+                infer_state.position_cos,
+                infer_state.position_sin,
             )
             return q, cache_kv
 
