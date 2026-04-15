@@ -683,8 +683,8 @@ class TpPartBaseModel:
         assert self.args.enable_tpsp_mix_mode
         origin_handle_token_num0 = model_input0.total_token_num - model_input0.prefix_total_token_num
         origin_handle_token_num1 = model_input1.total_token_num - model_input1.prefix_total_token_num
-        infer_handle_token_num0 = triton.cdiv(model_input0.total_token_num, self.tp_world_size_) * self.tp_world_size_
-        infer_handle_token_num1 = triton.cdiv(model_input1.total_token_num, self.tp_world_size_) * self.tp_world_size_
+        infer_handle_token_num0 = triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_
+        infer_handle_token_num1 = triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_
         origin_batch_size0 = model_input0.batch_size
         origin_batch_size1 = model_input1.batch_size
 
@@ -848,6 +848,7 @@ class TpPartBaseModel:
         g_cache_manager.cache_env_in()
         # 决定是否进行 dp balance 优化，可以提升dp > 1 时的 prefill 效率。
         if get_env_start_args().enable_dp_prefill_balance:
+            assert not self.args.enable_prefill_cudagraph, "not support now"
             _input_ids = infer_state.prefill_dp_balance(input_ids=infer_state.input_ids)
             _input_ids1 = infer_state1.prefill_dp_balance(input_ids=infer_state1.input_ids)
         else:
