@@ -186,19 +186,24 @@ async def _openai_sse_to_anthropic_events(
         "tool_calls": "tool_use",
     }
 
-    async for raw_line in openai_body_iterator:
-        if not raw_line:
+    async for raw_chunk in openai_body_iterator:
+        if not raw_chunk:
             continue
+        # chat_completions_impl yields str ("data: {...}\n\n"); some callers or
+        # middlewares may hand us bytes. Normalise to str so the splitter below
+        # does not have to branch on type.
+        if isinstance(raw_chunk, (bytes, bytearray)):
+            raw_chunk = raw_chunk.decode("utf-8", errors="replace")
         # A single StreamingResponse chunk may contain multiple SSE lines.
-        for line in raw_line.split(b"\n"):
+        for line in raw_chunk.split("\n"):
             line = line.strip()
-            if not line or not line.startswith(b"data: "):
+            if not line or not line.startswith("data: "):
                 continue
-            payload = line[len(b"data: "):]
-            if payload == b"[DONE]":
+            payload = line[len("data: "):]
+            if payload == "[DONE]":
                 continue
             try:
-                chunk = json.loads(payload.decode("utf-8"))
+                chunk = json.loads(payload)
             except Exception:
                 logger.debug("Skipping non-JSON SSE payload: %r", payload)
                 continue

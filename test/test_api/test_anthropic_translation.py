@@ -221,6 +221,33 @@ def test_stream_bridge_emits_anthropic_event_sequence_text_only():
     assert '"output_tokens"' in joined
 
 
+def test_stream_bridge_accepts_str_iterator():
+    """Regression: chat_completions_impl yields str chunks, not bytes.
+    The bridge must accept either without raising on split()."""
+    from lightllm.server.api_anthropic import _openai_sse_to_anthropic_events
+
+    openai_chunks = [
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n\n',
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: {"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n',
+        "data: [DONE]\n\n",
+    ]
+
+    async def fake_body_iterator():
+        for c in openai_chunks:
+            yield c
+
+    async def collect():
+        return [b.decode("utf-8") async for b in _openai_sse_to_anthropic_events(
+            fake_body_iterator(), requested_model="claude-opus-4-6", message_id="msg_str_test"
+        )]
+
+    joined = "".join(_run(collect()))
+    assert "event: message_start" in joined
+    assert "Hi" in joined
+    assert "event: message_stop" in joined
+
+
 def test_anthropic_to_chat_request_with_tools():
     from lightllm.server.api_anthropic import _anthropic_to_chat_request
 
