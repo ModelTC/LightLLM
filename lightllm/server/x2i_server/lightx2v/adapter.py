@@ -109,6 +109,8 @@ class LightX2VServer:
             # release
             await self.result_socket.send_pyobj(X2ICacheRelease(request_id=param.request_id))
 
+        logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {param}")
+
         if is_t2i:
             self.pipe.runner.set_kvcache(
                 past_kv_cache,

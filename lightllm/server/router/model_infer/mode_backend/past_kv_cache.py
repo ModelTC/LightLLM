@@ -134,6 +134,7 @@ class PastKVCacheModule(object):
             )
             sync_event = torch.cuda.Event()
             sync_event.record()
+            sync_event.wait(g_infer_context.get_overlap_stream())
             # sync_event.synchronize()
             req.past_kv_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             return TransTask(
