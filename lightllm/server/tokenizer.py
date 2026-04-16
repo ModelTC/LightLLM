@@ -91,11 +91,16 @@ def get_tokenizer(
 
     # Qwen-VL family shares a max_pixels clamp helper to keep get_image_token_length
     # in sync with visual_image_max_tokens budget. No-op for non-Qwen-VL tokenizers.
+    # This tokenizer factory is also invoked from startup-time shm size checks
+    # before set_env_start_args runs; treat a missing env as "no budget configured".
     from ..models.qwen2_vl.vision_process import clamp_processor_max_pixels
     from lightllm.utils.envs_utils import get_env_start_args
 
-    _start_args = get_env_start_args()
-    _img_max_tokens = getattr(_start_args, "visual_image_max_tokens", None)
+    try:
+        _start_args = get_env_start_args()
+        _img_max_tokens = getattr(_start_args, "visual_image_max_tokens", None)
+    except KeyError:
+        _img_max_tokens = None
 
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor

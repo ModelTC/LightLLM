@@ -1,10 +1,14 @@
 import importlib.util
+import logging
 import os
+import re
 import unittest
 
-# Load the helper directly from its file so we do not trigger heavy imports in
-# lightllm.models.* (torch, triton kernels, etc.) just to test a pure function.
-_PATH = os.path.normpath(
+
+# Load just the clamp helper's source so we don't drag torch/triton/HF into
+# pytest collection just to test a pure function. Stubbing modules would leak
+# into other tests collected in the same session.
+_VP_PATH = os.path.normpath(
     os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -16,64 +20,13 @@ _PATH = os.path.normpath(
         "vision_process.py",
     )
 )
-
-
-def _load_helper():
-    import sys
-    import types
-
-    # Stub out heavy imports that vision_process.py pulls at module load.
-    # Only the pure helper is under test; nothing below depends on these stubs.
-    for name in ("torch", "numpy", "PIL", "PIL.Image"):
-        if name not in sys.modules:
-            sys.modules[name] = types.ModuleType(name)
-
-    if "torchvision" not in sys.modules:
-        tv = types.ModuleType("torchvision")
-        tv_t = types.ModuleType("torchvision.transforms")
-        tv_tv2 = types.ModuleType("torchvision.transforms.v2")
-        tv_tf = types.ModuleType("torchvision.transforms.v2.functional")
-        sys.modules["torchvision"] = tv
-        sys.modules["torchvision.transforms"] = tv_t
-        sys.modules["torchvision.transforms.v2"] = tv_tv2
-        sys.modules["torchvision.transforms.v2.functional"] = tv_tf
-
-    # The file imports transformers pieces; stub them.
-    if "transformers" not in sys.modules:
-        sys.modules["transformers"] = types.ModuleType("transformers")
-    for sub in (
-        "transformers.image_utils",
-        "transformers.image_processing_utils_fast",
-        "transformers.image_transforms",
-    ):
-        if sub not in sys.modules:
-            sys.modules[sub] = types.ModuleType(sub)
-
-    spec = importlib.util.spec_from_file_location("_vp_under_test", _PATH)
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        # If stubs aren't enough to import the whole file, fall back to
-        # reading the function source and exec'ing it directly.
-        with open(_PATH, "r") as f:
-            src = f.read()
-        start = src.index("def clamp_processor_max_pixels")
-        # Find the end — the next "def " at column 0.
-        tail = src[start:]
-        next_def = tail.find("\ndef ", 1)
-        fn_src = tail[:next_def] if next_def != -1 else tail
-        ns = {}
-        # Substitute logger with a noop.
-        import logging
-
-        ns["logger"] = logging.getLogger("clamp_test")
-        exec("from typing import Optional\n" + fn_src, ns)
-        return ns["clamp_processor_max_pixels"]
-    return mod.clamp_processor_max_pixels
-
-
-clamp_processor_max_pixels = _load_helper()
+with open(_VP_PATH, "r") as _f:
+    _src = _f.read()
+_match = re.search(r"^def clamp_processor_max_pixels\b.*?(?=^def |\Z)", _src, re.DOTALL | re.MULTILINE)
+assert _match, "clamp_processor_max_pixels not found in vision_process.py"
+_ns = {"logger": logging.getLogger("clamp_test")}
+exec("from typing import Optional\n" + _match.group(0), _ns)
+clamp_processor_max_pixels = _ns["clamp_processor_max_pixels"]
 
 
 class _FakeProcessor:
