@@ -135,11 +135,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mem_fraction",
         type=float,
-        default=1.0,
+        default=0.95,
         help=(
-            "Optional safety multiplier applied on top of the auto-profiled "
-            "KV cache budget. Default 1.0 means auto-profile uses the full "
-            "measured headroom. Set <1.0 (e.g., 0.95) as paranoia headroom. "
+            "Safety multiplier applied on top of the auto-profiled KV cache "
+            "budget. Default 0.95 reserves 5%% extra headroom for per-request "
+            "spikes and allocator fragmentation the stress test cannot cover. "
+            "Set 1.0 to use the full measured budget (aggressive). "
             "Ignored when --max_total_token_num is set explicitly."
         ),
     )
