@@ -206,13 +206,18 @@ class MambaCacheManager:
                 f"you can add `--disable_dynamic_prompt_cache` to avoid this error.",
             )
             return
-        from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
+        from lightllm.utils.profile_max_tokens import get_available_gpu_memory
         import torch.distributed as dist
 
-        mem_fraction = start_args.mem_fraction
         world_size = dist.get_world_size()
-        total_memory = get_total_gpu_memory()
-        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
+        # Do NOT subtract `total * (1 - mem_fraction)` here. Under the
+        # auto-profile design, the mem_fraction safety margin applies only
+        # to the KV cache budget in Phase 2, and the 256 MB LLM-side canary
+        # absorbs allocator jitter. Subtracting again here would double-count
+        # the safety margin and starve mamba on memory-tight configurations
+        # (e.g. Qwen3.5-122B on 80 GB cards where weights alone take ~60 GB
+        # per TP rank).
+        available_memory = get_available_gpu_memory(world_size)
         conv_cell_size = (
             self.layer_num
             * self.conv_dim
