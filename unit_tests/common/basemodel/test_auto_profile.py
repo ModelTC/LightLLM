@@ -12,15 +12,16 @@ from unittest import mock
 
 
 class _StubStartArgs:
-    def __init__(self, graph_max_batch_size, batch_max_tokens):
+    def __init__(self, graph_max_batch_size, batch_max_tokens, max_req_total_len=2048):
         self.graph_max_batch_size = graph_max_batch_size
         self.batch_max_tokens = batch_max_tokens
+        self.max_req_total_len = max_req_total_len
 
 
 @pytest.fixture
 def stub_env_start_args(monkeypatch):
-    def _install(graph_max_batch_size, batch_max_tokens):
-        stub = _StubStartArgs(graph_max_batch_size, batch_max_tokens)
+    def _install(graph_max_batch_size, batch_max_tokens, max_req_total_len=2048):
+        stub = _StubStartArgs(graph_max_batch_size, batch_max_tokens, max_req_total_len)
         monkeypatch.setattr(
             "lightllm.utils.envs_utils.get_env_start_args",
             lambda: stub,
@@ -54,8 +55,8 @@ def _make_bare_mem_manager():
 
 
 def test_profile_size_probe_formula_large_bmt(stub_env_start_args):
-    """Probe size = bmt + gmbs when that exceeds the 8192 floor."""
-    stub_env_start_args(graph_max_batch_size=128, batch_max_tokens=16384)
+    """Probe size = bmt + gmbs when bmt >= max_req_total_len and exceeds the floor."""
+    stub_env_start_args(graph_max_batch_size=128, batch_max_tokens=16384, max_req_total_len=16384)
     mgr = _make_bare_mem_manager()
     mgr.profile_size(mem_fraction=1.0)
     assert mgr.size == 16384 + 128
@@ -63,9 +64,19 @@ def test_profile_size_probe_formula_large_bmt(stub_env_start_args):
     assert mgr._mem_fraction == 1.0
 
 
+def test_profile_size_probe_formula_long_context(stub_env_start_args):
+    """Probe size = max_req_total_len + gmbs when max_req_total_len > bmt
+    (e.g. chunked prefill where bmt=4096 but requests can be up to 262144)."""
+    stub_env_start_args(graph_max_batch_size=128, batch_max_tokens=4096, max_req_total_len=262144)
+    mgr = _make_bare_mem_manager()
+    mgr.profile_size(mem_fraction=1.0)
+    assert mgr.size == 262144 + 128
+    assert mgr._probe_tokens == 262144 + 128
+
+
 def test_profile_size_probe_formula_tiny_config(stub_env_start_args):
-    """Probe size floors to 8192 when bmt+gmbs is smaller."""
-    stub_env_start_args(graph_max_batch_size=1, batch_max_tokens=128)
+    """Probe size floors to 8192 when bmt+gmbs and max_req_total_len+gmbs both smaller."""
+    stub_env_start_args(graph_max_batch_size=1, batch_max_tokens=128, max_req_total_len=1024)
     mgr = _make_bare_mem_manager()
     mgr.profile_size(mem_fraction=1.0)
     assert mgr.size == 8192
