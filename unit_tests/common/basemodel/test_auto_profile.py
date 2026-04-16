@@ -53,18 +53,18 @@ def _make_bare_mem_manager():
     return mgr
 
 
-def test_profile_size_probe_formula_graph_heavy(stub_env_start_args):
-    """Probe size = gmbs * (bmt + 256) when that exceeds the 8192 floor."""
-    stub_env_start_args(graph_max_batch_size=64, batch_max_tokens=4096)
+def test_profile_size_probe_formula_large_bmt(stub_env_start_args):
+    """Probe size = bmt + gmbs when that exceeds the 8192 floor."""
+    stub_env_start_args(graph_max_batch_size=128, batch_max_tokens=16384)
     mgr = _make_bare_mem_manager()
     mgr.profile_size(mem_fraction=1.0)
-    assert mgr.size == 64 * (4096 + 256)
-    assert mgr._probe_tokens == 64 * (4096 + 256)
+    assert mgr.size == 16384 + 128
+    assert mgr._probe_tokens == 16384 + 128
     assert mgr._mem_fraction == 1.0
 
 
 def test_profile_size_probe_formula_tiny_config(stub_env_start_args):
-    """Probe size floors to 8192 when gmbs*(bmt+256) is smaller."""
+    """Probe size floors to 8192 when bmt+gmbs is smaller."""
     stub_env_start_args(graph_max_batch_size=1, batch_max_tokens=128)
     mgr = _make_bare_mem_manager()
     mgr.profile_size(mem_fraction=1.0)

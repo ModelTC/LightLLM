@@ -106,7 +106,11 @@ class MemoryManager:
         start_args = get_env_start_args()
         gmbs = start_args.graph_max_batch_size
         bmt = start_args.batch_max_tokens
-        self._probe_tokens = max(gmbs * (bmt + 256), 8192)
+        # Probe needs enough KV for: one full-length prefill (bmt slots)
+        # + one decode batch (gmbs slots, 1 token each). NOT gmbs * bmt —
+        # that would be the full production KV which defeats the purpose of
+        # the probe (measuring non-KV overhead with a small KV allocation).
+        self._probe_tokens = max(bmt + gmbs, 8192)
         self.size = self._probe_tokens
         self._mem_fraction = mem_fraction  # redundant with __init__; kept so profile_size is readable in isolation
         logger.info(
