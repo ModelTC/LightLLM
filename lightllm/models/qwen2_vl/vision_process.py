@@ -37,22 +37,34 @@ def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_nam
     return a value above the budget, so request-level rejection becomes a
     defensive no-op in practice.
 
-    No-op when ``visual_image_max_tokens`` is None or the processor already
-    enforces a tighter bound.
+    No-op when ``visual_image_max_tokens`` is None, when the processor lacks the
+    expected ``patch_size``/``merge_size`` attributes (non-Qwen-VL processor), or
+    when the processor already enforces a tighter bound. When the processor's
+    ``max_pixels`` is unset (``None``), it is populated with the derived budget.
     """
     if visual_image_max_tokens is None:
         return
-    unit = processor.patch_size * processor.merge_size
+    patch_size = getattr(processor, "patch_size", None)
+    merge_size = getattr(processor, "merge_size", None)
+    if patch_size is None or merge_size is None:
+        logger.warning(
+            f"{processor_name or 'processor'}: skipping max_pixels clamp — "
+            f"processor has no patch_size/merge_size (patch_size={patch_size}, "
+            f"merge_size={merge_size})"
+        )
+        return
+    unit = patch_size * merge_size
     allowed_max_pixels = visual_image_max_tokens * unit * unit
     if allowed_max_pixels < unit * unit:
         raise ValueError(
             f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
             f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
         )
-    if allowed_max_pixels < processor.max_pixels:
+    current = getattr(processor, "max_pixels", None)
+    if current is None or allowed_max_pixels < current:
         logger.info(
-            f"{processor_name or 'processor'}: clamping max_pixels "
-            f"{processor.max_pixels} -> {allowed_max_pixels} "
+            f"{processor_name or 'processor'}: setting max_pixels "
+            f"{current} -> {allowed_max_pixels} "
             f"(visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
         )
         processor.max_pixels = allowed_max_pixels

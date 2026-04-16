@@ -118,6 +118,22 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         clamp_processor_max_pixels(p, visual_image_max_tokens=1000)
         self.assertEqual(p.max_pixels, 1000 * 16 * 16)
 
+    def test_none_max_pixels_gets_populated(self):
+        # HF-loaded processors can have max_pixels=None; treat as "unset, populate".
+        p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
+        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        self.assertEqual(p.max_pixels, 4096 * 28 * 28)
+
+    def test_missing_patch_or_merge_size_is_noop(self):
+        # A non-Qwen-VL processor may lack these attributes entirely.
+        p = _FakeProcessor(patch_size=None, merge_size=2, max_pixels=1000)
+        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        self.assertEqual(p.max_pixels, 1000)
+
+        p2 = _FakeProcessor(patch_size=14, merge_size=None, max_pixels=1000)
+        clamp_processor_max_pixels(p2, visual_image_max_tokens=4096)
+        self.assertEqual(p2.max_pixels, 1000)
+
 
 if __name__ == "__main__":
     unittest.main()
