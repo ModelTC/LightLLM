@@ -4,6 +4,9 @@ from typing import Tuple
 
 LIGHTLLM_TOKEN_MAX_BYTES = int(os.getenv("LIGHTLLM_TOKEN_MAX_BYTES", 1280))
 LIGHTLLM_OUT_TOKEN_QUEUE_SIZE = int(os.getenv("LIGHTLLM_OUT_TOKEN_QUEUE_SIZE", 8))
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class QueueItem(ctypes.Structure):
@@ -24,9 +27,18 @@ class QueueItem(ctypes.Structure):
 
     def set(self, token_str: str, src_index: int, special: bool, count_output_tokens: int):
         str_bytes = token_str.encode("utf-8")
-        assert (
-            len(str_bytes) <= LIGHTLLM_TOKEN_MAX_BYTES
-        ), f"Token string {len(str_bytes)} exceeds maximum length of {LIGHTLLM_TOKEN_MAX_BYTES} bytes."
+        if len(str_bytes) > LIGHTLLM_TOKEN_MAX_BYTES:
+            logger.error(
+                "Token string exceeds max bytes: bytes=%d limit=%d src_index=%d count_output_tokens=%d preview=%s",
+                len(str_bytes),
+                LIGHTLLM_TOKEN_MAX_BYTES,
+                src_index,
+                count_output_tokens,
+                token_str,
+            )
+            raise ValueError(
+                f"Token string {len(str_bytes)} exceeds maximum length of {LIGHTLLM_TOKEN_MAX_BYTES} bytes."
+            )
         ctypes.memmove(self.data, str_bytes, len(str_bytes))
         self.data_len = len(str_bytes)
         self.src_index = src_index
