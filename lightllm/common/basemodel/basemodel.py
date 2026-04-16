@@ -890,7 +890,7 @@ class TpPartBaseModel:
             input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-                input_embs1 = infer_state._all_to_all_unbalance_get(data=input_embs1)
+                input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
