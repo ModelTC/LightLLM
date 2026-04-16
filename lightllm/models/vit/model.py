@@ -58,10 +58,6 @@ class VisionTransformer:
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
-        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-        if disable_check_max_len_infer:
-            return
-
         try:
             dummy_images = torch.randn(
                 (self.MAX_PATH_NUM * self.max_batch_size, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type

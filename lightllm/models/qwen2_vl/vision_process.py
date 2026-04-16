@@ -47,10 +47,6 @@ def qwen_vl_check_max_len_infer(model, max_batch_size):
     deliberately NOT calling torch.cuda.empty_cache() — the Python refs
     are dropped, but the driver view continues to see the reservation.
     """
-    disable_check = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-    if disable_check:
-        return
-
     unit = model.patch_size * model.spatial_merge_size
     max_pixels = model.processor.max_pixels
     max_patches = max_pixels // (unit * unit)

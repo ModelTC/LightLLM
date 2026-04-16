@@ -946,11 +946,6 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
-        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-        if disable_check_max_len_infer:
-            logger.info("disable_check_max_len_infer is true")
-            return
-
         # 做一次 同步
         torch.distributed.barrier()
 
@@ -1085,10 +1080,6 @@ class TpPartBaseModel:
         skipping it under-measures the peak by exactly the amount that causes
         the "first decode batch after warmup OOMs" bug class.
         """
-        disable_check = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-        if disable_check:
-            return
-
         torch.distributed.barrier()
 
         batch_size = self.graph_max_batch_size

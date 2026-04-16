@@ -135,9 +135,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mem_fraction",
         type=float,
-        default=0.9,
-        help="""Memory usage ratio, default is 0.9, you can specify a smaller value if OOM occurs at runtime.
-        If max_total_token_num is not specified, it will be calculated automatically based on this value.""",
+        default=1.0,
+        help=(
+            "Optional safety multiplier applied on top of the auto-profiled "
+            "KV cache budget. Default 1.0 means auto-profile uses the full "
+            "measured headroom. Set <1.0 (e.g., 0.95) as paranoia headroom. "
+            "Ignored when --max_total_token_num is set explicitly."
+        ),
     )
     parser.add_argument(
         "--batch_max_tokens",
