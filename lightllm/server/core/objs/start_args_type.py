@@ -107,6 +107,8 @@ class StartArgs:
     push_interval: int = field(default=10)
     visual_node_id: int = field(default=None)
     visual_infer_batch_size: int = field(default=None)
+    visual_batch_max_tokens: Optional[int] = field(default=None)
+    visual_image_max_tokens: Optional[int] = field(default=None)
     visual_send_batch_size: int = field(default=1)
     visual_gpu_ids: List[int] = field(default_factory=lambda: [0])
     visual_tp: int = field(default=1)

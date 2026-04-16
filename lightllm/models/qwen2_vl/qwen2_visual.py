@@ -33,7 +33,8 @@ from transformers.activations import ACT2FN
 from safetensors import safe_open
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.visualserver import get_vit_attn_backend
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor, clamp_processor_max_pixels
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
 
@@ -244,6 +245,9 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         with open(processor_config_path, "r") as f:
             processor_config_dict = json.load(f)
         self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+        clamp_processor_max_pixels(
+            self.processor, get_env_start_args().visual_image_max_tokens, processor_name="qwen2_vl-vit"
+        )
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:

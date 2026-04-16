@@ -222,3 +222,12 @@ Hardware Requirements
 - ``--tp 8`` required to fit model weights across GPUs
 - Reduce ``--max_req_total_len`` or ``--graph_max_batch_size`` if encountering OOM errors
 - Use ``--data_type fp8_e4m3`` for FP8 KV quantization to further reduce memory pressure
+- For multimodal OOMs driven by dynamic-resolution images or video, cap the
+  per-step ViT workload with ``--visual_batch_max_tokens`` (e.g. ``16384``).
+  This bounds peak ViT memory the same way ``--batch_max_tokens`` bounds the
+  LLM prefill. Setting this alone also derives a default single-image cap
+  (``--visual_image_max_tokens`` is implicitly set to the same value), which
+  rejects any single image that couldn't fit in one batch — closing the "first
+  image always admitted" deadlock-avoidance hole. Override
+  ``--visual_image_max_tokens`` separately only if you need a stricter single-
+  image limit.

@@ -27,6 +27,37 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_name: str = "") -> None:
+    """Clamp a Qwen-VL style image processor's ``max_pixels`` so that even a
+    max-sized image produces ``token_num <= visual_image_max_tokens``.
+
+    Reuses the processor's built-in ``smart_resize`` + ``max_pixels`` mechanism —
+    just tightens ``max_pixels`` so the existing resize path fits the server-wide
+    per-image token budget. After the clamp, ``get_image_token_length`` cannot
+    return a value above the budget, so request-level rejection becomes a
+    defensive no-op in practice.
+
+    No-op when ``visual_image_max_tokens`` is None or the processor already
+    enforces a tighter bound.
+    """
+    if visual_image_max_tokens is None:
+        return
+    unit = processor.patch_size * processor.merge_size
+    allowed_max_pixels = visual_image_max_tokens * unit * unit
+    if allowed_max_pixels < unit * unit:
+        raise ValueError(
+            f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
+            f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
+        )
+    if allowed_max_pixels < processor.max_pixels:
+        logger.info(
+            f"{processor_name or 'processor'}: clamping max_pixels "
+            f"{processor.max_pixels} -> {allowed_max_pixels} "
+            f"(visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
+        )
+        processor.max_pixels = allowed_max_pixels
+
+
 IMAGE_FACTOR = 28
 MIN_PIXELS = 4 * 28 * 28
 MAX_PIXELS = 16384 * 28 * 28

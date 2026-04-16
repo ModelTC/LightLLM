@@ -89,10 +89,19 @@ def get_tokenizer(
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
 
+    # Qwen-VL family shares a max_pixels clamp helper to keep get_image_token_length
+    # in sync with visual_image_max_tokens budget. No-op for non-Qwen-VL tokenizers.
+    from ..models.qwen2_vl.vision_process import clamp_processor_max_pixels
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    _start_args = get_env_start_args()
+    _img_max_tokens = getattr(_start_args, "visual_image_max_tokens", None)
+
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor
 
         image_processor = Qwen2VLImageProcessor.from_pretrained(tokenizer_name)
+        clamp_processor_max_pixels(image_processor, _img_max_tokens, processor_name="tarsier2-tokenizer")
         tokenizer = Tarsier2Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_type == "llava" or model_type == "internlmxcomposer2":
         tokenizer = LlavaTokenizer(tokenizer, model_cfg)
@@ -102,6 +111,7 @@ def get_tokenizer(
         from transformers import AutoProcessor
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)
+        clamp_processor_max_pixels(processor.image_processor, _img_max_tokens, processor_name=f"{model_type}-tokenizer")
         tokenizer = QWen2VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
@@ -109,6 +119,7 @@ def get_tokenizer(
         from transformers import AutoProcessor
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)
+        clamp_processor_max_pixels(processor.image_processor, _img_max_tokens, processor_name=f"{model_type}-tokenizer")
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
@@ -117,6 +128,7 @@ def get_tokenizer(
         from ..models.qwen3_5.model import QWen3_5Tokenizer
 
         processor = AutoProcessor.from_pretrained(tokenizer_name)
+        clamp_processor_max_pixels(processor.image_processor, _img_max_tokens, processor_name=f"{model_type}-tokenizer")
         tokenizer = QWen3_5Tokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
@@ -125,6 +137,7 @@ def get_tokenizer(
 
         model_cfg = model_cfg["thinker_config"]
         processor = AutoProcessor.from_pretrained(tokenizer_name)
+        clamp_processor_max_pixels(processor.image_processor, _img_max_tokens, processor_name="qwen3-omni-tokenizer")
         tokenizer = QWen3OmniTokenizer(tokenizer, processor=processor, model_cfg=model_cfg)
     elif model_type == "internvl_chat":
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)

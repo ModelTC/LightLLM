@@ -261,6 +261,35 @@ Multimodal Parameters
 
     Number of images processed in each inference batch, default is ``1``
 
+.. option:: --visual_batch_max_tokens
+
+    Per-step ViT admission budget, measured in image output tokens (post
+    spatial_merge). The multimodal analogue of ``--batch_max_tokens``: the
+    ViT scheduler stops adding images to the current batch once their
+    cumulative ``token_num`` would exceed this value. Useful for bounding
+    peak ViT memory on dynamic-resolution models (Qwen2.5/3/3.5-VL, etc.)
+    where one 4K image or long video can contain more patches than many
+    small images combined. One image is always admitted per step to avoid
+    deadlock when a single request is larger than the budget. Default is
+    ``None`` (disabled; only ``--visual_infer_batch_size`` applies).
+
+.. option:: --visual_image_max_tokens
+
+    Per-image hard cap, measured in image output tokens (post spatial_merge).
+    The multimodal analogue of ``--max_req_total_len``: a single image whose
+    ``token_num`` exceeds this value is rejected with a ``ValueError`` before
+    reaching the ViT. Pairs with ``--visual_batch_max_tokens`` to close the
+    "first image always admitted" hole — without this cap, one 4K image can
+    still OOM the ViT on its own.
+
+    If not specified, defaults to ``--visual_batch_max_tokens`` (single image
+    must fit in one batch; this is the implicit precondition of the first-image-
+    always-admitted rule). Set explicitly to a smaller value only if your ViT
+    cannot handle a batch-sized image alone. Must satisfy
+    ``visual_image_max_tokens <= visual_batch_max_tokens``.
+    Default is ``None`` (disabled when ``--visual_batch_max_tokens`` is also
+    unset).
+
 .. option:: --visual_gpu_ids
 
     List of GPU IDs to use, e.g., 0 1 2
