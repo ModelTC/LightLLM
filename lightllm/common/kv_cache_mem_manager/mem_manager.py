@@ -108,7 +108,7 @@ class MemoryManager:
         bmt = start_args.batch_max_tokens
         self._probe_tokens = max(gmbs * (bmt + 256), 8192)
         self.size = self._probe_tokens
-        self._mem_fraction = mem_fraction
+        self._mem_fraction = mem_fraction  # redundant with __init__; kept so profile_size is readable in isolation
         logger.info(
             f"auto-profile phase=probe probe_tokens={self._probe_tokens} "
             f"(gmbs={gmbs}, bmt={bmt}, mem_fraction={mem_fraction})"
@@ -140,6 +140,13 @@ class MemoryManager:
         cell_size = self.get_cell_size()
         probe_kv_bytes = self._probe_tokens * cell_size
         non_kv_overhead = peak_reserved_bytes - probe_kv_bytes
+        if non_kv_overhead < 0:
+            logger.warning(
+                f"auto-profile: peak_reserved ({peak_reserved_bytes}) < probe_kv_bytes ({probe_kv_bytes}). "
+                f"This suggests the allocator released probe blocks before measurement. "
+                f"Clamping non_kv_overhead to 0."
+            )
+            non_kv_overhead = 0
         canary_bytes = 256 * 1024 * 1024
 
         try:

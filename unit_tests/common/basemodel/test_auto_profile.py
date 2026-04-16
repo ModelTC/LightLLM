@@ -8,6 +8,7 @@ unit_tests/common/basemodel/ at the time of writing — the other tests
 in that directory are triton kernel tests that require a real GPU.
 """
 import pytest
+from unittest import mock
 
 
 class _StubStartArgs:
@@ -191,3 +192,90 @@ def test_profile_size_target_mem_fraction_multiplier(monkeypatch, stub_env_start
     # Paranoid target is 95% of default target (± rounding).
     ratio = target_paranoid / target_default
     assert 0.94 < ratio <= 0.95
+
+
+def test_auto_profile_retry_budget_respects_cap(monkeypatch):
+    """The rebuild/validate loop retries at most 3 times (4 total attempts)
+    before raising a multi-knob diagnostic exception.
+    """
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.mem_manager = mock.MagicMock()
+    model.mem_manager._probe_tokens = 8192
+    model.mem_manager.profile_size_target.return_value = 100000
+    model.mem_manager.get_cell_size.return_value = 64
+    model.max_total_token_num = None
+
+    # Stub teardown / re-init / graph re-capture so they succeed without CUDA.
+    model._teardown_graphs_and_kv = mock.MagicMock()
+    model._init_mem_manager = mock.MagicMock(side_effect=lambda: setattr(model, "mem_manager", model.mem_manager))
+    model._init_kv_move_buffer = mock.MagicMock()
+    model._check_mem_size = mock.MagicMock()
+    model._init_req_manager = mock.MagicMock()
+    model._init_cudagraph = mock.MagicMock()
+    model._init_prefill_cuda_graph = mock.MagicMock()
+
+    # Always-OOM stress so we exhaust the retry budget.
+    model._check_max_len_infer = mock.MagicMock(side_effect=RuntimeError("CUDA out of memory (synthetic)"))
+    model._check_decode_infer = mock.MagicMock()
+
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 1024 ** 3)
+    # memory_reserved is called twice per attempt: before and after empty_cache.
+    # We need (before - after) >= probe_kv_bytes (8192 * 64 = 524288) so the
+    # teardown-leak guard on attempt 1 is satisfied.
+    _mem_reserved_calls = [0]
+
+    def _memory_reserved():
+        _mem_reserved_calls[0] += 1
+        # Odd calls (before empty_cache) return 1 GB; even calls (after) return 0.
+        return 1024 ** 3 if _mem_reserved_calls[0] % 2 == 1 else 0
+
+    monkeypatch.setattr(torch.cuda, "memory_reserved", _memory_reserved)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda dev: mock.Mock(total_memory=80 * 1024 ** 3))
+    monkeypatch.setattr(torch, "empty", lambda *a, **kw: mock.MagicMock())
+
+    with pytest.raises(Exception) as exc_info:
+        model._auto_profile_rebuild_and_validate()
+
+    msg = str(exc_info.value)
+    assert "Auto-profile failed after 4 attempts" in msg
+    # Every knob the diagnostic promises must be named.
+    assert "--batch_max_tokens" in msg
+    assert "--graph_max_batch_size" in msg
+    assert "--visual_infer_batch_size" in msg
+    assert "--max_total_token_num" in msg
+    assert "--mem_fraction" in msg
+    # Confirm each attempt actually ran the stress
+    assert model._check_max_len_infer.call_count == 4
+
+
+def test_auto_profile_explicit_max_total_token_num_skips_rebuild(monkeypatch):
+    """If _probe_tokens is None (explicit --max_total_token_num path),
+    the rebuild loop is a no-op beyond one empty_cache call.
+    """
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.mem_manager = mock.MagicMock()
+    model.mem_manager._probe_tokens = None  # escape hatch
+
+    model._teardown_graphs_and_kv = mock.MagicMock()
+    model._init_mem_manager = mock.MagicMock()
+    model._check_max_len_infer = mock.MagicMock()
+    model._check_decode_infer = mock.MagicMock()
+
+    import torch
+
+    empty_cache_calls = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: empty_cache_calls.append(1))
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 1)
+
+    model._auto_profile_rebuild_and_validate()
+
+    assert empty_cache_calls == [1]  # exactly one call
+    assert model._teardown_graphs_and_kv.call_count == 0
+    assert model._init_mem_manager.call_count == 0

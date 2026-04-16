@@ -4,6 +4,7 @@ import os
 import gc
 import copy
 import json
+import time
 import torch
 import torch.nn.functional as F
 import triton
@@ -135,8 +136,7 @@ class TpPartBaseModel:
         self._init_prefill_cuda_graph()
         self._check_max_len_infer()
         self._check_decode_infer()
-        self._auto_profile_log_only_phase2()
-        torch.cuda.empty_cache()
+        self._auto_profile_rebuild_and_validate()
         set_model_init_status(True)
         return
 
@@ -1131,34 +1131,155 @@ class TpPartBaseModel:
             raise Exception(exception_str)
         return
 
-    def _auto_profile_log_only_phase2(self):
-        """Commit 2 transitional helper — computes the auto-profile target from
-        the just-measured stress peak and logs the delta versus what the static
-        mem_fraction path would have picked. Does NOT act on the computed
-        value; the server still runs with the probe-sized KV. Commit 3 replaces
-        this helper with the real Phase 3 rebuild.
+    def _teardown_graphs_and_kv(self):
+        """Phase 3 teardown: drop references to the probe's kv_buffer and
+        all captured CUDA graphs so torch.cuda.empty_cache() can actually
+        return the blocks to the driver.
+
+        Order matters — graphs hold tensor pointers into kv_buffer and must
+        go first, then req_manager (which references mem_manager), then
+        mem_manager itself. See spec §6.5 for the rationale.
+        """
+        if hasattr(self, "mem_manager") and self.mem_manager is not None:
+            try:
+                self.mem_manager.free_all()
+            except Exception:
+                pass
+
+        for attr in ("graph", "prefill_graph", "prefill_cuda_graph"):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+        # MTP variants (if present)
+        for attr in ("graph1", "prefill_graph1"):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+        if hasattr(self, "req_manager"):
+            self.req_manager = None
+        if hasattr(self, "mem_manager"):
+            self.mem_manager = None
+
+    def _auto_profile_rebuild_and_validate(self):
+        """Phases 2-4 of the auto-profile loop.
+
+        Runs after Phase 1 (__init__ through _check_decode_infer). Measures
+        the probe's peak, computes the target KV size, tears down the probe's
+        graphs and mem_manager, calls torch.cuda.empty_cache() once, re-inits
+        everything at the target size, re-captures graphs, allocates the 256 MB
+        canary, and validates by re-running the stress forwards.
+
+        On validation OOM, shrinks target_tokens by 5% and loops. Retry budget:
+        3 retries (4 total attempts). After that, raises with a multi-knob
+        diagnostic (see spec §7.2).
+
+        If --max_total_token_num was set explicitly (probe path was skipped),
+        this method is a pure no-op beyond a single empty_cache call to match
+        the pre-auto-profile behavior.
         """
         if self.mem_manager._probe_tokens is None:
             logger.info("auto-profile phase=skip reason=explicit_max_total_token_num")
+            torch.cuda.empty_cache()
             return
+
         peak_reserved = torch.cuda.max_memory_reserved()
-        try:
-            target_tokens = self.mem_manager.profile_size_target(peak_reserved)
-        except Exception as e:
-            logger.warning(f"auto-profile phase=measure FAILED: {e}")
-            return
+        initial_target_tokens = self.mem_manager.profile_size_target(peak_reserved)
+        target_tokens = initial_target_tokens
         probe_tokens = self.mem_manager._probe_tokens
-        cell_size = self.mem_manager.get_cell_size()
-        delta_tokens = target_tokens - probe_tokens
-        delta_gb = delta_tokens * cell_size / 1024 ** 3
-        logger.info(
-            f"auto-profile phase=log_only_dry_run "
-            f"probe_tokens={probe_tokens} "
-            f"target_tokens={target_tokens} "
-            f"delta_tokens={delta_tokens} "
-            f"delta_gb={delta_gb:.2f} "
-            f"(NOTE: Commit 2 does not act on this — the server still runs "
-            f"with probe-sized KV)"
+        probe_kv_bytes = probe_tokens * self.mem_manager.get_cell_size()
+
+        RETRY_BUDGET = 3
+        SHRINK_RATIO = 0.95
+        CANARY_BYTES = 256 * 1024 * 1024
+
+        attempt = 0
+        last_exc = None
+        while attempt <= RETRY_BUDGET:
+            attempt += 1
+            t0 = time.time()
+            try:
+                # Phase 3: tear down probe graphs and mem_manager
+                self._teardown_graphs_and_kv()
+                reserved_before_empty = torch.cuda.memory_reserved()
+                torch.cuda.empty_cache()
+                reserved_after_empty = torch.cuda.memory_reserved()
+                released = reserved_before_empty - reserved_after_empty
+
+                # Sanity: we should have released at least the probe kv_buffer.
+                # The threshold is probe_kv_bytes (strict, per spec §6.5 step 6)
+                # because the probe's kv_buffer is a single contiguous allocation
+                # and PyTorch's caching allocator returns whole segments on empty_cache.
+                if attempt == 1 and released < probe_kv_bytes:
+                    raise RuntimeError(
+                        f"auto-profile phase=rebuild TEARDOWN LEAK: "
+                        f"empty_cache() only released {released / 1024 ** 3:.2f} GB "
+                        f"but probe kv_buffer alone is {probe_kv_bytes / 1024 ** 3:.2f} GB. "
+                        f"Some Python reference to the probe kv_buffer or a captured "
+                        f"CUDA graph was not dropped by _teardown_graphs_and_kv. "
+                        f"Investigate which attribute is leaking."
+                    )
+
+                # Phase 3: re-init everything at target_tokens
+                self.max_total_token_num = target_tokens
+                self._init_mem_manager()
+                self._init_kv_move_buffer()
+                self._check_mem_size()
+                self._init_req_manager()
+                self._init_cudagraph()
+                self._init_prefill_cuda_graph()
+
+                # Canary
+                self._oom_canary = torch.empty(CANARY_BYTES, dtype=torch.uint8, device="cuda")
+
+                logger.info(
+                    f"auto-profile phase=rebuild attempt={attempt} "
+                    f"elapsed_sec={time.time() - t0:.2f} "
+                    f"new_kv_tokens={target_tokens}"
+                )
+
+                # Phase 4: validate
+                t1 = time.time()
+                self._check_max_len_infer()
+                self._check_decode_infer()
+                logger.info(
+                    f"auto-profile phase=validate attempt={attempt} " f"elapsed_sec={time.time() - t1:.2f} result=ok"
+                )
+                return  # success
+            except (RuntimeError, torch.cuda.OutOfMemoryError, torch.OutOfMemoryError) as e:
+                last_exc = e
+                logger.warning(
+                    f"auto-profile phase=validate attempt={attempt} "
+                    f"result={'retry' if attempt <= RETRY_BUDGET else 'fail'} "
+                    f"error={type(e).__name__}: {e}"
+                )
+                if attempt > RETRY_BUDGET:
+                    break
+                target_tokens = int(target_tokens * SHRINK_RATIO)
+
+        # All retries exhausted — raise a multi-knob diagnostic
+        total_memory_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        cell_size = None
+        try:
+            cell_size = self.mem_manager.get_cell_size()
+        except Exception:
+            pass
+        initial_gb = initial_target_tokens * (cell_size or 0) / 1024 ** 3
+        final_gb = target_tokens * (cell_size or 0) / 1024 ** 3
+        raise Exception(
+            f"Auto-profile failed after {attempt} attempts.\n"
+            f"Initial target:      {initial_target_tokens} tokens ({initial_gb:.2f} GB KV)\n"
+            f"Final attempted:     {target_tokens} tokens ({final_gb:.2f} GB KV)\n"
+            f"Measured peak:       {peak_reserved / 1024 ** 3:.2f} GB\n"
+            f"Total GPU memory:    {total_memory_gb:.2f} GB\n"
+            f"Canary reserve:      {CANARY_BYTES / 1024 ** 3:.2f} GB\n"
+            f"\n"
+            f"The configured load does not fit on this device. Try:\n"
+            f"  1. --batch_max_tokens: reduce to lower prefill activation peak\n"
+            f"  2. --graph_max_batch_size: reduce to lower decode activation peak\n"
+            f"  3. --visual_infer_batch_size: reduce to lower ViT pinned footprint\n"
+            f"  4. --max_total_token_num: pin a specific KV size (skips auto-profile)\n"
+            f"  5. --mem_fraction: as a last resort, set < 1.0 to add extra safety margin\n"
+            f"\n"
+            f"Last error: {type(last_exc).__name__}: {last_exc}"
         )
 
     def autotune_layers(self):
