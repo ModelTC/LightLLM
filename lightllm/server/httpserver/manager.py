@@ -35,6 +35,7 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
+from lightllm.utils.multimodal_utils import enforce_image_token_budget
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -179,11 +180,12 @@ class HttpServerManager:
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             items, md5sums, tokens_nums, datas = [], [], [], []
-            for img in multimodal_params.images:
+            for img_index, img in enumerate(multimodal_params.images):
                 self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
                 data = img.read()
                 # must after init_imageitem_extral_params
                 token_num = self.tokenizer.get_image_token_length(img)
+                enforce_image_token_budget(token_num, self.args.visual_image_max_tokens, image_index=img_index)
                 md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                 md5sums.append(md5sum)
                 img.md5 = md5sum
@@ -236,10 +238,12 @@ class HttpServerManager:
         img_count = 0
         audio_tokens = 0
         audio_count = 0
-        for img in multimodal_params.images:
+        for img_index, img in enumerate(multimodal_params.images):
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
-            image_tokens += self.tokenizer.get_image_token_length(img)
+            token_num = self.tokenizer.get_image_token_length(img)
+            enforce_image_token_budget(token_num, self.args.visual_image_max_tokens, image_index=img_index)
+            image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
             self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)

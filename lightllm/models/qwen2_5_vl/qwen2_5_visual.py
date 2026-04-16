@@ -8,7 +8,8 @@ from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
 import torch.nn as nn
 from transformers.activations import ACT2FN
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor, clamp_processor_max_pixels
+from lightllm.utils.envs_utils import get_env_start_args
 from safetensors import safe_open
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
@@ -208,6 +209,9 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         with open(processor_config_path, "r") as f:
             processor_config_dict = json.load(f)
         self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+        clamp_processor_max_pixels(
+            self.processor, get_env_start_args().visual_image_max_tokens, processor_name="qwen2_5_vl-vit"
+        )
 
         self._init_datatype()
 

@@ -463,6 +463,35 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
     )
     parser.add_argument(
+        "--visual_batch_max_tokens",
+        type=int,
+        default=None,
+        help="""
+        Per-step ViT admission budget measured in image output tokens (post
+        spatial_merge). When set, the ViT scheduler stops adding images to the
+        current batch once their cumulative token_num would exceed this value.
+        Acts as the multimodal analogue of --batch_max_tokens and caps peak ViT
+        memory/compute for dynamic-resolution models (Qwen2.5/3/3.5-VL, etc.).
+        One image is always admitted per step to avoid deadlock when a single
+        request is larger than the budget. Defaults to None (disabled; only the
+        image-count cap applies).
+        """,
+    )
+    parser.add_argument(
+        "--visual_image_max_tokens",
+        type=int,
+        default=None,
+        help="""
+        Per-image hard cap, measured in image output tokens (post spatial_merge).
+        The multimodal analogue of --max_req_total_len: a single image whose
+        token_num exceeds this value is rejected with a ValueError instead of
+        being forwarded to the ViT. Pairs with --visual_batch_max_tokens to
+        close the "first image always admitted" hole — without this cap, one
+        4K image or long-aspect-ratio image can still OOM the ViT by itself.
+        Defaults to None (disabled; any size is accepted).
+        """,
+    )
+    parser.add_argument(
         "--visual_send_batch_size",
         type=int,
         default=1,

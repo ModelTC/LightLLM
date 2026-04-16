@@ -4,11 +4,26 @@ import base64
 import httpx
 from PIL import Image
 from io import BytesIO
+from typing import Optional
 from fastapi import Request
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def enforce_image_token_budget(token_num: int, max_tokens: Optional[int], image_index: int = 0) -> None:
+    """Reject a request when a single image's ``token_num`` exceeds the server
+    budget. Pairs with the per-step ``--visual_batch_max_tokens`` admission cap:
+    this guards the batch against one oversized request, since a single image
+    is always admitted (the "first image always runs" deadlock-avoidance rule).
+    """
+    if max_tokens is not None and token_num > max_tokens:
+        raise ValueError(
+            f"image[{image_index}] token_num={token_num} exceeds "
+            f"visual_image_max_tokens={max_tokens}; reduce image resolution, "
+            f"image_max_patch_num (InternVL-family), or preprocessor_config.json::max_pixels (Qwen-VL)"
+        )
 
 
 def _httpx_async_client_proxy_kwargs(proxy) -> dict:

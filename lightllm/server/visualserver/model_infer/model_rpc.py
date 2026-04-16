@@ -26,6 +26,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
+from lightllm.server.visualserver.model_infer.batching import pull_batch_with_budget
 from lightllm.utils.log_utils import init_logger
 
 
@@ -53,6 +54,7 @@ class VisualModelRpcServer(rpyc.Service):
 
         weight_dir = kvargs["weight_dir"]
         self.infer_max_batch_size = kvargs["max_batch_size"]
+        self.visual_batch_max_tokens = kvargs.get("visual_batch_max_tokens", None)
         self.device_id = kvargs["device_id"]
         self.vit_tp = kvargs["vit_tp"]
         self.dp_rank_id = kvargs["dp_rank_id"]
@@ -189,30 +191,27 @@ class VisualModelRpcServer(rpyc.Service):
     def _get_image_items_from_infer_queue(self, max_num: int, force_same: bool = False) -> List[ImageItem]:
         """
         从队列中批量获取任务，直到达到 max_num 或队列为空。
-        """
-        tasks = []
-        # 至少获取一个任务，阻塞
-        self.sempare.acquire()
-        task = self.infer_queue.get(block=True)
-        tasks.append(task)
 
-        if not force_same:
-            # 尝试继续获取更多任务，直到达到 max_num
-            while len(tasks) < max_num:
-                try:
-                    self.sempare.acquire()
-                    task = self.infer_queue.get(block=False)
-                    tasks.append(task)
-                except queue.Empty:
-                    self.sempare.release()
-                    break
-        else:
+        On rank 0 the cumulative ``img.token_num`` is additionally capped by
+        ``visual_batch_max_tokens`` so a dynamic-resolution image (or batch of
+        them) cannot blow the ViT's memory budget. The non-rank-0 ``force_same``
+        path follows rank 0's already-decided count via the gloo broadcast.
+        """
+        if force_same:
+            tasks = []
+            self.sempare.acquire()
+            tasks.append(self.infer_queue.get(block=True))
             while len(tasks) < max_num:
                 self.sempare.acquire()
-                task = self.infer_queue.get(block=True)
-                tasks.append(task)
+                tasks.append(self.infer_queue.get(block=True))
+            return tasks
 
-        return tasks
+        return pull_batch_with_budget(
+            infer_queue=self.infer_queue,
+            semaphore=self.sempare,
+            max_num=max_num,
+            max_tokens=self.visual_batch_max_tokens,
+        )
 
     def _get_image_items_from_store_queue(self, max_num: int) -> List[ImageItem]:
         """

@@ -27,7 +27,8 @@ from transformers.activations import ACT2FN
 
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor, clamp_processor_max_pixels
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
 
 
@@ -225,6 +226,9 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         with open(processor_config_path, "r") as f:
             processor_config_dict = json.load(f)
         self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+        clamp_processor_max_pixels(
+            self.processor, get_env_start_args().visual_image_max_tokens, processor_name="qwen3_omni-vit"
+        )
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:

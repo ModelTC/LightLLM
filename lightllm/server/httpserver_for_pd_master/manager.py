@@ -21,6 +21,7 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
+from lightllm.utils.multimodal_utils import enforce_image_token_budget
 from .pd_selector import create_selector
 
 logger = init_logger(__name__)
@@ -73,10 +74,12 @@ class HttpServerManagerForPDMaster:
         img_count = 0
         audio_tokens = 0
         audio_count = 0
-        for img in multimodal_params.images:
+        for img_index, img in enumerate(multimodal_params.images):
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
-            image_tokens += self.tokenizer.get_image_token_length(img)
+            token_num = self.tokenizer.get_image_token_length(img)
+            enforce_image_token_budget(token_num, self.args.visual_image_max_tokens, image_index=img_index)
+            image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
             self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
