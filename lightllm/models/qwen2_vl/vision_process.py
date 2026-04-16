@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import os
 import torch
 import numpy as np
 from PIL import Image
@@ -25,6 +26,63 @@ from torchvision.transforms.v2 import functional as F
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def closest_factor_pair(n):
+    """Find the factor pair of n closest to sqrt(n). Returns (smaller, larger)."""
+    sqrt_n = int(math.sqrt(n))
+    for i in range(sqrt_n, 0, -1):
+        if n % i == 0:
+            return i, n // i
+    return 1, n
+
+
+@torch.no_grad()
+def qwen_vl_check_max_len_infer(model, max_batch_size):
+    """OOM pre-check for Qwen-family vision models.
+
+    Constructs worst-case dummy images at max_pixels resolution, replicates
+    for max_batch_size, and runs a forward pass. Holds the stress peak in
+    the PyTorch caching allocator for the rest of process lifetime by
+    deliberately NOT calling torch.cuda.empty_cache() — the Python refs
+    are dropped, but the driver view continues to see the reservation.
+    """
+    disable_check = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+    if disable_check:
+        return
+
+    unit = model.patch_size * model.spatial_merge_size
+    max_pixels = model.processor.max_pixels
+    max_patches = max_pixels // (unit * unit)
+    if max_patches < 1:
+        max_patches = 1
+    h_factor, w_factor = closest_factor_pair(max_patches)
+    worst_h = unit * h_factor
+    worst_w = unit * w_factor
+
+    try:
+        dummy_image = Image.new("RGB", (worst_w, worst_h), color=(128, 128, 128))
+        pixel_values, grid_thw = model.processor.preprocess(dummy_image)
+
+        pixel_values = pixel_values.repeat(max_batch_size, 1, 1)
+        grid_thw = grid_thw.repeat(max_batch_size, 1)
+
+        pixel_values = pixel_values.to("cuda", dtype=model.data_type, non_blocking=True)
+        grid_thw = grid_thw.to("cuda", non_blocking=True)
+
+        result = model.forward(pixel_values, grid_thw=grid_thw)
+        del result, pixel_values, grid_thw
+        # Deliberately NOT calling torch.cuda.empty_cache() — we want the
+        # stress peak to stay pinned at the driver level so the LLM
+        # subprocess's later get_available_gpu_memory sees it as reserved.
+        logger.info(f"vit check max_len {max_batch_size} infer ok")
+    except (RuntimeError, torch.OutOfMemoryError, ValueError):
+        logger.exception("Qwen VL check max len infer failed")
+        exception_str = (
+            "Vit check max len infer fail, you can try: " "1.Set the --visual_infer_batch_size to a smaller value."
+        )
+        logger.error(exception_str)
+        raise RuntimeError(exception_str)
 
 
 IMAGE_FACTOR = 28

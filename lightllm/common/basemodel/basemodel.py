@@ -1003,6 +1003,128 @@ class TpPartBaseModel:
             raise Exception(exception_str)
         return
 
+    @torch.no_grad()
+    def _allocate_decode_stress_slots(self, batch_size):
+        """Allocate req/mem slots for the decode stress forward.
+
+        Override this in mamba-aware subclasses (e.g. qwen3next) to also
+        allocate mamba buffers via req_manager.alloc_buffer_for_req so the
+        GDN layers exercise their full memory footprint. The base version
+        only touches the standard req/mem managers.
+
+        Returns a tuple (actual_batch, req_idxs, tokens_per_req, total_tokens,
+        mem_indexes) that _build_decode_model_input consumes.
+        """
+        req_idxs = []
+        for _ in range(batch_size):
+            idx = self.req_manager.alloc()
+            if idx is None:
+                break
+            req_idxs.append(idx)
+        actual_batch = len(req_idxs)
+        if actual_batch < 2:
+            return actual_batch, req_idxs, 0, 0, None
+
+        tokens_per_req = min(
+            self.batch_max_tokens,
+            max(1, self.max_total_token_num // actual_batch),
+        )
+        total_tokens = tokens_per_req * actual_batch
+        total_tokens = min(total_tokens, self.mem_manager.can_use_mem_size)
+        tokens_per_req = max(1, total_tokens // actual_batch)
+        total_tokens = tokens_per_req * actual_batch
+
+        mem_indexes = self.mem_manager.alloc(total_tokens).cuda()
+        return actual_batch, req_idxs, tokens_per_req, total_tokens, mem_indexes
+
+    def _build_decode_model_input(self, actual_batch, req_idxs, tokens_per_req, total_tokens, mem_indexes):
+        """Construct a decode-shaped ModelInput for the stress forward.
+
+        Split out so mamba subclasses can also override just the ModelInput
+        shape if needed, without touching _check_decode_infer's control flow.
+        """
+        dummy_input_ids = torch.ones(actual_batch, dtype=torch.int32, device="cuda")
+        b_req_idx = torch.tensor(req_idxs, dtype=torch.int32, device="cuda")
+        b_seq_len = torch.full((actual_batch,), tokens_per_req, dtype=torch.int32, device="cuda")
+        b_ready_cache_len = torch.zeros(actual_batch, dtype=torch.int32, device="cuda")
+        b_mtp_index = torch.zeros(actual_batch, dtype=torch.int32, device="cuda")
+        return ModelInput(
+            batch_size=actual_batch,
+            total_token_num=total_tokens,
+            max_q_seq_len=1,
+            max_kv_seq_len=tokens_per_req,
+            max_cache_len=tokens_per_req - 1,
+            prefix_total_token_num=0,
+            input_ids=dummy_input_ids,
+            mem_indexes=mem_indexes[:actual_batch],
+            b_req_idx=b_req_idx,
+            b_seq_len=b_seq_len,
+            b_mtp_index=b_mtp_index,
+            is_prefill=False,
+            b_ready_cache_len=b_ready_cache_len,
+            multimodal_params=[{"images": [], "audios": []}] * actual_batch,
+        )
+
+    @torch.no_grad()
+    def _check_decode_infer(self):
+        """Simulate a decode batch to detect OOM from concurrent request activations.
+
+        Ported from origin/qw35_stable:basemodel.py:895 and split into
+        overridable sub-methods per spec §6.4 so qwen3next (when it lands on
+        main) can cleanly hook in mamba buffer allocation.
+
+        The prob_out.sort() call at the end is load-bearing: it forces the
+        top_p/top_k sampling allocation that real inference triggers but a
+        naive decode forward does not. On a vocab=152k model with
+        graph_max_batch_size=64 this accounts for ~20 MB per decode step, so
+        skipping it under-measures the peak by exactly the amount that causes
+        the "first decode batch after warmup OOMs" bug class.
+        """
+        disable_check = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
+        if disable_check:
+            return
+
+        torch.distributed.barrier()
+
+        batch_size = self.graph_max_batch_size
+        if batch_size <= 1:
+            return
+
+        try:
+            logger.info(f"begin check decode infer with batch_size={batch_size}")
+
+            actual_batch, req_idxs, tokens_per_req, total_tokens, mem_indexes = self._allocate_decode_stress_slots(
+                batch_size
+            )
+            if actual_batch < 2:
+                logger.info("skip decode check: not enough req slots")
+                self.req_manager.free_all()
+                return
+
+            model_input = self._build_decode_model_input(
+                actual_batch, req_idxs, tokens_per_req, total_tokens, mem_indexes
+            )
+            model_output = self.forward(model_input)
+            prob_out = torch.softmax(model_output.logits, dim=-1)
+            del model_output
+            # Force top_p/top_k sampling allocation — load-bearing for peak measurement.
+            prob_out.sort(dim=-1, descending=True)
+            prob_out = None
+            self.req_manager.free_all()
+            self.mem_manager.free_all()
+            logger.info(f"check decode {actual_batch} infer ok")
+        except (RuntimeError, torch.OutOfMemoryError) as e:
+            logger.exception(str(e))
+            exception_str = (
+                "check decode infer fail, you can try:\n"
+                "1. Set --graph_max_batch_size to a smaller value.\n"
+                "2. Set --mem_fraction or --max_total_token_num to a smaller value.\n"
+                "3. Set --max_req_total_len to a smaller value."
+            )
+            logger.error(exception_str)
+            raise Exception(exception_str)
+        return
+
     def autotune_layers(self):
         # 控制autotune的层数，用于适配不同模型
         return self.config.get("first_k_dense_replace", 0) + 1

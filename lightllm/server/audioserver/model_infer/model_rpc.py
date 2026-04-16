@@ -93,7 +93,7 @@ class AudioModelRpcServer(rpyc.Service):
     def _init_taskes(self):
         self.infer_queue = queue.Queue()
         self.store_queue = queue.Queue()
-        self.sempare = threading.Semaphore(self.infer_max_batch_size * 8)
+        self.sempare = threading.Semaphore(self.infer_max_batch_size)
         self.gloo_group = dist.new_group(ranks=list(range(self.audio_tp)), backend="gloo")
 
         self._infer_thread = threading.Thread(target=self._infer_worker, daemon=True)

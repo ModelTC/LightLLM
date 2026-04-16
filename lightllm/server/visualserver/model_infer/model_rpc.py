@@ -111,6 +111,13 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
+            if hasattr(self.model, "_check_max_len_infer"):
+                self.model._check_max_len_infer()
+            else:
+                logger.warning(
+                    f"no stress test available for visual model type '{self.model_type}'; "
+                    f"the LLM subprocess's auto-profile is the only remaining OOM defense"
+                )
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -168,7 +175,7 @@ class VisualModelRpcServer(rpyc.Service):
         self.store_queue = queue.Queue()
 
         # 限制并发, 主要是为了控制内存用量，防止过多造成内存OOM
-        self.sempare = threading.Semaphore(self.infer_max_batch_size * 8)
+        self.sempare = threading.Semaphore(self.infer_max_batch_size)
 
         # 用于同步各个推理tp每次拿到一样的image数量建立的gloo通信组
         self.gloo_group = dist.new_group(ranks=list(range(self.vit_tp)), backend="gloo")
