@@ -179,9 +179,9 @@ class InferStateInfo:
             group=self.dist_group.dp_prefill_balance_group,
             async_op=False,
         )
-        dp_input_lens = dp_input_lens.detach().cpu()
-        self.dp_origin_lens = dp_input_lens.tolist()
-        sum_input_len = dp_input_lens.sum().item()
+        dp_input_lens = dp_input_lens.detach().cpu().tolist()
+        self.dp_origin_lens = dp_input_lens.copy()
+        sum_input_len = sum(dp_input_lens)
         if not args.enable_tpsp_mix_mode:
             dp_handle_lens = [sum_input_len // args.dp for _ in range(args.dp)]
             for i in range(sum_input_len % args.dp):
@@ -203,7 +203,7 @@ class InferStateInfo:
         dest_dp_inputs = [[] for _ in range(args.dp)]
         # 分配每个dp 的原始输入和分配后的原始输入
         origin_datas = collections.deque()
-        for origin_dp_index, origin_dp_input_len in enumerate(dp_input_lens.numpy()):
+        for origin_dp_index, origin_dp_input_len in enumerate(dp_input_lens):
             handle_len = dp_handle_lens[origin_dp_index]
             if origin_dp_input_len > handle_len:
                 origin_datas.append((origin_dp_index, handle_len, origin_dp_input_len))
