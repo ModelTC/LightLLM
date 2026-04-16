@@ -214,7 +214,12 @@ class TpPartBaseModel:
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size
-        assert self.max_seq_length <= self.max_total_token_num
+        # Skip the max_seq_length assertion during the auto-profile probe
+        # phase: the probe KV is intentionally small (just enough for the
+        # stress forwards), not sized to hold a full-length request. The
+        # assertion is re-checked after Phase 3 rebuilds at the target size.
+        if getattr(self.mem_manager, "_probe_tokens", None) is None or self.mem_manager.size >= self.max_seq_length:
+            assert self.max_seq_length <= self.max_total_token_num
         return
 
     def _init_req_manager(self):
