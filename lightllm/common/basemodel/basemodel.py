@@ -134,6 +134,8 @@ class TpPartBaseModel:
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
         self._check_max_len_infer()
+        self._check_decode_infer()
+        self._auto_profile_log_only_phase2()
         torch.cuda.empty_cache()
         set_model_init_status(True)
         return
@@ -1056,6 +1058,9 @@ class TpPartBaseModel:
             max_cache_len=tokens_per_req - 1,
             prefix_total_token_num=0,
             input_ids=dummy_input_ids,
+            # mem_indexes[:actual_batch] provides 1 new KV slot per request for the decode
+            # step's output token. The full total_tokens block was allocated from mem_manager
+            # to occupy the KV cache space, but only 1 slot per request is the "new" token.
             mem_indexes=mem_indexes[:actual_batch],
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -1099,6 +1104,7 @@ class TpPartBaseModel:
             if actual_batch < 2:
                 logger.info("skip decode check: not enough req slots")
                 self.req_manager.free_all()
+                self.mem_manager.free_all()
                 return
 
             model_input = self._build_decode_model_input(
@@ -1124,6 +1130,36 @@ class TpPartBaseModel:
             logger.error(exception_str)
             raise Exception(exception_str)
         return
+
+    def _auto_profile_log_only_phase2(self):
+        """Commit 2 transitional helper — computes the auto-profile target from
+        the just-measured stress peak and logs the delta versus what the static
+        mem_fraction path would have picked. Does NOT act on the computed
+        value; the server still runs with the probe-sized KV. Commit 3 replaces
+        this helper with the real Phase 3 rebuild.
+        """
+        if self.mem_manager._probe_tokens is None:
+            logger.info("auto-profile phase=skip reason=explicit_max_total_token_num")
+            return
+        peak_reserved = torch.cuda.max_memory_reserved()
+        try:
+            target_tokens = self.mem_manager.profile_size_target(peak_reserved)
+        except Exception as e:
+            logger.warning(f"auto-profile phase=measure FAILED: {e}")
+            return
+        probe_tokens = self.mem_manager._probe_tokens
+        cell_size = self.mem_manager.get_cell_size()
+        delta_tokens = target_tokens - probe_tokens
+        delta_gb = delta_tokens * cell_size / 1024 ** 3
+        logger.info(
+            f"auto-profile phase=log_only_dry_run "
+            f"probe_tokens={probe_tokens} "
+            f"target_tokens={target_tokens} "
+            f"delta_tokens={delta_tokens} "
+            f"delta_gb={delta_gb:.2f} "
+            f"(NOTE: Commit 2 does not act on this — the server still runs "
+            f"with probe-sized KV)"
+        )
 
     def autotune_layers(self):
         # 控制autotune的层数，用于适配不同模型
