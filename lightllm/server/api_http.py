@@ -304,6 +304,17 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
     return resp
 
 
+@app.post("/v1/messages")
+async def anthropic_messages(raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+    from .api_anthropic import anthropic_messages_impl
+
+    return await anthropic_messages_impl(raw_request)
+
+
 @app.get("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
