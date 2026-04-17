@@ -27,7 +27,6 @@ setup(
         "safetensors",
         "triton",
         "orjson",
-        "litellm>=1.52.0,<1.85",
     ],
     package_data=package_data,
 )
