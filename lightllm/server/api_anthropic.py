@@ -42,7 +42,7 @@ def get_anthropic_messages_adapter() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "The Anthropic Messages API (/v1/messages) requires the 'litellm' package. "
-            "Install it with: pip install 'lightllm[anthropic_api]'. "
+            "Install it with: pip install 'litellm>=1.52.0,<1.85'. "
             f"Original error: {exc}"
         ) from exc
 

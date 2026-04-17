@@ -11,12 +11,6 @@ hosted open-source model without rewriting the client.
 Enabling
 --------
 
-Install the optional dependency:
-
-.. code-block:: bash
-
-    pip install 'lightllm[anthropic_api]'
-
 The ``/v1/messages`` endpoint is always exposed; no extra flag is needed:
 
 .. code-block:: bash

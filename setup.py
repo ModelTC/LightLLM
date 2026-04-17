@@ -27,9 +27,7 @@ setup(
         "safetensors",
         "triton",
         "orjson",
+        "litellm>=1.52.0,<1.85",
     ],
-    extras_require={
-        "anthropic_api": ["litellm>=1.52.0,<1.85"],
-    },
     package_data=package_data,
 )
