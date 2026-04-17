@@ -1,35 +1,3 @@
-# Paged radix cache, adapted from radix_cache.py in the same directory.
-#
-# The tree is organized by page hashes instead of individual tokens. Two
-# control parameters shape the tree:
-#   - ``hash_page_size``: number of tokens that make up one page.
-#   - ``big_page_num``  : number of consecutive pages that make up one
-#                         "big page" (the mandatory size of any internal
-#                         node).
-#
-# Structural invariants maintained by this class:
-#   1. Every non-leaf (internal) node stores exactly ``big_page_num``
-#      pages, i.e. ``big_page_num * hash_page_size`` tokens.
-#   2. A leaf node may store either ``big_page_num`` pages (a "big leaf")
-#      or 1 .. (big_page_num - 1) pages (a "small leaf").
-#
-# These invariants restrict when the tree can be split:
-#   - Small leaves cannot carry children, so when a small leaf needs to
-#     gain a descendant it is first grown (page-by-page) up to
-#     ``big_page_num`` pages.
-#   - Splitting a node in the middle of its page range is forbidden,
-#     because it would produce an internal node with fewer than
-#     ``big_page_num`` pages.  When a caller's ``block_hashs`` diverges
-#     inside an existing node the traversal simply stops at the last
-#     fully-matched node.  (Because ``block_hashs`` are content-addressed
-#     this is expected to be rare.)
-#
-# All original ``RadixCache`` interfaces are preserved; ``insert`` and
-# ``match_prefix`` gain a ``block_hashs`` argument that drives the paged
-# matching logic, while the rest of the bookkeeping (ref counting,
-# eviction, shared arrays, read-only client, ...) behaves exactly as in
-# ``radix_cache.py``.
-
 import torch
 import numpy as np
 import collections
@@ -41,16 +9,6 @@ from .radix_cache import UniqueTimeIdGenerator, time_gen, match
 
 
 class PagedTreeNode:
-    """A node in the paged radix cache.
-
-    A node is always either a "big leaf" (exactly ``big_page_num``
-    pages) or a "small leaf" (1 .. big_page_num - 1 pages).  Because
-    block hashes are content-addressed, the hash of the *last* page is
-    sufficient to identify the whole page range uniquely; it therefore
-    serves both as the value we verify when matching and as the key the
-    parent uses to store this node in its ``children`` dict.
-    """
-
     def __init__(self):
         # children are keyed by the last ``block_hash`` of each child
         self.children: Dict[int, "PagedTreeNode"] = {}
@@ -72,7 +30,7 @@ class PagedTreeNode:
         self.node_prefix_total_len = 0
 
         # Kept for parity with ``TreeNode`` (used by hybrid attention models).
-        self.buffer_idx = None
+        self.linear_buffer_idx = None
 
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
@@ -82,10 +40,12 @@ class PagedTreeNode:
         token_id_key: torch.Tensor,
         token_mem_index_value: torch.Tensor,
         block_hashs: List[int],
+        block_linear_idxs: List[int],
     ) -> "PagedTreeNode":
         assert len(block_hashs) >= 1
         child = PagedTreeNode()
         child.last_page_hash = block_hashs[-1]
+        child.linear_buffer_idx = block_linear_idxs[-1]
         child.num_pages = len(block_hashs)
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
@@ -173,34 +133,36 @@ class PagedRadixCache:
         key: torch.Tensor,
         value: Optional[torch.Tensor] = None,
         block_hashs: Optional[List[int]] = None,
+        block_linear_idxs: Optional[List[int]] = None,
     ) -> Tuple[int, Optional[PagedTreeNode]]:
-        """Insert ``block_hashs`` worth of pages into the tree.
-
-        ``key`` / ``value`` and ``block_hashs`` may describe different
-        numbers of pages -- e.g. the last partial page's hash has not
-        been produced yet, or extra hashes were supplied.  We therefore
-        truncate both sides down to the common, page-aligned prefix
-        before inserting anything.
-        """
+        assert key is not None
         if value is None:
             value = key
         assert len(key) == len(value)
+        if block_hashs is None:
+            block_hashs = []
+        if block_linear_idxs is not None:
+            block_linear_idxs = []
 
-        if block_hashs is None or len(block_hashs) == 0 or len(key) == 0:
+        assert (
+            len(key) == len(block_hashs) * self.hash_page_size
+        ), f"key length {len(key)} does not match block_hashs length {len(block_hashs)} * {self.hash_page_size}"
+        assert len(block_hashs) == len(
+            block_linear_idxs
+        ), f"block_hashs length {len(block_hashs)} does not match block_linear_idxs length {len(block_linear_idxs)}"
+
+        if len(block_hashs) == 0:
             return 0, None
 
-        # Align ``key``/``value`` and ``block_hashs`` to the shortest
-        # common page-aligned prefix of the two inputs.
-        hash_block_num = min(len(block_hashs), len(key) // self.hash_page_size)
-        if hash_block_num == 0:
-            return 0, None
+        # TODO, test stable then to delete this assertion
+        assert all(
+            e is None for e in block_linear_idxs[:-1]
+        ), "only the last block_linear_idx can be non-None, for compatibility with non-paged radix cache"
+        assert (
+            block_linear_idxs[-1] is not None
+        ), "the last block_linear_idx must not be None, for compatibility with non-paged radix cache"
 
-        needed_tokens = hash_block_num * self.hash_page_size
-        key = key[:needed_tokens]
-        value = value[:needed_tokens]
-        block_hashs = list(block_hashs[:hash_block_num])
-
-        return self._insert_helper(self.root_node, key, value, block_hashs)
+        return self._insert_helper(self.root_node, key, value, block_hashs, block_linear_idxs)
 
     def _insert_helper(
         self,
@@ -208,37 +170,42 @@ class PagedRadixCache:
         key: torch.Tensor,
         value: torch.Tensor,
         block_hashs: List[int],
+        block_linear_idxs: List[int],
     ) -> Tuple[int, Optional[PagedTreeNode]]:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
+        node.update_time()
 
         try:
-            # No matching child -- append a fresh leaf.  The number of
-            # remaining ``block_hashs`` tells us which kind of leaf to
-            # create, and we branch explicitly on that.
             if len(block_hashs) > self.big_page_num:
-                # ----- big-leaf branch -----
-                # Take exactly ``big_page_num`` pages.  More hashes may
-                # still remain, so recurse into the new node to keep
-                # placing them underneath.
                 take_tokens = self.big_page_num * self.hash_page_size
                 if block_hashs[self.big_page_num - 1] in node.children:
                     child = node.children[block_hashs[self.big_page_num - 1]]
                     sub_prefix_len, ans_node = self._insert_helper(
-                        child, key[take_tokens:], value[take_tokens:], block_hashs[self.big_page_num :]
+                        child,
+                        key[take_tokens:],
+                        value[take_tokens:],
+                        block_hashs[self.big_page_num :],
+                        block_linear_idxs[self.big_page_num :],
                     )
                     return take_tokens + sub_prefix_len, ans_node
                 else:
                     new_node = node.add_and_return_new_child(
-                        key[:take_tokens], value[:take_tokens], block_hashs[: self.big_page_num]
+                        key[:take_tokens],
+                        value[:take_tokens],
+                        block_hashs[: self.big_page_num],
+                        block_linear_idxs[: self.big_page_num],
                     )
                     self.tree_total_tokens_num.arr[0] += take_tokens
                     _, ans_node = self._insert_helper(
-                        new_node, key[take_tokens:], value[take_tokens:], block_hashs[self.big_page_num :]
+                        new_node,
+                        key[take_tokens:],
+                        value[take_tokens:],
+                        block_hashs[self.big_page_num :],
+                        block_linear_idxs[self.big_page_num :],
                     )
                     return 0, ans_node
             else:
-
                 take = len(block_hashs)
                 take_tokens = take * self.hash_page_size
                 if block_hashs[-1] in node.children:
@@ -249,13 +216,13 @@ class PagedRadixCache:
                         key[:take_tokens],
                         value[:take_tokens],
                         block_hashs[:take],
+                        block_linear_idxs[:take],
                     )
                     self.tree_total_tokens_num.arr[0] += take_tokens
                     if new_node.is_leaf():
                         self.evict_tree_set.add(new_node)
                     return 0, new_node
         finally:
-            node.update_time()
             if node.is_leaf():
                 self.evict_tree_set.add(node)
 
@@ -272,20 +239,24 @@ class PagedRadixCache:
         query aligns with the node's page boundary).  Partial matches of
         a node are never returned.
         """
-        if block_hashs is None or len(block_hashs) == 0:
-            return None, 0, None
+        assert key is not None, "key must not be None"
+        if block_hashs is None:
+            block_hashs = []
 
-        hash_block_num = len(block_hashs)
-        needed_tokens = hash_block_num * self.hash_page_size
         assert (
-            len(key) >= needed_tokens
-        ), f"key length {len(key)} smaller than hash_block_num * hash_page_size = {needed_tokens}"
+            len(key) == len(block_hashs) * self.hash_page_size
+        ), f"key length {len(key)} does not match block_hashs length {len(block_hashs)} * {self.hash_page_size}"
 
-        key = key[:needed_tokens]
+        if len(block_hashs) == 0 and len(key) != 0:
+            return None, 0, None
 
         ans_value_list: List[torch.Tensor] = []
         tree_node = self._match_prefix_helper(
-            self.root_node, key, ans_value_list, update_refs=update_refs, block_hashs=list(block_hashs)
+            self.root_node,
+            key=key,
+            block_hashs=block_hashs,
+            ans_value_list=ans_value_list,
+            update_refs=update_refs,
         )
 
         if tree_node is not self.root_node:
@@ -303,55 +274,43 @@ class PagedRadixCache:
         self,
         node: PagedTreeNode,
         key: torch.Tensor,
+        block_hashs: Optional[List[int]],
         ans_value_list: list,
         update_refs: bool = False,
-        block_hashs: Optional[List[int]] = None,
     ) -> PagedTreeNode:
-        touched: List[PagedTreeNode] = []
+
+        if node.is_leaf():
+            self.evict_tree_set.discard(node)
+        node.update_time()
+
         try:
-            while True:
-                if node.is_leaf():
-                    self.evict_tree_set.discard(node)
-                touched.append(node)
 
-                if update_refs:
-                    node.ref_counter += 1
-                    # from 0 to 1 need update refs token num
-                    if node.ref_counter == 1:
-                        self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+            if update_refs:
+                node.ref_counter += 1
+                # from 0 to 1 need update refs token num
+                if node.ref_counter == 1:
+                    self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
 
-                if block_hashs is None or len(block_hashs) == 0:
-                    return node
+            for i in range(min(self.big_page_num, len(block_hashs))):
+                page_hash = block_hashs[i]
+                if page_hash in node.children:
+                    child = node.children[page_hash]
+                    assert (
+                        child.num_pages == i + 1
+                    ), "invariant broken: child num_pages does not match index in block_hashs"
+                    ans_value_list.append(child.token_mem_index_value)
+                    return self._match_prefix_helper(
+                        child,
+                        key[(i + 1) * self.hash_page_size :],
+                        block_hashs[i + 1 :],
+                        ans_value_list,
+                        update_refs,
+                    )
 
-                # Children are keyed by ``last_page_hash``, so look up in
-                # O(1) the two possible candidates: a big-leaf child at
-                # ``block_hashs[big_page_num - 1]`` and, if the query is
-                # shorter than a big page, the small-leaf candidate at
-                # ``block_hashs[-1]``.  Matching must end at a node
-                # boundary, so any mismatch / short query stops here.
-                matched_child: Optional[PagedTreeNode] = None
-                if len(block_hashs) >= self.big_page_num:
-                    matched_child = node.children.get(block_hashs[self.big_page_num - 1])
-                    if matched_child is not None and matched_child.num_pages != self.big_page_num:
-                        matched_child = None
-                if matched_child is None and len(block_hashs) < self.big_page_num:
-                    cand = node.children.get(block_hashs[-1])
-                    if cand is not None and cand.num_pages == len(block_hashs):
-                        matched_child = cand
-
-                if matched_child is None:
-                    return node
-
-                ans_value_list.append(matched_child.token_mem_index_value)
-                consumed = matched_child.num_pages * self.hash_page_size
-                node = matched_child
-                key = key[consumed:]
-                block_hashs = block_hashs[matched_child.num_pages :]
+            return node
         finally:
-            for n in touched:
-                n.update_time()
-                if n.is_leaf():
-                    self.evict_tree_set.add(n)
+            if node.is_leaf():
+                self.evict_tree_set.add(node)
 
     def evict(self, need_remove_tokens, evict_callback):
         if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
