@@ -71,26 +71,6 @@ class PagedTreeNode:
 
 
 class PagedRadixCache:
-    """
-    Page-aware radix cache.
-
-    Parameters
-    ----------
-    unique_name : str
-        Shared memory identifier (same semantics as in ``RadixCache``).
-    total_token_num : int
-        Total number of tokens managed (kept for interface parity).
-    rank_in_node : int
-        Rank of this process (kept for shared-array naming).
-    hash_page_size : int
-        Number of tokens per page.
-    big_page_num : int
-        Number of pages per "big page".  Internal nodes must contain
-        exactly ``big_page_num`` pages.
-    kv_cache_mem_manager : optional
-        Underlying memory manager (same as ``RadixCache``).
-    """
-
     def __init__(
         self,
         unique_name: str,
@@ -154,13 +134,18 @@ class PagedRadixCache:
         if len(block_hashs) == 0:
             return 0, None
 
-        # TODO, test stable then to delete this assertion
-        assert all(
-            e is None for e in block_linear_idxs[:-1]
-        ), "only the last block_linear_idx can be non-None, for compatibility with non-paged radix cache"
-        assert (
-            block_linear_idxs[-1] is not None
-        ), "the last block_linear_idx must not be None, for compatibility with non-paged radix cache"
+        if len(block_hashs) % self.big_page_num == 0:
+            assert all(
+                e is None for e in block_linear_idxs
+            ), "all block_linear_idxs must be None when block_hashs length is a multiple of big_page_num"
+        else:
+            # TODO, test stable then to delete this assertion
+            assert all(
+                e is None for e in block_linear_idxs[:-1]
+            ), "only the last block_linear_idx can be non-None, for compatibility with non-paged radix cache"
+            assert (
+                block_linear_idxs[-1] is not None
+            ), "the last block_linear_idx must not be None, for compatibility with non-paged radix cache"
 
         return self._insert_helper(self.root_node, key, value, block_hashs, block_linear_idxs)
 
@@ -208,8 +193,20 @@ class PagedRadixCache:
             else:
                 take = len(block_hashs)
                 take_tokens = take * self.hash_page_size
+                assert (
+                    block_linear_idxs[-1] is not None
+                ), "the last block_linear_idx must not be None, for compatibility with non-paged radix cache"
                 if block_hashs[-1] in node.children:
                     child = node.children[block_hashs[-1]]
+                    assert child.num_pages == len(
+                        block_hashs
+                    ), "invariant broken: child num_pages does not match block_hashs length"
+                    if child.is_leaf():
+                        self.evict_tree_set.discard(child)
+                    child.update_time()
+                    if child.is_leaf():
+                        self.evict_tree_set.add(child)
+
                     return take_tokens, child
                 else:
                     new_node = node.add_and_return_new_child(
