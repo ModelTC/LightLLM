@@ -36,9 +36,7 @@ class QueueItem(ctypes.Structure):
                 count_output_tokens,
                 token_str,
             )
-            raise ValueError(
-                f"Token string {len(str_bytes)} exceeds maximum length of {LIGHTLLM_TOKEN_MAX_BYTES} bytes."
-            )
+        str_bytes = str_bytes[: LIGHTLLM_TOKEN_MAX_BYTES - 1]
         ctypes.memmove(self.data, str_bytes, len(str_bytes))
         self.data_len = len(str_bytes)
         self.src_index = src_index
