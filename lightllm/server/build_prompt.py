@@ -63,11 +63,28 @@ def _normalize_tool_call_arguments(messages: list) -> None:
                             pass
 
 
+def _alias_reasoning_to_reasoning_content(messages: list) -> None:
+    # Clients (OpenRouter-style, claw-eval, and others) replay prior thinking on
+    # assistant messages as `reasoning`, but Qwen3/Qwen3.5 chat templates read
+    # `message.reasoning_content`. Without this alias the template falls back to
+    # rendering every recent assistant turn as `<think>\n</think>` (empty think),
+    # which teaches the model in-context to skip thinking on the current turn.
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        if msg.get("reasoning_content"):
+            continue
+        reasoning = msg.get("reasoning")
+        if isinstance(reasoning, str) and reasoning:
+            msg["reasoning_content"] = reasoning
+
+
 async def build_prompt(request, tools) -> str:
     global tokenizer
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     _normalize_tool_call_arguments(messages)
+    _alias_reasoning_to_reasoning_content(messages)
 
     kwargs = {"conversation": messages}
     if request.character_settings:
