@@ -17,13 +17,12 @@ Install the optional dependency:
 
     pip install 'lightllm[anthropic_api]'
 
-Start the server with the flag:
+The ``/v1/messages`` endpoint is always exposed; no extra flag is needed:
 
 .. code-block:: bash
 
     python -m lightllm.server.api_server \
         --model_dir /path/to/model \
-        --enable_anthropic_api \
         --port 8088
 
 Using it from the Anthropic SDK

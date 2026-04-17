@@ -20,9 +20,34 @@ from fastapi.responses import JSONResponse, Response
 
 from lightllm.utils.log_utils import init_logger
 
-from ._litellm_shim import get_anthropic_messages_adapter
-
 logger = init_logger(__name__)
+
+_cached_adapter: Any = None
+
+
+def get_anthropic_messages_adapter() -> Any:
+    """Return a cached instance of LiteLLM's Anthropic<->OpenAI adapter.
+
+    The returned object exposes ``translate_anthropic_to_openai`` and
+    ``translate_openai_response_to_anthropic`` methods.
+    """
+    global _cached_adapter
+    if _cached_adapter is not None:
+        return _cached_adapter
+
+    try:
+        from litellm.llms.anthropic.experimental_pass_through.adapters.transformation import (
+            LiteLLMAnthropicMessagesAdapter,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "The Anthropic Messages API (/v1/messages) requires the 'litellm' package. "
+            "Install it with: pip install 'lightllm[anthropic_api]'. "
+            f"Original error: {exc}"
+        ) from exc
+
+    _cached_adapter = LiteLLMAnthropicMessagesAdapter()
+    return _cached_adapter
 
 
 # ---------------------------------------------------------------------------
