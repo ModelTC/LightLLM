@@ -277,6 +277,17 @@ async def anthropic_messages(raw_request: Request) -> Response:
     return await anthropic_messages_impl(raw_request)
 
 
+@app.post("/v1/responses")
+async def openai_responses(raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+    from .api_openai_responses import openai_responses_impl
+
+    return await openai_responses_impl(raw_request)
+
+
 @app.get("/v1/models", response_model=ModelListResponse)
 @app.post("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
