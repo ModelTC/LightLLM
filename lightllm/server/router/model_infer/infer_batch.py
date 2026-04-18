@@ -227,9 +227,16 @@ class InferenceContext:
         req.deferred_free_token_indices.clear()
 
         # Free tokens beyond what the tree owns
-        shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        shared_len = req.raw_gpu_kv_len
+        if req.shared_kv_node is not None:
+            shared_len = max(shared_len, req.shared_kv_node.node_prefix_total_len)
         if shared_len < req.cur_kv_len:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_len : req.cur_kv_len])
+
+        if req.raw_gpu_kv_node is not None:
+            self.radix_cache.dec_node_ref_counter(req.raw_gpu_kv_node)
+            req.raw_gpu_kv_node = None
+            req.raw_gpu_kv_len = 0
 
         if req.shared_kv_node is not None:
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
@@ -265,57 +272,72 @@ class InferenceContext:
         if not reqs:
             return
 
+        for req in reqs:
+            self._insert_hybrid_prefix_checkpoint(req, req.cur_kv_len)
+        return
+
+    def _insert_hybrid_prefix_checkpoint(self, req: "InferReq", insert_len: int) -> Optional[TreeNode]:
+        if not self.has_recurrent_state or self.radix_cache is None or insert_len <= 0:
+            return None
+
         radix_cache = self.radix_cache
         req_to_buffer_index = self.req_manager.req_to_buffer_index
         cpu_mgr = getattr(self.req_manager, "cpu_buffer_mem_manager", None)
 
-        for req in reqs:
-            insert_len = req.cur_kv_len
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0:insert_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][:insert_len].detach().cpu()
+        input_token_ids = req.get_input_token_ids()
+        key = torch.tensor(input_token_ids[0:insert_len], dtype=torch.int64, device="cpu")
+        value = self.req_manager.req_to_token_indexs[req.req_idx][:insert_len].detach().cpu()
 
-            prefix_len, node = radix_cache.insert(key, value)
-            if node is None:
-                continue
+        prefix_len, node = radix_cache.insert(key, value)
+        if node is None:
+            return None
 
-            # Handle overlapping indices: tree already had [old_shared:prefix_len]
-            # from another request.  Our indices for that range differ — defer
-            # freeing until request completion (can't free mid-prefill).
-            old_shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            if prefix_len > old_shared_len:
-                req.deferred_free_token_indices.append(
-                    self.req_manager.req_to_token_indexs[req.req_idx][old_shared_len:prefix_len].detach().clone()
-                )
+        # Handle overlapping indices: tree already had [old_shared:prefix_len]
+        # from another request.  Our indices for that range differ — defer
+        # freeing until request completion (can't free mid-prefill).
+        old_shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        if prefix_len > old_shared_len:
+            req.deferred_free_token_indices.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][old_shared_len:prefix_len].detach().clone()
+            )
 
-            # Update shared_kv_node with ref counting
-            if req.shared_kv_node is not None:
-                radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            radix_cache.add_node_ref_counter(node)
-            req.shared_kv_node = node
+        # Update shared_kv_node with ref counting.
+        if req.shared_kv_node is not None:
+            radix_cache.dec_node_ref_counter(req.shared_kv_node)
+        radix_cache.add_node_ref_counter(node)
+        req.shared_kv_node = node
 
-            # Snapshot GDN buffer and attach to tree node
-            if node.buffer_idx is not None:
-                continue
+        # Once the restored prefix is promoted to a full hybrid checkpoint,
+        # the temporary raw GPU KV reference is no longer needed.
+        if req.raw_gpu_kv_node is not None and req.raw_gpu_kv_len <= prefix_len:
+            radix_cache.dec_node_ref_counter(req.raw_gpu_kv_node)
+            req.raw_gpu_kv_node = None
+            req.raw_gpu_kv_len = 0
 
-            primary = req_to_buffer_index[req.req_idx, 0].item()
-            if cpu_mgr is not None:
-                radix_cache.free_radix_cache_to_get_enough_buffer(1)
-                if cpu_mgr.can_use_mem_size < 1:
-                    continue
-                cpu_slot = cpu_mgr.alloc(1)
-                gpu_idx = torch.tensor([primary], dtype=torch.int64, device="cuda")
-                cpu_mgr.offload_to_cpu(gpu_idx, cpu_slot)
-                radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
-            else:
-                radix_cache.free_radix_cache_to_get_enough_buffer(1)
-                if radix_cache.buffer_mem_manager.can_use_mem_size < 1:
-                    continue
-                new_buf = radix_cache.buffer_mem_manager.alloc(1)
-                cur_buf = torch.tensor([primary], dtype=torch.int64, device="cuda")
-                new_buf_cuda = new_buf.to(device="cuda", dtype=torch.int64).contiguous()
-                radix_cache.buffer_mem_manager.copy_state_buffers(cur_buf, new_buf_cuda)
-                radix_cache.add_buffer_idx_to_node(node, new_buf[0].item())
+        # Snapshot GDN buffer and attach to tree node.
+        if node.buffer_idx is not None:
+            return node
+
+        primary = req_to_buffer_index[req.req_idx, 0].item()
+        if cpu_mgr is not None:
+            radix_cache.free_radix_cache_to_get_enough_buffer(1)
+            if cpu_mgr.can_use_mem_size < 1:
+                return node
+            cpu_slot = cpu_mgr.alloc(1)
+            gpu_idx = torch.tensor([primary], dtype=torch.int64, device="cuda")
+            cpu_mgr.offload_to_cpu(gpu_idx, cpu_slot)
+            radix_cache.add_buffer_idx_to_node(node, cpu_slot[0].item())
+        else:
+            radix_cache.free_radix_cache_to_get_enough_buffer(1)
+            if radix_cache.buffer_mem_manager.can_use_mem_size < 1:
+                return node
+            new_buf = radix_cache.buffer_mem_manager.alloc(1)
+            cur_buf = torch.tensor([primary], dtype=torch.int64, device="cuda")
+            new_buf_cuda = new_buf.to(device="cuda", dtype=torch.int64).contiguous()
+            radix_cache.buffer_mem_manager.copy_state_buffers(cur_buf, new_buf_cuda)
+            radix_cache.add_buffer_idx_to_node(node, new_buf[0].item())
+
+        return node
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -597,6 +619,8 @@ class InferReq:
             self.prefix_token_ids = []
         self.multimodal_params = self.multimodal_params.to_dict()
         self.shared_kv_node: TreeNode = None
+        self.raw_gpu_kv_node: TreeNode = None
+        self.raw_gpu_kv_len: int = 0
 
         self.finish_status = FinishStatus()
 
