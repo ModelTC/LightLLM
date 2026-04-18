@@ -748,6 +748,21 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
     parser.add_argument(
+        "--linear_att_hash_page_size",
+        type=int,
+        default=512,
+        help="""The hash page size for linear attention.
+        It controls the number of tokens in each hash bucket, which can affect radix cache reused""",
+    )
+    parser.add_argument(
+        "--linear_att_page_block_num",
+        type=int,
+        default=10000000,
+        help="""The number of blocks for linear attention state storage.
+        It controls the number of pages used for storing the attention state,
+        which can affect memory usage and mutiturn chat performance""",
+    )
+    parser.add_argument(
         "--mamba_cache_size",
         type=int,
         default=None,
