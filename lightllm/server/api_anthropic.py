@@ -76,6 +76,17 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         if "max_tokens" in anthropic_body:
             openai_dict["max_tokens"] = anthropic_body["max_tokens"]
 
+    # Forward LightLLM-specific fields nested under ``extra_body`` (OpenAI SDK
+    # convention) so clients hitting /v1/messages can reach ChatCompletionRequest
+    # options Anthropic's own schema does not expose — notably chat_template_kwargs
+    # for models with optional thinking modes (Qwen3, DeepSeek). Fields already
+    # produced by the Anthropic->OpenAI translation take precedence; unknown keys
+    # are silently dropped by Pydantic (extra='ignore').
+    extra_body = anthropic_body.get("extra_body")
+    if isinstance(extra_body, dict):
+        for k, v in extra_body.items():
+            openai_dict.setdefault(k, v)
+
     _UNKNOWN_FIELDS = {"extra_body", "metadata", "anthropic_version", "cache_control"}
     for key in list(openai_dict.keys()):
         if key in _UNKNOWN_FIELDS:
