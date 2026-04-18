@@ -1,5 +1,7 @@
 import torch
 import collections
+from lightllm.common.mamba_cache_mem_manager.config_objs import LinearAttCacheConfig
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional
@@ -9,6 +11,7 @@ from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_r
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.common.mamba_cache_mem_manager.layer_cache import LayerCache
 
 logger = init_logger(__name__)
 
@@ -236,27 +239,33 @@ class ReqSamplingParamsManager:
 
 
 class ReqManagerForMamba(ReqManager):
-    def __init__(self, max_request_num, max_sequence_length, mem_manager):
-        from lightllm.common.kv_cache_mem_manager.kv_buffer.hybrid_kv_buffer import HybridKvBuffer
-        from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
-
+    def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
-        assert isinstance(self.mem_manager.kv_buffer, HybridKvBuffer)
-        self.buffer_mem_manager: MambaCacheManager = self.mem_manager.kv_buffer.mamba_cache_manager
-        self.req_to_buffer_index = torch.zeros(
-            (self.max_request_num + 1, self.mtp_step + 1), dtype=torch.int32, device="cuda"
-        )
-        self.req_to_buffer_index[self.HOLD_REQUEST_ID, :] = self.buffer_mem_manager.HOLD_BUFFER_INDEX
+        assert (
+            self.mtp_step == 0
+        ), "currently only support mtp_step 0 for simplicity, more mtp_step support will be added in the future"
+        self.linear_config = linear_config
 
-    def free_buffer(self, free_buffer_indexes: List[int]):
-        self.buffer_mem_manager.free(free_buffer_indexes)
+        self.req_to_conv_state = LayerCache(
+            size=(max_request_num + 1) * (self.mtp_step + 1),
+            dtype=linear_config.conv_state_dtype,
+            shape=self.linear_config.get_conv_state_shape(),
+            layer_num=linear_config.layer_num,
+            device="cuda",
+        )
+        self.req_to_ssm_state = LayerCache(
+            size=(max_request_num + 1) * (self.mtp_step + 1),
+            dtype=linear_config.ssm_state_dtype,
+            shape=self.linear_config.get_ssm_state_shape(),
+            layer_num=linear_config.layer_num,
+            device="cuda",
+        )
         return
 
-    def alloc_buffer_for_req(self, req_index: torch.Tensor):
-        num_reqs = req_index.shape[0]
-        num_buffers_per_req = self.mtp_step + 1
-        buffer_indexes = self.buffer_mem_manager.alloc(num_reqs * num_buffers_per_req)
-        if not buffer_indexes.is_cuda:
-            buffer_indexes = buffer_indexes.cuda()
-        self.req_to_buffer_index[req_index] = buffer_indexes.view(num_reqs, num_buffers_per_req)
+    def init_linear_att_state(self, req: InferReq, mtp_index: int):
+        assert 0 <= mtp_index <= self.mtp_step, f"invalid mtp_index {mtp_index} for req {req.req_idx}"
+        conv_state, ssm_state = self.get_linear_att_state(req.req_idx * (self.mtp_step + 1) + mtp_index)
+        conv_state.fill_(0)
+        ssm_state.fill_(0)
+        return
