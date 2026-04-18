@@ -6,11 +6,12 @@ import collections
 import pickle
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional, Callable, Any
+from typing import List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
+from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache
 from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
@@ -27,7 +28,7 @@ logger = init_logger(__name__)
 @dataclass
 class InferenceContext:
     req_manager: ReqManager = None  # gpu 请求管理
-    radix_cache: RadixCache = None
+    radix_cache: Union[PagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
     infer_req_ids = None
@@ -36,13 +37,13 @@ class InferenceContext:
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
-    has_recurrent_state: bool = False  # for
+    has_linear_att_state: bool = False  # for
 
     def register(
         self,
         backend,
         req_manager: ReqManager,
-        radix_cache: RadixCache,
+        radix_cache: Union[PagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
     ):
@@ -60,7 +61,7 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.has_recurrent_state = isinstance(self.req_manager, ReqManagerForMamba)
+        self.has_linear_att_state = isinstance(self.req_manager, ReqManagerForMamba)
 
         return
 
@@ -187,7 +188,7 @@ class InferenceContext:
 
     def _free_req_mem_and_buffers(self, free_token_index: List, free_buffer_index: List, req: "InferReq"):
         """释放请求的 KV cache 和 buffer 内存"""
-        if self.has_recurrent_state:
+        if self.has_linear_att_state:
             need_free_base_buffer = self.free_a_req_mem_for_mamba(free_token_index, req)
             req_to_buffer_index = self.req_manager.req_to_buffer_index
             if need_free_base_buffer:
@@ -428,6 +429,14 @@ class InferReq:
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
 
+        # 类似 qwen3.5 这种混合linear att 模型使用的状态，记录申请来用于保存对应的线性att缓存的 buffer id
+        # 当 prefill 阶段结束后, 对应长度的 linear att state 会写入到buffer id 对应的块中， 方便插入到 radix cache中
+        # 方便被后续的请求使用，因为这种资源是有限的，也可能不存在的情况，申请不到时，默认为None，则这种小块对应的kv 无法
+        # 在后续被插入到radix cache中。
+        self.linear_att_cache_buffer_id: Optional[int] = None
+        # linear cache 对应的长度位置。
+        self.linear_att_cache_len: Optional[int] = None
+
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
@@ -476,6 +485,18 @@ class InferReq:
         self.shared_kv_node: TreeNode = None
 
         self.finish_status = FinishStatus()
+
+        # 申请线性att混合模型使用的缓存资源
+        if g_infer_context.has_linear_att_state:
+            args = get_env_start_args()
+            linear_block_num = self.shm_req.linear_att_token_hash_list.size
+            self.linear_att_cache_len = linear_block_num * args.linear_att_hash_page_size
+            # 只有非 大块的整数倍情况，才需要单独申请att资源块来缓存
+            if linear_block_num > 0 and linear_block_num % args.linear_att_page_block_num != 0:
+                g_infer_context.radix_cache.free_one_linear_buffer()
+                self.linear_att_cache_buffer_id = (
+                    g_infer_context.radix_cache.linear_att_cache_manager.alloc_one_state_cache()
+                )
         return
 
     def _match_radix_cache(self):
@@ -493,6 +514,45 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+
+        self.shm_req.shm_cur_kv_len = self.cur_kv_len
+        return
+
+    def _linear_match_radix_cache(self):
+        linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
+        linear_att_hash_page_size = get_env_start_args().linear_att_hash_page_size
+        match_tokens = min(len(linear_hash_list) * linear_att_hash_page_size, self.get_cur_total_len() - 1)
+        match_tokens = max(0, match_tokens)
+        match_tokens = (match_tokens // linear_att_hash_page_size) * linear_att_hash_page_size
+        match_block_num = match_tokens // linear_att_hash_page_size
+        linear_hash_list = linear_hash_list[:match_block_num]
+
+        if (
+            g_infer_context.radix_cache is not None
+            and match_tokens > 1
+            and len(linear_hash_list) > 0
+            and self.cur_kv_len == 0
+        ):
+            input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+            key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
+            assert len(key) == len(linear_hash_list) * linear_att_hash_page_size
+            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
+                key, block_hashs=linear_hash_list, update_refs=True
+            )
+            if share_node is not None:
+                self.shared_kv_node = share_node
+                ready_cache_len = share_node.node_prefix_total_len
+                # 从 cpu 到 gpu 是流内阻塞操作
+                g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                if share_node.node_prefix_total_len - self.linear_att_cache_len == 0:
+                    # 如果线性att的缓存完全命中，则将线性att的缓存资源提前释放掉，
+                    # 因为radix tree 中已经有了，没必要再次插入，提前释放掉即可
+                    _buffer_idx = self.linear_att_cache_buffer_id
+                    if _buffer_idx is not None:
+                        g_infer_context.radix_cache.linear_att_cache_manager.free_state_cache([_buffer_idx])
+                    self.linear_att_cache_buffer_id = None
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return

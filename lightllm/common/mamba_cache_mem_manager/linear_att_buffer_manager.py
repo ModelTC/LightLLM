@@ -51,6 +51,13 @@ class LinearAttCacheManager:
     def get_state_cache(self, layer_idx: int):
         return self.conv_state_cache.buffer[layer_idx], self.ssm_state_cache.buffer[layer_idx]
 
+    def alloc_one_state_cache(self) -> Optional[int]:
+        if len(self.free_list) == 0:
+            return None
+
+        alloc_index = self.free_list.popleft()
+        return alloc_index
+
     def alloc_state_cache(self, need_size: int) -> Optional[List[int]]:
         if need_size > len(self.free_list):
             logger.error(f"warn no enough cache need_size {need_size} free_size {len(self.free_list)}")
