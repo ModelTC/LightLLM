@@ -27,16 +27,19 @@ class QueueItem(ctypes.Structure):
 
     def set(self, token_str: str, src_index: int, special: bool, count_output_tokens: int):
         str_bytes = token_str.encode("utf-8")
-        if len(str_bytes) > LIGHTLLM_TOKEN_MAX_BYTES:
+        max_data_len = max(LIGHTLLM_TOKEN_MAX_BYTES - 1, 0)
+        if len(str_bytes) > max_data_len:
             logger.error(
                 "Token string exceeds max bytes: bytes=%d limit=%d src_index=%d count_output_tokens=%d preview=%s",
                 len(str_bytes),
-                LIGHTLLM_TOKEN_MAX_BYTES,
+                max_data_len,
                 src_index,
                 count_output_tokens,
                 token_str,
             )
-        str_bytes = str_bytes[: LIGHTLLM_TOKEN_MAX_BYTES - 1]
+            str_bytes = str_bytes[:max_data_len]
+            # Ensure truncation never leaves an incomplete UTF-8 sequence.
+            str_bytes = str_bytes.decode("utf-8", errors="ignore").encode("utf-8")
         ctypes.memmove(self.data, str_bytes, len(str_bytes))
         self.data_len = len(str_bytes)
         self.src_index = src_index
