@@ -251,7 +251,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         assert isinstance(infer_state.mem_manager, Qwen3NextHybridMemManager)
 
         input = input.view(-1, self.embed_dim_)
-        conv_states, ssm_states = infer_state.mem_manager.kv_buffer.get_mamba_cache(self.layer_num_)
+        conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
 
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)

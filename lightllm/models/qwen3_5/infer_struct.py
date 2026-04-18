@@ -13,5 +13,6 @@ class Qwen35InferStateInfo(Qwen2VLInferStateInfo):
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
         self.b_att_seq_len = self.b_seq_len
-        self.b_buffer_idx = model.req_manager.req_to_buffer_index[self.b_req_idx, 0].contiguous()
+        mtp_step = get_env_start_args().mtp_step
+        self.b_buffer_idx = self.b_req_idx * (mtp_step + 1) + self.b_mtp_index
         return

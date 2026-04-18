@@ -9,9 +9,10 @@ class LinearAttCacheConfig:
     head_linear_k_dim: int
     head_linear_v_dim: int
     conv_kernel_size: int
-    layer_num: int
+    linear_layer_num: int
     conv_state_dtype: torch.dtype
     ssm_state_dtype: torch.dtype
+    full_attention_interval: int
 
     def get_conv_dim(self):
         return self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
