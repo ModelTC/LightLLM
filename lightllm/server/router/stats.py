@@ -24,11 +24,13 @@ class SystemStatusReporter:
 
         # Windowed counters for cache hit (reset each interval)
         self.window_input_total = 0
-        self.window_cache_total = 0
+        self.window_gpu_cache_total = 0
+        self.window_cpu_cache_total = 0
 
         # Global counters (never reset, for lifetime stats)
         self.global_input_total = 0
-        self.global_cache_total = 0
+        self.global_gpu_cache_total = 0
+        self.global_cpu_cache_total = 0
         self.global_mtp_output_total = 0
         self.global_mtp_accepted_total = 0
 
@@ -44,12 +46,21 @@ class SystemStatusReporter:
         if self.enabled:
             self.output_tokens += num_tokens
 
-    def on_request_completed(self, input_len: int, output_len: int, cache_len: int, mtp_accepted: int):
+    def on_request_completed(
+        self,
+        input_len: int,
+        output_len: int,
+        gpu_cache_len: int,
+        cpu_cache_len: int,
+        mtp_accepted: int,
+    ):
         if self.enabled:
             self.window_input_total += input_len
-            self.window_cache_total += cache_len
+            self.window_gpu_cache_total += gpu_cache_len
+            self.window_cpu_cache_total += cpu_cache_len
             self.global_input_total += input_len
-            self.global_cache_total += cache_len
+            self.global_gpu_cache_total += gpu_cache_len
+            self.global_cpu_cache_total += cpu_cache_len
             self.global_mtp_output_total += output_len
             self.global_mtp_accepted_total += mtp_accepted
 
@@ -94,13 +105,19 @@ class SystemStatusReporter:
         avg_kv_used = sum(kv_used_list) / len(kv_used_list)
         avg_kv_used_no_cache = sum(kv_used_no_cache_list) / len(kv_used_no_cache_list)
 
-        # Windowed prefix cache hit rate (this interval only)
-        window_cache_hit_rate = (
-            (self.window_cache_total / self.window_input_total * 100) if self.window_input_total > 0 else 0.0
+        # Windowed prefix cache hit rates (this interval only)
+        window_gpu_cache_hit_rate = (
+            (self.window_gpu_cache_total / self.window_input_total * 100) if self.window_input_total > 0 else 0.0
         )
-        # Global prefix cache hit rate (lifetime)
-        global_cache_hit_rate = (
-            (self.global_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
+        window_cpu_cache_hit_rate = (
+            (self.window_cpu_cache_total / self.window_input_total * 100) if self.window_input_total > 0 else 0.0
+        )
+        # Global prefix cache hit rates (lifetime)
+        global_gpu_cache_hit_rate = (
+            (self.global_gpu_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
+        )
+        global_cpu_cache_hit_rate = (
+            (self.global_cpu_cache_total / self.global_input_total * 100) if self.global_input_total > 0 else 0.0
         )
 
         kv_pct = avg_kv_used * 100
@@ -117,12 +134,13 @@ class SystemStatusReporter:
             f"TPS {total_tps:.1f} (in {input_tps:.1f}, out {output_tps:.1f}), "
             f"REQ {running}run, {queued}wait, {paused_req_num}pause, "
             f"KV CACHE {kv_pct:.1f}% (active {kv_pct_no_cache:.1f}%), "
-            f"CACHE HIT {window_cache_hit_rate:.1f}% (global {global_cache_hit_rate:.1f}%)"
+            f"GPU CACHE HIT {window_gpu_cache_hit_rate:.1f}% (global {global_gpu_cache_hit_rate:.1f}%), "
+            f"CPU CACHE HIT {window_cpu_cache_hit_rate:.1f}% (global {global_cpu_cache_hit_rate:.1f}%)"
             f"{mtp_suffix}"
         )
 
         if self.metric_client is not None:
-            self.metric_client.gauge_set("lightllm_cache_hit_rate", global_cache_hit_rate / 100.0)
+            self.metric_client.gauge_set("lightllm_cache_hit_rate", global_gpu_cache_hit_rate / 100.0)
             self.metric_client.gauge_set("lightllm_gen_throughput", output_tps)
             self.metric_client.gauge_set("lightllm_num_running_reqs", running)
 
@@ -130,7 +148,8 @@ class SystemStatusReporter:
         self.prompt_tokens = 0
         self.output_tokens = 0
         self.window_input_total = 0
-        self.window_cache_total = 0
+        self.window_gpu_cache_total = 0
+        self.window_cpu_cache_total = 0
         self.last_print_time = now
 
 
