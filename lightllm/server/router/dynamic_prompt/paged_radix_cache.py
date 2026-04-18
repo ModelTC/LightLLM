@@ -3,7 +3,7 @@ import numpy as np
 import collections
 from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
-
+from lightllm.common.mamba_cache_mem_manager.linear_att_buffer_manager import LinearAttCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import UniqueTimeIdGenerator, time_gen, match
 
@@ -79,6 +79,7 @@ class PagedRadixCache:
         hash_page_size: int,
         big_page_num: int,
         kv_cache_mem_manager=None,
+        linear_att_cache_manager=None,
     ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
@@ -88,6 +89,7 @@ class PagedRadixCache:
         self.hash_page_size = hash_page_size
         self.big_page_num = big_page_num
         self.big_page_tokens = hash_page_size * big_page_num
+        self.total_token_num = total_token_num
 
         self.mem_manager: MemoryManager = kv_cache_mem_manager
         self._key_dtype = torch.int64
@@ -98,8 +100,8 @@ class PagedRadixCache:
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # pinned so root is never evicted
 
-        self.evict_tree_set: Set[PagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
-        self.evict_tree_set.add(self.root_node)
+        self._evict_tree_set: Set[PagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
+        self._evict_tree_set_for_linear_att: Set[PagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
 
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
@@ -107,6 +109,23 @@ class PagedRadixCache:
             f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
         )
         self.tree_total_tokens_num.arr[0] = 0
+        self.linear_att_cache_manager: LinearAttCacheManager = linear_att_cache_manager
+
+    def _discard_node(self, node: PagedTreeNode):
+        assert node.is_leaf(), "only leaf node can be discarded"
+        self._evict_tree_set.discard(node)
+        self._evict_tree_set_for_linear_att.discard(node)
+        return
+
+    def _add_node(self, node: PagedTreeNode):
+        if node is self.root_node:
+            return
+
+        assert node.is_leaf(), "only leaf node can be added"
+        self._evict_tree_set.add(node)
+        if node.linear_buffer_idx is not None and node.ref_counter == 0:
+            self._evict_tree_set_for_linear_att.add(node)
+        return
 
     def insert(
         self,
@@ -158,7 +177,8 @@ class PagedRadixCache:
         block_linear_idxs: List[int],
     ) -> Tuple[int, Optional[PagedTreeNode]]:
         if node.is_leaf():
-            self.evict_tree_set.discard(node)
+            self._discard_node(node)
+
         node.update_time()
 
         try:
@@ -193,19 +213,20 @@ class PagedRadixCache:
             else:
                 take = len(block_hashs)
                 take_tokens = take * self.hash_page_size
-                assert (
-                    block_linear_idxs[-1] is not None
-                ), "the last block_linear_idx must not be None, for compatibility with non-paged radix cache"
                 if block_hashs[-1] in node.children:
                     child = node.children[block_hashs[-1]]
                     assert child.num_pages == len(
                         block_hashs
                     ), "invariant broken: child num_pages does not match block_hashs length"
                     if child.is_leaf():
-                        self.evict_tree_set.discard(child)
+                        self._discard_node(child)
                     child.update_time()
                     if child.is_leaf():
-                        self.evict_tree_set.add(child)
+                        self._add_node(child)
+
+                    if block_linear_idxs[-1] is not None:
+                        # 当插入的时候发现，叶节点已经存在的时候，需要把这个叶节点占用的线性缓存释放掉，外部不用处理这个细节了
+                        self.linear_att_cache_manager.free_state_cache(free_indexes=[block_linear_idxs[-1]])
 
                     return take_tokens, child
                 else:
@@ -217,11 +238,11 @@ class PagedRadixCache:
                     )
                     self.tree_total_tokens_num.arr[0] += take_tokens
                     if new_node.is_leaf():
-                        self.evict_tree_set.add(new_node)
+                        self._add_node(new_node)
                     return 0, new_node
         finally:
             if node.is_leaf():
-                self.evict_tree_set.add(node)
+                self._add_node(node)
 
     def match_prefix(
         self,
@@ -277,7 +298,7 @@ class PagedRadixCache:
     ) -> PagedTreeNode:
 
         if node.is_leaf():
-            self.evict_tree_set.discard(node)
+            self._discard_node(node)
         node.update_time()
 
         try:
@@ -303,78 +324,20 @@ class PagedRadixCache:
                         ans_value_list,
                         update_refs,
                     )
-
             return node
         finally:
             if node.is_leaf():
-                self.evict_tree_set.add(node)
-
-    def evict(self, need_remove_tokens, evict_callback):
-        if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
-            assert False, f"""can not free tree tokens {need_remove_tokens},
-                              tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
-                              refed_tokens_num {self.refed_tokens_num.arr[0]}"""
-        num_evicted = 0
-        while num_evicted < need_remove_tokens:
-            node: PagedTreeNode = self.evict_tree_set.pop(0)
-            assert (
-                node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
-            ), "error evict tree node state"
-            num_evicted += len(node.token_mem_index_value)
-            evict_callback(node.token_mem_index_value)
-            self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-            parent_node: PagedTreeNode = node.parent
-            parent_node.remove_child(node)
-            if parent_node.is_leaf():
-                self.evict_tree_set.add(parent_node)
-
-        return
+                self._add_node(node)
 
     def _try_merge(self, child_node: PagedTreeNode) -> Optional[PagedTreeNode]:
-        """
-        Merging a parent into its only child is *never* valid under the
-        paged invariants: the parent is either the root or an internal
-        node carrying exactly ``big_page_num`` pages, so the merged node
-        would exceed ``big_page_num`` pages.  The method is kept for API
-        parity and always reports "nothing to merge".
-        """
-        parent_node = child_node.parent
-        if (
-            parent_node is None
-            or parent_node is self.root_node
-            or parent_node.ref_counter != 0
-            or len(parent_node.children) != 1
-            or child_node.ref_counter != 0
-            or parent_node.buffer_idx is not None
-        ):
-            return None
-        # Merging would break the "internal nodes are exactly big_page_num pages" rule.
-        return None
+        raise NotImplementedError()
 
     def merge_unreferenced_nodes(self):
-        # See ``_try_merge`` -- under the paged invariants no merge is legal.
-        return
-
-    def assert_leafs_is_right(self):
-        for node in self.evict_tree_set:
-            if node.is_leaf() and node.ref_counter == 0:
-                a = node.token_mem_index_value.cuda()
-                assert (self.mem_manager.mem_state[a] == 1).sum().item() == len(a)
+        raise NotImplementedError()
 
     def clear_tree_nodes(self):
         """Only used in tests."""
-        while True:
-            node: PagedTreeNode = self.evict_tree_set.pop(0)
-            if node is not self.root_node:
-                parent_node: PagedTreeNode = node.parent
-                parent_node.remove_child(node)
-                if parent_node.is_leaf():
-                    self.evict_tree_set.add(parent_node)
-            else:
-                break
-
-        self.tree_total_tokens_num.arr[0] = 0
-        self.refed_tokens_num.arr[0] = 0
+        self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
         return
 
     def dec_node_ref_counter(self, node: PagedTreeNode):
@@ -382,7 +345,7 @@ class PagedRadixCache:
             return
         old_node = node
         if old_node.is_leaf():
-            self.evict_tree_set.discard(old_node)
+            self._discard_node(old_node)
 
         while node is not None:
             if node.ref_counter == 1:
@@ -391,7 +354,7 @@ class PagedRadixCache:
             node = node.parent
 
         if old_node.is_leaf():
-            self.evict_tree_set.add(old_node)
+            self._add_node(old_node)
         return
 
     def add_node_ref_counter(self, node: PagedTreeNode):
@@ -399,7 +362,7 @@ class PagedRadixCache:
             return
         old_node = node
         if old_node.is_leaf():
-            self.evict_tree_set.discard(old_node)
+            self._discard_node(old_node)
 
         while node is not None:
             if node.ref_counter == 0:
@@ -408,7 +371,7 @@ class PagedRadixCache:
             node = node.parent
 
         if old_node.is_leaf():
-            self.evict_tree_set.add(old_node)
+            self._add_node(old_node)
         return
 
     def get_mem_index_value_by_node(self, node: PagedTreeNode) -> Optional[torch.Tensor]:
@@ -451,48 +414,65 @@ class PagedRadixCache:
         if need_token_num > self.mem_manager.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
             release_mems = []
+            linear_att_buffer_indexes = []
 
-            def release_mem(mem_index):
+            def release_mem(mem_index, linear_att_buffer_index):
                 release_mems.append(mem_index)
+                linear_att_buffer_indexes.append(linear_att_buffer_index)
                 return
 
-            self.evict(need_evict_token_num, release_mem)
+            self._evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
             self.mem_manager.free(mem_index)
+            linear_att_buffer_indexes = [idx for idx in linear_att_buffer_indexes if idx is not None]
+            if len(linear_att_buffer_indexes) > 0:
+                self.linear_att_cache_manager.free_state_cache(linear_att_buffer_indexes)
         return
 
+    def free_one_linear_buffer(self):
+        if self.linear_att_cache_manager is None:
+            return
+        if self.linear_att_cache_manager.get_free_cache_num() > 0:
+            return
+        if len(self._evict_tree_set_for_linear_att) == 0:
+            return
 
-class _PagedRadixCacheReadOnlyClient:
-    """Read-only client mirroring ``_RadixCacheReadOnlyClient`` for the paged cache."""
+        node: PagedTreeNode = self._evict_tree_set_for_linear_att.pop(0)
+        self._evict_tree_set.discard(node)
 
-    def __init__(self, unique_name, total_token_num, rank_in_node):
-        self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
-        self.tree_total_tokens_num = SharedArray(
-            f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
-        )
+        assert (
+            node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
+        ), "error evict tree node state"
 
-    def get_refed_tokens_num(self):
-        return self.refed_tokens_num.arr[0]
+        self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+        self.linear_att_cache_manager.free_state_cache(free_indexes=[node.linear_buffer_idx])
+        self.mem_manager.free(node.token_mem_index_value)
 
-    def get_tree_total_tokens_num(self):
-        return self.tree_total_tokens_num.arr[0]
+        parent_node: PagedTreeNode = node.parent
+        parent_node.remove_child(node)
+        if parent_node.is_leaf():
+            self._add_node(parent_node)
+        return
 
-    def get_unrefed_tokens_num(self):
-        return self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0]
+    def _evict(self, need_remove_tokens, evict_callback):
+        if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
+            assert False, f"""can not free tree tokens {need_remove_tokens},
+                              tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
+                              refed_tokens_num {self.refed_tokens_num.arr[0]}"""
+        num_evicted = 0
+        while num_evicted < need_remove_tokens:
+            node: PagedTreeNode = self._evict_tree_set.pop(0)
+            self._evict_tree_set_for_linear_att.discard(node)
 
+            assert (
+                node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
+            ), "error evict tree node state"
+            num_evicted += len(node.token_mem_index_value)
+            evict_callback(node.token_mem_index_value, node.linear_buffer_idx)
+            self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+            parent_node: PagedTreeNode = node.parent
+            parent_node.remove_child(node)
+            if parent_node.is_leaf():
+                self._add_node(parent_node)
 
-class PagedRadixCacheReadOnlyClient:
-    def __init__(self, unique_name, total_token_num, node_world_size, dp_world_size):
-        self.dp_rank_clients: List[_PagedRadixCacheReadOnlyClient] = [
-            _PagedRadixCacheReadOnlyClient(unique_name, total_token_num, rank_in_node)
-            for rank_in_node in range(0, node_world_size, dp_world_size)
-        ]
-
-    def get_refed_tokens_num(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_refed_tokens_num()
-
-    def get_tree_total_tokens_num(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_tree_total_tokens_num()
-
-    def get_unrefed_tokens_num(self, dp_rank_in_node):
-        return self.dp_rank_clients[dp_rank_in_node].get_unrefed_tokens_num()
+        return

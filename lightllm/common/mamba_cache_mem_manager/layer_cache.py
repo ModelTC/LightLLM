@@ -1,0 +1,19 @@
+from typing import Tuple
+import torch
+import numpy as np
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
+
+class LayerCache:
+    def __init__(self, size: int, dtype: torch.dtype, shape: Tuple[int, ...], layer_num: int, device: torch.device):
+        self.size = size
+        self.dtype = dtype
+        self.shape = shape
+        self.layer_num = layer_num
+        self.device = device
+        self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device=device)
+
+    def get_cell_size(self):
+        return np.prod(self.shape) * self.layer_num * torch._utils._element_size(self.dtype)
