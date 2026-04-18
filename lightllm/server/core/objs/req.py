@@ -10,6 +10,7 @@ from .token_chunck_hash_list import TokenHashList, CpuCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.config_utils import is_linear_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 from lightllm.utils.log_utils import init_logger
@@ -116,12 +117,12 @@ class Req(ctypes.Structure):
         # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
         # 该变量为 detokenization 进程写入，http_server 读取
         ("stop_str_matched_token_index", ctypes.c_int),
+        # 用于在 包含linear att 混合模型中，进行输入的提前hash，方便在对应的page radix tree中进行快速操作。
+        ("linear_att_token_hash_list", TokenHashList),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
         ("token_hash_list", TokenHashList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
-        # 分块hash的块大小
-        ("cpu_cache_token_page_size", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -182,9 +183,10 @@ class Req(ctypes.Structure):
 
         self.post_init()
 
-        self.cpu_cache_token_page_size = get_env_start_args().cpu_cache_token_page_size
         if get_env_start_args().enable_cpu_cache:
             self._fill_input_token_hash()
+        if is_linear_hybrid_att_model(get_env_start_args().model_dir):
+            self._fill_linear_att_token_hash()
         return
 
     def post_init(self):
@@ -194,9 +196,16 @@ class Req(ctypes.Structure):
     def _fill_input_token_hash(self):
         self.token_hash_list = TokenHashList()
         self.token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), self.cpu_cache_token_page_size)
+        hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().cpu_cache_token_page_size)
         self.token_hash_list.fill(hash_values)
         self.cpu_cache_match_page_indexes = CpuCachePageList()
+        return
+
+    def _fill_linear_att_token_hash(self):
+        self.linear_att_token_hash_list = TokenHashList()
+        self.linear_att_token_hash_list.clear()
+        hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
+        self.linear_att_token_hash_list.fill(hash_values)
         return
 
     def create_prompt_ids_shm_array(self):
