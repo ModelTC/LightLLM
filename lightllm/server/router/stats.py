@@ -87,7 +87,8 @@ class SystemStatusReporter:
             kv_used_list.append(used / self.max_total_token_num)
             if not disable_dynamic_prompt_cache and radix_cache_client is not None:
                 cache_unrefed = radix_cache_client.get_unrefed_tokens_num(dp_i)
-                kv_used_no_cache_list.append((used - cache_unrefed) / self.max_total_token_num)
+                active_used = max(0, used - cache_unrefed)
+                kv_used_no_cache_list.append(active_used / self.max_total_token_num)
             else:
                 kv_used_no_cache_list.append(used / self.max_total_token_num)
         avg_kv_used = sum(kv_used_list) / len(kv_used_list)

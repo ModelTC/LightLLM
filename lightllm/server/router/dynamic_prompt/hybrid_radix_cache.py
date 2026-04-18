@@ -5,7 +5,9 @@ from sortedcontainers import SortedSet
 
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.common.mamba_cache_mem_manager.cache_manager import MambaCacheManager
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
+from .detached_mamba_checkpoint_cache import DetachedMambaCheckpointCache
 
 logger = init_logger(__name__)
 
@@ -20,6 +22,12 @@ class HybridRadixCache(RadixCache):
         else:
             self.buffer_mem_manager: MambaCacheManager = kv_cache_mem_manager.mamba_cache_mem_manager
         self.evict_buffer_set: Set[TreeNode] = SortedSet(key=lambda x: x.buffer_time)
+        args = get_env_start_args()
+        self.detached_mamba_manager = (
+            DetachedMambaCheckpointCache(self.buffer_mem_manager, args.cpu_cache_token_page_size)
+            if args.enable_cpu_cache
+            else None
+        )
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
@@ -57,6 +65,9 @@ class HybridRadixCache(RadixCache):
         kv_len = tree_node.node_prefix_total_len
         value = torch.concat(ans_value_list)
         return tree_node, kv_len, value, unbuffered_prefix_pos
+
+    def match_prefix_kv(self, key, update_refs=False):
+        return RadixCache.match_prefix(self, key, update_refs=update_refs)
 
     def insert_with_buffer(self, key, value, unbuffered_prefix_pos, buffer_snapshot_fn):
         """Insert tokens and ensure buffers at the boundary and leaf.
@@ -113,6 +124,10 @@ class HybridRadixCache(RadixCache):
             self._evict_buffer(need_evict_buffer_num, release_buffer, protected_nodes=protected_nodes)
             if len(release_buffers) > 0:
                 self.buffer_mem_manager.free(release_buffers)
+            if need_buffer_num > self.buffer_mem_manager.can_use_mem_size and self.detached_mamba_manager is not None:
+                self.detached_mamba_manager.evict_to_get_enough_buffer(
+                    need_buffer_num - self.buffer_mem_manager.can_use_mem_size
+                )
         return
 
     def _evict_buffer(
@@ -202,7 +217,8 @@ class HybridRadixCache(RadixCache):
             evict_callback(node.token_mem_index_value)
             if node.buffer_idx is not None:
                 self.evict_buffer_set.discard(node)
-                evict_buffer_callback(node.buffer_idx)
+                if not self._detach_buffer_before_node_removal(node):
+                    evict_buffer_callback(node.buffer_idx)
                 node.buffer_idx = None
             # update total token num
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
@@ -212,3 +228,23 @@ class HybridRadixCache(RadixCache):
                 self.evict_tree_set.add(parent_node)
 
         return
+
+    def _detach_buffer_before_node_removal(self, node: TreeNode) -> bool:
+        if self.detached_mamba_manager is None:
+            return False
+        if node.node_prefix_total_len % self.detached_mamba_manager.token_page_size != 0:
+            return False
+
+        prefix_tokens = self._get_prefix_token_ids(node)
+        return self.detached_mamba_manager.add_checkpoint(prefix_tokens, node.buffer_idx)
+
+    def _get_prefix_token_ids(self, node: TreeNode) -> torch.Tensor:
+        parts = []
+        cur_node = node
+        while cur_node != self.root_node:
+            parts.append(cur_node.token_id_key)
+            cur_node = cur_node.parent
+
+        if not parts:
+            return torch.zeros((0,), dtype=self.root_node.token_id_key.dtype)
+        return torch.concat(parts[::-1])
