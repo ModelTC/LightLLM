@@ -36,7 +36,7 @@ class InferenceContext:
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
-    has_linear_att_state: bool = False  # for
+    is_linear_att_mixed_model: bool = False  # 标记模型是否是full att 混合 linear att 的混合模型。
 
     def register(
         self,
@@ -60,7 +60,7 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.has_linear_att_state = isinstance(self.req_manager, ReqManagerForMamba)
+        self.is_linear_att_mixed_model = isinstance(self.req_manager, ReqManagerForMamba)
 
         return
 
@@ -226,7 +226,12 @@ class InferenceContext:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
                     break
-                req._match_radix_cache()
+
+                if g_infer_context.is_linear_att_mixed_model:
+                    req._linear_match_radix_cache()
+                else:
+                    req._match_radix_cache()
+
                 assert req.paused is True
                 req.paused = False
                 if is_master_in_dp:
@@ -386,7 +391,10 @@ class InferReq:
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
-            self._match_radix_cache()
+            if g_infer_context.is_linear_att_mixed_model:
+                self._linear_match_radix_cache()
+            else:
+                self._match_radix_cache()
         return
 
     def _init_all_state(self):
@@ -416,7 +424,7 @@ class InferReq:
         self.finish_status = FinishStatus()
 
         # 申请线性att混合模型使用的缓存资源
-        if g_infer_context.has_linear_att_state:
+        if g_infer_context.is_linear_att_mixed_model:
             args = get_env_start_args()
             linear_block_num = self.shm_req.linear_att_token_hash_list.size
             self.linear_att_cache_len = linear_block_num * args.linear_att_hash_page_size
@@ -429,6 +437,9 @@ class InferReq:
         return
 
     def _match_radix_cache(self):
+        assert (
+            g_infer_context.is_linear_att_mixed_model is False
+        ), "current _match_radix_cache does not support linear att hybrid model, to do..."
         if self.sampling_param.disable_prompt_cache:
             return
         if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
@@ -448,6 +459,9 @@ class InferReq:
         return
 
     def _linear_match_radix_cache(self):
+        assert (
+            g_infer_context.is_linear_att_mixed_model is True
+        ), "current _linear_match_radix_cache only support linear att hybrid model, to do..."
         linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
         linear_att_hash_page_size = get_env_start_args().linear_att_hash_page_size
         match_tokens = min(len(linear_hash_list) * linear_att_hash_page_size, self.get_cur_total_len() - 1)
