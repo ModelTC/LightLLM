@@ -770,11 +770,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         automatically based on mamba_cache_ratio or max_total_token_num.""",
     )
     parser.add_argument(
-        "--mamba_ssm_data_type",
+        "-linear_att_ssm_data_type",
         type=str,
         choices=["bfloat16", "float32"],
         default="float32",
-        help="the data type of the model weight",
+        help="the data type of linear att smm data type",
     )
     parser.add_argument(
         "--hardware_platform",

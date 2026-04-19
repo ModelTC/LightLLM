@@ -193,4 +193,4 @@ class StartArgs:
     linear_att_page_block_num: int = field(default=10000000)
 
     linear_att_cache_size: Optional[int] = field(default=None)
-    mamba_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+    linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})

@@ -81,7 +81,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             layer_num=self.config["n_layer"],
             full_attention_interval=self.config["full_attention_interval"],
             conv_state_dtype=self.data_type,
-            ssm_state_dtype=ssm_dtype_dict[start_args.mamba_ssm_data_type],
+            ssm_state_dtype=ssm_dtype_dict[start_args.linear_att_ssm_data_type],
             conv_kernel_size=conv_kernel_size,
             num_linear_k_heads=self.num_linear_k_heads,
             num_linear_v_heads=self.num_linear_v_heads,

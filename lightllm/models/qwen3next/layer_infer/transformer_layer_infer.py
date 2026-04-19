@@ -71,7 +71,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         # SSM state dtype optimization
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         start_args = get_env_start_args()
-        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.mamba_ssm_data_type, torch.bfloat16)
+        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
 
         # Pre-compute whether dtype conversion is needed
         # GDN kernel output dtype is self.data_type
