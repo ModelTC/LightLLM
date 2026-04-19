@@ -252,6 +252,11 @@ def normal_or_p_d_start(args):
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
         f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
+    # linear att cache 参数自动设置
+    if args.linear_att_cache_size is None:
+        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
+        args.linear_att_cache_size = args.running_max_req_size * 2
+
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_prepare

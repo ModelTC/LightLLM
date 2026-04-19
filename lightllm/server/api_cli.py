@@ -763,24 +763,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         which can affect memory usage and mutiturn chat performance""",
     )
     parser.add_argument(
-        "--mamba_cache_size",
+        "--linear_att_cache_size",
         type=int,
         default=None,
         help="""The size of linear attn cache. If not specified, will be calculated
         automatically based on mamba_cache_ratio or max_total_token_num.""",
-    )
-    parser.add_argument(
-        "--mamba_cache_ratio",
-        type=lambda v: float(v)
-        if 0.0 <= (_ := float(v)) <= 1.0
-        else (_ for _ in ()).throw(
-            argparse.ArgumentTypeError(f"--mamba_cache_ratio must be between 0.0 and 1.0, got {v}")
-        ),
-        default=0.5,
-        help="""Ratio of mamba cache to total cache memory (mamba + KV).
-        Only effective when both mamba_cache_size and max_total_token_num are not set.
-        Default is 0.5 (50%% mamba cache, 50%% KV cache).
-        Example: 0.3 -> 30%% mamba, 70%% KV; 0.7 -> 70%% mamba, 30%% KV.""",
     )
     parser.add_argument(
         "--mamba_ssm_data_type",
