@@ -122,18 +122,103 @@ class InferenceContext:
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
+            if not self.is_linear_att_mixed_model:
+                self._full_att_free_req(free_token_index=free_token_index, req=req)
+            else:
+                self._linear_att_free_req(free_token_index=free_token_index, req=req)
+        req.cur_kv_len = 0
+        req.shm_req.shm_cur_kv_len = req.cur_kv_len
+        return
+
+    def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
+        input_token_ids = req.get_input_token_ids()
+        key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+        # .cpu() 是 流内阻塞操作
+        value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+
+        prefix_len, _ = self.radix_cache.insert(key, value)
+        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+        if req.shared_kv_node is not None:
+            assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
+        return
+
+    def _linear_att_free_req(self, free_token_index: List, req: "InferReq"):
+        assert g_infer_context.is_linear_att_mixed_model is True
+        args = get_env_start_args()
+        hash_page_size = args.linear_att_hash_page_size
+        big_page_num = args.linear_att_page_block_num
+        shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        big_page_token_num = (
+            req.linear_att_cache_len // (hash_page_size * big_page_num) * (hash_page_size * big_page_num)
+        )
+        page_num = req.linear_att_cache_len // hash_page_size
+        assert req.linear_att_cache_len >= shared_kv_len
+
+        if req.cur_kv_len < req.linear_att_cache_len and req.linear_att_cache_buffer_id is not None:
+            req.free_linear_buffer()
+        if req.cur_kv_len == 0:
+            return
+
+        if (
+            req.linear_att_cache_len <= req.cur_kv_len
+            and req.linear_att_cache_buffer_id is not None
+            and page_num % big_page_num != 0
+        ):
+            free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][req.linear_att_cache_len : req.cur_kv_len]
+            )
+            req.cur_kv_len = req.linear_att_cache_len
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            # .cpu() 是 流内阻塞操作
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-
-            prefix_len, _ = self.radix_cache.insert(key, value)
+            block_hashs = req.shm_req.linear_att_token_hash_list.get_all()[:page_num]
+            linear_idxs = [None for _ in range(page_num)]
+            linear_idxs[-1] = req.linear_att_cache_buffer_id
+            req.linear_att_cache_buffer_id = None
+            prefix_len, _ = self.radix_cache.insert(key, value, block_hashs=block_hashs, block_linear_idxs=linear_idxs)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.node_prefix_total_len <= prefix_len
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
                 req.shared_kv_node = None
+            return
+
+        if shared_kv_len < big_page_token_num <= req.cur_kv_len:
+            free_token_index.append(
+                self.req_manager.req_to_token_indexs[req.req_idx][big_page_token_num : req.cur_kv_len]
+            )
+            req.cur_kv_len = big_page_token_num
+
+            req.free_linear_buffer()
+            input_token_ids = req.get_input_token_ids()
+            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
+            block_hashs = req.shm_req.linear_att_token_hash_list.get_all()[:page_num]
+            linear_idxs = [None for _ in range(page_num)]
+            prefix_len, _ = self.radix_cache.insert(key, value, block_hashs=block_hashs, block_linear_idxs=linear_idxs)
+            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
+            if req.shared_kv_node is not None:
+                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
+            return
+
+        if shared_kv_len <= req.cur_kv_len:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+            req.cur_kv_len = shared_kv_len
+            req.free_linear_buffer()
+            if req.shared_kv_node is not None:
+                assert req.shared_kv_node.node_prefix_total_len == req.cur_kv_len
+                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                req.shared_kv_node = None
+            return
+
+        assert False, f"error state: cur_kv_len: {req.cur_kv_len}"
 
     def _save_promptcache_kvbuffer(self):
         """
@@ -202,8 +287,6 @@ class InferenceContext:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
                 self.free_a_req_mem(free_token_index, req)
-                req.cur_kv_len = 0
-                req.shm_req.shm_cur_kv_len = req.cur_kv_len
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
@@ -498,6 +581,12 @@ class InferReq:
                     self.linear_att_cache_buffer_id = None
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
+        return
+
+    def free_linear_buffer(self):
+        if self.linear_att_cache_buffer_id is not None:
+            g_infer_context.radix_cache.linear_att_cache_manager.free_state_cache([self.linear_att_cache_buffer_id])
+            self.linear_att_cache_buffer_id = None
         return
 
     def is_master_req(self):
