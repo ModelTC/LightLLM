@@ -523,9 +523,8 @@ class InferReq:
         assert (
             g_infer_context.is_linear_att_mixed_model is False
         ), "current _match_radix_cache does not support linear att hybrid model, to do..."
-        if self.sampling_param.disable_prompt_cache:
-            return
-        if g_infer_context.radix_cache is not None and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
+        enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
+        if enable_prompt_cache and self.get_cur_total_len() > 1 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
@@ -545,6 +544,7 @@ class InferReq:
         assert (
             g_infer_context.is_linear_att_mixed_model is True
         ), "current _linear_match_radix_cache only support linear att hybrid model, to do..."
+        enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
         linear_att_hash_page_size = get_env_start_args().linear_att_hash_page_size
         match_tokens = min(len(linear_hash_list) * linear_att_hash_page_size, self.get_cur_total_len() - 1)
@@ -552,13 +552,7 @@ class InferReq:
         match_tokens = (match_tokens // linear_att_hash_page_size) * linear_att_hash_page_size
         match_block_num = match_tokens // linear_att_hash_page_size
         linear_hash_list = linear_hash_list[:match_block_num]
-
-        if (
-            g_infer_context.radix_cache is not None
-            and match_tokens > 1
-            and len(linear_hash_list) > 0
-            and self.cur_kv_len == 0
-        ):
+        if enable_prompt_cache and match_tokens > 1 and len(linear_hash_list) > 0 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(linear_hash_list) * linear_att_hash_page_size
@@ -581,6 +575,8 @@ class InferReq:
                     self.linear_att_cache_buffer_id = None
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
+
+        # TODO 通过当前命中的数据，完成线性 att state的初始化。
         return
 
     def free_linear_buffer(self):
