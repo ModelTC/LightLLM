@@ -144,7 +144,8 @@ class MultiLevelKvCacheModule(object):
 
                 # 计算需要加载的页面（只加载未匹配的部分）
                 cur_kv_pages = req.cur_kv_len // token_page_size
-                need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
+                end_kv_pages = final_match_len // token_page_size
+                need_pages = page_list[cur_kv_pages:end_kv_pages]  # 只取需要的页面
 
                 mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 

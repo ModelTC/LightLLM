@@ -295,10 +295,15 @@ class InferenceContext:
         # Handle overlapping indices: tree already had [old_shared:prefix_len]
         # from another request.  Our indices for that range differ — defer
         # freeing until request completion (can't free mid-prefill).
+        # IMPORTANT: indices in [old_shared_len, raw_gpu_kv_len) were borrowed
+        # from the radix tree via raw KV reuse (match_prefix_kv) — they are
+        # owned by the tree and must NOT be deferred-freed.
         old_shared_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        if prefix_len > old_shared_len:
+        raw_kv_len = req.raw_gpu_kv_len if req.raw_gpu_kv_node is not None else 0
+        deferred_start = max(old_shared_len, raw_kv_len)
+        if prefix_len > deferred_start:
             req.deferred_free_token_indices.append(
-                self.req_manager.req_to_token_indexs[req.req_idx][old_shared_len:prefix_len].detach().clone()
+                self.req_manager.req_to_token_indexs[req.req_idx][deferred_start:prefix_len].detach().clone()
             )
 
         # Update shared_kv_node with ref counting.
