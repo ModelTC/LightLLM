@@ -345,7 +345,9 @@ class SamplingParams(ctypes.Structure):
         self.top_k = kwargs.get("top_k", SamplingParams._top_k)
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        self.max_new_tokens = kwargs.get("max_new_tokens", 16384)
+        # -1 作为哨兵值，表示请求未显式设置 max_new_tokens，后续会在长度校验阶段
+        # 被解析为 max_req_total_len - prompt_tokens，即允许输出到 max_req_total_len。
+        self.max_new_tokens = kwargs.get("max_new_tokens", -1)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
@@ -441,11 +443,11 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(f"top_p must be in (0.0, 1.0], got {self.top_p}")
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, got {self.top_k}.")
-        if self.max_new_tokens < 1:
+        if self.max_new_tokens != -1 and self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be at least 1 , got {self.max_new_tokens}.")
         if self.min_new_tokens < 1:
             raise ValueError(f"min_new_tokens must be at least 1 , got {self.min_new_tokens}.")
-        if self.min_new_tokens > self.max_new_tokens:
+        if self.max_new_tokens != -1 and self.min_new_tokens > self.max_new_tokens:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
