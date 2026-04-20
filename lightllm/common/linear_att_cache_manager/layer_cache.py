@@ -13,7 +13,11 @@ class LayerCache:
         self.shape = shape
         self.layer_num = layer_num
         self.device = device
-        self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device=device)
+
+        if device == "cpu":
+            self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device="cpu", pin_memory=True)
+        else:
+            self.buffer = torch.zeros((self.layer_num, size, *shape), dtype=dtype, device=device)
 
     def get_cell_size(self):
         return np.prod(self.shape) * self.layer_num * torch._utils._element_size(self.dtype)

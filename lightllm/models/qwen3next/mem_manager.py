@@ -7,6 +7,11 @@ from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.basemodel.triton_kernel.linear_att_copy import (
+    copy_kv_buffer_to_linear_att_state,
+    copy_linear_att_state_to_kv_buffer,
+)
+
 
 logger = init_logger(__name__)
 
