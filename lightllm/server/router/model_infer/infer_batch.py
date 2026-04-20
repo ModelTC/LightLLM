@@ -333,6 +333,28 @@ class InferenceContext:
             )
         return self.req_manager.mem_manager.can_use_mem_size + radix_cache_unref_token_num
 
+    def copy_linear_att_state_to_kv_buffer(self, b_req_idx: torch.Tensor, b_seq_len: torch.Tensor):
+        """
+        该函数用于在线性混合模型prefill后,如果存在大页匹配的情况下，将线性层状态复制到
+        """
+        if not self.is_linear_att_mixed_model:
+            return
+        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+
+        assert len(b_req_idx) == len(b_seq_len)
+        copy_linear_att_state_to_kv_buffer(
+            b_req_idx=b_req_idx,
+            b_seq_len=b_seq_len,
+            req_to_token_mem_index=self.req_manager.req_to_token_indexs,
+            gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
+            gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
+            cpu_kv_conv_state=self.req_manager.mem_manager.conv_state_buffer,
+            cpu_kv_ssm_state=self.req_manager.mem_manager.ssm_state_buffer,
+            mtp_step=self.args.mtp_step,
+            big_page_token_num=self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num,
+        )
+        return
+
 
 g_infer_context = InferenceContext()
 

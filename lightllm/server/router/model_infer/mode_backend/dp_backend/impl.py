@@ -161,6 +161,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu[:run_reqs_num],
                     mask_func=None,
                 )
+                g_infer_context.copy_linear_att_state_to_kv_buffer(
+                    b_req_idx=model_input.b_req_idx, b_seq_len=model_input.b_seq_len
+                )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -269,6 +272,13 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                     mask_func=None,
                 )
+
+                if g_infer_context.is_linear_att_mixed_model:
+                    _b_req_len = torch.cat(
+                        model_input0.b_seq_len[0:req_num0], model_input1.b_seq_len[0:req_num1], dim=0
+                    )
+                    g_infer_context.copy_linear_att_state_to_kv_buffer(b_req_idx=b_req_idx, b_req_len=_b_req_len)
+
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -390,6 +400,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                 model_output=model_output,
                 next_token_ids=draft_next_token_ids_gpu,
             )
+            if req_num > 0:
+                g_infer_context.copy_linear_att_state_to_kv_buffer(
+                    b_req_idx=b_req_idx, b_seq_len=model_input.b_seq_len[0:req_num]
+                )
+
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -692,6 +707,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                 ].microbatch_overlap_prefill(draft_model_input0, draft_model_input1)
                 draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
                 draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
+
+            if req_num0 + req_num1 > 0 and g_infer_context.is_linear_att_mixed_model:
+                _b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
+                _b_seq_len = torch.cat((model_input0.b_seq_len[0:req_num0], model_input1.b_seq_len[0:req_num1]), dim=0)
+                g_infer_context.copy_linear_att_state_to_kv_buffer(b_req_idx=_b_req_idx, b_seq_len=_b_seq_len)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
