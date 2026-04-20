@@ -1,3 +1,4 @@
+import os
 import torch
 from functools import partial
 from typing import Tuple
@@ -11,6 +12,8 @@ from lightllm.distributed import all_reduce
 import torch.distributed as dist
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.common.basemodel.attention.base_att import AttControl
+
+_USE_TRITON_PREFILL = os.environ.get("LIGHTLLM_NEO_PREFILL_TRITON_BACKEND", "0").strip().lower() in ("1", "true")
 
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
@@ -82,23 +85,40 @@ class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def _context_attention_kernel(
         self, q, kv, infer_state: NeoChatInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
-        o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
-        kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
-        context_attention_fwd_neo(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            kv[:, 0 : self.tp_k_head_num_, :],
-            kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
-            o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-            infer_state.position_ids[0],  # [0,0,1,2,3,3,3,4]
-            infer_state.b_req_idx,
-            infer_state.b_q_start_loc,
-            infer_state.b_seq_len,
-            infer_state.b_ready_cache_len,
-            infer_state.max_q_seq_len,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.b_image_token_tag,
+        if _USE_TRITON_PREFILL:
+            o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out
+            kv = infer_state.mem_manager.kv_buffer[self.layer_num_]
+            context_attention_fwd_neo(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                kv[:, 0 : self.tp_k_head_num_, :],
+                kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
+                o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
+                infer_state.position_ids[0],  # [0,0,1,2,3,3,3,4]
+                infer_state.b_req_idx,
+                infer_state.b_q_start_loc,
+                infer_state.b_seq_len,
+                infer_state.b_ready_cache_len,
+                infer_state.max_q_seq_len,
+                infer_state.req_manager.req_to_token_indexs,
+                infer_state.b_image_token_tag,
+            )
+            return o_tensor
+
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+
+        att_control = AttControl()
+        att_control.image_token_tag = getattr(infer_state, "b_image_token_tag", None)
+        att_control.max_image_q_idx = getattr(infer_state, "b_max_image_q_idx", None)
+
+        o_tensor = infer_state.prefill_att_state.prefill_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            att_control=att_control,
+            alloc_func=self.alloc_tensor,
         )
-        return o_tensor
+        return o_tensor.view(q.shape)
 
     def _token_attention_kernel(
         self,

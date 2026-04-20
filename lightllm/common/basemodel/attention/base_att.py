@@ -70,6 +70,11 @@ class AttControl:
     nsa_prefill_dict: Dict = None
     nsa_decode: bool = False
     nsa_decode_dict: Dict = None
+    image_token_tag: Optional[torch.Tensor] = None
+    # max_image_q_idx: int32[batch]. 每个 batch 内最后一个 image token 的 local q
+    # 下标；没有 image token 的 batch 填 -1。fa3 kernel 据此决定该 batch 的哪些
+    # M-block 需要把 n_block_max 延长到 full seqlen_k，避免无 image 的 batch 翻倍计算。
+    max_image_q_idx: Optional[torch.Tensor] = None
 
 
 @dataclass

@@ -92,6 +92,15 @@ class Fa3PrefillAttState(BasePrefillAttState):
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
+
+        # Optional image-token bidirectional attention (neo_chat*). When None,
+        # the kernel path reduces to plain causal fa3 (zero overhead).
+        extra_kwargs = {}
+        if att_control.image_token_tag is not None:
+            extra_kwargs["image_token_tag"] = att_control.image_token_tag
+        if att_control.max_image_q_idx is not None:
+            extra_kwargs["max_image_q_idx"] = att_control.max_image_q_idx
+
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
@@ -109,6 +118,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             v_descale=v_descale,
             return_softmax_lse=False,
             sinks=sink_weight,
+            **extra_kwargs,
         )
         return o
 

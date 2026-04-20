@@ -20,6 +20,11 @@ from lightllm.models.neo_chat_moe.layer_weights.transformer_layer_weight import 
 from lightllm.models.neo_chat_moe.layer_weights.pre_and_post_layer_weight import NeoChatMOEPreAndPostLayerWeight
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
+from lightllm.common.basemodel.attention import (
+    get_prefill_att_backend_class,
+    get_decode_att_backend_class,
+    BaseAttBackend,
+)
 
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
@@ -181,6 +186,14 @@ class NeoTpMOEPartModel(Qwen3MOEModel):
 
     def _init_inferstate_cls(self):
         pass
+
+    def _init_att_backend(self):
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(
+            index=0, priority_list=["fa3"]
+        )(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(
+            index=0, priority_list=["fa3"]
+        )(model=self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
