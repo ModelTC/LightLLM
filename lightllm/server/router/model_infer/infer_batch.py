@@ -11,7 +11,7 @@ from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
-from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache
+from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache, PagedTreeNode
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
@@ -502,7 +502,7 @@ class InferReq:
         else:
             self.prefix_token_ids = []
         self.multimodal_params = self.multimodal_params.to_dict()
-        self.shared_kv_node: TreeNode = None
+        self.shared_kv_node: Union[TreeNode, PagedTreeNode] = None
 
         self.finish_status = FinishStatus()
 
@@ -569,18 +569,23 @@ class InferReq:
                 if share_node.node_prefix_total_len - self.linear_att_cache_len == 0:
                     # 如果线性att的缓存完全命中，则将线性att的缓存资源提前释放掉，
                     # 因为radix tree 中已经有了，没必要再次插入，提前释放掉即可
-                    _buffer_idx = self.linear_att_cache_buffer_id
-                    if _buffer_idx is not None:
-                        g_infer_context.radix_cache.linear_att_cache_manager.free_state_cache([_buffer_idx])
-                    self.linear_att_cache_buffer_id = None
+                    self.free_linear_buffer()
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
-        # TODO 通过当前命中的数据，完成线性 att state的初始化。
+        # 通过当前命中的数据，完成线性 att state的初始化。
+        big_page_token_num = linear_att_hash_page_size * get_env_start_args().linear_att_page_block_num
         if self.cur_kv_len == 0:
             # 说明没有任何命中
             g_infer_context.req_manager.init_linear_att_state(req=self)
-
+        elif self.cur_kv_len % big_page_token_num == 0:
+            g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(req=self)
+        elif self.shared_kv_node is not None and self.shared_kv_node.linear_buffer_idx is not None:
+            g_infer_context.req_manager.copy_cache_to_linear_att_state(
+                req=self, linear_att_cache_manager=g_infer_context.radix_cache.linear_att_cache_manager
+            )
+        else:
+            assert False, "dead code"
         return
 
     def free_linear_buffer(self):

@@ -12,6 +12,7 @@ from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
+from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
 
 logger = init_logger(__name__)
 
@@ -297,4 +298,14 @@ class ReqManagerForMamba(ReqManager):
             mtp_step=self.mtp_step,
             big_page_token_num=self.big_page_token_num,
         )
+        return
+
+    def copy_cache_to_linear_att_state(self, req: InferReq, linear_att_cache_manager: LinearAttCacheManager):
+        conv_state, ssm_state = linear_att_cache_manager.get_state_cache(
+            buffer_idx=req.shared_kv_node.linear_buffer_idx
+        )
+        dest_req_idx = req.req_idx * (self.mtp_step + 1)
+        # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
+        self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
+        self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
         return

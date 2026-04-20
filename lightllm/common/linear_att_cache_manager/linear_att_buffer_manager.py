@@ -36,8 +36,8 @@ class LinearAttCacheManager:
         self.clear_to_init_state()
         return
 
-    def get_state_cache(self, layer_idx: int):
-        return self.conv_state_cache.buffer[layer_idx], self.ssm_state_cache.buffer[layer_idx]
+    def get_state_cache(self, buffer_idx: int):
+        return self.conv_state_cache.buffer[:, buffer_idx, ...], self.ssm_state_cache.buffer[:, buffer_idx, ...]
 
     def alloc_one_state_cache(self) -> Optional[int]:
         if len(self.free_list) == 0:
