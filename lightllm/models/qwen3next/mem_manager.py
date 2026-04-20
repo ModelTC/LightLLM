@@ -5,6 +5,7 @@ from lightllm.common.kv_cache_mem_manager.kv_buffer.hybrid_kv_buffer import Hybr
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
+from lightllm.common.mamba_cache_mem_manager.config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 
@@ -18,33 +19,12 @@ class Qwen3NextHybridMemManager(MemoryManager):
         num_kv_heads,
         head_dim,
         layer_num,
-        full_attention_interval: int,
-        conv_state_dtype: torch.dtype,
-        ssm_state_dtype: torch.dtype,
-        conv_kernel_size: int,
-        num_linear_k_heads: int,
-        num_linear_v_heads: int,
-        head_linear_k_dim: int,
-        head_linear_v_dim: int,
-        max_req_num: int,
+        linear_config: LinearAttCacheConfig,
         always_copy=False,
         mem_fraction=0.9,
         network_config: dict = None,
     ):
-
-        self.full_attention_interval = full_attention_interval
-        assert layer_num % full_attention_interval == 0
-        self.transformer_layer_num = layer_num
-        self.full_attn_layer_num = layer_num // full_attention_interval
-        self.linear_attn_layer_num = layer_num - self.full_attn_layer_num
-        self.linear_attn_cache_size = linear_attn_cache_size
-        self.conv_state_dtype = conv_state_dtype
-        self.ssm_state_dtype = ssm_state_dtype
-        self.conv_kernel_size = conv_kernel_size
-        self.num_linear_k_heads = num_linear_k_heads
-        self.num_linear_v_heads = num_linear_v_heads
-        self.head_linear_k_dim = head_linear_k_dim
-        self.head_linear_v_dim = head_linear_v_dim
+        self.linear_config = linear_config
 
         super().__init__(
             full_attn_cache_size, dtype, num_kv_heads, head_dim, self.full_attn_layer_num, always_copy, mem_fraction
