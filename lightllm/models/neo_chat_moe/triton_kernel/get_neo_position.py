@@ -44,7 +44,7 @@ def _get_neo_position_triton(
         # the current q window (after clipping to [0, q_seq_len)). Matches the
         # mask applied in the stores below.
         cand_raw = local_image_start_idx - cache_len + image_len - 1
-        candidate = tl.minimum(cand_raw, q_seq_len - 1)
+        candidate = tl.minimum(cand_raw, q_seq_len - 1).to(tl.int32)
         contributes = (cand_raw >= 0) & (local_image_start_idx - cache_len < q_seq_len)
         max_image_q_idx = tl.where(
             contributes, tl.maximum(max_image_q_idx, candidate), max_image_q_idx
