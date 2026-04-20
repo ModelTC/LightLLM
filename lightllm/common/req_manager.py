@@ -263,17 +263,19 @@ class ReqManagerForMamba(ReqManager):
         )
         return
 
-    def init_linear_att_state(self, req: InferReq, mtp_index: int):
-        assert 0 <= mtp_index <= self.mtp_step, f"invalid mtp_index {mtp_index} for req {req.req_idx}"
-        conv_state, ssm_state = self.get_linear_att_state(req.req_idx * (self.mtp_step + 1) + mtp_index)
+    def init_linear_att_state(self, req: InferReq):
+        index = req.req_idx * (self.mtp_step + 1)
+        conv_state = self.req_to_conv_state.buffer[:, index, ...]
+        ssm_state = self.req_to_ssm_state.buffer[:, index, ...]
         conv_state.fill_(0)
         ssm_state.fill_(0)
         return
 
-    def get_mamba_cache(self, layer_idx: int):
-        assert 0 <= layer_idx < self._transformer_layer_num, f"invalid transformer layer index {layer_idx}"
-        assert not self._is_full_attention_layer(layer_idx), f"layer {layer_idx} is not a linear attention layer"
-        layer_idx_in_linear = layer_idx - (layer_idx // self.linear_config.full_attention_interval)
+    def get_mamba_cache(self, layer_idx_in_all: int):
+        assert (
+            0 <= layer_idx_in_all < self.linear_config.all_layer_num
+        ), f"invalid transformer layer index {layer_idx_in_all}"
+        layer_idx_in_linear = layer_idx_in_all - (layer_idx_in_all // self.linear_config.full_attention_interval)
         conv_states = self.req_to_conv_state.buffer[layer_idx_in_linear]
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states

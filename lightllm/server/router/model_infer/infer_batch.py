@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class InferenceContext:
-    req_manager: ReqManager = None  # gpu 请求管理
+    req_manager: Union[ReqManager, ReqManagerForMamba] = None  # gpu 请求管理
     radix_cache: Union[PagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
@@ -41,7 +41,7 @@ class InferenceContext:
     def register(
         self,
         backend,
-        req_manager: ReqManager,
+        req_manager: Union[ReqManager, ReqManagerForMamba],
         radix_cache: Union[PagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
@@ -577,6 +577,10 @@ class InferReq:
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
         # TODO 通过当前命中的数据，完成线性 att state的初始化。
+        if self.cur_kv_len == 0:
+            # 说明没有任何命中
+            g_infer_context.req_manager.init_linear_att_state(req=self)
+
         return
 
     def free_linear_buffer(self):

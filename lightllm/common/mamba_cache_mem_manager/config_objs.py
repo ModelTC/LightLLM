@@ -13,6 +13,7 @@ class LinearAttCacheConfig:
     conv_state_dtype: torch.dtype
     ssm_state_dtype: torch.dtype
     full_attention_interval: int
+    all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
 
     def get_conv_dim(self):
         return self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
