@@ -242,6 +242,9 @@ class ReqManagerForMamba(ReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
+        self.big_page_token_num = (
+            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size,
+        )
         assert (
             self.mtp_step == 0
         ), "currently only support mtp_step 0 for simplicity, more mtp_step support will be added in the future"
@@ -279,3 +282,19 @@ class ReqManagerForMamba(ReqManager):
         conv_states = self.req_to_conv_state.buffer[layer_idx_in_linear]
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
+
+    def copy_kv_buffer_to_linear_att_state(self, req: InferReq):
+        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_kv_buffer_to_linear_att_state
+
+        copy_kv_buffer_to_linear_att_state(
+            req_idx=req.req_idx,
+            seq_len=req.cur_kv_len,
+            req_to_token_mem_index=self.req_to_token_indexs,
+            gpu_conv_state=self.req_to_conv_state.buffer,
+            gpu_ssm_state=self.req_to_ssm_state.buffer,
+            cpu_kv_conv_state=self.mem_manager.conv_state_buffer,
+            cpu_kv_ssm_state=self.mem_manager.ssm_state_buffer,
+            mtp_step=self.mtp_step,
+            big_page_token_num=self.big_page_token_num,
+        )
+        return
