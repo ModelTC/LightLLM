@@ -18,6 +18,7 @@ from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
+from lightllm.common.mamba_cache_mem_manager.config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 
@@ -66,28 +67,27 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         start_args: StartArgs = get_env_start_args()
-        self.num_linear_k_heads = self.config["linear_num_key_heads"] // self.tp_world_size_
-        self.num_linear_v_heads = self.config["linear_num_value_heads"] // self.tp_world_size_
-        self.head_linear_k_dim = self.config["linear_key_head_dim"]
-        self.head_linear_v_dim = self.config["linear_value_head_dim"]
-        conv_kernel_size = self.config["linear_conv_kernel_dim"]
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        self.linear_config = LinearAttCacheConfig(
+            num_linear_k_heads=self.config["linear_num_key_heads"] // self.tp_world_size_,
+            num_linear_v_heads=self.config["linear_num_value_heads"] // self.tp_world_size_,
+            head_linear_k_dim=self.config["linear_key_head_dim"],
+            head_linear_v_dim=self.config["linear_value_head_dim"],
+            conv_kernel_size=self.config["linear_conv_kernel_dim"],
+            linear_layer_num=self.config["n_layer"],
+            conv_state_dtype=self.data_type,
+            ssm_state_dtype=ssm_dtype_dict[start_args.linear_att_ssm_data_type],
+            full_attention_interval=self.config["full_attention_interval"],
+            all_layer_num=self.config["n_layer"],
+        )
+
         self.mem_manager = Qwen3NextHybridMemManager(
-            full_attn_cache_size=self.max_total_token_num,
-            linear_attn_cache_size=start_args.mamba_cache_size,
+            size=self.max_total_token_num,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
             layer_num=self.config["n_layer"],
-            full_attention_interval=self.config["full_attention_interval"],
-            conv_state_dtype=self.data_type,
-            ssm_state_dtype=ssm_dtype_dict[start_args.linear_att_ssm_data_type],
-            conv_kernel_size=conv_kernel_size,
-            num_linear_k_heads=self.num_linear_k_heads,
-            num_linear_v_heads=self.num_linear_v_heads,
-            head_linear_k_dim=self.head_linear_k_dim,
-            head_linear_v_dim=self.head_linear_v_dim,
-            max_req_num=self.max_req_num,
+            linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )
 
