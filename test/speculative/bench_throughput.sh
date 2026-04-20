@@ -2,7 +2,7 @@
 # 默认值
 PORT=8088
 NUM_PROMPTS=1000
-TOKENIZER="/mtc/models/qwen3-8b"
+TOKENIZER="/mtc/models/qwen3-32b"
 DATASET="/data/nvme0/chenjunyi/project/lightllm/datasets/gsm8k.json"
 HISTORY_TURNS=1
 CONCURRENCY=128
