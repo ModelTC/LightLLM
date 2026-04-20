@@ -1,6 +1,6 @@
 import torch
 import collections
-from lightllm.common.mamba_cache_mem_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
@@ -11,7 +11,7 @@ from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_r
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.common.mamba_cache_mem_manager.layer_cache import LayerCache
+from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
 
 logger = init_logger(__name__)
 
