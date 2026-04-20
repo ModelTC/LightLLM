@@ -33,6 +33,8 @@ class MemoryManager:
         self.layer_num = layer_num
         self.always_copy = always_copy
         self.dtype = dtype
+        self._probe_tokens = None
+        self._mem_fraction = mem_fraction
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
@@ -84,24 +86,110 @@ class MemoryManager:
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def profile_size(self, mem_fraction):
+        """
+        Phase 1 of the two-pass auto-profile: pick a small-but-realistic
+        probe KV size for graph capture and stress measurement.
+
+        - If self.size is already set (explicit --max_total_token_num, or
+          Phase 3's re-init after computing the target), this is a no-op.
+        - mem_fraction is saved for Phase 2's profile_size_target(), where
+          it acts as an optional additional safety multiplier on top of the
+          measured budget.
+
+        See docs/superpowers/specs/2026-04-16-multimodal-oom-fix-design.md
+        sections 6.3 and 6.5 for the full design rationale.
+        """
         if self.size is not None:
             return
+        from lightllm.utils.envs_utils import get_env_start_args
 
-        world_size = dist.get_world_size()
-        total_memory = get_total_gpu_memory()
-        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
-        cell_size = self.get_cell_size()
-        self.size = int(available_memory * 1024 ** 3 / cell_size)
-        if world_size > 1:
-            tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
-            dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
-            self.size = tensor.item()
+        start_args = get_env_start_args()
+        gmbs = start_args.graph_max_batch_size
+        bmt = start_args.batch_max_tokens
+        # Probe needs enough KV for:
+        # - one prefill stress (bmt slots — full chunk length)
+        # - one decode stress (gmbs slots, 1 new token per request)
+        # NOT gmbs * bmt — that would be the full production KV and defeat
+        # the purpose of the probe (measuring non-KV overhead with a small
+        # KV allocation).
+        # basemodel._check_mem_size relaxes its max_seq_length assertion
+        # when _probe_tokens is set, so the probe doesn't need to hold a
+        # full-length request — it only needs enough slots for the stress
+        # forwards.
+        self._probe_tokens = max(bmt + gmbs, 8192)
+        self.size = self._probe_tokens
+        self._mem_fraction = mem_fraction  # redundant with __init__; kept so profile_size is readable in isolation
         logger.info(
-            f"{str(available_memory)} GB space is available after load the model weight\n"
-            f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
-            f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
+            f"auto-profile phase=probe probe_tokens={self._probe_tokens} "
+            f"(gmbs={gmbs}, bmt={bmt}, mem_fraction={mem_fraction})"
         )
-        return
+
+    def profile_size_target(self, peak_reserved_bytes):
+        """
+        Phase 2 of the two-pass auto-profile: compute target KV size from
+        the measured `torch.cuda.max_memory_reserved()` peak.
+
+        Formula (see spec §6.3):
+            non_kv_overhead = peak_reserved - probe_kv_bytes
+            peers_footprint = max(total - avail - own_reserved, 0)
+            budget = total - non_kv_overhead - canary - peers_footprint
+            budget *= mem_fraction   # default 1.0
+            target_tokens = int(budget / cell_size)
+
+        In TP mode, target_tokens is all_reduce(MIN) across ranks so every
+        rank agrees on the smallest feasible size.
+        """
+        if self._probe_tokens is None:
+            raise RuntimeError(
+                "profile_size_target called before profile_size set a probe. "
+                "This indicates the auto-profile escape-hatch (--max_total_token_num) "
+                "was taken — Phase 2 should not be reached in that path."
+            )
+
+        total_memory_bytes = int(get_total_gpu_memory() * 1024 ** 3)
+        cell_size = self.get_cell_size()
+        probe_kv_bytes = self._probe_tokens * cell_size
+        non_kv_overhead = peak_reserved_bytes - probe_kv_bytes
+        if non_kv_overhead < 0:
+            logger.warning(
+                f"auto-profile: peak_reserved ({peak_reserved_bytes}) < probe_kv_bytes ({probe_kv_bytes}). "
+                f"This suggests the allocator released probe blocks before measurement. "
+                f"Clamping non_kv_overhead to 0."
+            )
+            non_kv_overhead = 0
+        canary_bytes = 256 * 1024 * 1024
+
+        try:
+            world_size = dist.get_world_size()
+        except Exception:
+            world_size = 1
+        avail_bytes = int(get_available_gpu_memory(world_size) * 1024 ** 3)
+        own_reserved = torch.cuda.memory_reserved()
+        peers_footprint = max(total_memory_bytes - avail_bytes - own_reserved, 0)
+
+        budget = total_memory_bytes - non_kv_overhead - canary_bytes - peers_footprint
+        budget = int(budget * self._mem_fraction)
+        target_tokens = max(int(budget / cell_size), 1)
+
+        if world_size > 1:
+            device = f"cuda:{get_current_device_id()}"
+            t = torch.tensor(target_tokens, dtype=torch.int64, device=device)
+            dist.all_reduce(t, op=dist.ReduceOp.MIN)
+            target_tokens = t.item()
+
+        logger.info(
+            f"auto-profile phase=measure "
+            f"peak_reserved_gb={peak_reserved_bytes / 1024 ** 3:.2f} "
+            f"non_kv_overhead_gb={non_kv_overhead / 1024 ** 3:.2f} "
+            f"peers_footprint_gb={peers_footprint / 1024 ** 3:.2f}"
+        )
+        logger.info(
+            f"auto-profile phase=compute "
+            f"target_tokens={target_tokens} "
+            f"target_kv_gb={target_tokens * cell_size / 1024 ** 3:.2f} "
+            f"mem_fraction_applied={self._mem_fraction}"
+        )
+        return target_tokens
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         # 在初始化 kv_buffer 的时候，每层多初始化了一个 token，这个 token 永远不会被真的被对外

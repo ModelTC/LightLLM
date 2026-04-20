@@ -136,8 +136,8 @@ def normal_or_p_d_start(args):
         assert args.config_server_host == args.nccl_host
 
     assert (
-        args.mem_fraction > 0 and args.mem_fraction < 1
-    ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1."
+        args.mem_fraction > 0 and args.mem_fraction <= 1
+    ), f"Invalid mem_fraction {args.mem_fraction}, The expected value is between 0 and 1 (inclusive)."
 
     if args.graph_max_len_in_batch == 0:
         args.graph_max_len_in_batch = args.max_req_total_len
