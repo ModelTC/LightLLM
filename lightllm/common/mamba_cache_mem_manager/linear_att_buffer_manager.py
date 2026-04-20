@@ -3,6 +3,7 @@ import collections
 from lightllm.utils.log_utils import init_logger
 from .layer_cache import LayerCache
 from typing import List, Optional, Tuple, Union
+from .config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 
@@ -11,41 +12,28 @@ class LinearAttCacheManager:
     def __init__(
         self,
         size: int,
-        layer_num: int,
-        conv_state_dtype: torch.dtype,
-        ssm_state_dtype: torch.dtype,
-        conv_kernel_size: int,
-        num_linear_k_heads: int,
-        num_linear_v_heads: int,
-        head_linear_k_dim: int,
-        head_linear_v_dim: int,
+        linear_config: LinearAttCacheConfig,
     ):
         # init the mem state
         self.size = size
-        self.num_linear_k_heads = num_linear_k_heads
-        self.num_linear_v_heads = num_linear_v_heads
-        self.head_linear_k_dim = head_linear_k_dim
-        self.head_linear_v_dim = head_linear_v_dim
-        self.conv_dim = (
-            self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
-        )
-        self.layer_num = layer_num
-        self.conv_kernel_size = conv_kernel_size
-        conv_state_shape = (self.conv_dim, conv_kernel_size - 1)
-        ssm_state_shape = (
-            self.num_linear_v_heads,
-            self.head_linear_k_dim,
-            self.head_linear_v_dim,
-        )
-        self.ssm_state_dtype = ssm_state_dtype
-        self.conv_state_dtype = conv_state_dtype
+        self.linear_config = linear_config
 
         # init the layer cache
-        self.conv_state_cache = LayerCache(self.size, conv_state_dtype, conv_state_shape, layer_num, device="cpu")
-        self.ssm_state_cache = LayerCache(self.size, ssm_state_dtype, ssm_state_shape, layer_num, device="cpu")
-        self.free_list = collections.deque()
-        for i in range(self.size):
-            self.free_list.append(i)
+        self.conv_state_cache = LayerCache(
+            size=self.size,
+            dtype=self.linear_config.conv_state_dtype,
+            shape=self.linear_config.get_conv_state_shape(),
+            layer_num=self.linear_config.linear_layer_num,
+            device="cpu",
+        )
+        self.ssm_state_cache = LayerCache(
+            size=self.size,
+            dtype=self.linear_config.ssm_state_dtype,
+            shape=self.linear_config.get_ssm_state_shape(),
+            layer_num=self.linear_config.linear_layer_num,
+            device="cpu",
+        )
+        self.clear_to_init_state()
         return
 
     def get_state_cache(self, layer_idx: int):
