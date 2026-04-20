@@ -354,7 +354,7 @@ class HttpServerManager:
                     f"nixl prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await nixl_pd_upload_websocket.send(
-                    pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
+                    safe_pickle_dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
                 )
                 try:
                     await asyncio.wait_for(nixl_pd_event.wait(), timeout=80)
@@ -363,7 +363,7 @@ class HttpServerManager:
                     raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
 
                 decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
-                sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
+                sampling_params.nixl_params.set(safe_pickle_dumps(decode_node_info))
 
                 if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill

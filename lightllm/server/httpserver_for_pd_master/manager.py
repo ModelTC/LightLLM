@@ -4,7 +4,7 @@ import uvloop
 import time
 import datetime
 import ujson as json
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads, safe_pickle_dumps
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
@@ -216,7 +216,7 @@ class HttpServerManagerForPDMaster:
         sampling_params.move_kv_to_decode_node.initialize(decode_node_dict if old_max_new_tokens != 1 else None)
         sampling_params.suggested_dp_index = -1
 
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.websocket.send_bytes(safe_pickle_dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         while True:
             await req_status.wait_to_ready()
@@ -253,7 +253,7 @@ class HttpServerManagerForPDMaster:
         sampling_params.suggested_dp_index = upkv_status.dp_index
 
         await d_node.websocket.send_bytes(
-            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+            safe_pickle_dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
         while True:
@@ -287,7 +287,7 @@ class HttpServerManagerForPDMaster:
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
+        await p_node.websocket.send_bytes(safe_pickle_dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
             await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
@@ -303,7 +303,7 @@ class HttpServerManagerForPDMaster:
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
-            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
+            safe_pickle_dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
         )
 
         try:
@@ -315,9 +315,9 @@ class HttpServerManagerForPDMaster:
         # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
         upkv_status: NixlUpKVStatus = up_status_event.upkv_status
         nixl_params: bytes = upkv_status.nixl_params
-        decode_node_info: NIXLDecodeNodeInfo = pickle.loads(nixl_params)
+        decode_node_info: NIXLDecodeNodeInfo = safe_pickle_loads(nixl_params)
         await p_node.websocket.send_bytes(
-            pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
+            safe_pickle_dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
         first_token_gen = False
@@ -435,12 +435,12 @@ class HttpServerManagerForPDMaster:
             pass
 
         try:
-            await p_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await p_node.websocket.send_bytes(safe_pickle_dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
         try:
-            await d_node.websocket.send_bytes(pickle.dumps((ObjType.ABORT, group_request_id)))
+            await d_node.websocket.send_bytes(safe_pickle_dumps((ObjType.ABORT, group_request_id)))
         except:
             pass
 
