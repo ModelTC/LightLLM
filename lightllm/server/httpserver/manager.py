@@ -343,12 +343,12 @@ class HttpServerManager:
             )
 
             prompt_tokens = len(prompt_ids)
+            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
             # 监控
             if group_request_id > 0:
                 self.metric_client.counter_inc("lightllm_request_count")
                 self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
                 self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -545,6 +545,15 @@ class HttpServerManager:
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
+        # 请求未显式传 max_new_tokens 时，默认允许输出到 max_req_total_len
+        if sampling_params.max_new_tokens == -1:
+            remaining = self.max_req_total_len - prompt_tokens
+            if remaining < 1:
+                raise ValueError(
+                    f"the input prompt token len {prompt_tokens} >= max_req_total_len:"
+                    f"{self.max_req_total_len}, no space left for output"
+                )
+            sampling_params.max_new_tokens = remaining
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
             if self.args.long_truncation_mode is None:
