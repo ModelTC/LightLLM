@@ -42,10 +42,8 @@ class Qwen3NextHybridMemManager(MemoryManager):
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        conv_state_bytes = triton.cdiv(self.linear_config.get_conv_state_bytes(), 16) * 16
-        ssm_state_bytes = triton.cdiv(self.linear_config.get_ssm_state_bytes(), 16) * 16
-        conv_head_dim = triton.cdiv(conv_state_bytes, big_page_token_num)
-        ssm_head_dim = triton.cdiv(ssm_state_bytes, big_page_token_num)
+        conv_head_dim = triton.cdiv(self.linear_config.get_conv_state_bytes(), big_page_token_num)
+        ssm_head_dim = triton.cdiv(self.linear_config.get_ssm_state_bytes(), big_page_token_num)
 
         self.conv_state_buffer = torch.empty(
             (self.linear_config.linear_layer_num, self.size + 1, conv_head_dim),
