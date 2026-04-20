@@ -368,7 +368,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
-            full_text = text
 
             # Handle reasoning content
             reasoning_text = None
@@ -382,7 +381,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         force_reasoning=request_enable_reasoning,
                     )
                     reasoning_text, text = parser.parse_non_stream(text)
-                    full_text = text
                 except Exception as e:
                     logger.error(f"Reasoning parsing error: {e}")
                     return create_error_response(
@@ -398,12 +396,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             tool_calls = None
             tool_choice = request.tool_choice
             tools = request.tools
-            if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
+            if tool_choice != "none" and any([i in text for i in TOOLS_TAG_LIST]):
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
-                    full_normal_text, call_info_list = parser.parse_non_stream(full_text)
+                    text, call_info_list = parser.parse_non_stream(text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
@@ -424,7 +422,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     )
             if tool_calls and finish_reason == "stop":
                 finish_reason = "tool_calls"
-                text = ""
             chat_message = ChatMessage(
                 role="assistant",
                 content=text if text else "",
