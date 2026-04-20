@@ -36,9 +36,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     # infer state class
     infer_state_class = Qwen3NextInferStateInfo
 
-    # radix cache class
-    radix_cache_class = HybridRadixCache
-
     def __init__(self, kvargs) -> None:
         self.mem_manager: Qwen3NextHybridMemManager = None
 
