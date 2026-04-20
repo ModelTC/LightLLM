@@ -23,3 +23,9 @@ class LinearAttCacheConfig:
 
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)
+
+    def get_conv_state_bytes(self):
+        return self.get_conv_dim() * (self.conv_kernel_size - 1) * self.conv_state_dtype.itemsize
+
+    def get_ssm_state_bytes(self):
+        return self.num_linear_v_heads * self.head_linear_k_dim * self.head_linear_v_dim * self.ssm_state_dtype.itemsize
