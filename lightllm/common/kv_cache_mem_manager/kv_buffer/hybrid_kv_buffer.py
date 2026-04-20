@@ -1,6 +1,6 @@
 import torch
 from typing import Any
-from lightllm.common.mamba_cache_mem_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 from .kv_buffer import KvBuffer
 
 
