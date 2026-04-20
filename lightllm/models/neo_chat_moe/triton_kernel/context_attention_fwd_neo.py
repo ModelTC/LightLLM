@@ -103,7 +103,7 @@ def _fwd_kernel(
         qk += tl.dot(q, k)
 
         # mask: causal OR same gid (only possible inside NEW part)
-        mask = (q_pos[:, None] >= k_pos[None, :]) | q_image_token_tag[:, None]
+        mask = ((q_pos[:, None] >= k_pos[None, :]) | q_image_token_tag[:, None]) & k_valid[None, :]
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
 
         # online softmax
