@@ -1,6 +1,5 @@
 import torch
 from .base import BaseMemManagerOperator
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -29,6 +28,8 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         cpu_kv_cache_scale = cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, cpu_cache_meta.head_dim :].view(
             mem_manager.scale_buffer.dtype
         )
+
+        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import load_cpu_kv_to_gpu
 
         load_cpu_kv_to_gpu(
             gpu_mem_indexes=mem_indexes,
@@ -62,6 +63,8 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         cpu_kv_cache_scale = cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, cpu_cache_meta.head_dim :].view(
             mem_manager.scale_buffer.dtype
         )
+
+        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
 
         offload_gpu_kv_to_cpu(
             token_indexes=mem_indexes,

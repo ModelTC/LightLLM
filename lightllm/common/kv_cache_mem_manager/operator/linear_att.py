@@ -1,9 +1,5 @@
 import torch
 from .base import BaseMemManagerOperator
-from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
-    copy_cpu_cache_to_kv_buffer,
-    copy_kv_buffer_to_cpu_cache,
-)
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -31,6 +27,10 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
+
+        from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
+            copy_cpu_cache_to_kv_buffer,
+        )
 
         copy_cpu_cache_to_kv_buffer(
             mem_indexes=mem_indexes,
@@ -60,6 +60,11 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
+
+        from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
+            copy_kv_buffer_to_cpu_cache,
+        )
+
         copy_kv_buffer_to_cpu_cache(
             mem_indexes=mem_indexes,
             page_indexes=page_indexes,

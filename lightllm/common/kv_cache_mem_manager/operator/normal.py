@@ -1,6 +1,6 @@
 import torch
 from .base import BaseMemManagerOperator
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
+
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -19,6 +19,8 @@ class NormalMemOperator(BaseMemManagerOperator):
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
+        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import load_cpu_kv_to_gpu
+
         load_cpu_kv_to_gpu(
             gpu_mem_indexes=mem_indexes,
             gpu_kv_cache=mem_manager.kv_buffer,
@@ -45,6 +47,9 @@ class NormalMemOperator(BaseMemManagerOperator):
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
+
+        from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu
+
         offload_gpu_kv_to_cpu(
             token_indexes=mem_indexes,
             gpu_kv_cache=mem_manager.kv_buffer,
