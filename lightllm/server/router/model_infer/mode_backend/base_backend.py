@@ -14,7 +14,7 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.mamba_cache_mem_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
