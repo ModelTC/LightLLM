@@ -49,10 +49,11 @@ def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_nam
             f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
             f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
         )
-    if allowed_max_pixels < processor.max_pixels:
+    current_max_pixels = getattr(processor, "max_pixels", None)
+    if current_max_pixels is None or allowed_max_pixels < current_max_pixels:
         logger.info(
             f"{processor_name or 'processor'}: clamping max_pixels "
-            f"{processor.max_pixels} -> {allowed_max_pixels} "
+            f"{current_max_pixels} -> {allowed_max_pixels} "
             f"(visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
         )
         processor.max_pixels = allowed_max_pixels

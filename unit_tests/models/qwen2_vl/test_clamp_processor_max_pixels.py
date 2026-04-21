@@ -118,6 +118,14 @@ class TestClampProcessorMaxPixels(unittest.TestCase):
         clamp_processor_max_pixels(p, visual_image_max_tokens=1000)
         self.assertEqual(p.max_pixels, 1000 * 16 * 16)
 
+    def test_processor_max_pixels_none_is_clamped(self):
+        # HF Qwen3.5-VL's processor exposes max_pixels=None (no intrinsic upper
+        # bound); the clamp must treat that as "looser than any budget" and
+        # always apply our allowed_max_pixels instead of crashing on int<None.
+        p = _FakeProcessor(patch_size=14, merge_size=2, max_pixels=None)
+        clamp_processor_max_pixels(p, visual_image_max_tokens=4096)
+        self.assertEqual(p.max_pixels, 4096 * 28 * 28)
+
 
 if __name__ == "__main__":
     unittest.main()
