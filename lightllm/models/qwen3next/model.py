@@ -14,10 +14,9 @@ from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
+from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
@@ -37,7 +36,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     infer_state_class = Qwen3NextInferStateInfo
 
     def __init__(self, kvargs) -> None:
-        self.mem_manager: Qwen3NextHybridMemManager = None
+        self.mem_manager: Qwen3NextMemManager = None
 
         def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
             return torch.empty(size, device="cuda", dtype=torch.int8)
@@ -83,7 +82,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             all_layer_num=self.config["n_layer"],
         )
 
-        self.mem_manager = Qwen3NextHybridMemManager(
+        self.mem_manager = Qwen3NextMemManager(
             size=self.max_total_token_num,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,

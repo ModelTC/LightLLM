@@ -1,22 +1,17 @@
 import torch
-import torch.distributed as dist
 import triton
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.kv_cache_mem_manager.kv_buffer.hybrid_kv_buffer import HybridKvBuffer
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
-from lightllm.common.basemodel.triton_kernel.linear_att_copy import (
-    copy_kv_buffer_to_linear_att_state,
-    copy_linear_att_state_to_kv_buffer,
-)
-
+from .operator import LinearAttMemOperator
 
 logger = init_logger(__name__)
 
 
-class Qwen3NextHybridMemManager(MemoryManager):
+class Qwen3NextMemManager(MemoryManager):
+    operator_class = LinearAttMemOperator
+
     def __init__(
         self,
         size,
