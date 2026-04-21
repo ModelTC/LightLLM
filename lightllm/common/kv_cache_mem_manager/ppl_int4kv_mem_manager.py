@@ -1,9 +1,12 @@
 import torch
 from typing import Tuple, Any
 from .mem_manager import MemoryManager
+from .operator import QuantScaleMemOperator
 
 
 class PPLINT4KVMemoryManager(MemoryManager):
+    operator_class = QuantScaleMemOperator
+
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=True, mem_fraction=0.9):
         self.kv_dtype = torch.int8
         self.group_quant_size = 8

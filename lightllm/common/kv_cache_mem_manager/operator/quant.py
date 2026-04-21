@@ -10,6 +10,10 @@ logger = init_logger(__name__)
 
 
 class QuantScaleMemOperator(BaseMemManagerOperator):
+    """
+    对于kv cache中包含独立的对应每个token的scale变量的memManager使用。
+    """
+
     def load_cpu_kv_to_gpu(
         self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client: CpuKvCacheClient
     ):
