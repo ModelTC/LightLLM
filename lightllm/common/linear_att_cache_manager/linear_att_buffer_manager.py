@@ -70,7 +70,5 @@ class LinearAttCacheManager:
     def clear_to_init_state(self):
         self.conv_state_cache.buffer.zero_()
         self.ssm_state_cache.buffer.zero_()
-        self.free_list.clear()
-        for i in range(self.size):
-            self.free_list.append(i)
+        self.free_list = collections.deque(range(self.size))
         return
