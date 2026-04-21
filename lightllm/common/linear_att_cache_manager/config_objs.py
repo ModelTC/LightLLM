@@ -72,6 +72,8 @@ class LinearAttCacheConfig:
         except:
             pass
 
+        n_layer = llm_config["num_hidden_layers"]
+
         tp_world_size = get_env_start_args().tp // get_env_start_args().dp
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
@@ -83,9 +85,9 @@ class LinearAttCacheConfig:
             head_linear_k_dim=llm_config["linear_key_head_dim"],
             head_linear_v_dim=llm_config["linear_value_head_dim"],
             conv_kernel_size=llm_config["linear_conv_kernel_dim"],
-            linear_layer_num=llm_config["n_layer"] - (llm_config["n_layer"] // llm_config["full_attention_interval"]),
+            linear_layer_num=n_layer - (n_layer // llm_config["full_attention_interval"]),
             conv_state_dtype=get_torch_dtype(args.data_type),
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=llm_config["full_attention_interval"],
-            all_layer_num=llm_config["n_layer"],
+            all_layer_num=n_layer,
         )
