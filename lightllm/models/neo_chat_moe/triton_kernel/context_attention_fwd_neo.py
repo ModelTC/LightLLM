@@ -77,11 +77,14 @@ def _fwd_kernel(
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, V_HEAD_DIM], dtype=tl.float32)
-    block_end_loc = total_len
-
     # absolute q positions in the request
     q_pos = prompt_cache_len + offs_m  # [M]
     q_image_token_tag = tl.load(b_image_token_tag + cur_batch_in_all_start_index + offs_m, mask=q_valid, other=False)
+
+    # per-M-block: only scan full K range if this block has image tokens
+    has_image = tl.reduce_or(q_image_token_tag.to(tl.int32), axis=0) > 0
+    causal_end = tl.minimum(prompt_cache_len + block_start_loc + BLOCK_M, total_len)
+    block_end_loc = tl.where(has_image, total_len, causal_end)
 
     for start_n in range(0, block_end_loc, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
