@@ -103,6 +103,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManagerForMamba(
-            self.max_req_num, create_max_seq_len, None, linear_config=self.linear_config
+            self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
         return
