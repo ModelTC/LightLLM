@@ -158,7 +158,7 @@ class PagedRadixCache:
         assert len(key) == len(value)
         if block_hashs is None:
             block_hashs = []
-        if block_linear_idxs is not None:
+        if block_linear_idxs is None:
             block_linear_idxs = []
 
         assert (
