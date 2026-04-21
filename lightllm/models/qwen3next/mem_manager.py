@@ -23,14 +23,14 @@ class Qwen3NextHybridMemManager(MemoryManager):
         dtype,
         num_kv_heads,
         head_dim,
-        layer_num,
+        full_att_layer_num,
         linear_config: LinearAttCacheConfig,
         always_copy=False,
         mem_fraction=0.9,
     ):
         self.linear_config = linear_config
 
-        super().__init__(size, dtype, num_kv_heads, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
