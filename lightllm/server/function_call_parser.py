@@ -15,6 +15,7 @@ import ast
 import json
 import orjson
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from json import JSONDecodeError, JSONDecoder
@@ -26,9 +27,22 @@ from partial_json_parser.core.exceptions import MalformedJSON
 from partial_json_parser.core.options import Allow
 from pydantic import BaseModel, Field
 
+from functools import lru_cache
+
 from .api_models import Tool
 
 logger = logging.getLogger(__name__)
+
+
+# request's tools array. Default skips the check (accepts any tool name); set
+# the env to OFF/FALSE/0 to re-enable strict validation.
+_TOOL_CALL_SKIP_NAME_CHECK_ENV = "LIGHTLLM_TOOL_CALL_SKIP_NAME_CHECK"
+
+
+@lru_cache(maxsize=1)
+def _skip_tool_name_validation() -> bool:
+    return os.getenv(_TOOL_CALL_SKIP_NAME_CHECK_ENV, "True").upper() not in ["OFF", "FALSE", "0"]
+
 
 TOOLS_TAG_LIST = [
     "<|plugin|>",
@@ -150,13 +164,14 @@ class BaseFormatDetector(ABC):
 
     def parse_base_json(self, action: Any, tools: List[Tool]) -> List[ToolCallItem]:
         tool_indices = self._get_tool_indices(tools)
+        skip_name_check = _skip_tool_name_validation()
         if not isinstance(action, list):
             action = [action]
 
         results = []
         for act in action:
             name = act.get("name")
-            if name and name in tool_indices:
+            if name and (skip_name_check or name in tool_indices):
                 results.append(
                     ToolCallItem(
                         tool_index=-1,  # Caller should update this based on the actual tools array called
@@ -254,8 +269,8 @@ class BaseFormatDetector(ABC):
 
                 is_current_complete = _is_complete_json(current_text[start_idx : start_idx + end_idx])
 
-                # Validate tool name if present
-                if "name" in obj and obj["name"] not in self._tool_indices:
+                # Validate tool name if present (can be skipped via env var)
+                if "name" in obj and obj["name"] not in self._tool_indices and not _skip_tool_name_validation():
                     # Invalid tool name - reset state
                     self._buffer = ""
                     self.current_tool_id = -1
@@ -283,7 +298,7 @@ class BaseFormatDetector(ABC):
             if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
 
-                if function_name and function_name in self._tool_indices:
+                if function_name and (function_name in self._tool_indices or _skip_tool_name_validation()):
                     # If this is a new tool (current_tool_id was -1), initialize it
                     if self.current_tool_id == -1:
                         self.current_tool_id = 0
@@ -1300,8 +1315,8 @@ class Glm47Detector(BaseFormatDetector):
                 func_name = func_detail.group(1).strip()
                 arg_text = func_detail.group(2) if func_detail.group(2) else ""
 
-                # Validate function name
-                if func_name not in tool_indices:
+                # Validate function name (can be skipped via env var)
+                if func_name not in tool_indices and not _skip_tool_name_validation():
                     logger.warning(f"Model attempted to call undefined function: {func_name}")
                     continue
 
@@ -1310,7 +1325,7 @@ class Glm47Detector(BaseFormatDetector):
 
                 calls.append(
                     ToolCallItem(
-                        tool_index=tool_indices[func_name],
+                        tool_index=tool_indices.get(func_name, -1),
                         name=func_name,
                         parameters=json.dumps(func_args, ensure_ascii=False),
                     )
@@ -1402,8 +1417,8 @@ class Glm47Detector(BaseFormatDetector):
             while len(self.streamed_args_for_tool) <= self.current_tool_id:
                 self.streamed_args_for_tool.append("")
 
-            # Check if function name is valid
-            if func_name and func_name in self._tool_indices:
+            # Check if function name is valid (can be skipped via env var)
+            if func_name and (func_name in self._tool_indices or _skip_tool_name_validation()):
                 if not self.current_tool_name_sent:
                     # Send function name first
                     calls.append(
@@ -1536,7 +1551,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
         invoke_matches = self.invoke_regex.findall(text)
         for func_name, invoke_body in invoke_matches:
-            if func_name not in tool_indices:
+            if func_name not in tool_indices and not _skip_tool_name_validation():
                 logger.warning(f"Model attempted to call undefined function: {func_name}")
                 continue
 
@@ -1545,7 +1560,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
             calls.append(
                 ToolCallItem(
-                    tool_index=tool_indices[func_name],
+                    tool_index=tool_indices.get(func_name, -1),
                     name=func_name,
                     parameters=args_json,
                 )
@@ -1673,7 +1688,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     self.streamed_args_for_tool.append("")
 
                 if not self.current_tool_name_sent:
-                    if func_name in self._tool_indices:
+                    if func_name in self._tool_indices or _skip_tool_name_validation():
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -1817,7 +1832,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         func_name = function_str[:end_index].strip()
         tool_indices = self._get_tool_indices(tools)
-        if func_name not in tool_indices:
+        if func_name not in tool_indices and not _skip_tool_name_validation():
             logger.warning(f"Model attempted to call undefined function: {func_name}")
             return None
 
@@ -1841,7 +1856,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
 
         return ToolCallItem(
-            tool_index=tool_indices[func_name],
+            tool_index=tool_indices.get(func_name, -1),
             name=func_name,
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
