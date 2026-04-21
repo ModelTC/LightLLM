@@ -1,5 +1,10 @@
 import torch
 import dataclasses
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
+from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+logger = init_logger(__name__)
 
 
 @dataclasses.dataclass
@@ -39,3 +44,36 @@ class LinearAttCacheConfig:
 
     def get_full_att_bytes(self):
         return 2 * self.full_att_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
+
+    @staticmethod
+    def load_from_args() -> "LinearAttCacheConfig":
+        args = get_env_start_args()
+        model_path = args.model_dir
+        from transformers.configuration_utils import PretrainedConfig
+
+        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_type = model_cfg["model_type"]
+        assert model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]
+        llm_config = model_cfg
+        try:
+            llm_config = llm_config["text_config"]
+        except:
+            pass
+
+        tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+        return LinearAttCacheConfig(
+            tp_world_size=tp_world_size,
+            full_att_dtype=get_torch_dtype(args.data_type),
+            full_att_num_kv_heads=llm_config["num_attention_heads"] // tp_world_size,
+            full_att_head_dim=llm_config["head_dim"],
+            num_linear_k_heads=llm_config["linear_num_key_heads"] // tp_world_size,
+            num_linear_v_heads=llm_config["linear_num_value_heads"] // tp_world_size,
+            head_linear_k_dim=llm_config["linear_key_head_dim"],
+            head_linear_v_dim=llm_config["linear_value_head_dim"],
+            conv_kernel_size=llm_config["linear_conv_kernel_dim"],
+            linear_layer_num=llm_config["n_layer"] - (llm_config["n_layer"] // llm_config["full_attention_interval"]),
+            conv_state_dtype=get_torch_dtype(args.data_type),
+            ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
+            full_attention_interval=llm_config["full_attention_interval"],
+            all_layer_num=llm_config["n_layer"],
+        )
