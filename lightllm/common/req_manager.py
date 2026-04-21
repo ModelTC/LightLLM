@@ -1,11 +1,10 @@
 import torch
 import collections
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
-from lightllm.server.router.model_infer.infer_batch import InferReq
+
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
-from typing import List, Optional
-
+from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
@@ -13,6 +12,9 @@ from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
 from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.infer_batch import InferReq
 
 logger = init_logger(__name__)
 
@@ -132,11 +134,7 @@ class ReqSamplingParamsManager:
                 (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
             )
 
-    def init_req_sampling_params(self, req):
-        # fix cycle loop import
-        from lightllm.server.router.model_infer.infer_batch import InferReq
-
-        req: InferReq = req
+    def init_req_sampling_params(self, req: "InferReq"):
 
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
@@ -190,12 +188,8 @@ class ReqSamplingParamsManager:
         return
 
     def update_reqs_token_counter(
-        self, req_objs: List, next_token_ids: List[int], accept_mark: Optional[List[List[bool]]] = None
+        self, req_objs: List["InferReq"], next_token_ids: List[int], accept_mark: Optional[List[List[bool]]] = None
     ):
-        from lightllm.server.router.model_infer.infer_batch import InferReq
-
-        req_objs: List[InferReq] = req_objs
-
         if self.penalty_counter_mode != "cpu_counter":
             return
 
@@ -204,12 +198,8 @@ class ReqSamplingParamsManager:
                 req_obj.out_token_id_count[next_token_id] += 1
         return
 
-    def gen_cpu_out_token_counter_sampling_params(self, req_objs: List):
+    def gen_cpu_out_token_counter_sampling_params(self, req_objs: List["InferReq"]):
         assert self.penalty_counter_mode == "cpu_counter"
-
-        from lightllm.server.router.model_infer.infer_batch import InferReq
-
-        req_objs: List[InferReq] = req_objs
 
         p_token_ids: List[int] = []
         p_token_counts: List[int] = []
@@ -267,7 +257,7 @@ class ReqManagerForMamba(ReqManager):
         )
         return
 
-    def init_linear_att_state(self, req: InferReq):
+    def init_linear_att_state(self, req: "InferReq"):
         index = req.req_idx * (self.mtp_step + 1)
         conv_state = self.req_to_conv_state.buffer[:, index, ...]
         ssm_state = self.req_to_ssm_state.buffer[:, index, ...]
@@ -284,7 +274,7 @@ class ReqManagerForMamba(ReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
-    def copy_kv_buffer_to_linear_att_state(self, req: InferReq):
+    def copy_kv_buffer_to_linear_att_state(self, req: "InferReq"):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_kv_buffer_to_linear_att_state
 
         copy_kv_buffer_to_linear_att_state(
@@ -300,7 +290,7 @@ class ReqManagerForMamba(ReqManager):
         )
         return
 
-    def copy_cache_to_linear_att_state(self, req: InferReq, linear_att_cache_manager: LinearAttCacheManager):
+    def copy_cache_to_linear_att_state(self, req: "InferReq", linear_att_cache_manager: LinearAttCacheManager):
         conv_state, ssm_state = linear_att_cache_manager.get_state_cache(
             buffer_idx=req.shared_kv_node.linear_buffer_idx
         )
