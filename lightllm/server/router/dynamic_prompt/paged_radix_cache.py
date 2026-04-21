@@ -3,7 +3,7 @@ import numpy as np
 import collections
 from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
-from lightllm.common.mamba_cache_mem_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import UniqueTimeIdGenerator, time_gen, match
 
