@@ -5,6 +5,7 @@ from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 from .operator import LinearAttMemOperator
+from typing import Tuple, Any
 
 logger = init_logger(__name__)
 
@@ -26,6 +27,14 @@ class Qwen3NextMemManager(MemoryManager):
         self.linear_config = linear_config
 
         super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
+
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        layer_index = layer_index // self.linear_config.full_attention_interval
+        return super().copy_kv_to_mem_manager(layer_index, mem_index, kv)
+
+    def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
+        layer_index = layer_index // self.linear_config.full_attention_interval
+        return super().get_att_input_params(layer_index)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         super()._init_buffers(size, dtype, head_num, head_dim, layer_num)

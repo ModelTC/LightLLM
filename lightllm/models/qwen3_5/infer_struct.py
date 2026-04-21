@@ -15,8 +15,5 @@ class Qwen35InferStateInfo(Qwen2VLInferStateInfo):
         self.b_att_seq_len = self.b_seq_len
         mtp_step = get_env_start_args().mtp_step
 
-        if self.is_prefill:
-            self.b_buffer_idx = self.b_req_idx * (mtp_step + 1)
-        else:
-            self.b_buffer_idx = self.b_req_idx * (mtp_step + 1) + self.b_mtp_index
+        self.b_buffer_idx = self.b_req_idx * (mtp_step + 1) + self.b_mtp_index
         return

@@ -308,6 +308,7 @@ class TpPartBaseModel:
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
+        infer_state.b_mtp_index = model_input.b_mtp_index
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
