@@ -6,6 +6,7 @@ from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheC
 
 @triton.jit
 def _copy_kv_buffer_to_cpu_cache(
+    page_num,
     mem_indexes_ptr,  # [move_token_num]
     page_indexes_ptr,  # [page_num],
     page_readies_ptr,  # [page_num],
@@ -34,88 +35,92 @@ def _copy_kv_buffer_to_cpu_cache(
     big_page_token_num,
     BLOCK: tl.constexpr,
 ):
-    block_index = tl.program_id(0)
-    cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
-    if cpu_page_index == -1:
-        return
-    ready_state = tl.load(page_readies_ptr + block_index)
-    if ready_state:
-        return
-    mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
-    full_att_big_page_bytes = full_att_layer_num * gpu_full_att_tail_dim * big_page_token_num
-    full_att_dest_start = 0
-    for i in range(tl.cdiv(full_att_big_page_bytes, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_i < full_att_big_page_bytes
-        mem_offs = gpu_start_i // (full_att_layer_num * gpu_full_att_tail_dim)
-        mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
-        layer_index = (gpu_start_i // (gpu_full_att_tail_dim)) % full_att_layer_num
-        dim_index = gpu_start_i % gpu_full_att_tail_dim
-        gpu_full_att_data = tl.load(
-            gpu_full_att_ptr
-            + mem_index * gpu_full_att_stride_s
-            + layer_index * gpu_full_att_stride_l
-            + dim_index * gpu_full_att_stride_d,
-            mask=mask,
-            other=0,
-        )
-        dest_cpu_cache_ptr = (
-            cpu_cache_tensor_ptr
-            + cpu_page_index * cpu_cache_tensor_stride_page
-            + tp_rank * cpu_cache_tensor_stride_t
-            + (full_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
-        )
-        tl.store(dest_cpu_cache_ptr, gpu_full_att_data, mask=mask)
+    block_index_start = tl.program_id(0)
+    grid_num = tl.num_programs(0)
 
-    linear_att_conv_big_page_bytes = linear_layer_num * cpu_kv_conv_tail_dim * big_page_token_num
-    linear_att_dest_start = full_att_big_page_bytes
-    for i in range(tl.cdiv(linear_att_conv_big_page_bytes, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_i < linear_att_conv_big_page_bytes
-        mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_conv_tail_dim)
-        mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
-        layer_index = (gpu_start_i // (cpu_kv_conv_tail_dim)) % linear_layer_num
-        dim_index = gpu_start_i % cpu_kv_conv_tail_dim
-        cpu_kv_conv_data = tl.load(
-            cpu_kv_conv_ptr
-            + mem_index * cpu_kv_conv_stride_s
-            + layer_index * cpu_kv_conv_stride_l
-            + dim_index * cpu_kv_conv_stride_d,
-            mask=mask,
-            other=0,
-        )
-        dest_cpu_cache_ptr = (
-            cpu_cache_tensor_ptr
-            + cpu_page_index * cpu_cache_tensor_stride_page
-            + tp_rank * cpu_cache_tensor_stride_t
-            + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
-        )
-        tl.store(dest_cpu_cache_ptr, cpu_kv_conv_data, mask=mask)
+    for block_index in range(block_index_start, page_num, grid_num):
+        cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
+        if cpu_page_index == -1:
+            continue
+        ready_state = tl.load(page_readies_ptr + block_index)
+        if ready_state:
+            continue
 
-    linear_att_ssm_big_page_bytes = linear_layer_num * cpu_kv_ssm_tail_dim * big_page_token_num
-    linear_att_dest_start = full_att_big_page_bytes + linear_att_conv_big_page_bytes
-    for i in range(tl.cdiv(linear_att_ssm_big_page_bytes, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_i < linear_att_ssm_big_page_bytes
-        mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_ssm_tail_dim)
-        mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
-        layer_index = (gpu_start_i // (cpu_kv_ssm_tail_dim)) % linear_layer_num
-        dim_index = gpu_start_i % cpu_kv_ssm_tail_dim
-        cpu_kv_ssm_data = tl.load(
-            cpu_kv_ssm_ptr
-            + mem_index * cpu_kv_ssm_stride_s
-            + layer_index * cpu_kv_ssm_stride_l
-            + dim_index * cpu_kv_ssm_stride_d,
-            mask=mask,
-            other=0,
-        )
-        dest_cpu_cache_ptr = (
-            cpu_cache_tensor_ptr
-            + cpu_page_index * cpu_cache_tensor_stride_page
-            + tp_rank * cpu_cache_tensor_stride_t
-            + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
-        )
-        tl.store(dest_cpu_cache_ptr, cpu_kv_ssm_data, mask=mask)
+        mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
+        full_att_big_page_bytes = full_att_layer_num * gpu_full_att_tail_dim * big_page_token_num
+        full_att_dest_start = 0
+        for i in range(tl.cdiv(full_att_big_page_bytes, BLOCK)):
+            gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
+            mask = gpu_start_i < full_att_big_page_bytes
+            mem_offs = gpu_start_i // (full_att_layer_num * gpu_full_att_tail_dim)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            layer_index = (gpu_start_i // (gpu_full_att_tail_dim)) % full_att_layer_num
+            dim_index = gpu_start_i % gpu_full_att_tail_dim
+            gpu_full_att_data = tl.load(
+                gpu_full_att_ptr
+                + mem_index * gpu_full_att_stride_s
+                + layer_index * gpu_full_att_stride_l
+                + dim_index * gpu_full_att_stride_d,
+                mask=mask,
+                other=0,
+            )
+            dest_cpu_cache_ptr = (
+                cpu_cache_tensor_ptr
+                + cpu_page_index * cpu_cache_tensor_stride_page
+                + tp_rank * cpu_cache_tensor_stride_t
+                + (full_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
+            )
+            tl.store(dest_cpu_cache_ptr, gpu_full_att_data, mask=mask)
+
+        linear_att_conv_big_page_bytes = linear_layer_num * cpu_kv_conv_tail_dim * big_page_token_num
+        linear_att_dest_start = full_att_big_page_bytes
+        for i in range(tl.cdiv(linear_att_conv_big_page_bytes, BLOCK)):
+            gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
+            mask = gpu_start_i < linear_att_conv_big_page_bytes
+            mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_conv_tail_dim)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            layer_index = (gpu_start_i // (cpu_kv_conv_tail_dim)) % linear_layer_num
+            dim_index = gpu_start_i % cpu_kv_conv_tail_dim
+            cpu_kv_conv_data = tl.load(
+                cpu_kv_conv_ptr
+                + mem_index * cpu_kv_conv_stride_s
+                + layer_index * cpu_kv_conv_stride_l
+                + dim_index * cpu_kv_conv_stride_d,
+                mask=mask,
+                other=0,
+            )
+            dest_cpu_cache_ptr = (
+                cpu_cache_tensor_ptr
+                + cpu_page_index * cpu_cache_tensor_stride_page
+                + tp_rank * cpu_cache_tensor_stride_t
+                + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
+            )
+            tl.store(dest_cpu_cache_ptr, cpu_kv_conv_data, mask=mask)
+
+        linear_att_ssm_big_page_bytes = linear_layer_num * cpu_kv_ssm_tail_dim * big_page_token_num
+        linear_att_dest_start = full_att_big_page_bytes + linear_att_conv_big_page_bytes
+        for i in range(tl.cdiv(linear_att_ssm_big_page_bytes, BLOCK)):
+            gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
+            mask = gpu_start_i < linear_att_ssm_big_page_bytes
+            mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_ssm_tail_dim)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            layer_index = (gpu_start_i // (cpu_kv_ssm_tail_dim)) % linear_layer_num
+            dim_index = gpu_start_i % cpu_kv_ssm_tail_dim
+            cpu_kv_ssm_data = tl.load(
+                cpu_kv_ssm_ptr
+                + mem_index * cpu_kv_ssm_stride_s
+                + layer_index * cpu_kv_ssm_stride_l
+                + dim_index * cpu_kv_ssm_stride_d,
+                mask=mask,
+                other=0,
+            )
+            dest_cpu_cache_ptr = (
+                cpu_cache_tensor_ptr
+                + cpu_page_index * cpu_cache_tensor_stride_page
+                + tp_rank * cpu_cache_tensor_stride_t
+                + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
+            )
+            tl.store(dest_cpu_cache_ptr, cpu_kv_ssm_data, mask=mask)
 
     return
 
@@ -132,6 +137,7 @@ def copy_kv_buffer_to_cpu_cache(
     tp_world_size: int,
     big_page_token_num: int,
     linear_config: LinearAttCacheConfig,
+    grid_num: int = 16,
 ):
     BLOCK = 4096
     gpu_full_att_kv_state = gpu_full_att_kv_state.view(
@@ -155,8 +161,9 @@ def copy_kv_buffer_to_cpu_cache(
     )
     assert cpu_cache_tensor.shape[1] == tp_world_size
 
-    grid = (len(page_indexes),)
+    grid = (grid_num,)
     _copy_kv_buffer_to_cpu_cache[grid](
+        page_num=len(page_indexes),
         mem_indexes_ptr=mem_indexes,
         page_indexes_ptr=page_indexes,
         page_readies_ptr=page_readies,
@@ -189,6 +196,7 @@ def copy_kv_buffer_to_cpu_cache(
 
 @triton.jit
 def _copy_cpu_cache_to_kv_buffer(
+    page_num,
     mem_indexes_ptr,  # [move_token_num]
     page_indexes_ptr,  # [page_num],
     gpu_full_att_ptr,  # [token_size, full_att_layer_num, xdim]
@@ -216,91 +224,92 @@ def _copy_cpu_cache_to_kv_buffer(
     big_page_token_num,
     BLOCK: tl.constexpr,
 ):
-    block_index = tl.program_id(0)
-    cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
+    block_index_start = tl.program_id(0)
+    grid_num = tl.num_programs(0)
+    for block_index in range(block_index_start, page_num, grid_num):
+        cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
+        mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
+        full_att_big_page_bytes = full_att_layer_num * gpu_full_att_tail_dim * big_page_token_num
+        full_att_dest_start = 0
+        for i in range(tl.cdiv(full_att_big_page_bytes, BLOCK)):
+            gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
+            mask = gpu_start_i < full_att_big_page_bytes
+            src_cpu_cache_ptr = (
+                cpu_cache_tensor_ptr
+                + cpu_page_index * cpu_cache_tensor_stride_page
+                + tp_rank * cpu_cache_tensor_stride_t
+                + (full_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
+            )
+            full_att_data = tl.load(src_cpu_cache_ptr, mask=mask, other=0)
 
-    mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
-    full_att_big_page_bytes = full_att_layer_num * gpu_full_att_tail_dim * big_page_token_num
-    full_att_dest_start = 0
-    for i in range(tl.cdiv(full_att_big_page_bytes, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_i < full_att_big_page_bytes
-        src_cpu_cache_ptr = (
-            cpu_cache_tensor_ptr
-            + cpu_page_index * cpu_cache_tensor_stride_page
-            + tp_rank * cpu_cache_tensor_stride_t
-            + (full_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
-        )
-        full_att_data = tl.load(src_cpu_cache_ptr, mask=mask, other=0)
+            mem_offs = gpu_start_i // (full_att_layer_num * gpu_full_att_tail_dim)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            layer_index = (gpu_start_i // (gpu_full_att_tail_dim)) % full_att_layer_num
+            dim_index = gpu_start_i % gpu_full_att_tail_dim
+            tl.store(
+                gpu_full_att_ptr
+                + mem_index * gpu_full_att_stride_s
+                + layer_index * gpu_full_att_stride_l
+                + dim_index * gpu_full_att_stride_d,
+                full_att_data,
+                mask=mask,
+            )
 
-        mem_offs = gpu_start_i // (full_att_layer_num * gpu_full_att_tail_dim)
-        mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
-        layer_index = (gpu_start_i // (gpu_full_att_tail_dim)) % full_att_layer_num
-        dim_index = gpu_start_i % gpu_full_att_tail_dim
-        tl.store(
-            gpu_full_att_ptr
-            + mem_index * gpu_full_att_stride_s
-            + layer_index * gpu_full_att_stride_l
-            + dim_index * gpu_full_att_stride_d,
-            full_att_data,
-            mask=mask,
-        )
+        linear_att_conv_big_page_bytes = linear_layer_num * cpu_kv_conv_tail_dim * big_page_token_num
+        linear_att_dest_start = full_att_big_page_bytes
+        for i in range(tl.cdiv(linear_att_conv_big_page_bytes, BLOCK)):
+            gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
+            mask = gpu_start_i < linear_att_conv_big_page_bytes
+            src_cpu_cache_ptr = (
+                cpu_cache_tensor_ptr
+                + cpu_page_index * cpu_cache_tensor_stride_page
+                + tp_rank * cpu_cache_tensor_stride_t
+                + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
+            )
+            conv_data = tl.load(src_cpu_cache_ptr, mask=mask, other=0)
 
-    linear_att_conv_big_page_bytes = linear_layer_num * cpu_kv_conv_tail_dim * big_page_token_num
-    linear_att_dest_start = full_att_big_page_bytes
-    for i in range(tl.cdiv(linear_att_conv_big_page_bytes, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_i < linear_att_conv_big_page_bytes
-        src_cpu_cache_ptr = (
-            cpu_cache_tensor_ptr
-            + cpu_page_index * cpu_cache_tensor_stride_page
-            + tp_rank * cpu_cache_tensor_stride_t
-            + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
-        )
-        conv_data = tl.load(src_cpu_cache_ptr, mask=mask, other=0)
+            mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_conv_tail_dim)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            layer_index = (gpu_start_i // (cpu_kv_conv_tail_dim)) % linear_layer_num
+            dim_index = gpu_start_i % cpu_kv_conv_tail_dim
+            tl.store(
+                cpu_kv_conv_ptr
+                + mem_index * cpu_kv_conv_stride_s
+                + layer_index * cpu_kv_conv_stride_l
+                + dim_index * cpu_kv_conv_stride_d,
+                conv_data,
+                mask=mask,
+                other=0,
+            )
 
-        mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_conv_tail_dim)
-        mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
-        layer_index = (gpu_start_i // (cpu_kv_conv_tail_dim)) % linear_layer_num
-        dim_index = gpu_start_i % cpu_kv_conv_tail_dim
-        tl.store(
-            cpu_kv_conv_ptr
-            + mem_index * cpu_kv_conv_stride_s
-            + layer_index * cpu_kv_conv_stride_l
-            + dim_index * cpu_kv_conv_stride_d,
-            conv_data,
-            mask=mask,
-            other=0,
-        )
+        linear_att_ssm_big_page_bytes = linear_layer_num * cpu_kv_ssm_tail_dim * big_page_token_num
+        linear_att_dest_start = full_att_big_page_bytes + linear_att_conv_big_page_bytes
+        for i in range(tl.cdiv(linear_att_ssm_big_page_bytes, BLOCK)):
+            gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
+            mask = gpu_start_i < linear_att_ssm_big_page_bytes
 
-    linear_att_ssm_big_page_bytes = linear_layer_num * cpu_kv_ssm_tail_dim * big_page_token_num
-    linear_att_dest_start = full_att_big_page_bytes + linear_att_conv_big_page_bytes
-    for i in range(tl.cdiv(linear_att_ssm_big_page_bytes, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-        mask = gpu_start_i < linear_att_ssm_big_page_bytes
+            src_cpu_cache_ptr = (
+                cpu_cache_tensor_ptr
+                + cpu_page_index * cpu_cache_tensor_stride_page
+                + tp_rank * cpu_cache_tensor_stride_t
+                + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
+            )
 
-        src_cpu_cache_ptr = (
-            cpu_cache_tensor_ptr
-            + cpu_page_index * cpu_cache_tensor_stride_page
-            + tp_rank * cpu_cache_tensor_stride_t
-            + (linear_att_dest_start + gpu_start_i) * cpu_cache_tensor_stride_d
-        )
+            ssm_data = tl.load(src_cpu_cache_ptr, mask=mask, other=0)
 
-        ssm_data = tl.load(src_cpu_cache_ptr, mask=mask, other=0)
-
-        mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_ssm_tail_dim)
-        mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
-        layer_index = (gpu_start_i // (cpu_kv_ssm_tail_dim)) % linear_layer_num
-        dim_index = gpu_start_i % cpu_kv_ssm_tail_dim
-        tl.store(
-            cpu_kv_ssm_ptr
-            + mem_index * cpu_kv_ssm_stride_s
-            + layer_index * cpu_kv_ssm_stride_l
-            + dim_index * cpu_kv_ssm_stride_d,
-            ssm_data,
-            mask=mask,
-            other=0,
-        )
+            mem_offs = gpu_start_i // (linear_layer_num * cpu_kv_ssm_tail_dim)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            layer_index = (gpu_start_i // (cpu_kv_ssm_tail_dim)) % linear_layer_num
+            dim_index = gpu_start_i % cpu_kv_ssm_tail_dim
+            tl.store(
+                cpu_kv_ssm_ptr
+                + mem_index * cpu_kv_ssm_stride_s
+                + layer_index * cpu_kv_ssm_stride_l
+                + dim_index * cpu_kv_ssm_stride_d,
+                ssm_data,
+                mask=mask,
+                other=0,
+            )
     return
 
 
@@ -315,6 +324,7 @@ def copy_cpu_cache_to_kv_buffer(
     tp_world_size: int,
     big_page_token_num: int,
     linear_config: LinearAttCacheConfig,
+    grid_num: int = 16,
 ):
     assert len(mem_indexes) % len(page_indexes) == 0
     BLOCK = 4096
@@ -339,8 +349,9 @@ def copy_cpu_cache_to_kv_buffer(
     )
     assert cpu_cache_tensor.shape[1] == tp_world_size
 
-    grid = (len(page_indexes),)
+    grid = (grid_num,)
     _copy_cpu_cache_to_kv_buffer[grid](
+        page_num=len(page_indexes),
         mem_indexes_ptr=mem_indexes,
         page_indexes_ptr=page_indexes,
         gpu_full_att_ptr=gpu_full_att_kv_state,
