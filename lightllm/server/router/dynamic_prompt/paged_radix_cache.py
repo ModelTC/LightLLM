@@ -258,7 +258,7 @@ class PagedRadixCache:
             len(key) == len(block_hashs) * self.hash_page_size
         ), f"key length {len(key)} does not match block_hashs length {len(block_hashs)} * {self.hash_page_size}"
 
-        if len(block_hashs) == 0 and len(key) != 0:
+        if len(block_hashs) == 0 or len(key) == 0:
             return None, 0, None
 
         ans_node_list: List[PagedTreeNode] = []
@@ -322,17 +322,16 @@ class PagedRadixCache:
             self._add_node(node)
 
     def _realy_match(self, nodes: List[PagedTreeNode]) -> List[PagedTreeNode]:
-        removed_cout = 0
+        removed_list = []
         for node in reversed(nodes):
             if node.is_big_page_node():
                 break
+            elif node.linear_buffer_idx is not None:
+                break
             else:
-                if node.linear_buffer_idx is not None:
-                    break
-                else:
-                    removed_cout += 1
-        removed_nodes = nodes[-removed_cout:]
-        for node in removed_nodes:
+                removed_list.append(node)
+
+        for node in removed_list:
             self._discard_node(node)
             # def ref
             node.ref_counter -= 1
@@ -341,7 +340,10 @@ class PagedRadixCache:
 
             self._add_node(node)
 
-        return nodes[:-removed_cout]
+        if len(removed_list) == 0:
+            return nodes
+        else:
+            return nodes[: -len(removed_list)]
 
     def _try_merge(self, child_node: PagedTreeNode) -> Optional[PagedTreeNode]:
         raise NotImplementedError()
@@ -408,12 +410,12 @@ class PagedRadixCache:
     def _print_helper(self, node: PagedTreeNode, indent):
         print(
             " " * indent,
-            f"num_pages: {node.num_pages} last_hash: {node.last_page_hash} "
+            f"hash_info: {node.page_hash} "
             f"k: {node.token_id_key[0:10] if node.token_id_key is not None else None} "
             f"v: {node.token_mem_index_value[0:10] if node.token_mem_index_value is not None else None} "
             f"refs: {node.ref_counter} time_id: {node.time_id} "
             f"prefix_total_len: {node.node_prefix_total_len} "
-            f"node_value_len: {node.node_value_len} buffer_idx: {node.buffer_idx}",
+            f"node_value_len: {node.node_value_len} buffer_idx: {node.linear_buffer_idx}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
