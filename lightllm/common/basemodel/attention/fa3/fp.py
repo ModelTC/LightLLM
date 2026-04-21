@@ -7,6 +7,12 @@ from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
 try:
     from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
+    import inspect
+
+    # Verify this is the neo-patched FA3 build (with image_token_tag support),
+    _sig = inspect.signature(flash_attn_with_kvcache_neo)
+    if "image_token_tag" not in _sig.parameters:
+        raise ImportError("flash_attn_interface found but missing image_token_tag support (need neo build)")
 
     HAS_FLASH_ATTN_INTERFACE = True
 except ImportError:
