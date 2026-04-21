@@ -6,10 +6,8 @@ from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
 )
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
-from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
-from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
+from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
@@ -248,7 +246,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Qwen3NextTransformerLayerWeight,
         is_prefill: bool,
     ):
-        assert isinstance(infer_state.mem_manager, Qwen3NextHybridMemManager)
+        assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
 
         input = input.view(-1, self.embed_dim_)
         conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
