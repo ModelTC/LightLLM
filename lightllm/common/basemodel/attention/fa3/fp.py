@@ -4,7 +4,14 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
+
+try:
+    from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
+
+    HAS_FLASH_ATTN_INTERFACE = True
+except ImportError:
+    flash_attn_with_kvcache_neo = None
+    HAS_FLASH_ATTN_INTERFACE = False
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
@@ -97,6 +104,12 @@ class Fa3PrefillAttState(BasePrefillAttState):
         # neo_chat*: image-token bidirectional attention requires flash_attn_interface
         # (sgl_kernel's flash_attn_with_kvcache does not support image_token_tag).
         if att_control.image_token_tag is not None:
+            if not HAS_FLASH_ATTN_INTERFACE:
+                raise ImportError(
+                    "flash_attn_interface (fa3-neo) is required for image_token_tag bidirectional "
+                    "attention. Install it or set LIGHTLLM_NEO_PREFILL_TRITON_BACKEND=1 to use the "
+                    "triton fallback."
+                )
             extra_kwargs = {"image_token_tag": att_control.image_token_tag}
             o = flash_attn_with_kvcache_neo(
                 q=q,

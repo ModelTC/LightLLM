@@ -12,8 +12,19 @@ from lightllm.distributed import all_reduce
 import torch.distributed as dist
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.fa3.fp import HAS_FLASH_ATTN_INTERFACE
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 _USE_TRITON_PREFILL = os.environ.get("LIGHTLLM_NEO_PREFILL_TRITON_BACKEND", "0").strip().lower() in ("1", "true")
+if not HAS_FLASH_ATTN_INTERFACE:
+    logger.warning(
+        "flash_attn_interface (fa3-neo) is not installed; falling back to triton prefill backend "
+        "for neo_chat_moe. Install fa3-neo or set LIGHTLLM_NEO_PREFILL_TRITON_BACKEND=1 to silence "
+        "this warning."
+    )
+    _USE_TRITON_PREFILL = True
 
 
 class NeoChatMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
