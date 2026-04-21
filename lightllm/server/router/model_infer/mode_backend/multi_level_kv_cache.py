@@ -245,34 +245,13 @@ class MultiLevelKvCacheModule(object):
             assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            # TODO 更有效的分配策略。
-            grid_num = 16
-
             mem_manager = self.backend.model.mem_manager
-            if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
-                cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                    :, :, :, :, cpu_cache_meta.head_dim :
-                ].view(mem_manager.scale_buffer.dtype)
-                gpu_kv_cache_scale = mem_manager.scale_buffer
-            else:
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
-                cpu_kv_cache_scale = None
-                gpu_kv_cache_scale = None
 
-            # assert max(page_list) < self.cpu_cache_client.cpu_kv_cache_tensor.shape[0]
-            offload_gpu_kv_to_cpu(
-                token_indexes=token_indexes,
-                gpu_kv_cache=mem_manager.kv_buffer,
-                gpu_kv_cache_scale=gpu_kv_cache_scale,
-                cpu_kv_cache=cpu_kv_cache,
-                cpu_kv_cache_scale=cpu_kv_cache_scale,
+            mem_manager.operator.offload_gpu_kv_to_cpu(
+                mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
-                tp_index=self.backend.rank_in_dp,
-                tp_world_size=self.backend.dp_world_size,
-                grid_num=grid_num,
+                cpu_cache_client=self.cpu_cache_client,
             )
 
             sync_event = torch.cuda.Event()
