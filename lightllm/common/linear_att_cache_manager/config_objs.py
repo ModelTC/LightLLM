@@ -1,5 +1,6 @@
 import torch
 import dataclasses
+import triton
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
@@ -44,6 +45,17 @@ class LinearAttCacheConfig:
 
     def get_full_att_bytes(self):
         return 2 * self.full_att_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
+
+    def get_cpu_cache_big_page_bytes(self):
+        big_page_token_num = (
+            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
+        )
+        assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
+        a = self.get_full_att_bytes() * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
+        b = self.get_conv_state_bytes() * self.linear_layer_num * big_page_token_num
+        c = self.get_ssm_state_bytes() * self.linear_layer_num * big_page_token_num
+
+        return triton.cdiv(a + b + c, 16) * 16
 
     @staticmethod
     def load_from_args() -> "LinearAttCacheConfig":
