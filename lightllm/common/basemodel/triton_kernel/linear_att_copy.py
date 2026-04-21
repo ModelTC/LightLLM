@@ -5,10 +5,10 @@ import triton.language as tl
 
 @triton.jit
 def _copy_linear_att_state_to_kv_buffer(
-    gpu_conv_ptr,  # [layer_num, size_num, xdim]
-    gpu_ssm_ptr,  # [layer_num, size_num, xdim]
-    cpu_kv_conv_ptr,  # [layer_num, size, xdim]
-    cpu_kv_ssm_ptr,  # [layer_num, size, xdim]
+    gpu_conv_ptr,  # [linear_layer_num, size_num, xdim]
+    gpu_ssm_ptr,  # [linear_layer_num, size_num, xdim]
+    cpu_kv_conv_ptr,  # [linear_layer_num, size, xdim]
+    cpu_kv_ssm_ptr,  # [linear_layer_num, size, xdim]
     b_req_idx,  # [batch_size,]
     b_seq_len,  # [batch_size,]
     req_to_token_mem_index,  # [xxx, xxxx]
@@ -100,8 +100,8 @@ def copy_linear_att_state_to_kv_buffer(
     req_to_token_mem_index: torch.Tensor,
     gpu_conv_state: torch.Tensor,
     gpu_ssm_state: torch.Tensor,
-    cpu_kv_conv_state: torch.Tensor,  # [layer_num, s, dim]
-    cpu_kv_ssm_state: torch.Tensor,  # [layer_num, s, xdim]
+    cpu_kv_conv_state: torch.Tensor,  # [linear_layer_num, s, dim]
+    cpu_kv_ssm_state: torch.Tensor,  # [linear_layer_num, s, xdim]
     mtp_step: int,
     big_page_token_num: int,
 ):
@@ -151,10 +151,10 @@ def copy_linear_att_state_to_kv_buffer(
 
 @triton.jit
 def _copy_kv_buffer_to_linear_att_state(
-    gpu_conv_ptr,  # [layer_num, size_num, xdim]
-    gpu_ssm_ptr,  # [layer_num, size_num, xdim]
-    cpu_kv_conv_ptr,  # [layer_num, size, xdim]
-    cpu_kv_ssm_ptr,  # [layer_num, size, xdim]
+    gpu_conv_ptr,  # [linear_layer_num, size_num, xdim]
+    gpu_ssm_ptr,  # [linear_layer_num, size_num, xdim]
+    cpu_kv_conv_ptr,  # [linear_layer_num, size, xdim]
+    cpu_kv_ssm_ptr,  # [linear_layer_num, size, xdim]
     req_idx,  # int
     seq_len,  # int
     req_to_token_mem_index,  # [xxx, xxxx]
@@ -246,8 +246,8 @@ def copy_kv_buffer_to_linear_att_state(
     req_to_token_mem_index: torch.Tensor,
     gpu_conv_state: torch.Tensor,
     gpu_ssm_state: torch.Tensor,
-    cpu_kv_conv_state: torch.Tensor,  # [layer_num, s, dim]
-    cpu_kv_ssm_state: torch.Tensor,  # [layer_num, s, xdim]
+    cpu_kv_conv_state: torch.Tensor,  # [linear_layer_num, s, dim]
+    cpu_kv_ssm_state: torch.Tensor,  # [linear_layer_num, s, xdim]
     mtp_step: int,
     big_page_token_num: int,
 ):
