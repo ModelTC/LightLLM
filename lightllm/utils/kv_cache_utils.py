@@ -15,7 +15,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_hybrid_att_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
@@ -28,6 +28,7 @@ from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 
@@ -60,6 +61,21 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
+
+    if is_linear_hybrid_att_model(args.model_dir):
+        # 对于 qwen3.5 等 linear att 混合模型的特殊处理。
+        linear_config = LinearAttCacheConfig.load_from_args()
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=1,
+            layer_num=1,
+            num_heads=linear_config.tp_world_size,
+            head_dim=linear_config.get_cpu_cache_big_page_bytes(),
+            data_type=torch.uint8,
+            scale_head_dim=0,
+            scale_data_type=get_llm_data_type(),
+        )
+        return cpu_cache_meta
 
     mem_manager_class = select_mem_manager_class()
     if mem_manager_class is Deepseek2MemoryManager:
