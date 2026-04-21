@@ -266,7 +266,7 @@ class PagedRadixCache:
             self.root_node,
             key=key,
             block_hashs=block_hashs,
-            ans_value_list=ans_node_list,
+            ans_node_list=ans_node_list,
             update_refs=update_refs,
         )
         if len(ans_node_list) == 0:
