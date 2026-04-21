@@ -45,10 +45,11 @@ def pull_batch_with_budget(
 
     while len(tasks) < max_num:
         try:
-            semaphore.acquire()
             task = infer_queue.get(block=False)
         except queue.Empty:
-            semaphore.release()
+            break
+        if not semaphore.acquire(blocking=False):
+            infer_queue.put(task)
             break
 
         next_tokens = task.token_num or 0
