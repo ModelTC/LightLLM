@@ -1,10 +1,12 @@
 import torch
+from typing import TYPE_CHECKING
 from .base import BaseMemManagerOperator
-from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
 
+if TYPE_CHECKING:
+    from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 logger = init_logger(__name__)
 
 
@@ -14,7 +16,7 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
     """
 
     def load_cpu_kv_to_gpu(
-        self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client: CpuKvCacheClient
+        self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client: "CpuKvCacheClient"
     ):
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()
@@ -48,7 +50,7 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
         mem_indexes: torch.Tensor,
         page_indexes: torch.Tensor,
         page_readies: torch.Tensor,
-        cpu_cache_client: CpuKvCacheClient,
+        cpu_cache_client: "CpuKvCacheClient",
     ):
         assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
         args = get_env_start_args()
