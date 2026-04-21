@@ -357,7 +357,8 @@ class RouterManager:
                     self.status_reporter.on_request_completed(
                         input_len=req.input_len,
                         output_len=req.shm_cur_output_len,
-                        cache_len=req.prompt_cache_len,
+                        gpu_cache_len=req.prompt_cache_len,
+                        cpu_cache_len=max(0, req.cpu_prompt_cache_len),
                         mtp_accepted=req.mtp_accepted_token_num,
                     )
                     # Update EMA for output length prediction (used by scheduler)

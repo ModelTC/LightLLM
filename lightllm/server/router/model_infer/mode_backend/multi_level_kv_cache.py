@@ -12,6 +12,7 @@ from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.req_manager import ReqManagerForMamba
 
 logger = init_logger(__name__)
 
@@ -77,69 +78,121 @@ class MultiLevelKvCacheModule(object):
         token_page_size = self.args.cpu_cache_token_page_size
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
+        detached_mamba_manager = getattr(self.backend.radix_cache, "detached_mamba_manager", None)
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
-            match_tokens = len(page_list) * token_page_size
+            cpu_kv_len = len(page_list) * token_page_size
+            gpu_buffer_len = req.cur_kv_len
+            gpu_kv_len = gpu_buffer_len
+            final_match_len = gpu_buffer_len
+            detached_checkpoint = None
+            raw_gpu_value_tensor = None
+
+            # `prompt_cache_len` is the per-request GPU prompt-cache hit stat
+            # consumed by router CACHE HIT metrics. Keep it GPU-live-only for
+            # this request; CPU restoration and later promotion must not be
+            # counted as this request's GPU hit.
+            if is_master_in_dp:
+                req.shm_req.prompt_cache_len = gpu_buffer_len
+
+            if (
+                self.backend.radix_cache is not None
+                and isinstance(self.backend.model.req_manager, ReqManagerForMamba)
+                and req.shm_req.input_len > 1
+            ):
+                prompt_key = torch.tensor(req.shm_req.get_prompt_ids(), dtype=torch.int64, device="cpu")[:-1]
+                _, gpu_kv_len, raw_gpu_value_tensor = self.backend.radix_cache.match_prefix_kv(
+                    prompt_key, update_refs=False
+                )
+                kv_upper_len = max(cpu_kv_len, gpu_kv_len)
+                if detached_mamba_manager is not None:
+                    detached_checkpoint = detached_mamba_manager.match_prompt_prefix(
+                        prompt_tokens=req.shm_req.get_prompt_ids(),
+                        max_prefix_len=kv_upper_len,
+                    )
+                detached_len = 0 if detached_checkpoint is None else detached_checkpoint.prefix_len
+                final_match_len = max(gpu_buffer_len, detached_len)
+            else:
+                final_match_len = max(gpu_buffer_len, cpu_kv_len)
+
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
                 req.shm_req.cpu_prompt_cache_len = max(
-                    0, match_tokens - req.cur_kv_len - req.shm_req.disk_prompt_cache_len
+                    0, final_match_len - gpu_buffer_len - req.shm_req.disk_prompt_cache_len
                 )
 
-            need_token_num = match_tokens - req.cur_kv_len
+            raw_reuse_len = min(gpu_kv_len, final_match_len)
+            if raw_reuse_len > req.cur_kv_len and raw_gpu_value_tensor is not None:
+                prompt_key = torch.tensor(req.shm_req.get_prompt_ids(), dtype=torch.int64, device="cpu")[:-1]
+                raw_gpu_node, raw_reuse_len, raw_gpu_value_tensor = self.backend.radix_cache.match_prefix_kv(
+                    prompt_key[:raw_reuse_len], update_refs=True
+                )
+                req.raw_gpu_kv_node = raw_gpu_node
+                req.raw_gpu_kv_len = raw_reuse_len
+                g_infer_context.req_manager.req_to_token_indexs[
+                    req.req_idx, req.cur_kv_len : raw_reuse_len
+                ] = raw_gpu_value_tensor[req.cur_kv_len : raw_reuse_len]
+                req.cur_kv_len = raw_reuse_len
+                if self.backend.is_master_in_dp:
+                    req.shm_req.shm_cur_kv_len = req.cur_kv_len
+
+            need_token_num = final_match_len - req.cur_kv_len
             # 多匹配了一定数量的token同时请求长度大于一定的长度，才进行复制操作，不然操作效率不高，代价过高
-            if need_token_num >= 128 and req.shm_req.input_len >= 256:
-                if need_token_num <= idle_token_num:
-                    if self.backend.radix_cache is not None:
-                        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
+            if need_token_num >= 128 and req.shm_req.input_len >= 256 and need_token_num <= idle_token_num:
+                if self.backend.radix_cache is not None:
+                    g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
 
-                    # 计算需要加载的页面（只加载未匹配的部分）
-                    cur_kv_pages = req.cur_kv_len // token_page_size
-                    need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
+                # 计算需要加载的页面（只加载未匹配的部分）
+                cur_kv_pages = req.cur_kv_len // token_page_size
+                end_kv_pages = final_match_len // token_page_size
+                need_pages = page_list[cur_kv_pages:end_kv_pages]  # 只取需要的页面
 
-                    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
+                mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
-                    if self.need_sync_compute_stream():
-                        # TODO fa3 现在必须使用同步模式, 未来需要移除
-                        g_infer_context.get_overlap_stream().synchronize()
+                if self.need_sync_compute_stream():
+                    # TODO fa3 现在必须使用同步模式, 未来需要移除
+                    g_infer_context.get_overlap_stream().synchronize()
 
-                    # TODO 更有效的分配策略。
-                    grid_num = 16
+                # TODO 更有效的分配策略。
+                grid_num = 16
 
-                    mem_manager = self.backend.model.mem_manager
-                    gpu_kv_cache = self._get_gpu_kv_cache_tensor()
-                    if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                        cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, 0 : cpu_cache_meta.head_dim
-                        ]
-                        cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, cpu_cache_meta.head_dim :
-                        ].view(mem_manager.scale_buffer.dtype)
-                        gpu_kv_cache_scale = mem_manager.scale_buffer
-                    else:
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
-                        cpu_kv_cache_scale = None
-                        gpu_kv_cache_scale = None
+                mem_manager = self.backend.model.mem_manager
+                gpu_kv_cache = self._get_gpu_kv_cache_tensor()
+                if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
+                    cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
+                    cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
+                    cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
+                        :, :, :, :, cpu_cache_meta.head_dim :
+                    ].view(mem_manager.scale_buffer.dtype)
+                    gpu_kv_cache_scale = mem_manager.scale_buffer
+                else:
+                    cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
+                    cpu_kv_cache_scale = None
+                    gpu_kv_cache_scale = None
 
-                    mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
-                    page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
-                        non_blocking=True
-                    )
-                    # 将 cpu page 的内容拷贝到 gpu 页面中
-                    load_cpu_kv_to_gpu(
-                        gpu_mem_indexes=mem_indexes_cuda,
-                        gpu_kv_cache=gpu_kv_cache,
-                        gpu_kv_cache_scale=gpu_kv_cache_scale,
-                        cpu_kv_cache=cpu_kv_cache,
-                        cpu_kv_cache_scale=cpu_kv_cache_scale,
-                        page_indexes=page_indexes_cuda,
-                        tp_index=self.backend.rank_in_dp,
-                        tp_world_size=self.backend.dp_world_size,
-                        grid_num=grid_num,
-                    )
+                mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
+                page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+                # 将 cpu page 的内容拷贝到 gpu 页面中
+                load_cpu_kv_to_gpu(
+                    gpu_mem_indexes=mem_indexes_cuda,
+                    gpu_kv_cache=gpu_kv_cache,
+                    gpu_kv_cache_scale=gpu_kv_cache_scale,
+                    cpu_kv_cache=cpu_kv_cache,
+                    cpu_kv_cache_scale=cpu_kv_cache_scale,
+                    page_indexes=page_indexes_cuda,
+                    tp_index=self.backend.rank_in_dp,
+                    tp_world_size=self.backend.dp_world_size,
+                    grid_num=grid_num,
+                )
 
                 torch.cuda.current_stream().synchronize()
+
+                if (
+                    detached_checkpoint is not None
+                    and detached_checkpoint.prefix_len >= final_match_len
+                    and isinstance(self.backend.model.req_manager, ReqManagerForMamba)
+                ):
+                    self._restore_detached_mamba_checkpoint(req, detached_checkpoint.buffer_idx)
 
                 idle_token_num -= need_token_num
                 g_infer_context.req_manager.req_to_token_indexs[
@@ -148,6 +201,22 @@ class MultiLevelKvCacheModule(object):
                 req.cur_kv_len = req.cur_kv_len + need_token_num
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
+            elif (
+                detached_checkpoint is not None
+                and final_match_len > gpu_buffer_len
+                and need_token_num == 0
+                and isinstance(self.backend.model.req_manager, ReqManagerForMamba)
+            ):
+                self._restore_detached_mamba_checkpoint(req, detached_checkpoint.buffer_idx)
+
+            if (
+                detached_checkpoint is not None
+                and final_match_len > gpu_buffer_len
+                and req.cur_kv_len >= final_match_len
+                and detached_checkpoint.prefix_len >= final_match_len
+                and isinstance(self.backend.model.req_manager, ReqManagerForMamba)
+            ):
+                g_infer_context._insert_hybrid_prefix_checkpoint(req, final_match_len)
 
             all_page_list.extend(page_list)
 
@@ -158,6 +227,20 @@ class MultiLevelKvCacheModule(object):
             self.cpu_cache_client.deref_pages(page_list=all_page_list)
             self.cpu_cache_client.lock.release()
         return
+
+    def _restore_detached_mamba_checkpoint(self, req: InferReq, buffer_idx: int):
+        req_manager = self.backend.model.req_manager
+        dst_buffer = req_manager.req_to_buffer_index[req.req_idx, 0].view(1)
+        cpu_mgr = getattr(req_manager, "cpu_buffer_mem_manager", None)
+
+        if cpu_mgr is not None:
+            cpu_slots = torch.tensor([buffer_idx], dtype=torch.int64)
+            cpu_mgr.load_to_gpu(cpu_slots, dst_buffer)
+            return
+
+        src_tensor = torch.tensor([buffer_idx], device="cuda", dtype=torch.int32)
+        dst_buffers = dst_buffer.to(device="cuda", dtype=torch.int32).view(-1, 1)
+        req_manager.buffer_mem_manager.fork_state_buffers(src_tensor, dst_buffers)
 
     def offload_finished_reqs_to_cpu_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """

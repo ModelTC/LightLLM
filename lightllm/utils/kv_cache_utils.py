@@ -15,7 +15,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, get_kv_cache_layer_num
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
@@ -77,7 +77,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
+            layer_num=get_kv_cache_layer_num(args.model_dir),
             num_heads=get_num_key_value_heads(args.model_dir) * 2,
             head_dim=get_head_dim(args.model_dir),
             data_type=get_llm_data_type(),
@@ -88,7 +88,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
+            layer_num=get_kv_cache_layer_num(args.model_dir),
             num_heads=get_num_key_value_heads(args.model_dir) * 2,
             head_dim=get_head_dim(args.model_dir),
             data_type=torch.int8,
