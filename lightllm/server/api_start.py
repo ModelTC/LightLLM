@@ -469,6 +469,13 @@ def normal_or_p_d_start(args):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+
+    from lightllm.server.oom_check.manager import should_run_oom_check
+
+    if should_run_oom_check():
+        from lightllm.server.oom_check.manager import start_oom_check_process
+
+        process_manager.start_submodule_processes(start_funcs=[start_oom_check_process], start_args=[(args,)])
     setup_signal_handlers(http_server_process, process_manager)
     http_server_process.wait()
     return
@@ -530,6 +537,13 @@ def pd_master_start(args):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+
+    from lightllm.server.oom_check.manager import should_run_oom_check
+
+    if should_run_oom_check():
+        from lightllm.server.oom_check.manager import start_oom_check_process
+
+        process_manager.start_submodule_processes(start_funcs=[start_oom_check_process], start_args=[(args,)])
 
     setup_signal_handlers(http_server_process, process_manager)
     http_server_process.wait()
