@@ -179,7 +179,7 @@ class ModeBackend:
 
         if self.is_linear_att_mixed_model:
             self.linear_att_cache_manager = LinearAttCacheManager(
-                size=self.model.mem_manager.size,
+                size=self.args.linear_att_cache_size,
                 linear_config=self.model.req_manager.linear_config,
             )
         else:
