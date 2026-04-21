@@ -17,7 +17,6 @@ def _get_neo_position_triton(
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
     b_image_token_tag: torch.Tensor,
-    b_max_image_q_idx: torch.Tensor,
     BLOCK_SIZE: tl.constexpr,
 ) -> torch.Tensor:
     cur_batch = tl.program_id(0)
@@ -27,28 +26,12 @@ def _get_neo_position_triton(
     image_start_num = tl.load(b_image_start_num + cur_batch)
     start_loc = tl.load(b_start_loc + cur_batch)
 
-    # Track per-batch last (batch-local) packed-q index where tag=True is
-    # written. -1 means this batch has no image tokens in its q range (either
-    # no images at all, or every image is entirely in prompt cache / out of
-    # the current q window).
-    max_image_q_idx = -1
-
     for i in range(image_num):
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_start_idx = start_loc + local_image_start_idx - cache_len
         image_len = tl.load(b_image_len + image_start_num + i)
         # image_h = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 1)
         image_w = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 2)
-
-        # Batch-local index of this image's last token that actually lands in
-        # the current q window (after clipping to [0, q_seq_len)). Matches the
-        # mask applied in the stores below.
-        cand_raw = local_image_start_idx - cache_len + image_len - 1
-        candidate = tl.minimum(cand_raw, q_seq_len - 1).to(tl.int32)
-        contributes = (cand_raw >= 0) & (local_image_start_idx - cache_len < q_seq_len)
-        max_image_q_idx = tl.where(
-            contributes, tl.maximum(max_image_q_idx, candidate), max_image_q_idx
-        )
 
         for j in range(0, image_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
@@ -85,8 +68,6 @@ def _get_neo_position_triton(
                 & (local_image_start_idx - cache_len + off >= 0),
             )
 
-    tl.store(b_max_image_q_idx + cur_batch, max_image_q_idx)
-
     for i in range(image_num):
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_len = tl.load(b_image_len + image_start_num + i)
@@ -117,12 +98,10 @@ def get_neo_position_triton(
     b_q_seq_len: torch.Tensor,
     b_start_loc: torch.Tensor,
     b_image_token_tag: torch.Tensor,
-    b_max_image_q_idx: torch.Tensor,
 ) -> torch.Tensor:
 
     batch_size = b_q_seq_len.shape[0]
     assert batch_size == b_image_nums.shape[0]
-    assert b_max_image_q_idx.shape[0] == batch_size
     grid = (batch_size,)
     BLOCK_SIZE = 64
     _get_neo_position_triton[grid](
@@ -138,7 +117,6 @@ def get_neo_position_triton(
         b_q_seq_len=b_q_seq_len,
         b_start_loc=b_start_loc,
         b_image_token_tag=b_image_token_tag,
-        b_max_image_q_idx=b_max_image_q_idx,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
@@ -160,7 +138,6 @@ def test():
     b_ready_cache_len = torch.tensor([0, 0], dtype=torch.int32, device="cuda")
     b_q_seq_len = torch.tensor([7, 13], dtype=torch.int32, device="cuda")
     b_start_loc = torch.tensor([0, 7], dtype=torch.int32, device="cuda")
-    b_max_image_q_idx = torch.full((b_q_seq_len.shape[0],), -1, dtype=torch.int32, device="cuda")
     get_neo_position_triton(
         b_image_start_idx,
         b_image_thwd,
@@ -172,12 +149,10 @@ def test():
         b_q_seq_len,
         b_start_loc,
         b_image_token_tag,
-        b_max_image_q_idx,
     )
 
     print(b_image_token_tag)
     print(position_ids)
-    print(b_max_image_q_idx)
     # old_value = torch.cat([position_ids[:, 2:7], position_ids[:, 7 + 2 :]], dim=1)
 
     # position_ids = (

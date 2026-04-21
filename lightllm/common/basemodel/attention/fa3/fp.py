@@ -98,8 +98,6 @@ class Fa3PrefillAttState(BasePrefillAttState):
         # (sgl_kernel's flash_attn_with_kvcache does not support image_token_tag).
         if att_control.image_token_tag is not None:
             extra_kwargs = {"image_token_tag": att_control.image_token_tag}
-            if att_control.max_image_q_idx is not None:
-                extra_kwargs["max_image_q_idx"] = att_control.max_image_q_idx
             o = flash_attn_with_kvcache_neo(
                 q=q,
                 k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),

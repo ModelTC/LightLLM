@@ -182,20 +182,6 @@ def _build_inputs(
     b_seq_len = seq_lens.to(torch.int32)
     b_prompt_cache_len = prompt_cache_lens.to(torch.int32)
 
-    # Per-batch last image-token index in *batch-local* packed-q coordinates.
-    # Matches NeoChatInferStateInfo._compute_b_max_image_q_idx semantics:
-    #   shape int32[batch]; value == -1 means that batch has no image tokens.
-    # Computed on CPU (b_image_token_tag is still on CPU here) so no D2H sync
-    # — keeps the eventual flash_attn_with_kvcache call CUDA-graph-safe.
-    b_max_image_q_idx_cpu = torch.full((batch,), -1, dtype=torch.int32)
-    for b in range(batch):
-        start = int(b_q_start_loc[b].item())
-        length = int(q_seq_lens[b].item())
-        seg = b_image_token_tag[start : start + length]
-        idx = torch.nonzero(seg, as_tuple=False)
-        if idx.numel() > 0:
-            b_max_image_q_idx_cpu[b] = int(idx[-1, 0].item())
-
     q = torch.randn((sum_q, Hq, D), dtype=dtype, device=device)
     k = torch.randn((kv_pool_size, Hk, D), dtype=dtype, device=device)
     v = torch.randn((kv_pool_size, Hk, D), dtype=dtype, device=device)
@@ -212,7 +198,6 @@ def _build_inputs(
         max_q_seq_len_in_batch=max_q_seq_len_in_batch,
         req_to_token_indexs=req_to_token_indexs.to(device),
         b_image_token_tag=b_image_token_tag.to(device),
-        b_max_image_q_idx=b_max_image_q_idx_cpu.to(device),
         q_seq_lens=q_seq_lens,
         prompt_cache_lens=prompt_cache_lens,
     )
@@ -266,14 +251,9 @@ def _fa3_prefill_with_image_tag(inputs: dict) -> torch.Tensor:
         # image-token bidirectional attention. Packed like q (shape [sum_q],
         # bool). Rows where the tag is True are allowed to attend to every
         # real key in the request (not just the causal prefix).
-        #
-        # b_max_image_q_idx is int32[batch]: per-batch last image-token index
-        # in batch-local coordinates, -1 if no image in that batch. Lets the
-        # fa3 kernel skip n_block_max extension for text-only requests, which
-        # is critical for mixed-modality batches. Pre-computed in
-        # _build_inputs (host-side) so this call is CUDA-graph safe.
+        # The kernel uses warp OR reduce to detect image tokens per M-block
+        # and extends n_block_max for full attention automatically.
         image_token_tag=inputs["b_image_token_tag"],
-        max_image_q_idx=inputs["b_max_image_q_idx"],
     )
     return o
 
@@ -505,7 +485,8 @@ if __name__ == "__main__":
         dict(batch=4, Hq=8, Hk=2, D=128, dtype=torch.bfloat16, seed=0, max_q_seq_len=128, max_prompt_cache_len=256),
         dict(batch=8, Hq=16, Hk=4, D=128, dtype=torch.bfloat16, seed=1, max_q_seq_len=256, max_prompt_cache_len=512),
         dict(batch=16, Hq=28, Hk=4, D=128, dtype=torch.bfloat16, seed=2, max_q_seq_len=128, max_prompt_cache_len=256),
-        dict(batch=4, Hq=8, Hk=2, D=128, dtype=torch.float16, seed=3, max_q_seq_len=256, max_prompt_cache_len=512),
+        # FP16 case disabled: current build compiled without FP16 support
+        # dict(batch=4, Hq=8, Hk=2, D=128, dtype=torch.float16, seed=3, max_q_seq_len=256, max_prompt_cache_len=512),
     ]
 
     print("=" * 100)

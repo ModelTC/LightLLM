@@ -24,14 +24,6 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             self.b_image_token_tag = torch.zeros([self.position_ids.size(0)], dtype=torch.bool, device="cpu").cuda(
                 non_blocking=True
             )
-            # Pre-allocate to -1 so the "no images anywhere" fast path in
-            # get_neo_position (which skips the triton kernel entirely) still
-            # yields a valid per-batch tensor. When the kernel runs, it
-            # overwrites every batch slot unconditionally with its computed
-            # value (-1 if no image lands in that batch's q window).
-            self.b_max_image_q_idx = torch.full(
-                (bsz,), -1, dtype=torch.int32, device=self.b_q_seq_len.device
-            )
             self.position_ids = self.get_neo_position(self.multimodal_params)
         else:
             b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
@@ -106,6 +98,5 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             b_q_seq_len=self.b_q_seq_len,
             b_start_loc=self.b_q_start_loc,
             b_image_token_tag=self.b_image_token_tag,
-            b_max_image_q_idx=self.b_max_image_q_idx,
         )
         return position_ids
