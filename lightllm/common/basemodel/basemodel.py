@@ -105,10 +105,14 @@ class TpPartBaseModel:
         self._init_quant()
 
         self._init_weights()
+        self._init_req_manager()
         self._init_mem_manager()
+        # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
+        # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
+        self.req_manager.mem_manager = self.mem_manager
+
         self._init_kv_move_buffer()
         self._check_mem_size()
-        self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -219,7 +223,7 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
+        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
         return
 
     def _init_infer_layer(self, start_layer_index=0):

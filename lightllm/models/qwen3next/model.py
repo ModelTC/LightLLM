@@ -36,8 +36,10 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     infer_state_class = Qwen3NextInferStateInfo
 
     def __init__(self, kvargs) -> None:
-        self.mem_manager: Qwen3NextMemManager = None
+        self._init_triton()
+        super().__init__(kvargs)
 
+    def _init_triton(self):
         def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
             return torch.empty(size, device="cuda", dtype=torch.int8)
 
@@ -45,7 +47,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         # This is required for kernels in qwen3next/triton_kernel/fla/ops/solve_tril.py
         triton.set_allocator(_triton_allocator)
         logger.info("Triton allocator set for Qwen3Next model")
-        super().__init__(kvargs)
+        return
 
     def autotune_layers(self):
         return self.config["full_attention_interval"]
@@ -101,6 +103,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManagerForMamba(
-            self.max_req_num, create_max_seq_len, self.mem_manager, linear_config=self.linear_config
+            self.max_req_num, create_max_seq_len, None, linear_config=self.linear_config
         )
         return
