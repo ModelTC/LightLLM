@@ -369,6 +369,7 @@ class InferenceContext:
                 dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_cache_manager.get_state_cache(
                     buffer_idx=dst_buffer_idx
                 )
+                # TODO 对于非连续对象调用 copy_ 效率并不高
                 dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
                 dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
         return

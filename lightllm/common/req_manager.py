@@ -296,6 +296,7 @@ class ReqManagerForMamba(ReqManager):
         )
         dest_req_idx = req.req_idx * (self.mtp_step + 1)
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
+        # 同时，非连续对象的拷贝，可能存在效率问题。
         self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
         self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
         return
