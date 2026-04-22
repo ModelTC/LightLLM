@@ -308,7 +308,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
-            full_text = text
 
             # Handle reasoning content
             reasoning_text = None
@@ -333,14 +332,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             tool_calls = None
             tool_choice = request.tool_choice
             tools = request.tools
-            if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
-                if finish_reason == "stop":
-                    finish_reason = "tool_calls"
+            if tool_choice != "none" and any([i in text for i in TOOLS_TAG_LIST]):
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
-                    full_normal_text, call_info_list = parser.parse_non_stream(full_text)
+                    text, call_info_list = parser.parse_non_stream(text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
@@ -358,8 +355,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
-            if finish_reason == "tool_calls":
-                text = ""
+            if tool_calls and finish_reason == "stop":
+                finish_reason = "tool_calls"
             chat_message = ChatMessage(
                 role="assistant",
                 content=text if text else "",
@@ -610,13 +607,17 @@ def _normalize_image_b64_for_multimodal(image: Union[str, bytes]) -> str:
     return image
 
 
-def _apply_image_generation_stop(chat_request: ChatCompletionRequest, image_start_tag: str) -> None:
+def _apply_image_generation_stop(
+    chat_request: ChatCompletionRequest, image_start_tag: str, image_only: bool = False
+) -> None:
     stop = chat_request.stop or []
     if isinstance(stop, str):
         stop = [stop]
     stop = list(stop)
     if image_start_tag not in stop:
         stop.append(image_start_tag)
+    if chat_request.chat_template_kwargs.get("enable_thinking", False) and image_only:
+        stop.append("</think>")  # TODO: from model config
     chat_request.stop = stop
 
 
@@ -683,8 +684,9 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
     image_start_tag = g_objs.httpserver_manager.tokenizer.image_start_tag
     image_tag = g_objs.httpserver_manager.tokenizer.image_tag
+    image_only = request.modalities == ["image"]
 
-    _apply_image_generation_stop(chat_request, image_start_tag)
+    _apply_image_generation_stop(chat_request, image_start_tag, image_only=image_only)
 
     created_time = int(time.time())
 
@@ -694,7 +696,10 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
     x2i_params = X2IParams()
     x2i_params.init_from_image_config(request.image_config)
 
-    if request.modalities == ["image"]:
+    enable_thinking = request.chat_template_kwargs.get("enable_thinking", False)
+    print(f"x2i_params: {x2i_params} {image_only} {enable_thinking}", flush=True)
+
+    if image_only and not enable_thinking:
         return await _chat_completion_image_only(request, raw_request, prompt, multimodal_params, x2i_params)
 
     if not request.stream:
@@ -706,7 +711,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
         completion_tokens = 0
         finish_reason: Optional[str] = "stop"
         group_request_id = None
-        max_image_gen_num = 15  # TODO: make this configurable
+        max_image_gen_num = 15 if not image_only else 1  # TODO: make this configurable
 
         while max_image_gen_num > 0:
             max_image_gen_num -= 1
@@ -730,7 +735,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
             full_text += output_chunk
 
-            if need_call_x2i:
+            if need_call_x2i or image_only:
                 prompt += output_chunk
                 images = await g_objs.httpserver_manager.generate_image(
                     prompt, x2i_params, multimodal_params.clone(), request=raw_request, input_image_num=input_image_num
@@ -741,7 +746,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                 response_images.extend(_message_contents_from_raw_images(images, request.image_config.image_type))
                 for image in images:
                     prompt += image_tag
-                    full_text += image_tag
+                    full_text += image_tag if not image_only else ""
                     multimodal_params.add_image({"type": "base64", "data": _normalize_image_b64_for_multimodal(image)})
             else:
                 break
@@ -797,7 +802,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
         completion_tokens = 0
         finish_reason = None
         group_request_id = None
-        max_image_gen_num = 15  # TODO: make this configurable
+        max_image_gen_num = 15 if not image_only else 1  # TODO: make this configurable
 
         while max_image_gen_num > 0:
             max_image_gen_num -= 1
@@ -857,11 +862,11 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                 )
                 yield ("data: " + json.dumps(stream_resp.model_dump(), ensure_ascii=False) + "\n\n").encode("utf-8")
 
-            if need_call_x2i:
+            if need_call_x2i or image_only:
                 prompt += output_chunk
 
                 images = await g_objs.httpserver_manager.generate_image(
-                    prompt, x2i_params, multimodal_params.clone(), request=raw_request
+                    prompt, x2i_params, multimodal_params.clone(), request=raw_request, input_image_num=input_image_num
                 )
 
                 if images is None or len(images) == 0:
