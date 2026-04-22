@@ -231,6 +231,8 @@ def _copy_cpu_cache_to_kv_buffer(
     gpu_full_att_tail_dim,
     cpu_kv_conv_tail_dim,
     cpu_kv_ssm_tail_dim,
+    conv_bytes_per_layer,
+    ssm_bytes_per_layer,
     tp_rank,
     full_att_layer_num,
     linear_layer_num,
@@ -277,7 +279,7 @@ def _copy_cpu_cache_to_kv_buffer(
                 mask=mask,
             )
 
-        linear_att_conv_big_page_bytes = linear_layer_num * cpu_kv_conv_tail_dim
+        linear_att_conv_big_page_bytes = linear_layer_num * conv_bytes_per_layer
         linear_att_dest_start = full_att_big_page_bytes
         for i in range(tl.cdiv(linear_att_conv_big_page_bytes, BLOCK)):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
@@ -303,7 +305,7 @@ def _copy_cpu_cache_to_kv_buffer(
                 mask=mask,
             )
 
-        linear_att_ssm_big_page_bytes = linear_layer_num * cpu_kv_ssm_tail_dim
+        linear_att_ssm_big_page_bytes = linear_layer_num * ssm_bytes_per_layer
         linear_att_dest_start = full_att_big_page_bytes + linear_att_conv_big_page_bytes
         for i in range(tl.cdiv(linear_att_ssm_big_page_bytes, BLOCK)):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
@@ -393,6 +395,8 @@ def copy_cpu_cache_to_kv_buffer(
         gpu_full_att_tail_dim=gpu_full_att_tail_dim,
         cpu_kv_conv_tail_dim=cpu_kv_conv_tail_dim,
         cpu_kv_ssm_tail_dim=cpu_kv_ssm_tail_dim,
+        conv_bytes_per_layer=linear_config.get_conv_state_bytes(),
+        ssm_bytes_per_layer=linear_config.get_ssm_state_bytes(),
         tp_rank=tp_rank,
         full_att_layer_num=full_att_layer_num,
         linear_layer_num=linear_layer_num,
