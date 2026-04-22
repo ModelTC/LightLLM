@@ -34,8 +34,10 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_ssm_tail_dim,
     BLOCK: tl.constexpr,
 ):
-    cur_layer = tl.program_id(0)
-    cur_batch_size = tl.program_id(1)
+    cur_layer = tl.program_id(0).to(tl.int64)
+    cur_batch_size = tl.program_id(1).to(tl.int64)
+    cpu_kv_conv_stride_s = cpu_kv_conv_stride_s.to(tl.int64)
+    cpu_kv_ssm_stride_s = cpu_kv_ssm_stride_s.to(tl.int64)
 
     cur_seq_len = tl.load(b_seq_len + cur_batch_size)
     if cur_seq_len == 0:
@@ -43,11 +45,11 @@ def _copy_linear_att_state_to_kv_buffer(
     if cur_seq_len % big_page_token_num != 0:
         return
 
-    cur_req_idx = tl.load(b_req_idx + cur_batch_size)
+    cur_req_idx = tl.load(b_req_idx + cur_batch_size).to(tl.int64)
     req_to_mem_start = (
         req_to_token_mem_index + cur_req_idx * req_to_stride_idx + (cur_seq_len - big_page_token_num) * req_to_stride_s
     )
-    cur_state_req_idx = cur_req_idx * (mtp_step + 1)
+    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
 
     for i in range(tl.cdiv(gpu_conv_tail_dim, BLOCK)):
         gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
@@ -180,15 +182,18 @@ def _copy_kv_buffer_to_linear_att_state(
     cpu_ssm_tail_dim,
     BLOCK: tl.constexpr,
 ):
-    cur_layer = tl.program_id(0)
+    cur_layer = tl.program_id(0).to(tl.int64)
+    cpu_kv_conv_stride_s = cpu_kv_conv_stride_s.to(tl.int64)
+    cpu_kv_ssm_stride_s = cpu_kv_ssm_stride_s.to(tl.int64)
+
     cur_seq_len = seq_len
     if cur_seq_len == 0:
         return
     if cur_seq_len % big_page_token_num != 0:
         return
 
-    cur_req_idx = req_idx
-    cur_state_req_idx = cur_req_idx * (mtp_step + 1)
+    cur_req_idx = req_idx.to(tl.int64)
+    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
 
     req_to_mem_start = (
         req_to_token_mem_index + cur_req_idx * req_to_stride_idx + (cur_seq_len - big_page_token_num) * req_to_stride_s
