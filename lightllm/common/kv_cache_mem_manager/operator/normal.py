@@ -1,5 +1,5 @@
 import torch
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -63,5 +63,35 @@ class NormalMemOperator(BaseMemManagerOperator):
             tp_index=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),
             grid_num=16,
+        )
+        return
+
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers: List,
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ):
+        if not hasattr(self, "mem_ptrs_tensor"):
+            # 构建一个2D tensor，shape为(layer_num, mem_num)
+            mems_ptr_list = []
+            for i in range(0, len(mem_managers)):
+                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
+            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
+
+        from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
+
+        # 一次性传输所有层
+        kv_trans_for_dp(
+            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
+            input_idx=move_token_indexes,
+            input_dp_idx=token_dp_indexes,
+            output=self.mem_manager.kv_buffer,
+            output_idx=mem_indexes,
+            dp_size_in_node=dp_size_in_node,
+            rank_in_dp=rank_in_dp,
         )
         return

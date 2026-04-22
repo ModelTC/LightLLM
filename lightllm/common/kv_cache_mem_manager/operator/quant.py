@@ -1,5 +1,5 @@
 import torch
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
@@ -81,3 +81,14 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
             grid_num=16,
         )
         return
+
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers: List,
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ):
+        raise NotImplementedError("QuantScaleMemOperator does not support copy_kv_from_other_dp_ranks")

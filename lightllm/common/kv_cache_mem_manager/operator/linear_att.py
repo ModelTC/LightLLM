@@ -1,4 +1,5 @@
 import torch
+from typing import List
 from typing import TYPE_CHECKING
 from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
@@ -81,3 +82,14 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             linear_config=self.linear_config,
         )
         return
+
+    def copy_kv_from_other_dp_ranks(
+        self,
+        mem_managers: List,
+        move_token_indexes: torch.Tensor,
+        token_dp_indexes: torch.Tensor,
+        mem_indexes: torch.Tensor,
+        dp_size_in_node: int,
+        rank_in_dp: int,
+    ):
+        raise NotImplementedError("LinearAttMemOperator does not support copy_kv_from_other_dp_ranks")
