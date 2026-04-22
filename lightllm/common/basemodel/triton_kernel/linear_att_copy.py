@@ -222,7 +222,7 @@ def _copy_kv_buffer_to_linear_att_state(
         )
 
     for i in range(tl.cdiv(gpu_ssm_tail_dim, BLOCK)):
-        gpu_start_i = i * BLOCK + tl.arange(BLOCK)
+        gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
         mask = gpu_start_i < gpu_ssm_tail_dim
         src_mem_index = tl.load(
             req_to_mem_start + (gpu_start_i // cpu_ssm_tail_dim) * req_to_stride_s, mask=mask, other=-11111111
