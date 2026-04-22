@@ -689,13 +689,18 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_linear_att(self):
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+
         chunked_start = self.cur_kv_len
         chunked_end = chunked_start + self.args.chunked_prefill_size
-        att_block_end = (
-            (chunked_start // self.args.linear_att_hash_page_size) + 1
-        ) * self.args.linear_att_hash_page_size
+        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
         total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, att_block_end)
+        end = min(total_end, chunked_end, big_page_end)
+
+        if chunked_start < self.linear_att_cache_len < end:
+            # linear att cache 对应需要存储的部分。
+            end = self.linear_att_cache_len
+
         return self.shm_req.shm_prompt_ids.arr[0:end]
 
     def get_chuncked_input_token_len(self):
@@ -704,13 +709,14 @@ class InferReq:
         return chunked_end
 
     def get_chuncked_input_token_len_for_linear_att(self):
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         chunked_start = self.cur_kv_len
         chunked_end = chunked_start + self.args.chunked_prefill_size
-        att_block_end = (
-            (chunked_start // self.args.linear_att_hash_page_size) + 1
-        ) * self.args.linear_att_hash_page_size
+        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
         total_end = self.get_cur_total_len()
-        end = min(total_end, chunked_end, att_block_end)
+        end = min(total_end, chunked_end, big_page_end)
+        if chunked_start < self.linear_att_cache_len < end:
+            end = self.linear_att_cache_len
         return end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
