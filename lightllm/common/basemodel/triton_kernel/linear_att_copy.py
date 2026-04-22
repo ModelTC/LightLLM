@@ -185,6 +185,7 @@ def _copy_kv_buffer_to_linear_att_state(
     cur_layer = tl.program_id(0).to(tl.int64)
     cpu_kv_conv_stride_s = cpu_kv_conv_stride_s.to(tl.int64)
     cpu_kv_ssm_stride_s = cpu_kv_ssm_stride_s.to(tl.int64)
+    req_idx = tl.cast(req_idx, dtype=tl.int64)
 
     cur_seq_len = seq_len
     if cur_seq_len == 0:
@@ -192,7 +193,7 @@ def _copy_kv_buffer_to_linear_att_state(
     if (cur_seq_len % big_page_token_num) != 0:
         return
 
-    cur_req_idx = req_idx.to(tl.int64)
+    cur_req_idx = req_idx
     cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
 
     req_to_mem_start = (
