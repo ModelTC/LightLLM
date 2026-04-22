@@ -55,9 +55,7 @@ class LightX2VServer:
             support_tasks=["t2i", "i2i"],
         )
         self.pipe.create_generator(config_json=self.args.x2v_gen_model_config)
-        self.pipe.modify_config({
-            "load_kv_cache_in_pipeline_for_debug": False,
-            "save_result_for_debug": False})
+        self.pipe.modify_config({"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False})
 
     async def run(self):
         while True:
@@ -95,13 +93,16 @@ class LightX2VServer:
             timestep_shift=param.timestep_shift,
         )
         past_kv_cache = self.past_kv_cache_client.get_kv_cache_for_x2i(
-            param.past_kvcache.get_all(), param.past_kvcache.token_len)
+            param.past_kvcache.get_all(), param.past_kvcache.token_len
+        )
         past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
-            param.past_kvcache_text.get_all(), param.past_kvcache_text.token_len)
+            param.past_kvcache_text.get_all(), param.past_kvcache_text.token_len
+        )
         past_kv_cache_img = None
         if not is_t2i:
             past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                param.past_kvcache_img.get_all(), param.past_kvcache_img.token_len)
+                param.past_kvcache_img.get_all(), param.past_kvcache_img.token_len
+            )
 
         dist.barrier()  # ensure all workers have got the kv cache before generation starts
 
@@ -122,8 +123,10 @@ class LightX2VServer:
                 past_kv_cache_text,
                 past_kv_cache_img,
             )
+        seed = param.seed if param.first_image else None
+        logger.info(f"seed: {seed} {param.seed} first_image: {param.first_image}")
         image = self.pipe.generate(
-            seed=param.seed + param.past_kvcache.img_len,
+            seed=seed,
             save_result_path="",
             target_shape=[param.height, param.width],
         )

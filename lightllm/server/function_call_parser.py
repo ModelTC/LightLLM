@@ -11,7 +11,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import json
+import os
 import orjson
 import logging
 import re
@@ -28,6 +30,7 @@ from pydantic import BaseModel, Field
 from .api_models import Tool
 
 logger = logging.getLogger(__name__)
+ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
 
 TOOLS_TAG_LIST = [
     "<|plugin|>",
@@ -155,7 +158,7 @@ class BaseFormatDetector(ABC):
         results = []
         for act in action:
             name = act.get("name")
-            if name and name in tool_indices:
+            if name and (not ENABLE_TOOL_NAME_CHECK or name in tool_indices):
                 results.append(
                     ToolCallItem(
                         tool_index=-1,  # Caller should update this based on the actual tools array called

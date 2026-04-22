@@ -54,9 +54,10 @@ class X2IParams(ctypes.Structure):
     _image_guidance_scale: float = 1.0
     _seed: int = 42
     _num_images: int = 1
-    _cfg_norm: CfgNormType = CfgNormType.NONE
-    _cfg_interval: float = (-1, 2)
+    _cfg_norm: CfgNormType = CfgNormType.GLOBAL
+    _cfg_interval: float = (0, 1)
     _timestep_shift: float = 3.0
+    _dynamic_resolution: bool = True
 
     def init(self, **kwargs):
         def _get(key, default):
@@ -76,9 +77,11 @@ class X2IParams(ctypes.Structure):
         self.past_kvcache = PastKVCachePageList()
         self.past_kvcache_text = PastKVCachePageList()
         self.past_kvcache_img = PastKVCachePageList()
+        self.dynamic_resolution = _get("dynamic_resolution", X2IParams._dynamic_resolution)
         self.total_prompt_tokens = 0
         self.request_id = 0
         self.has_updated_hw = False
+        self.first_image = True
 
     def init_from_image_config(self, image_config: Any) -> None:
         """从 HTTP `image_config`（api_models.ImageConfig）填充，与 `init(**kwargs)` 共用默认值逻辑。"""
@@ -98,6 +101,8 @@ class X2IParams(ctypes.Structure):
             kwargs["seed"] = image_config.seed
         if image_config.num_images is not None:
             kwargs["num_images"] = image_config.num_images
+        if image_config.dynamic_resolution is not None:
+            kwargs["dynamic_resolution"] = image_config.dynamic_resolution
         if image_config.cfg_norm is not None:
             for e in CfgNormType:
                 if e.as_str() == image_config.cfg_norm:
@@ -106,6 +111,8 @@ class X2IParams(ctypes.Structure):
         self.init(**kwargs)
 
     def update_hw(self, width: int, height: int):
+        if not self.dynamic_resolution:
+            return
         if self.has_updated_hw:
             return
         from lightllm.models.neo_chat_moe.vision_process import smart_resize

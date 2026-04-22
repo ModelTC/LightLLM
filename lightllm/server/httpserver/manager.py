@@ -487,7 +487,7 @@ class HttpServerManager:
             else:
                 # call t2i
                 prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt, input_image_num)
-                # logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
+                logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
                 (con_gen, uncon_gen) = await asyncio.gather(
                     *[
                         generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
@@ -514,6 +514,7 @@ class HttpServerManager:
             assert req_status.response is not None
 
             self.req_id_to_x2i_reqs.pop(x2i_req_id, None)
+            generation_params.first_image = False
 
             return req_status.response.images
 

@@ -108,7 +108,7 @@ class X2IManager:
         for i in range(param.num_images):
             self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
             image = self.gen_pipe.generate(
-                seed=param.seed + param.past_kvcache.img_len + i,
+                seed=param.seed if param.first_image else None,
                 save_result_path="",  # 返回base64，不需要指定路径了
                 target_shape=[param.height, param.width],  # Height, Width
             )
