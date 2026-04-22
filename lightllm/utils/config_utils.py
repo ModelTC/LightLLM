@@ -234,7 +234,7 @@ def has_audio_module(model_path: str) -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_linear_hybrid_att_model(model_path: str) -> bool:
+def is_linear_att_mixed_model(model_path: str) -> bool:
     try:
         from transformers.configuration_utils import PretrainedConfig
 

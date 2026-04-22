@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.config_utils import is_linear_hybrid_att_model
+from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
@@ -124,7 +124,7 @@ class MultiLevelKvCacheModule(object):
                     req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
                 ] = mem_indexes
                 req.cur_kv_len = req.cur_kv_len + need_token_num
-                if g_infer_context.is_linear_hybrid_att_model:
+                if g_infer_context.is_linear_att_mixed_model:
                     g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(
                         req=req,
                     )

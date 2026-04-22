@@ -10,7 +10,7 @@ from .token_chunck_hash_list import TokenHashList, CpuCachePageList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.config_utils import is_linear_hybrid_att_model
+from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 from lightllm.utils.log_utils import init_logger
@@ -185,7 +185,7 @@ class Req(ctypes.Structure):
 
         if get_env_start_args().enable_cpu_cache:
             self._fill_input_token_hash()
-        if is_linear_hybrid_att_model(get_env_start_args().model_dir):
+        if is_linear_att_mixed_model(get_env_start_args().model_dir):
             self._fill_linear_att_token_hash()
         return
 

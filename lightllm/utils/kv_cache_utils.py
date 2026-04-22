@@ -15,7 +15,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_hybrid_att_model
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_att_mixed_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
@@ -63,7 +63,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    if is_linear_hybrid_att_model(args.model_dir):
+    if is_linear_att_mixed_model(args.model_dir):
         # 对于 qwen3.5 等 linear att 混合模型的特殊处理。
         mem_manager_class = Qwen3NextMemManager
     else:
