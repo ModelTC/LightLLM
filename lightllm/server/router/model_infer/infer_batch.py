@@ -333,7 +333,9 @@ class InferenceContext:
             )
         return self.req_manager.mem_manager.can_use_mem_size + radix_cache_unref_token_num
 
-    def copy_linear_att_state_to_kv_buffer(self, b_req_idx: torch.Tensor, b_seq_len: torch.Tensor):
+    def copy_linear_att_state_to_cache_buffer(
+        self, b_req_idx: torch.Tensor, b_seq_len: torch.Tensor, reqs: List["InferReq"]
+    ):
         """
         该函数用于在线性混合模型prefill后,如果存在大页匹配的情况下，将线性层状态复制到
         """
@@ -353,6 +355,22 @@ class InferenceContext:
             mtp_step=self.args.mtp_step,
             big_page_token_num=self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num,
         )
+        assert not self.args.disable_chunked_prefill, "chunked prefill mode is not supported for linear att mixed model"
+        for req in reqs:
+            if (
+                req.get_chuncked_input_token_len() == req.linear_att_cache_len
+                and req.linear_att_cache_buffer_id is not None
+            ):
+                src_buffer_idx = req.req_idx * (self.args.mtp_step + 1)
+                gpu_conv_state = (self.req_manager.req_to_conv_state.buffer[:, src_buffer_idx, ...],)
+                gpu_ssm_state = (self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...],)
+                dst_buffer_idx = req.linear_att_cache_buffer_id
+
+                dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_cache_manager.get_state_cache(
+                    buffer_idx=dst_buffer_idx
+                )
+                dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
+                dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
         return
 
 

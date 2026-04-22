@@ -161,8 +161,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu[:run_reqs_num],
                     mask_func=None,
                 )
-                g_infer_context.copy_linear_att_state_to_kv_buffer(
-                    b_req_idx=model_input.b_req_idx, b_seq_len=model_input.b_seq_len
+                g_infer_context.copy_linear_att_state_to_cache_buffer(
+                    b_req_idx=model_input.b_req_idx[:run_reqs_num],
+                    b_seq_len=model_input.b_seq_len[:run_reqs_num],
+                    reqs=run_reqs,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
@@ -277,7 +279,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     _b_req_len = torch.cat(
                         model_input0.b_seq_len[0:req_num0], model_input1.b_seq_len[0:req_num1], dim=0
                     )
-                    g_infer_context.copy_linear_att_state_to_kv_buffer(b_req_idx=b_req_idx, b_req_len=_b_req_len)
+                    g_infer_context.copy_linear_att_state_to_cache_buffer(
+                        b_req_idx=b_req_idx, b_req_len=_b_req_len, reqs=run_reqs
+                    )
 
                 sync_event = torch.cuda.Event()
                 sync_event.record()
@@ -401,8 +405,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_ids=draft_next_token_ids_gpu,
             )
             if req_num > 0:
-                g_infer_context.copy_linear_att_state_to_kv_buffer(
-                    b_req_idx=b_req_idx, b_seq_len=model_input.b_seq_len[0:req_num]
+                g_infer_context.copy_linear_att_state_to_cache_buffer(
+                    b_req_idx=b_req_idx, b_seq_len=model_input.b_seq_len[0:req_num], reqs=run_reqs
                 )
 
             sync_event = torch.cuda.Event()
@@ -711,7 +715,9 @@ class DPChunkedPrefillBackend(ModeBackend):
             if req_num0 + req_num1 > 0 and g_infer_context.is_linear_att_mixed_model:
                 _b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
                 _b_seq_len = torch.cat((model_input0.b_seq_len[0:req_num0], model_input1.b_seq_len[0:req_num1]), dim=0)
-                g_infer_context.copy_linear_att_state_to_kv_buffer(b_req_idx=_b_req_idx, b_seq_len=_b_seq_len)
+                g_infer_context.copy_linear_att_state_to_cache_buffer(
+                    b_req_idx=_b_req_idx, b_seq_len=_b_seq_len, reqs=run_reqs
+                )
 
             sync_event = torch.cuda.Event()
             sync_event.record()
