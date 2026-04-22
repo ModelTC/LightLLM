@@ -280,7 +280,6 @@ def _copy_cpu_cache_to_kv_buffer(
                 + dim_index * cpu_kv_conv_stride_d,
                 conv_data,
                 mask=mask,
-                other=0,
             )
 
         linear_att_ssm_big_page_bytes = linear_layer_num * cpu_kv_ssm_tail_dim
@@ -309,7 +308,6 @@ def _copy_cpu_cache_to_kv_buffer(
                 + dim_index * cpu_kv_ssm_stride_d,
                 ssm_data,
                 mask=mask,
-                other=0,
             )
     return
 
