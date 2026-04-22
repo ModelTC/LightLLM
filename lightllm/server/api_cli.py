@@ -1,4 +1,5 @@
 import argparse
+import json
 
 
 def make_argument_parser() -> argparse.ArgumentParser:
@@ -489,6 +490,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         close the "first image always admitted" hole — without this cap, one
         4K image or long-aspect-ratio image can still OOM the ViT by itself.
         Defaults to None (disabled; any size is accepted).
+        """,
+    )
+    parser.add_argument(
+        "--mm_processor_kwargs",
+        type=json.loads,
+        default=None,
+        help="""
+        JSON dict of attribute overrides applied to the HuggingFace image
+        processor after from_pretrained (mirrors vLLM's --mm-processor-kwargs).
+        Use to set per-deployment limits like max_pixels / min_pixels without
+        editing preprocessor_config.json. Example:
+        --mm_processor_kwargs '{"max_pixels": 1003520, "min_pixels": 3136}'.
+        Applies to Qwen-VL-family tokenizers (qwen2_vl, qwen2_5_vl, qwen3_vl,
+        qwen3_5*, tarsier2, qwen3-omni thinker).
         """,
     )
     parser.add_argument(

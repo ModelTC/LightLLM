@@ -290,6 +290,22 @@ Multimodal Parameters
     Default is ``None`` (disabled when ``--visual_batch_max_tokens`` is also
     unset).
 
+.. option:: --mm_processor_kwargs
+
+    JSON dict of attribute overrides applied to the HuggingFace image
+    processor after ``from_pretrained`` (mirrors vLLM's
+    ``--mm-processor-kwargs``). Use to set per-deployment limits like
+    ``max_pixels`` / ``min_pixels`` without editing
+    ``preprocessor_config.json``. Applies to Qwen-VL-family tokenizers
+    (``qwen2_vl``, ``qwen2_5_vl``, ``qwen3_vl``, ``qwen3_5*``, ``tarsier2``,
+    qwen3-omni thinker).
+
+    Example::
+
+        --mm_processor_kwargs '{"max_pixels": 1003520, "min_pixels": 3136}'
+
+    Default is ``None``.
+
 .. option:: --visual_gpu_ids
 
     List of GPU IDs to use, e.g., 0 1 2

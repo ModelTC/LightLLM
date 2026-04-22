@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from PIL import Image
 from collections import defaultdict
-from typing import List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 from transformers.image_processing_utils_fast import (
     BaseImageProcessorFast,
@@ -27,36 +27,25 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_name: str = "") -> None:
-    """Clamp a Qwen-VL style image processor's ``max_pixels`` so that even a
-    max-sized image produces ``token_num <= visual_image_max_tokens``.
+def apply_mm_processor_kwargs(
+    processor, kwargs: Optional[Dict[str, Any]], processor_name: str = ""
+) -> None:
+    """Override attributes on a HF image processor from ``--mm_processor_kwargs``.
 
-    Reuses the processor's built-in ``smart_resize`` + ``max_pixels`` mechanism —
-    just tightens ``max_pixels`` so the existing resize path fits the server-wide
-    per-image token budget. After the clamp, ``get_image_token_length`` cannot
-    return a value above the budget, so request-level rejection becomes a
-    defensive no-op in practice.
-
-    No-op when ``visual_image_max_tokens`` is None or the processor already
-    enforces a tighter bound.
+    Mirrors vLLM's ``--mm-processor-kwargs``: each (key, value) from the JSON
+    dict is set on the processor instance after ``from_pretrained``, so callers
+    can tighten (or loosen) defaults like ``max_pixels`` / ``min_pixels`` without
+    editing ``preprocessor_config.json``. No-op when ``kwargs`` is None or empty.
     """
-    if visual_image_max_tokens is None:
+    if not kwargs:
         return
-    unit = processor.patch_size * processor.merge_size
-    allowed_max_pixels = visual_image_max_tokens * unit * unit
-    if allowed_max_pixels < unit * unit:
-        raise ValueError(
-            f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
-            f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
-        )
-    current_max_pixels = getattr(processor, "max_pixels", None)
-    if current_max_pixels is None or allowed_max_pixels < current_max_pixels:
+    for key, value in kwargs.items():
+        old = getattr(processor, key, None)
         logger.info(
-            f"{processor_name or 'processor'}: clamping max_pixels "
-            f"{current_max_pixels} -> {allowed_max_pixels} "
-            f"(visual_image_max_tokens={visual_image_max_tokens}, unit={unit})"
+            f"{processor_name or 'processor'}: mm_processor_kwargs sets "
+            f"{key}: {old!r} -> {value!r}"
         )
-        processor.max_pixels = allowed_max_pixels
+        setattr(processor, key, value)
 
 
 IMAGE_FACTOR = 28
