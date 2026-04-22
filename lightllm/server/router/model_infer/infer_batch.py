@@ -156,9 +156,9 @@ class InferenceContext:
         )
         page_num = req.linear_att_cache_len // hash_page_size
         assert req.linear_att_cache_len >= shared_kv_len
+        if req.linear_att_cache_buffer_id is not None:
+            assert req.linear_att_cache_len <= req.cur_kv_len
 
-        if req.cur_kv_len < req.linear_att_cache_len and req.linear_att_cache_buffer_id is not None:
-            req.free_linear_buffer()
         if req.cur_kv_len == 0:
             return
 
@@ -193,7 +193,7 @@ class InferenceContext:
             )
             req.cur_kv_len = big_page_token_num
 
-            req.free_linear_buffer()
+            assert req.linear_att_cache_buffer_id is None
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
@@ -213,7 +213,7 @@ class InferenceContext:
         if shared_kv_len <= req.cur_kv_len:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
             req.cur_kv_len = shared_kv_len
-            req.free_linear_buffer()
+            assert req.linear_att_cache_buffer_id is None
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.node_prefix_total_len == req.cur_kv_len
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
@@ -358,22 +358,26 @@ class InferenceContext:
             big_page_token_num=self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num,
         )
         assert not self.args.disable_chunked_prefill, "chunked prefill mode is not supported for linear att mixed model"
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         for req in reqs:
-            if (
-                req.get_chuncked_input_token_len() == req.linear_att_cache_len
-                and req.linear_att_cache_buffer_id is not None
-            ):
-                src_buffer_idx = req.req_idx * (self.args.mtp_step + 1)
-                gpu_conv_state = self.req_manager.req_to_conv_state.buffer[:, src_buffer_idx, ...]
-                gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...]
-                dst_buffer_idx = req.linear_att_cache_buffer_id
+            # 判断本次prefill 完以后 kv 的长度是否到达linear att 块存储的临界点。
+            if req.get_chuncked_input_token_len() == req.linear_att_cache_len:
+                assert req.linear_att_cache_buffer_id is None
+                if req.linear_att_cache_len % big_page_token_num != 0:
+                    self.radix_cache.free_one_linear_buffer()
+                    req.linear_att_cache_buffer_id = self.radix_cache.linear_att_cache_manager.alloc_one_state_cache()
+                    if req.linear_att_cache_buffer_id is not None:
+                        src_buffer_idx = req.req_idx * (self.args.mtp_step + 1)
+                        gpu_conv_state = self.req_manager.req_to_conv_state.buffer[:, src_buffer_idx, ...]
+                        gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...]
+                        dst_buffer_idx = req.linear_att_cache_buffer_id
 
-                dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_cache_manager.get_state_cache(
-                    buffer_idx=dst_buffer_idx
-                )
-                # TODO 对于非连续对象调用 copy_ 效率并不高
-                dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
-                dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
+                        dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_cache_manager.get_state_cache(
+                            buffer_idx=dst_buffer_idx
+                        )
+                        # TODO 对于非连续对象调用 copy_ 效率并不高
+                        dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
+                        dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
         return
 
 
@@ -491,9 +495,9 @@ class InferReq:
         self.nixl_trans_device_id: int = -1
 
         # 类似 qwen3.5 这种混合linear att 模型使用的状态，记录申请来用于保存对应的线性att缓存的 buffer id
-        # 当 prefill 阶段结束后, 对应长度的 linear att state 会写入到buffer id 对应的块中， 方便插入到 radix cache中
-        # 方便被后续的请求使用，因为这种资源是有限的，也可能不存在的情况，申请不到时，默认为None，则这种小块对应的kv 无法
-        # 在后续被插入到radix cache中。
+        # 当 prefill 阶段结束后, 对应长度的 linear att state 会写入到申请 buffer id 对应的块中， 方便插入到 radix cache中
+        # 方便被后续的请求使用，因为这种资源是有限的，也可能不存在的情况，申请不到时, 为None，则这种小块对应长度的 kv 无法
+        # 在后续被插入到radix cache中.
         self.linear_att_cache_buffer_id: Optional[int] = None
         # linear cache 对应的长度位置。
         self.linear_att_cache_len: Optional[int] = None
@@ -559,12 +563,6 @@ class InferReq:
             args = get_env_start_args()
             linear_block_num = self.shm_req.linear_att_token_hash_list.size
             self.linear_att_cache_len = linear_block_num * args.linear_att_hash_page_size
-            # 只有非 大块的整数倍情况，才需要单独申请att资源块来缓存
-            if linear_block_num > 0 and linear_block_num % args.linear_att_page_block_num != 0:
-                g_infer_context.radix_cache.free_one_linear_buffer()
-                self.linear_att_cache_buffer_id = (
-                    g_infer_context.radix_cache.linear_att_cache_manager.alloc_one_state_cache()
-                )
         return
 
     def _match_radix_cache(self):
@@ -614,10 +612,7 @@ class InferReq:
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                if share_node.node_prefix_total_len - self.linear_att_cache_len == 0:
-                    # 如果线性att的缓存完全命中，则将线性att的缓存资源提前释放掉，
-                    # 因为radix tree 中已经有了，没必要再次插入，提前释放掉即可
-                    self.free_linear_buffer()
+                assert self.linear_att_cache_buffer_id is None
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
@@ -634,12 +629,6 @@ class InferReq:
             )
         else:
             assert False, "dead code"
-        return
-
-    def free_linear_buffer(self):
-        if self.linear_att_cache_buffer_id is not None:
-            g_infer_context.radix_cache.linear_att_cache_manager.free_state_cache([self.linear_att_cache_buffer_id])
-            self.linear_att_cache_buffer_id = None
         return
 
     def is_master_req(self):
