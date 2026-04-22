@@ -441,6 +441,7 @@ class InferReq:
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
     ):
+        self.args = get_env_start_args()
         self.req_id = req_id
         self.req_idx = req_idx
         self.shm_index = shm_index
@@ -487,6 +488,10 @@ class InferReq:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
             self.decode_need_token_num = self._normal_decode_need_token_num
+
+        if g_infer_context.is_linear_att_mixed_model:
+            self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att
+            self.get_chuncked_input_token_ids = self.get_chuncked_input_token_ids_for_linear_att
 
         self._init_all_state()
 
@@ -661,13 +666,33 @@ class InferReq:
 
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
+
+    def get_chuncked_input_token_ids_for_linear_att(self):
+        chunked_start = self.cur_kv_len
+        chunked_end = chunked_start + self.args.chunked_prefill_size
+        att_block_end = (
+            (chunked_start // self.args.linear_att_hash_page_size) + 1
+        ) * self.args.linear_att_hash_page_size
+        total_end = self.get_cur_total_len()
+        end = min(total_end, chunked_end, att_block_end)
+        return self.shm_req.shm_prompt_ids.arr[0:end]
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
-        chunked_end = min(self.get_cur_total_len(), chunked_start + self.shm_req.chunked_prefill_size)
+        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
         return chunked_end
+
+    def get_chuncked_input_token_len_for_linear_att(self):
+        chunked_start = self.cur_kv_len
+        chunked_end = chunked_start + self.args.chunked_prefill_size
+        att_block_end = (
+            (chunked_start // self.args.linear_att_hash_page_size) + 1
+        ) * self.args.linear_att_hash_page_size
+        total_end = self.get_cur_total_len()
+        end = min(total_end, chunked_end, att_block_end)
+        return end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
         index = self.shm_req.input_len + output_len
