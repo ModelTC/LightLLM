@@ -230,11 +230,14 @@ def torch_profile(fn, log_dir=None):
     torch.cuda.synchronize()
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
         record_shapes=False,
         profile_memory=False,
         on_trace_ready=torch.profiler.tensorboard_trace_handler(log_dir),
     ) as prof:
         fn()
+        torch.cuda.synchronize()
+        prof.step()
     if get_current_rank_in_dp() == 0:
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
 
@@ -340,25 +343,6 @@ def run_forward_once(
             b_seq_len,
             total_token_num,
         )
-        if enable_torch_profile and i == output_len - 1:
-            try:
-                torch_profile(
-                    lambda: decode_fn(
-                        model_part,
-                        batch_size,
-                        max_len_in_batch,
-                        predict_ids.view(-1),
-                        mem_indexes,
-                        b_req_idx,
-                        b_mtp_index,
-                        b_seq_len,
-                        total_token_num,
-                    ),
-                    log_dir=f"./logs/forward_decode_{model_kvargs['rank_id']}",
-                )
-            except Exception as e:
-                print(str(e))
-                raise
 
         prob_out = torch.softmax(logits, dim=-1)
         predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
@@ -370,6 +354,30 @@ def run_forward_once(
                     f"i: {i}, step cost time: {(time.time() - step_start) * 1000} ms, "
                     f"throughput: {dp_size * batch_size / (time.time() - step_start)} tokens/s"
                 )
+
+    if enable_torch_profile:
+        profile_mem_indexes = model_part.req_manager.mem_manager.alloc(predict_ids.shape[0])
+        profile_b_seq_len = b_seq_len + 1
+        profile_total_token_num = total_token_num + batch_size
+        profile_max_len_in_batch = input_len + output_len + 1
+        try:
+            torch_profile(
+                lambda: decode_fn(
+                    model_part,
+                    batch_size,
+                    profile_max_len_in_batch,
+                    predict_ids.view(-1),
+                    profile_mem_indexes,
+                    b_req_idx,
+                    b_mtp_index,
+                    profile_b_seq_len,
+                    profile_total_token_num,
+                ),
+                log_dir=f"./logs/forward_decode_{model_kvargs['rank_id']}",
+            )
+        except Exception as e:
+            print(str(e))
+            raise
 
     model_part.mem_manager.free_all()
     model_part.req_manager.free_all()

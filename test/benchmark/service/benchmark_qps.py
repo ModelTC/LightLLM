@@ -107,6 +107,19 @@ model_name = []
 _DEFAULT_RETRY = 1
 
 
+def resolve_openai_model_name(tokenizer_path: str, explicit_model_name: str = None) -> str:
+    if explicit_model_name:
+        return explicit_model_name
+
+    # For a local tokenizer/model directory, default to the served model id that
+    # vLLM exposes when started with a local path.
+    if os.path.exists(tokenizer_path):
+        return os.path.basename(os.path.abspath(tokenizer_path.rstrip("/")))
+
+    # For hub ids like Qwen/Qwen3-8B, keep the original identifier.
+    return tokenizer_path
+
+
 async def async_post_stream_openai(url, prompt, max_new_tokens, session):
     try:
         text_input, input_len = prompt
@@ -394,6 +407,12 @@ def main():
     )
     parser.add_argument("--num_clients", type=int, default=100)
     parser.add_argument("--tokenizer_path", type=str, default=None)
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="OpenAI request model name. Defaults to the local directory basename or tokenizer_path.",
+    )
     parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--input_num", type=int, default=2000)
     parser.add_argument("--input_qps", type=float, default=30.0)
@@ -429,7 +448,7 @@ def main():
         return
 
     assert args.tokenizer_path is not None
-    model_name.append(args.tokenizer_path)
+    model_name.append(resolve_openai_model_name(args.tokenizer_path, args.model_name))
     seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)
@@ -498,6 +517,9 @@ def main():
             final_output_lens.append(len(result))
             input_lens.append(input_len)
             valid_num += 1
+
+    if len(results) == 0:
+        raise SystemExit("No successful responses were collected. Check the request URL, model_name, and server logs.")
 
     print(
         f"\n\nvalid num = {valid_num}; all data num = {len(results)}; valid ratio = {valid_num * 1.0 / len(results)}\n"

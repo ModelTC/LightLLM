@@ -27,9 +27,17 @@
     "BLOCK_SIZE": 128,
     "num_warps": 8
   },
+  "16384": {
+    "BLOCK_SIZE": 128,
+    "num_warps": 2
+  },
   "2": {
     "BLOCK_SIZE": 256,
     "num_warps": 4
+  },
+  "2048": {
+    "BLOCK_SIZE": 128,
+    "num_warps": 2
   },
   "24": {
     "BLOCK_SIZE": 128,
@@ -40,6 +48,10 @@
     "num_warps": 8
   },
   "32": {
+    "BLOCK_SIZE": 128,
+    "num_warps": 8
+  },
+  "4096": {
     "BLOCK_SIZE": 128,
     "num_warps": 8
   },

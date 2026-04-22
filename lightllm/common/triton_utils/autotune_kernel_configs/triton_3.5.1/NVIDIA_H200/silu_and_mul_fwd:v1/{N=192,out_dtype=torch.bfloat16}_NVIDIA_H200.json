@@ -11,6 +11,18 @@
     "NUM_STAGES": 1,
     "num_warps": 8
   },
+  "131072": {
+    "BLOCK_M": 64,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  },
+  "16384": {
+    "BLOCK_M": 8,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
+  },
   "192": {
     "BLOCK_M": 1,
     "BLOCK_N": 64,
@@ -28,6 +40,12 @@
     "BLOCK_N": 256,
     "NUM_STAGES": 1,
     "num_warps": 8
+  },
+  "32768": {
+    "BLOCK_M": 1,
+    "BLOCK_N": 256,
+    "NUM_STAGES": 4,
+    "num_warps": 1
   },
   "384": {
     "BLOCK_M": 1,
