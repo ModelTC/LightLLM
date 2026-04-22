@@ -37,6 +37,14 @@ def _copy_kv_buffer_to_cpu_cache(
 ):
     block_index_start = tl.program_id(0)
     grid_num = tl.num_programs(0)
+    gpu_full_att_stride_s = gpu_full_att_stride_s.to(tl.int64)
+    gpu_full_att_stride_l = gpu_full_att_stride_l.to(tl.int64)
+    cpu_kv_conv_stride_s = cpu_kv_conv_stride_s.to(tl.int64)
+    cpu_kv_conv_stride_l = cpu_kv_conv_stride_l.to(tl.int64)
+    cpu_kv_ssm_stride_s = cpu_kv_ssm_stride_s.to(tl.int64)
+    cpu_kv_ssm_stride_l = cpu_kv_ssm_stride_l.to(tl.int64)
+    cpu_cache_tensor_stride_page = cpu_cache_tensor_stride_page.to(tl.int64)
+    cpu_cache_tensor_stride_t = cpu_cache_tensor_stride_t.to(tl.int64)
 
     for block_index in range(block_index_start, page_num, grid_num):
         cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
@@ -227,6 +235,15 @@ def _copy_cpu_cache_to_kv_buffer(
 ):
     block_index_start = tl.program_id(0)
     grid_num = tl.num_programs(0)
+    gpu_full_att_stride_s = gpu_full_att_stride_s.to(tl.int64)
+    gpu_full_att_stride_l = gpu_full_att_stride_l.to(tl.int64)
+    cpu_kv_conv_stride_s = cpu_kv_conv_stride_s.to(tl.int64)
+    cpu_kv_conv_stride_l = cpu_kv_conv_stride_l.to(tl.int64)
+    cpu_kv_ssm_stride_s = cpu_kv_ssm_stride_s.to(tl.int64)
+    cpu_kv_ssm_stride_l = cpu_kv_ssm_stride_l.to(tl.int64)
+    cpu_cache_tensor_stride_page = cpu_cache_tensor_stride_page.to(tl.int64)
+    cpu_cache_tensor_stride_t = cpu_cache_tensor_stride_t.to(tl.int64)
+
     for block_index in range(block_index_start, page_num, grid_num):
         cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
         mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
