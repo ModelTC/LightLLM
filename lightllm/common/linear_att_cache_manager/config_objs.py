@@ -52,8 +52,8 @@ class LinearAttCacheConfig:
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
         a = self.get_full_att_bytes() * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
-        b = self.get_conv_state_bytes() * self.linear_layer_num * big_page_token_num
-        c = self.get_ssm_state_bytes() * self.linear_layer_num * big_page_token_num
+        b = self.get_conv_state_bytes() * self.linear_layer_num
+        c = self.get_ssm_state_bytes() * self.linear_layer_num
 
         return triton.cdiv(a + b + c, 16) * 16
 

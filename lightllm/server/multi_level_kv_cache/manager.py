@@ -236,6 +236,7 @@ def start_multi_level_kv_cache_manager(args, pipe_writer):
             args=args,
         )
     except Exception as e:
+        logger.exception(f"start multi_level_kv_cache_manager has exception {str(e)}")
         pipe_writer.send(str(e))
         raise
 

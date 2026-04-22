@@ -22,6 +22,7 @@ from lightllm.common.kv_cache_mem_manager import (
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
+    Qwen3NextMemManager,
 )
 
 from typing import List, Tuple, Optional
@@ -64,6 +65,11 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if is_linear_hybrid_att_model(args.model_dir):
         # 对于 qwen3.5 等 linear att 混合模型的特殊处理。
+        mem_manager_class = Qwen3NextMemManager
+    else:
+        mem_manager_class = select_mem_manager_class()
+
+    if mem_manager_class is Qwen3NextMemManager:
         linear_config = LinearAttCacheConfig.load_from_args()
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
@@ -75,10 +81,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
-        return cpu_cache_meta
-
-    mem_manager_class = select_mem_manager_class()
-    if mem_manager_class is Deepseek2MemoryManager:
+    elif mem_manager_class is Deepseek2MemoryManager:
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,
