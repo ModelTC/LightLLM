@@ -189,7 +189,7 @@ def _copy_kv_buffer_to_linear_att_state(
     cur_seq_len = seq_len
     if cur_seq_len == 0:
         return
-    if cur_seq_len % big_page_token_num != 0:
+    if (cur_seq_len % big_page_token_num) != 0:
         return
 
     cur_req_idx = req_idx.to(tl.int64)
@@ -268,7 +268,7 @@ def copy_kv_buffer_to_linear_att_state(
 
     grid = (layer_num,)
 
-    _copy_linear_att_state_to_kv_buffer[grid](
+    _copy_kv_buffer_to_linear_att_state[grid](
         gpu_conv_ptr=gpu_conv_state,
         gpu_ssm_ptr=gpu_ssm_state,
         cpu_kv_conv_ptr=cpu_kv_conv_state,

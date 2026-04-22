@@ -234,7 +234,7 @@ class ReqManagerForMamba(ReqManager):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
         self.big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size,
+            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
         assert (
             self.mtp_step == 0
