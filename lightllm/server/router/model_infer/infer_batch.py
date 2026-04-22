@@ -197,8 +197,10 @@ class InferenceContext:
             input_token_ids = req.get_input_token_ids()
             key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            block_hashs = req.shm_req.linear_att_token_hash_list.get_all()[:page_num]
-            linear_idxs = [None for _ in range(page_num)]
+            cur_page_num = big_page_token_num // hash_page_size
+            assert big_page_token_num % hash_page_size == 0
+            block_hashs = req.shm_req.linear_att_token_hash_list.get_all()[:cur_page_num]
+            linear_idxs = [None for _ in range(cur_page_num)]
             prefix_len, _ = self.radix_cache.insert(key, value, block_hashs=block_hashs, block_linear_idxs=linear_idxs)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
