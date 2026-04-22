@@ -362,8 +362,8 @@ class InferenceContext:
                 and req.linear_att_cache_buffer_id is not None
             ):
                 src_buffer_idx = req.req_idx * (self.args.mtp_step + 1)
-                gpu_conv_state = (self.req_manager.req_to_conv_state.buffer[:, src_buffer_idx, ...],)
-                gpu_ssm_state = (self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...],)
+                gpu_conv_state = self.req_manager.req_to_conv_state.buffer[:, src_buffer_idx, ...]
+                gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...]
                 dst_buffer_idx = req.linear_att_cache_buffer_id
 
                 dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_cache_manager.get_state_cache(
