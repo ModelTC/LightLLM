@@ -108,6 +108,36 @@ class TestApplyMMProcessorKwargs(unittest.TestCase):
         apply_mm_processor_kwargs(p, {"max_pixels": 2000 * 28 * 28})
         self.assertEqual(p.max_pixels, 2000 * 28 * 28)
 
+    def test_max_pixels_mirrors_into_size_longest_edge(self):
+        # HF Qwen3-VL processor exposes pixel bounds via the ``size`` dict
+        # (shortest_edge / longest_edge). The tokenizer reads from there for
+        # get_image_token_length, so setting .max_pixels alone is not enough.
+        p = _FakeProcessor(
+            max_pixels=12845056,
+            min_pixels=3136,
+            size={"shortest_edge": 3136, "longest_edge": 12845056},
+        )
+        apply_mm_processor_kwargs(p, {"max_pixels": 1003520, "min_pixels": 3136})
+        self.assertEqual(p.max_pixels, 1003520)
+        self.assertEqual(p.size["longest_edge"], 1003520)
+        self.assertEqual(p.size["shortest_edge"], 3136)
+
+    def test_size_dict_unchanged_for_unrelated_keys(self):
+        p = _FakeProcessor(
+            max_pixels=1,
+            size={"shortest_edge": 3136, "longest_edge": 12845056},
+        )
+        apply_mm_processor_kwargs(p, {"some_other_key": 7})
+        self.assertEqual(p.size, {"shortest_edge": 3136, "longest_edge": 12845056})
+
+    def test_missing_size_dict_is_ok(self):
+        # Not all processors expose a ``size`` dict; mirroring must be a no-op
+        # rather than crashing when it's absent.
+        p = _FakeProcessor(max_pixels=1)
+        apply_mm_processor_kwargs(p, {"max_pixels": 1003520})
+        self.assertEqual(p.max_pixels, 1003520)
+        self.assertFalse(hasattr(p, "size"))
+
 
 if __name__ == "__main__":
     unittest.main()

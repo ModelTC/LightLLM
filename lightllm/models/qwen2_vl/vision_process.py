@@ -36,9 +36,17 @@ def apply_mm_processor_kwargs(
     dict is set on the processor instance after ``from_pretrained``, so callers
     can tighten (or loosen) defaults like ``max_pixels`` / ``min_pixels`` without
     editing ``preprocessor_config.json``. No-op when ``kwargs`` is None or empty.
+
+    The HF Qwen-VL image processors keep pixel bounds in two places: the
+    ``min_pixels`` / ``max_pixels`` attributes and the ``size`` dict
+    (``shortest_edge`` / ``longest_edge``). Their ``__init__`` copies size → attrs,
+    but post-init mutation doesn't propagate. Qwen3-VL's tokenizer reads the
+    ``size`` dict for ``get_image_token_length``, so we mirror ``min_pixels`` /
+    ``max_pixels`` into the dict to keep both readers consistent.
     """
     if not kwargs:
         return
+    size_mirror = {"max_pixels": "longest_edge", "min_pixels": "shortest_edge"}
     for key, value in kwargs.items():
         old = getattr(processor, key, None)
         logger.info(
@@ -46,6 +54,10 @@ def apply_mm_processor_kwargs(
             f"{key}: {old!r} -> {value!r}"
         )
         setattr(processor, key, value)
+
+        size_key = size_mirror.get(key)
+        if size_key is not None and isinstance(getattr(processor, "size", None), dict):
+            processor.size[size_key] = value
 
 
 IMAGE_FACTOR = 28
