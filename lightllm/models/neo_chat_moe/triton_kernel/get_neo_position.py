@@ -25,12 +25,14 @@ def _get_neo_position_triton(
     image_num = tl.load(b_image_nums + cur_batch)
     image_start_num = tl.load(b_image_start_num + cur_batch)
     start_loc = tl.load(b_start_loc + cur_batch)
+
     for i in range(image_num):
         local_image_start_idx = tl.load(b_image_start_idx + image_start_num + i)
         image_start_idx = start_loc + local_image_start_idx - cache_len
         image_len = tl.load(b_image_len + image_start_num + i)
         # image_h = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 1)
         image_w = tl.load(b_image_thwd + (image_start_num + i) * b_image_thwd_stride0 + 2)
+
         for j in range(0, image_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
             # 目前没考虑视频，所以t 恒为 0

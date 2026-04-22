@@ -20,6 +20,7 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model: LlamaTpPartModel):
         LlamaInferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
+            bsz = self.b_q_seq_len.shape[0]
             self.b_image_token_tag = torch.zeros([self.position_ids.size(0)], dtype=torch.bool, device="cpu").cuda(
                 non_blocking=True
             )
