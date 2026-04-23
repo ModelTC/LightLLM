@@ -598,6 +598,9 @@ class InferReq:
         match_tokens = (match_tokens // linear_att_hash_page_size) * linear_att_hash_page_size
         match_block_num = match_tokens // linear_att_hash_page_size
         linear_hash_list = linear_hash_list[:match_block_num]
+        assert len(linear_hash_list) == self.shm_req.linear_att_token_hash_list.size
+        big_page_token_num = linear_att_hash_page_size * get_env_start_args().linear_att_page_block_num
+        big_page_is_disable = big_page_token_num > self.args.max_req_total_len
         if enable_prompt_cache and match_tokens > 1 and len(linear_hash_list) > 0 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
@@ -606,29 +609,92 @@ class InferReq:
                 key, block_hashs=linear_hash_list, update_refs=True
             )
             if share_node is not None:
-                self.shared_kv_node = share_node
-                ready_cache_len = share_node.node_prefix_total_len
-                # 从 cpu 到 gpu 是流内阻塞操作
-                g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                assert self.linear_att_cache_buffer_id is None
+                if share_node.is_big_page_node():
+                    # 大页匹配
+                    self.shared_kv_node = share_node
+                    ready_cache_len = share_node.node_prefix_total_len
+                    # 从 cpu 到 gpu 是流内阻塞操作
+                    g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                    self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                    self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                    assert self.linear_att_cache_buffer_id is None
+                    # 恢复linear att 状态
+                    g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(req=self)
+                else:
+                    # 小页匹配
+                    if big_page_is_disable:
+                        # 如果 大页本质是被禁用的，可以直接使用小页的匹配结果
+                        self.shared_kv_node = share_node
+                        ready_cache_len = share_node.node_prefix_total_len
+                        # 从 cpu 到 gpu 是流内阻塞操作
+                        g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                        self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                        self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                        assert self.linear_att_cache_buffer_id is not None
+                        # 恢复linear att 状态
+                        g_infer_context.req_manager.copy_cache_to_linear_att_state(
+                            req=self, linear_att_cache_manager=g_infer_context.radix_cache.linear_att_cache_manager
+                        )
+                    else:
+                        # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
+                        # 对应的小页对应的节点，递归找到对应最近的大叶节点进行返回,然后赋值到req.shared_node 对象上
+                        shared_kv_len = share_node.node_prefix_total_len
+                        cur_big_page_tokens = (shared_kv_len // big_page_token_num) * big_page_token_num
+                        need_tokens = shared_kv_len - cur_big_page_tokens
+                        radix_cache = g_infer_context.radix_cache
+                        if g_infer_context.get_can_alloc_token_num() > need_tokens:
+                            # 有充足的token 容量时
+                            radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
+                            tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
+                            g_infer_context.req_manager.req_to_token_indexs[
+                                self.req_idx, 0:cur_big_page_tokens
+                            ] = value_tensor[0:cur_big_page_tokens]
+                            g_infer_context.req_manager.req_to_token_indexs[
+                                self.req_idx, cur_big_page_tokens:shared_kv_len
+                            ] = tail_mems
+
+                            # TODO 将 对应的 value_tensors 中的数据 拷贝到 tail_mems 中对应的数据去
+                            radix_cache.mem_manager.kv_buffer[:, tail_mems, ...].copy_(
+                                radix_cache.mem_manager.kv_buffer[
+                                    :, value_tensor[cur_big_page_tokens:shared_kv_len], ...
+                                ]
+                            )
+
+                            self.shared_kv_node = share_node  # 只是为了保证 copy_cache_to_linear_att_state 正确调用
+                            g_infer_context.req_manager.copy_cache_to_linear_att_state(
+                                req=self, linear_att_cache_manager=g_infer_context.radix_cache.linear_att_cache_manager
+                            )
+                            self.shared_kv_node = None
+
+                            big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                            self.shared_kv_node = big_page_shared_node
+                            self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                            self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                        else:
+                            # 没有充足的token 容量时
+                            share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                            if share_node is not None:
+                                assert share_node.is_big_page_node()
+                                # 大页匹配
+                                self.shared_kv_node = share_node
+                                ready_cache_len = share_node.node_prefix_total_len
+                                # 从 cpu 到 gpu 是流内阻塞操作
+                                g_infer_context.req_manager.req_to_token_indexs[
+                                    self.req_idx, 0:ready_cache_len
+                                ] = value_tensor[0:ready_cache_len]
+                                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
+                                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                                assert self.linear_att_cache_buffer_id is None
+                                # 恢复linear att 状态
+                                g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(req=self)
+
+                assert self.linear_att_cache_buffer_id is not None
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
-        # 通过当前命中的数据，完成线性 att state的初始化。
-        big_page_token_num = linear_att_hash_page_size * get_env_start_args().linear_att_page_block_num
         if self.cur_kv_len == 0:
             # 说明没有任何命中
             g_infer_context.req_manager.init_linear_att_state(req=self)
-        elif self.cur_kv_len % big_page_token_num == 0:
-            g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(req=self)
-        elif self.shared_kv_node is not None and self.shared_kv_node.linear_buffer_idx is not None:
-            g_infer_context.req_manager.copy_cache_to_linear_att_state(
-                req=self, linear_att_cache_manager=g_infer_context.radix_cache.linear_att_cache_manager
-            )
-        else:
-            assert False, "dead code"
         return
 
     def is_master_req(self):

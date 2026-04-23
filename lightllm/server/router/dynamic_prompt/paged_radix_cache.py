@@ -439,6 +439,25 @@ class PagedRadixCache:
         self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
         return
 
+    def deref_to_first_big_page_node(self, node: PagedTreeNode) -> Optional[PagedTreeNode]:
+        assert not node.is_big_page_node()
+        iter_node = node
+        while not iter_node.is_big_page_node():
+            self._discard_node(iter_node)
+
+            if iter_node.ref_counter == 1:
+                self.refed_tokens_num.arr[0] -= len(iter_node.token_mem_index_value)
+            iter_node.ref_counter -= 1
+
+            self._add_node(iter_node)
+
+            iter_node = iter_node.parent
+
+        if iter_node is self.root_node:
+            return None
+        else:
+            return iter_node
+
     def dec_node_ref_counter(self, node: PagedTreeNode):
         if node is None:
             return
