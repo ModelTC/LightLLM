@@ -369,6 +369,23 @@ class PagedRadixCache:
             if len(block_hashs) == 0:
                 return
 
+            if len(block_hashs) >= self.big_page_num:
+                # 大页的匹配
+                big_page_block_hash = block_hashs[self.big_page_num - 1]
+                if big_page_block_hash in node.children:
+                    child = node.children[big_page_block_hash]
+                    assert child.is_big_page_node()
+                    ans_node_list.append(child)
+                    self._match_prefix_helper(
+                        child,
+                        key[self.big_page_tokens :],
+                        block_hashs[self.big_page_num :],
+                        ans_node_list,
+                        update_refs,
+                    )
+                    return
+
+            # 小页匹配的情况
             if block_hashs[0] in node.children:
                 child = node.children[block_hashs[0]]
                 ans_node_list.append(child)
@@ -392,6 +409,7 @@ class PagedRadixCache:
             if node.is_big_page_node():
                 break
             elif node.linear_buffer_idx is not None:
+                assert not node.is_big_page_node()
                 break
             else:
                 removed_list.append(node)
