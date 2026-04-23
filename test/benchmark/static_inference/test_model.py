@@ -31,6 +31,12 @@ if __name__ == "__main__":
     parser.add_argument("--input_len", type=int, default=64, help="input sequence length")
     parser.add_argument("--output_len", type=int, default=128, help="output sequence length")
     parser.add_argument(
+        "--cache_hit_len",
+        type=int,
+        default=0,
+        help="cached prefix length used to benchmark cache-hit prefill/decode; 0 means cold run",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",

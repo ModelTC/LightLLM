@@ -74,11 +74,14 @@ def overlap_prefill(
     b_seq_len,
     total_token_num,
     b_ready_cache_len,
+    max_cache_len=0,
+    prefix_total_token_num=0,
 ):
     _0_batch_size = batch_size // 2
-    _0_total_token_num = total_token_num // 2
-    _0_input_ids = input_ids[: total_token_num // 2]
-    _0_mem_indexes = mem_indexes[: total_token_num // 2]
+    _0_q_token_num = int(torch.sum(b_seq_len[:_0_batch_size] - b_ready_cache_len[:_0_batch_size]).item())
+    _0_total_token_num = int(torch.sum(b_seq_len[:_0_batch_size]).item())
+    _0_input_ids = input_ids[:_0_q_token_num]
+    _0_mem_indexes = mem_indexes[:_0_q_token_num]
     _0_b_req_idx = b_req_idx[: batch_size // 2]
     _0_b_mtp_index = b_mtp_index[: batch_size // 2]
     _0_b_seq_len = b_seq_len[: batch_size // 2]
@@ -86,6 +89,10 @@ def overlap_prefill(
     micro_batch1 = ModelInput(
         batch_size=_0_batch_size,
         total_token_num=_0_total_token_num,
+        max_q_seq_len=int(torch.max(_0_b_seq_len - _o_b_ready_cache_len).item()),
+        max_kv_seq_len=int(torch.max(_0_b_seq_len).item()),
+        max_cache_len=int(torch.max(_o_b_ready_cache_len).item()),
+        prefix_total_token_num=int(torch.sum(_o_b_ready_cache_len).item()),
         input_ids=_0_input_ids,
         b_req_idx=_0_b_req_idx,
         b_mtp_index=_0_b_mtp_index,
@@ -97,9 +104,10 @@ def overlap_prefill(
     )
 
     _1_batch_size = batch_size - batch_size // 2
-    _1_total_token_num = total_token_num - total_token_num // 2
-    _1_input_ids = input_ids[total_token_num // 2 :]
-    _1_mem_indexes = mem_indexes[total_token_num // 2 :]
+    _1_q_token_num = int(torch.sum(b_seq_len[batch_size // 2 :] - b_ready_cache_len[batch_size // 2 :]).item())
+    _1_total_token_num = int(torch.sum(b_seq_len[batch_size // 2 :]).item())
+    _1_input_ids = input_ids[_0_q_token_num : _0_q_token_num + _1_q_token_num]
+    _1_mem_indexes = mem_indexes[_0_q_token_num : _0_q_token_num + _1_q_token_num]
     _1_b_req_idx = b_req_idx[batch_size // 2 :]
     _1_b_mtp_index = b_mtp_index[batch_size // 2 :]
     _1_b_seq_len = b_seq_len[batch_size // 2 :]
@@ -108,6 +116,10 @@ def overlap_prefill(
     micro_batch2 = ModelInput(
         batch_size=_1_batch_size,
         total_token_num=_1_total_token_num,
+        max_q_seq_len=int(torch.max(_1_b_seq_len - _1_b_ready_cache_len).item()),
+        max_kv_seq_len=int(torch.max(_1_b_seq_len).item()),
+        max_cache_len=int(torch.max(_1_b_ready_cache_len).item()),
+        prefix_total_token_num=int(torch.sum(_1_b_ready_cache_len).item()),
         input_ids=_1_input_ids,
         b_req_idx=_1_b_req_idx,
         b_mtp_index=_1_b_mtp_index,
@@ -181,15 +193,18 @@ def prefill(
     b_seq_len,
     total_token_num,
     b_ready_cache_len,
+    max_cache_len=0,
+    prefix_total_token_num=0,
 ):
     b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
-    b_prefill_start_loc = b_seq_len.cumsum(dim=0, dtype=torch.int32) - b_seq_len
+    b_q_seq_len = b_seq_len - b_ready_cache_len
+    b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
     model_input = ModelInput(
         batch_size=batch_size,
         total_token_num=total_token_num,
-        max_q_seq_len=max_len_in_batch,
+        max_q_seq_len=max_len_in_batch - max_cache_len,
         max_kv_seq_len=max_len_in_batch,
-        max_cache_len=0,
+        max_cache_len=max_cache_len,
         input_ids=input_ids,
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
@@ -198,12 +213,41 @@ def prefill(
         is_prefill=True,
         b_ready_cache_len=b_ready_cache_len,  # b_ready_cache_len
         b_prefill_start_loc=b_prefill_start_loc,
-        prefix_total_token_num=0,  # the default kvcache len is zero.
+        prefix_total_token_num=prefix_total_token_num,
+        # Required when --enable_prefill_cudagraph pads the batch up to the
+        # nearest captured graph bucket: _create_padded_prefill_model_input
+        # iterates over this list.
+        b_prefill_has_output_cpu=[True] * batch_size,
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
     )
 
     model_output = model_part.forward(model_input)
     return model_output.logits
+
+
+def seed_cache_hit_prefix(model_part, prefill_fn, batch_size, cache_hit_len, prefix_input_ids, b_req_idx, b_mtp_index):
+    if cache_hit_len <= 0:
+        return
+
+    prefix_seq_len = torch.full((batch_size,), cache_hit_len, dtype=torch.int32, device="cpu")
+    prefix_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
+    prefix_total_token_num = batch_size * cache_hit_len
+    prefix_mem_indexes = model_part.req_manager.mem_manager.alloc(prefix_input_ids.shape[0])
+
+    prefill_fn(
+        model_part,
+        batch_size,
+        cache_hit_len,
+        prefix_input_ids,
+        prefix_mem_indexes,
+        b_req_idx,
+        b_mtp_index,
+        prefix_seq_len,
+        prefix_total_token_num,
+        prefix_ready_cache_len,
+        max_cache_len=0,
+        prefix_total_token_num=0,
+    )
 
 
 def decode(
@@ -243,11 +287,23 @@ def torch_profile(fn, log_dir=None):
 
 
 def run_forward_once(
-    model_kvargs, input_len, output_len, batch_size, model_part, enable_overlap, enable_torch_profile=False
+    model_kvargs,
+    input_len,
+    output_len,
+    batch_size,
+    model_part,
+    enable_overlap,
+    enable_torch_profile=False,
+    cache_hit_len=0,
 ):
+    assert 0 <= cache_hit_len < input_len, f"cache_hit_len must be in [0, input_len), got {cache_hit_len}"
     test_data = np.vstack([np.random.randint(0, 50256, input_len) for _ in range(batch_size)])
-    test_data = test_data.reshape(-1)
-    test_data = torch.from_numpy(test_data)
+    if cache_hit_len > 0:
+        prefix_data = torch.from_numpy(test_data[:, :cache_hit_len].reshape(-1))
+        prefill_input_ids = torch.from_numpy(test_data[:, cache_hit_len:].reshape(-1))
+    else:
+        prefix_data = None
+        prefill_input_ids = torch.from_numpy(test_data.reshape(-1))
     import torch.distributed as dist
 
     dist.barrier()
@@ -255,19 +311,15 @@ def run_forward_once(
 
     dp_size = model_kvargs["dp_size"]
 
-    torch.cuda.synchronize()
-    prefill_start_time = time.time()
-
     b_req_idx = torch.tensor(
         [model_part.req_manager.alloc() for _ in range(batch_size)], dtype=torch.int32, device="cpu"
     )
     b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
-    b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
+    b_ready_cache_len = torch.full((batch_size,), cache_hit_len, dtype=torch.int32, device="cpu")
     for i in range(batch_size):
         b_seq_len[i] = input_len
 
     total_token_num = batch_size * input_len
-    mem_indexes = model_part.req_manager.mem_manager.alloc(test_data.shape[0])
     b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cpu")
     rank_id = model_kvargs["rank_id"]
 
@@ -278,17 +330,29 @@ def run_forward_once(
         prefill_fn = prefill
         decode_fn = decode
 
+    if cache_hit_len > 0:
+        seed_cache_hit_prefix(model_part, prefill_fn, batch_size, cache_hit_len, prefix_data, b_req_idx, b_mtp_index)
+
+    prefix_total_token_num = batch_size * cache_hit_len
+    handled_prefill_token_num = batch_size * (input_len - cache_hit_len)
+
+    torch.cuda.synchronize()
+    prefill_start_time = time.time()
+    mem_indexes = model_part.req_manager.mem_manager.alloc(prefill_input_ids.shape[0])
+
     logits = prefill_fn(
         model_part,
         batch_size,
         input_len,
-        test_data,
+        prefill_input_ids,
         mem_indexes,
         b_req_idx,
         b_mtp_index,
         b_seq_len,
         total_token_num,
         b_ready_cache_len,  # b_ready_cache_len
+        max_cache_len=cache_hit_len,
+        prefix_total_token_num=prefix_total_token_num,
     )
 
     prob_out = torch.softmax(logits, dim=-1)
@@ -298,9 +362,11 @@ def run_forward_once(
     torch.cuda.synchronize()
 
     if rank_id == 0:
+        prefill_cost = time.time() - prefill_start_time
         print(
-            f"prefill time cost: {(time.time() - prefill_start_time) * 1000}, "
-            f"prefill throughput: {dp_size * batch_size * input_len / (time.time() - prefill_start_time)} tokens/s"
+            f"prefill time cost: {prefill_cost * 1000}, "
+            f"prefill throughput: {dp_size * handled_prefill_token_num / prefill_cost} tokens/s, "
+            f"cache_hit_len: {cache_hit_len}"
         )
 
     if enable_torch_profile:
@@ -311,13 +377,15 @@ def run_forward_once(
                     model_part,
                     batch_size,
                     input_len,
-                    test_data,
+                    prefill_input_ids,
                     mem_indexes,
                     b_req_idx,
                     b_mtp_index,
                     b_seq_len,
                     total_token_num,
                     b_ready_cache_len,  # b_ready_cache_len
+                    max_cache_len=cache_hit_len,
+                    prefix_total_token_num=prefix_total_token_num,
                 ),
                 log_dir=f"./logs/forward_prefill_{model_kvargs['rank_id']}",
             )
@@ -430,6 +498,7 @@ def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, an
             model_part=model_part,
             enable_overlap=enable_overlap,
             enable_torch_profile=False,
+            cache_hit_len=args.cache_hit_len,
         )
 
         # test
@@ -441,10 +510,16 @@ def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, an
             model_part=model_part,
             enable_overlap=enable_overlap,
             enable_torch_profile=args.torch_profile,
+            cache_hit_len=args.cache_hit_len,
         )
         if rank_id == 0:
             print("=" * 50)
 
     ans_queue.put(True)
 
-    return
+    try:
+        ans_queue.close()
+        ans_queue.join_thread()
+    except Exception:
+        pass
+    os._exit(0)

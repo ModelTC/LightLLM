@@ -1,91 +1,79 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-export BS=8
-export ILEN=10000
-export OLEN=500
-export WARMUP_OLEN=10
+# Keep knobs in lock-step with lightllm.sh so profile results line up 1:1.
+export BS=${BS:-8}
+export ILEN=${ILEN:-10000}
+export OLEN=${OLEN:-500}
+export WARMUP_OLEN=${WARMUP_OLEN:-10}
+export TP=${TP:-8}
+export BENCH_MODE=${1:-${BENCH_MODE:-both}}
+export CACHE_HIT_LEN=${CACHE_HIT_LEN:-$((ILEN - 1))}
 
-export ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MODEL_DIR="$ROOT_DIR/../Qwen3-235B-A22B"
-export PROFILE_DIR="$ROOT_DIR/profiles"
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
-export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export ROOT_DIR
+export MODEL_DIR=${MODEL_DIR:-../Qwen3-235B-A22B}
+# Mirror lightllm's `./logs/forward_{prefill|decode}_<rank>/` layout. Only the
+# top-level directory name differs (profiles/ vs logs/) so vLLM and lightllm
+# artefacts don't clash when both are inspected side-by-side. Running
+# BENCH_MODE=both will overwrite the static_forward traces with cache_hit ones,
+# which matches lightllm.sh's behaviour.
+export PROFILE_ROOT=${PROFILE_ROOT:-$ROOT_DIR/profiles}
 
-rm -rf "$PROFILE_DIR/qwen3_static_decode"
-mkdir -p "$PROFILE_DIR/qwen3_static_decode"
+# --- vLLM engine knobs ------------------------------------------------------
+# Force V1 engine (matches what LightLLM is effectively being compared to).
+export VLLM_USE_V1=${VLLM_USE_V1:-1}
+# Align attention backend with lightllm (flashinfer on both prefill & decode).
+# export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASHINFER}
+# Spawn start method for multiprocessing workers (see repo memory notes on
+# vllm-benchmark spawn behaviour).
+export VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD:-spawn}
+# Profiler-related defaults.
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-1800}
+export VLLM_ALLOW_INSECURE_SERIALIZATION=${VLLM_ALLOW_INSECURE_SERIALIZATION:-1}
 
+run_vllm_profile() {
+  bench_mode=$1
+  profile_stage=$2
+  profile_dir=$PROFILE_ROOT
 
-cd "$PROFILE_DIR"
+  mkdir -p "$profile_dir"
 
-env -u PYTHONPATH python - <<'PY'
-import os
-import time
-
-from vllm import LLM
-from vllm.config import ProfilerConfig
-
-
-batch_size = int(os.environ["BS"])
-input_len = int(os.environ["ILEN"])
-model_dir = os.environ["MODEL_DIR"]
-profile_dir = os.path.join(os.environ["PROFILE_DIR"], "qwen3_static_decode")
-
-profiler_config = ProfilerConfig(
-  profiler="torch",
-  torch_profiler_dir=profile_dir,
-  delay_iterations=0,
-  max_iterations=0,
-  ignore_frontend=True,
-)
-
-llm = LLM(
-  model=model_dir,
-  skip_tokenizer_init=True,
-  tensor_parallel_size=8,
-  dtype="bfloat16",
-  max_model_len=32768,
-  max_num_seqs=batch_size,
-  max_num_batched_tokens=batch_size * input_len,
-  enable_prefix_caching=False,
-  enforce_eager=False,
-  profiler_config=profiler_config,
-)
-
-
-def warmup_decode_dummy_run(worker, num_tokens: int, seq_len: int):
-  worker.model_runner._dummy_run(
-    num_tokens=num_tokens,
-    uniform_decode=True,
-    profile_seq_lens=seq_len,
+  echo "[vLLM] profiling ${bench_mode}/${profile_stage} -> ${profile_dir}"
+  (
+    cd "$ROOT_DIR"
+    env -u PYTHONPATH \
+      BENCH_MODE="$bench_mode" \
+      PROFILE_STAGE="$profile_stage" \
+      PROFILE_DIR="$profile_dir" \
+      python "$ROOT_DIR/test/benchmark/static_inference/vllm_benchmark.py"
   )
-  return worker.rank
+}
 
+run_static_forward_bench() {
+  echo "[vLLM] run cold prefill+decode benchmark"
+  run_vllm_profile static_forward full
+}
 
-def profile_decode_dummy_run(worker, num_tokens: int, seq_len: int):
-  if worker.rank == 0:
-    worker.profile(True)
-  worker.model_runner._dummy_run(
-    num_tokens=num_tokens,
-    uniform_decode=True,
-    profile_seq_lens=seq_len,
-  )
-  if worker.rank == 0:
-    worker.profile(False)
-    return {"rank": worker.rank, "profiled": True}
-  return {"rank": worker.rank, "profiled": False}
+run_cache_hit_forward_bench() {
+  echo "[vLLM] run cache-hit prefill+decode benchmark, cache_hit_len=${CACHE_HIT_LEN}"
+  run_vllm_profile cache_hit full
+}
 
-
-print("Warm up pure decode forward...")
-print(
-  f"Warmup replies: {llm.collective_rpc(warmup_decode_dummy_run, args=(batch_size, input_len))}"
-)
-
-print(f"Profiling pure decode forward into {profile_dir} ...")
-print(
-  f"Profile replies: {llm.collective_rpc(profile_decode_dummy_run, args=(batch_size, input_len))}"
-)
-
-# Give worker processes a moment to flush trace files.
-time.sleep(5)
-PY
+case "$BENCH_MODE" in
+  static_forward)
+    run_static_forward_bench
+    ;;
+  cache_hit)
+    run_cache_hit_forward_bench
+    ;;
+  both)
+    run_static_forward_bench
+    run_cache_hit_forward_bench
+    ;;
+  *)
+    echo "Unsupported BENCH_MODE: $BENCH_MODE" >&2
+    echo "Supported values: static_forward, cache_hit, both" >&2
+    exit 1
+    ;;
+esac
