@@ -11,22 +11,20 @@ class BaseMemManagerOperator(ABC):
         super().__init__()
         self.mem_manager = mem_manager
 
+    # @abstractmethod
+    # def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+    #     return
+
     # cpu cache 的相关操作接口
+    def load_cpu_kv_to_gpu(self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client):
+        raise NotImplementedError()
 
-    @abstractmethod
-    def load_cpu_kv_to_gpu(mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client):
-        """子类必须实现此方法用于处理数据"""
-        pass
-
-    @abstractmethod
     def offload_gpu_kv_to_cpu(
-        mem_indexes: torch.Tensor, page_indexes: torch.Tensor, page_readies: torch.Tensor, cpu_cache_client
+        self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, page_readies: torch.Tensor, cpu_cache_client
     ):
-        """子类必须实现此方法用于处理数据"""
-        pass
+        raise NotImplementedError()
 
     # dp 间共享 kv 的操作接口, 提升dp 模式下的kv 共享效率，降低调度的难度
-    @abstractmethod
     def copy_kv_from_other_dp_ranks(
         self,
         mem_managers: List["MemoryManager"],
@@ -36,4 +34,4 @@ class BaseMemManagerOperator(ABC):
         dp_size_in_node: int,
         rank_in_dp: int,
     ):
-        pass
+        raise NotImplementedError()

@@ -81,14 +81,3 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
             grid_num=16,
         )
         return
-
-    def copy_kv_from_other_dp_ranks(
-        self,
-        mem_managers: List,
-        move_token_indexes: torch.Tensor,
-        token_dp_indexes: torch.Tensor,
-        mem_indexes: torch.Tensor,
-        dp_size_in_node: int,
-        rank_in_dp: int,
-    ):
-        raise NotImplementedError("QuantScaleMemOperator does not support copy_kv_from_other_dp_ranks")
