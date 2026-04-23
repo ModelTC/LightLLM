@@ -18,6 +18,7 @@ class PagedTreeNode:
         self.parent: "PagedTreeNode" = None
 
         # Hash of the last page in this node (None for the empty root).
+        self.page_num = None  # 页面数量，只能是 1 或者 big_page_num
         self.page_hash: Optional[int] = None
 
         # token-level data for this node; length == num_pages * hash_page_size
@@ -62,16 +63,35 @@ class PagedTreeNode:
         block_hash: int,
         block_linear_idx: Optional[int],
     ) -> "PagedTreeNode":
+        assert len(token_id_key) == self.hash_page_size == len(token_mem_index_value)
         child = PagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
         child.page_hash = block_hash
         child.linear_buffer_idx = block_linear_idx
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
-
+        child.page_num = 1
         assert child.page_hash not in self.children, "duplicate last block hash in children"
         self.children[child.page_hash] = child
         child.parent = self
 
+        new_len = len(child.token_mem_index_value)
+        child.node_value_len = new_len
+        child.node_prefix_total_len = child.parent.node_prefix_total_len + new_len
+        return child
+
+    def add_and_return_new_big_page_child(
+        self, token_id_key: torch.Tensor, token_mem_index_value: torch.Tensor, block_hash: int
+    ) -> "PagedTreeNode":
+        assert len(token_id_key) == self.hash_page_size * self.big_page_num == len(token_mem_index_value)
+        child = PagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
+        child.page_hash = block_hash
+        child.linear_buffer_idx = None
+        child.token_id_key = token_id_key
+        child.token_mem_index_value = token_mem_index_value
+        child.page_num = self.big_page_num
+        assert child.page_hash not in self.children, "duplicate last block hash in children"
+        child.parent = self
+        self.children[child.page_hash] = child
         new_len = len(child.token_mem_index_value)
         child.node_value_len = new_len
         child.node_prefix_total_len = child.parent.node_prefix_total_len + new_len
@@ -116,7 +136,8 @@ class PagedRadixCache:
         self.root_node = PagedTreeNode(hash_page_size=hash_page_size, big_page_num=big_page_num)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
-        self.root_node.ref_counter = 1  # pinned so root is never evicted
+        self.root_node.ref_counter = 1
+        self.root_node.page_num = self.big_page_num
 
         self._evict_tree_set: Set[PagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
         self._evict_tree_set_for_linear_att: Set[PagedTreeNode] = SortedSet(
@@ -200,46 +221,89 @@ class PagedRadixCache:
         try:
             if len(block_hashs) == 0:
                 return 0, node
-
-            # 是否已经存在了。
-            if block_hashs[0] in node.children:
-                child = node.children[block_hashs[0]]
-
-                if block_linear_idxs[0] is not None:
-                    assert len(block_hashs) == 1 == len(block_linear_idxs)
-                    if child.linear_buffer_idx is None:
-                        # 将这个buffer id 移交给这个存在的节点。
-                        self._discard_node(child)
-                        child.linear_buffer_idx = block_linear_idxs[0]
-                        self._add_node(child)
-                    else:
-                        # 说明节点已经存在了，直接提前移除掉这个节点占用的线性缓存，外部不用处理这个细节了
-                        self.linear_att_cache_manager.free_state_cache(free_indexes=[block_linear_idxs[0]])
-
-                sub_prefix_len, ans_node = self._insert_helper(
-                    child,
-                    key[self.hash_page_size :],
-                    value[self.hash_page_size :],
-                    block_hashs[1:],
-                    block_linear_idxs[1:],
-                )
-                return self.hash_page_size + sub_prefix_len, ans_node
+            # 先看是不是能插入一个大页节点
+            if len(block_hashs) >= self.big_page_num:
+                # 插入大叶节点
+                big_page_block_hash = block_hashs[self.big_page_num - 1]
+                big_page_token_id_key = key[: self.big_page_tokens]
+                big_page_token_mem_index_value = value[: self.big_page_tokens]
+                if big_page_block_hash in node.children:
+                    assert node.is_big_page_node()
+                    child = node.children[big_page_block_hash]
+                    assert child.is_big_page_node()
+                    # 已经存在了
+                    sub_prefix_len, ans_node = self._insert_helper(
+                        child,
+                        key[self.big_page_tokens :],
+                        value[self.big_page_tokens :],
+                        block_hashs[self.big_page_num :],
+                        block_linear_idxs[self.big_page_num :],
+                    )
+                    return self.big_page_tokens + sub_prefix_len, ans_node
+                else:
+                    # 不存在，则新建一个大页节点
+                    assert node.is_big_page_node()
+                    new_child = node.add_and_return_new_big_page_child(
+                        big_page_token_id_key,
+                        big_page_token_mem_index_value,
+                        big_page_block_hash,
+                    )
+                    self.tree_total_tokens_num.arr[0] += self.big_page_tokens
+                    assert new_child.is_big_page_node()
+                    assert new_child.page_num == self.big_page_num
+                    _, ans_node = self._insert_helper(
+                        new_child,
+                        key[self.big_page_tokens :],
+                        value[self.big_page_tokens :],
+                        block_hashs[self.big_page_num :],
+                        block_linear_idxs[self.big_page_num :],
+                    )
+                    return 0, ans_node
             else:
-                new_node = node.add_and_return_new_child(
-                    key[: self.hash_page_size],
-                    value[: self.hash_page_size],
-                    block_hashs[0],
-                    block_linear_idxs[0],
-                )
-                self.tree_total_tokens_num.arr[0] += self.hash_page_size
-                _, ans_node = self._insert_helper(
-                    new_node,
-                    key[self.hash_page_size :],
-                    value[self.hash_page_size :],
-                    block_hashs[1:],
-                    block_linear_idxs[1:],
-                )
-                return 0, ans_node
+                # 插入小页节点的情况
+                assert len(block_hashs) < self.big_page_num
+
+                # 是否已经存在了。
+                if block_hashs[0] in node.children:
+                    child = node.children[block_hashs[0]]
+
+                    if block_linear_idxs[0] is not None:
+                        assert len(block_hashs) == 1 == len(block_linear_idxs)
+                        if child.linear_buffer_idx is None:
+                            # 将这个buffer id 移交给这个存在的节点。
+                            self._discard_node(child)
+                            child.linear_buffer_idx = block_linear_idxs[0]
+                            self._add_node(child)
+                        else:
+                            # 说明节点已经存在了，直接提前移除掉这个节点占用的线性缓存，外部不用处理这个细节了
+                            self.linear_att_cache_manager.free_state_cache(free_indexes=[block_linear_idxs[0]])
+
+                    sub_prefix_len, ans_node = self._insert_helper(
+                        child,
+                        key[self.hash_page_size :],
+                        value[self.hash_page_size :],
+                        block_hashs[1:],
+                        block_linear_idxs[1:],
+                    )
+                    return self.hash_page_size + sub_prefix_len, ans_node
+                else:
+                    new_node = node.add_and_return_new_child(
+                        key[: self.hash_page_size],
+                        value[: self.hash_page_size],
+                        block_hashs[0],
+                        block_linear_idxs[0],
+                    )
+                    assert not new_node.is_big_page_node()
+                    assert new_node.page_num == 1
+                    self.tree_total_tokens_num.arr[0] += self.hash_page_size
+                    _, ans_node = self._insert_helper(
+                        new_node,
+                        key[self.hash_page_size :],
+                        value[self.hash_page_size :],
+                        block_hashs[1:],
+                        block_linear_idxs[1:],
+                    )
+                    return 0, ans_node
 
         finally:
             self._add_node(node)
@@ -250,6 +314,7 @@ class PagedRadixCache:
         block_hashs: Optional[List[int]] = None,
         update_refs: bool = False,
     ):
+        assert update_refs is True, "update_refs must be True"
         assert key is not None, "key must not be None"
         if block_hashs is None:
             block_hashs = []
