@@ -28,10 +28,6 @@ class Qwen3NextMemManager(MemoryManager):
 
         super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
 
-    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        layer_index = layer_index // self.linear_config.full_attention_interval
-        return super().copy_kv_to_mem_manager(layer_index, mem_index, kv)
-
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         layer_index = layer_index // self.linear_config.full_attention_interval
         return super().get_att_input_params(layer_index)

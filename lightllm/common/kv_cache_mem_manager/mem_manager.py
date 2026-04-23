@@ -25,7 +25,8 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-    operator_class: BaseMemManagerOperator = NormalMemOperator
+
+    operator_class = NormalMemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         self.size = size
@@ -69,15 +70,6 @@ class MemoryManager:
 
         # 构建对外的操作类接口
         self.operator: BaseMemManagerOperator = self.operator_class(self)
-
-    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        """
-        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
-        """
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-        destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
-        return
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
