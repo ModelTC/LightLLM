@@ -631,7 +631,7 @@ class InferReq:
                         g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
                         self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                         self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
-                        assert self.linear_att_cache_buffer_id is not None
+                        assert self.linear_att_cache_buffer_id is None
                         # 恢复linear att 状态
                         g_infer_context.req_manager.copy_cache_to_linear_att_state(
                             req=self, linear_att_cache_manager=g_infer_context.radix_cache.linear_att_cache_manager
