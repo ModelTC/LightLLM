@@ -609,6 +609,7 @@ class InferReq:
                 key, block_hashs=linear_hash_list, update_refs=True
             )
             if share_node is not None:
+                assert self.linear_att_cache_buffer_id is None
                 if share_node.is_big_page_node():
                     # 大页匹配
                     self.shared_kv_node = share_node
@@ -687,8 +688,6 @@ class InferReq:
                                 assert self.linear_att_cache_buffer_id is None
                                 # 恢复linear att 状态
                                 g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(req=self)
-
-                assert self.linear_att_cache_buffer_id is not None
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
