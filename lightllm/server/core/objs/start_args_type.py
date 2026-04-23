@@ -187,7 +187,7 @@ class StartArgs:
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)
-    
+
     # multi_modal_x2i
     enable_multimodal_x2i: bool = field(default=False)
     x2i_port: int = field(default=None)

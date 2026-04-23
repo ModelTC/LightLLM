@@ -18,18 +18,28 @@ import torchvision.io as io
 from .configuration_neo_chat import NEOChatConfig
 from .modeling_neo_vit import NEOVisionModel
 from .modeling_qwen3 import Qwen3ForCausalLM, create_block_causal_mask
-from .modeling_fm_modules import PositionEmbedding, TimestepEmbedder, FlowMatchingHead, RMSNorm, NerfEmbedder, SimpleMLPAdaLN, ConvDecoder
+from .modeling_fm_modules import (
+    PositionEmbedding,
+    TimestepEmbedder,
+    FlowMatchingHead,
+    RMSNorm,
+    NerfEmbedder,
+    SimpleMLPAdaLN,
+    ConvDecoder,
+)
 
 
 logger = logging.get_logger(__name__)
 
 
-def version_cmp(v1, v2, op='eq'):
+def version_cmp(v1, v2, op="eq"):
     import operator
 
     from packaging import version
+
     op_func = getattr(operator, op)
     return op_func(version.parse(v1), version.parse(v2))
+
 
 def prepare_flash_kv_cache(
     past_key_values,
@@ -82,6 +92,7 @@ def prepare_flash_kv_cache(
         layer.flash_k_cache = k_cache
         layer.flash_v_cache = v_cache
 
+
 def clear_flash_kv_cache(past_key_values):
     if past_key_values is None:
         return
@@ -132,9 +143,10 @@ def build_abs_positions_from_grid_hw(grid_hw: torch.Tensor, device=None):
 
     # Generate intra-image patch index (row-major order)
     patch_id_within_image = torch.arange(N_total, device=device)
-    patch_id_within_image = patch_id_within_image - torch.cumsum(
-        torch.cat([torch.tensor([0], device=device), N[:-1]]), dim=0
-    )[patch_to_sample]
+    patch_id_within_image = (
+        patch_id_within_image
+        - torch.cumsum(torch.cat([torch.tensor([0], device=device), N[:-1]]), dim=0)[patch_to_sample]
+    )
 
     # Get H/W for each patch according to its image
     W_per_patch = W[patch_to_sample]
@@ -146,8 +158,8 @@ def build_abs_positions_from_grid_hw(grid_hw: torch.Tensor, device=None):
 
 class NEOChatModel(PreTrainedModel):
     config_class = NEOChatConfig
-    main_input_name = 'pixel_values'
-    base_model_prefix = 'language_model'
+    main_input_name = "pixel_values"
+    base_model_prefix = "language_model"
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
     _no_split_modules = [
@@ -156,17 +168,17 @@ class NEOChatModel(PreTrainedModel):
     ]
 
     # support transformers 4.51.+
-    _tp_plan = ''
+    _tp_plan = ""
 
     def __init__(self, config: NEOChatConfig, vision_model=None, language_model=None, use_flash_attn=True):
         super().__init__(config)
 
-        assert version_cmp(transformers.__version__, '4.37.0', 'ge')
+        assert version_cmp(transformers.__version__, "4.37.0", "ge")
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
         self.template = config.template
         self.downsample_ratio = config.downsample_ratio
-        config.llm_config._attn_implementation = 'eager'
+        config.llm_config._attn_implementation = "eager"
 
         if vision_model is not None:
             self.vision_model = vision_model
@@ -179,31 +191,32 @@ class NEOChatModel(PreTrainedModel):
             self.language_model = Qwen3ForCausalLM(config.llm_config)
 
         merge_size = int(1 / self.downsample_ratio)
-        output_dim = 3*(patch_size*merge_size)**2
+        output_dim = 3 * (patch_size * merge_size) ** 2
         llm_hidden_size = self.config.llm_config.hidden_size
         self.use_deep_fm_head = self.config.fm_head_layers > 2
         self.use_pixel_head = self.config.use_pixel_head
 
         if self.use_deep_fm_head:
-                fm_head = FlowMatchingHead(llm_hidden_size, output_dim, dim=self.config.fm_head_dim, layers=self.config.fm_head_layers, mlp_ratio=self.config.fm_head_mlp_ratio)
+            fm_head = FlowMatchingHead(
+                llm_hidden_size,
+                output_dim,
+                dim=self.config.fm_head_dim,
+                layers=self.config.fm_head_layers,
+                mlp_ratio=self.config.fm_head_mlp_ratio,
+            )
         else:
             fm_head = nn.Sequential(
-                    nn.Linear(llm_hidden_size, 4096, bias=True),
-                    nn.GELU(),
-                    nn.Linear(4096, output_dim, bias=True),
-                )
+                nn.Linear(llm_hidden_size, 4096, bias=True),
+                nn.GELU(),
+                nn.Linear(4096, output_dim, bias=True),
+            )
 
         timestep_embedder = TimestepEmbedder(llm_hidden_size)
         self.fm_modules = nn.ModuleDict(
-                    {
-                        "vision_model_mot_gen": vision_model_mot_gen,
-                        "timestep_embedder": timestep_embedder,
-                        "fm_head": fm_head
-                    }
-                )
+            {"vision_model_mot_gen": vision_model_mot_gen, "timestep_embedder": timestep_embedder, "fm_head": fm_head}
+        )
         if self.use_pixel_head:
             self.fm_modules["fm_head"] = ConvDecoder(llm_hidden_size)
-
 
         self.concat_time_token_num = config.concat_time_token_num
         self.time_token_id = 151682
@@ -222,27 +235,22 @@ class NEOChatModel(PreTrainedModel):
 
         if self.add_noise_scale_embedding:
             noise_scale_embedder = TimestepEmbedder(llm_hidden_size)
-            self.fm_modules['noise_scale_embedder'] = noise_scale_embedder
-
-
+            self.fm_modules["noise_scale_embedder"] = noise_scale_embedder
 
         self.img_context_token_id = None
         self.img_start_token_id = 151670
         # self.conv_template = get_conv_template(self.template)
         # self.system_message = self.conv_template.system_message
 
-
     def extract_feature(self, pixel_values, gen_model=False, grid_hw=None):
         if gen_model:
-            return self.fm_modules['vision_model_mot_gen'](pixel_values=pixel_values,
-                                 output_hidden_states=False,
-                                 return_dict=True,
-                                 grid_hw=grid_hw).last_hidden_state
+            return self.fm_modules["vision_model_mot_gen"](
+                pixel_values=pixel_values, output_hidden_states=False, return_dict=True, grid_hw=grid_hw
+            ).last_hidden_state
         else:
-            return self.vision_model(pixel_values=pixel_values,
-                                 output_hidden_states=False,
-                                 return_dict=True,
-                                 grid_hw=grid_hw).last_hidden_state
+            return self.vision_model(
+                pixel_values=pixel_values, output_hidden_states=False, return_dict=True, grid_hw=grid_hw
+            ).last_hidden_state
 
     def patchify(self, images, patch_size, channel_first=False):
         """
@@ -253,11 +261,11 @@ class NEOChatModel(PreTrainedModel):
         x = images.reshape(shape=(images.shape[0], 3, h, patch_size, w, patch_size))
 
         if channel_first:
-            x = torch.einsum('nchpwq->nhwcpq', x)
+            x = torch.einsum("nchpwq->nhwcpq", x)
         else:
-            x = torch.einsum('nchpwq->nhwpqc', x)
+            x = torch.einsum("nchpwq->nhwpqc", x)
 
-        x = x.reshape(shape=(images.shape[0], h * w, patch_size**2 * 3))
+        x = x.reshape(shape=(images.shape[0], h * w, patch_size ** 2 * 3))
         return x
 
     def unpatchify(sle, x, patch_size, h=None, w=None):
@@ -266,12 +274,12 @@ class NEOChatModel(PreTrainedModel):
         images: (N, 3, H, W)
         """
         if h is None or w is None:
-            h = w = int(x.shape[1]**.5)
+            h = w = int(x.shape[1] ** 0.5)
         else:
             h = h // patch_size
             w = w // patch_size
         x = x.reshape(shape=(x.shape[0], h, w, patch_size, patch_size, 3))
-        x = torch.einsum('nhwpqc->nchpwq', x)
+        x = torch.einsum("nhwpqc->nchpwq", x)
         images = x.reshape(shape=(x.shape[0], 3, h * patch_size, w * patch_size))
         return images
 
@@ -316,15 +324,25 @@ class NEOChatModel(PreTrainedModel):
         w_image = idx % token_w
         return torch.stack([t_image, h_image, w_image], dim=0)
 
-
-
-    def _t2i_predict_v(self, input_embeds, indexes_image, attn_mask, past_key_values, t, z,
-                       image_token_num, timestep_embeddings=None, image_size=None):
+    def _t2i_predict_v(
+        self,
+        input_embeds,
+        indexes_image,
+        attn_mask,
+        past_key_values,
+        t,
+        z,
+        image_token_num,
+        timestep_embeddings=None,
+        image_size=None,
+    ):
         B, L = z.shape[0], z.shape[1]
 
         outputs = self.language_model.model(
             inputs_embeds=input_embeds,
-            image_gen_indicators=torch.ones((input_embeds.shape[0], input_embeds.shape[1]), dtype=torch.bool, device=input_embeds.device),
+            image_gen_indicators=torch.ones(
+                (input_embeds.shape[0], input_embeds.shape[1]), dtype=torch.bool, device=input_embeds.device
+            ),
             indexes=indexes_image,
             attention_mask=attn_mask,
             past_key_values=past_key_values,
@@ -341,44 +359,47 @@ class NEOChatModel(PreTrainedModel):
             img_2d = torch.einsum("b h w c -> b c h w", img_reshaped)
             img_2d = img_2d.contiguous().view(B, -1, token_h, token_w)
 
-            smoothed_img_2d = self.fm_modules['fm_head'](img_2d)
+            smoothed_img_2d = self.fm_modules["fm_head"](img_2d)
 
-            smoothed_reshaped = smoothed_img_2d.view(B, 3, token_h, self.patch_size * merge_size, token_w, self.patch_size * merge_size)
+            smoothed_reshaped = smoothed_img_2d.view(
+                B, 3, token_h, self.patch_size * merge_size, token_w, self.patch_size * merge_size
+            )
             smoothed_reshaped = torch.einsum("b c h p w q -> b h w p q c", smoothed_reshaped)
-            out_1d = smoothed_reshaped.contiguous().view(B, L, self.patch_size * merge_size * self.patch_size * merge_size * 3)
+            out_1d = smoothed_reshaped.contiguous().view(
+                B, L, self.patch_size * merge_size * self.patch_size * merge_size * 3
+            )
             x_pred = out_1d
         else:
             if self.use_deep_fm_head:
                 x_pred = self.fm_modules["fm_head"](
-                outputs.last_hidden_state[:, -image_token_num:].view(B*L, -1), t.repeat(B*L)
+                    outputs.last_hidden_state[:, -image_token_num:].view(B * L, -1), t.repeat(B * L)
                 ).view(B, L, -1)
             else:
                 x_pred = self.fm_modules["fm_head"](
                     outputs.last_hidden_state[:, -image_token_num:].view(B, L, -1)
                 ).view(B, L, -1)
 
-
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.config.t_eps)
         return v_pred
 
-
     @torch.no_grad()
-    def it2i_generate(self,
-                      past_key_values_condition,
-                      past_key_values_text_uncondition,
-                      past_key_values_img_uncondition,
-                      text_lens,
-                      cfg_scale=1,
-                      img_cfg_scale=1,
-                      cfg_norm='none',
-                      enable_timestep_shift=True,
-                      timestep_shift=3,
-                      image_size=(256, 256),
-                      num_steps=30,
-                      cfg_interval=(0.1, 1.0),
-                      batch_size=1,
-                      t_eps=0.02,
-                      ):
+    def it2i_generate(
+        self,
+        past_key_values_condition,
+        past_key_values_text_uncondition,
+        past_key_values_img_uncondition,
+        text_lens,
+        cfg_scale=1,
+        img_cfg_scale=1,
+        cfg_norm="none",
+        enable_timestep_shift=True,
+        timestep_shift=3,
+        image_size=(256, 256),
+        num_steps=30,
+        cfg_interval=(0.1, 1.0),
+        batch_size=1,
+        t_eps=0.02,
+    ):
 
         self.config.t_eps = t_eps
         device, dtype = self.get_cache_device_dtype(past_key_values_condition)
@@ -394,12 +415,24 @@ class NEOChatModel(PreTrainedModel):
         indexes_image_img_uncondition = self._build_t2i_image_indexes(token_h, token_w, S3, device=device)
 
         for layer_idx in range(len(past_key_values_condition.layers)):
-            past_key_values_condition.layers[layer_idx].keys = past_key_values_condition.layers[layer_idx].keys.expand(batch_size, *past_key_values_condition.layers[layer_idx].keys.shape[1:])
-            past_key_values_condition.layers[layer_idx].values = past_key_values_condition.layers[layer_idx].values.expand(batch_size, *past_key_values_condition.layers[layer_idx].values.shape[1:])
-            past_key_values_text_uncondition.layers[layer_idx].keys = past_key_values_text_uncondition.layers[layer_idx].keys.expand(batch_size, *past_key_values_text_uncondition.layers[layer_idx].keys.shape[1:])
-            past_key_values_text_uncondition.layers[layer_idx].values = past_key_values_text_uncondition.layers[layer_idx].values.expand(batch_size, *past_key_values_text_uncondition.layers[layer_idx].values.shape[1:])
-            past_key_values_img_uncondition.layers[layer_idx].keys = past_key_values_img_uncondition.layers[layer_idx].keys.expand(batch_size, *past_key_values_img_uncondition.layers[layer_idx].keys.shape[1:])
-            past_key_values_img_uncondition.layers[layer_idx].values = past_key_values_img_uncondition.layers[layer_idx].values.expand(batch_size, *past_key_values_img_uncondition.layers[layer_idx].values.shape[1:])
+            past_key_values_condition.layers[layer_idx].keys = past_key_values_condition.layers[layer_idx].keys.expand(
+                batch_size, *past_key_values_condition.layers[layer_idx].keys.shape[1:]
+            )
+            past_key_values_condition.layers[layer_idx].values = past_key_values_condition.layers[
+                layer_idx
+            ].values.expand(batch_size, *past_key_values_condition.layers[layer_idx].values.shape[1:])
+            past_key_values_text_uncondition.layers[layer_idx].keys = past_key_values_text_uncondition.layers[
+                layer_idx
+            ].keys.expand(batch_size, *past_key_values_text_uncondition.layers[layer_idx].keys.shape[1:])
+            past_key_values_text_uncondition.layers[layer_idx].values = past_key_values_text_uncondition.layers[
+                layer_idx
+            ].values.expand(batch_size, *past_key_values_text_uncondition.layers[layer_idx].values.shape[1:])
+            past_key_values_img_uncondition.layers[layer_idx].keys = past_key_values_img_uncondition.layers[
+                layer_idx
+            ].keys.expand(batch_size, *past_key_values_img_uncondition.layers[layer_idx].keys.shape[1:])
+            past_key_values_img_uncondition.layers[layer_idx].values = past_key_values_img_uncondition.layers[
+                layer_idx
+            ].values.expand(batch_size, *past_key_values_img_uncondition.layers[layer_idx].values.shape[1:])
 
         prepare_flash_kv_cache(
             past_key_values_condition,
@@ -417,31 +450,32 @@ class NEOChatModel(PreTrainedModel):
             batch_size=batch_size,
         )
 
-
         # init noise image tokens
         grid_h = image_size[1] // self.patch_size
         grid_w = image_size[0] // self.patch_size
         grid_hw = torch.tensor([[grid_h, grid_w]] * batch_size, device=device)
 
         noise_scale = self.noise_scale
-        if self.noise_scale_mode in ("resolution", "dynamic", 'dynamic_sqrt'):
-            noise_scale = math.sqrt((grid_h*grid_w)/(merge_size**2) / self.noise_scale_base_image_seq_len)
+        if self.noise_scale_mode in ("resolution", "dynamic", "dynamic_sqrt"):
+            noise_scale = math.sqrt((grid_h * grid_w) / (merge_size ** 2) / self.noise_scale_base_image_seq_len)
             base = float(self.noise_scale_base_image_seq_len)
-            scale = math.sqrt((grid_h*grid_w)/(merge_size**2)/base)
+            scale = math.sqrt((grid_h * grid_w) / (merge_size ** 2) / base)
             noise_scale = scale * float(self.noise_scale)
-            if self.noise_scale_mode == 'dynamic_sqrt':
+            if self.noise_scale_mode == "dynamic_sqrt":
                 noise_scale = math.sqrt(noise_scale)
         noise_scale = min(noise_scale, self.noise_scale_max_value)
 
-        image_prediction = noise_scale * torch.randn((batch_size, 3, image_size[1], image_size[0]), device=device, dtype=dtype)
+        image_prediction = noise_scale * torch.randn(
+            (batch_size, 3, image_size[1], image_size[0]), device=device, dtype=dtype
+        )
 
         attention_mask_condition = {"full_attention": None}
         attention_mask_text_uncondition = {"full_attention": None}
         attention_mask_img_uncondition = {"full_attention": None}
 
-        timesteps = torch.linspace(0.0, 1.0, num_steps+1, device=device)
+        timesteps = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
         if enable_timestep_shift:
-            timesteps = self._apply_time_schedule(timesteps, token_h*token_w, timestep_shift)
+            timesteps = self._apply_time_schedule(timesteps, token_h * token_w, timestep_shift)
 
         for step_i in range(num_steps):
             t = timesteps[step_i]
@@ -450,16 +484,32 @@ class NEOChatModel(PreTrainedModel):
 
             z = self.patchify(image_prediction, self.patch_size * merge_size)
             image_input = self.patchify(image_prediction, self.patch_size, channel_first=True)
-            image_embeds = self.extract_feature(image_input.view(batch_size * grid_h*grid_w, -1), gen_model=True, grid_hw=grid_hw).view(batch_size, token_h*token_w, -1)
-            t_expanded = t.expand(batch_size*token_h*token_w)
-            timestep_embeddings = self.fm_modules['timestep_embedder'](t_expanded).view(batch_size, token_h*token_w, -1)
+            image_embeds = self.extract_feature(
+                image_input.view(batch_size * grid_h * grid_w, -1), gen_model=True, grid_hw=grid_hw
+            ).view(batch_size, token_h * token_w, -1)
+            t_expanded = t.expand(batch_size * token_h * token_w)
+            timestep_embeddings = self.fm_modules["timestep_embedder"](t_expanded).view(
+                batch_size, token_h * token_w, -1
+            )
             if self.add_noise_scale_embedding:
-                noise_scale_tensor = torch.full_like(t_expanded, noise_scale/self.noise_scale_max_value)
-                noise_embeddings = self.fm_modules['noise_scale_embedder'](noise_scale_tensor).view(batch_size, token_h*token_w, -1)
+                noise_scale_tensor = torch.full_like(t_expanded, noise_scale / self.noise_scale_max_value)
+                noise_embeddings = self.fm_modules["noise_scale_embedder"](noise_scale_tensor).view(
+                    batch_size, token_h * token_w, -1
+                )
                 timestep_embeddings += noise_embeddings
             image_embeds = image_embeds + timestep_embeddings
 
-            v_pred_condition = self._t2i_predict_v(image_embeds, indexes_image_condition, attention_mask_condition, past_key_values_condition, t, z, image_token_num=token_h*token_w, timestep_embeddings=timestep_embeddings,image_size=image_size)
+            v_pred_condition = self._t2i_predict_v(
+                image_embeds,
+                indexes_image_condition,
+                attention_mask_condition,
+                past_key_values_condition,
+                t,
+                z,
+                image_token_num=token_h * token_w,
+                timestep_embeddings=timestep_embeddings,
+                image_size=image_size,
+            )
             if not use_cfg:
                 v_pred = v_pred_condition
             elif cfg_scale == 1 and img_cfg_scale == 1:
@@ -489,7 +539,7 @@ class NEOChatModel(PreTrainedModel):
                     timestep_embeddings=timestep_embeddings,
                     image_size=image_size,
                 )
-                v_pred = out_uncond + cfg_scale *(v_pred_condition - out_uncond)
+                v_pred = out_uncond + cfg_scale * (v_pred_condition - out_uncond)
             else:
                 out_img_cond = self._t2i_predict_v(
                     image_embeds,
@@ -520,17 +570,16 @@ class NEOChatModel(PreTrainedModel):
                 )
 
             if cfg_scale > 1 or img_cfg_scale > 1:
-                if cfg_norm == 'global':
+                if cfg_norm == "global":
                     norm_v_condition = torch.norm(v_pred_condition, dim=(1, 2), keepdim=True)
                     norm_v_cfg = torch.norm(v_pred, dim=(1, 2), keepdim=True)
                     scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
                     v_pred = v_pred * scale
-                elif cfg_norm == 'channel':
+                elif cfg_norm == "channel":
                     norm_v_condition = torch.norm(v_pred_condition, dim=-1, keepdim=True)
                     norm_v_cfg = torch.norm(v_pred, dim=-1, keepdim=True)
                     scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
                     v_pred = v_pred * scale
-
 
             z = z + (t_next - t) * v_pred
 
@@ -542,7 +591,6 @@ class NEOChatModel(PreTrainedModel):
 
         return image_prediction
 
-
     def get_cache_device_dtype(self, cache):
         """
         Returns (device, dtype) of a DynamicCache.
@@ -553,20 +601,22 @@ class NEOChatModel(PreTrainedModel):
         raise ValueError("Cache is empty")
 
     @torch.no_grad()
-    def t2i_generate(self,
-                     past_key_values_condition,
-                     past_key_values_uncondition,
-                     text_lens,
-                     cfg_scale=1,
-                     timestep_shift=3,
-                     enable_timestep_shift=True,
-                     cfg_norm='none',
-                     image_size=(256, 256),
-                     num_steps=30,
-                     cfg_interval=(0.1, 1.0),
-                     batch_size=1,
-                     t_eps=0.02):
-        assert cfg_norm in ['cfg_zero_star', 'global', 'none'], f"cfg_norm={cfg_norm}"
+    def t2i_generate(
+        self,
+        past_key_values_condition,
+        past_key_values_uncondition,
+        text_lens,
+        cfg_scale=1,
+        timestep_shift=3,
+        enable_timestep_shift=True,
+        cfg_norm="none",
+        image_size=(256, 256),
+        num_steps=30,
+        cfg_interval=(0.1, 1.0),
+        batch_size=1,
+        t_eps=0.02,
+    ):
+        assert cfg_norm in ["cfg_zero_star", "global", "none"], f"cfg_norm={cfg_norm}"
         merge_size = int(1 / self.downsample_ratio)
         self.config.t_eps = t_eps
 
@@ -580,10 +630,18 @@ class NEOChatModel(PreTrainedModel):
         indexes_image_uncondition = self._build_t2i_image_indexes(token_h, token_w, S2, device=device)
 
         for layer_idx in range(len(past_key_values_condition.layers)):
-            past_key_values_condition.layers[layer_idx].keys = past_key_values_condition.layers[layer_idx].keys.expand(batch_size, *past_key_values_condition.layers[layer_idx].keys.shape[1:])
-            past_key_values_condition.layers[layer_idx].values = past_key_values_condition.layers[layer_idx].values.expand(batch_size, *past_key_values_condition.layers[layer_idx].values.shape[1:])
-            past_key_values_uncondition.layers[layer_idx].keys = past_key_values_uncondition.layers[layer_idx].keys.expand(batch_size, *past_key_values_uncondition.layers[layer_idx].keys.shape[1:])
-            past_key_values_uncondition.layers[layer_idx].values = past_key_values_uncondition.layers[layer_idx].values.expand(batch_size, *past_key_values_uncondition.layers[layer_idx].values.shape[1:])
+            past_key_values_condition.layers[layer_idx].keys = past_key_values_condition.layers[layer_idx].keys.expand(
+                batch_size, *past_key_values_condition.layers[layer_idx].keys.shape[1:]
+            )
+            past_key_values_condition.layers[layer_idx].values = past_key_values_condition.layers[
+                layer_idx
+            ].values.expand(batch_size, *past_key_values_condition.layers[layer_idx].values.shape[1:])
+            past_key_values_uncondition.layers[layer_idx].keys = past_key_values_uncondition.layers[
+                layer_idx
+            ].keys.expand(batch_size, *past_key_values_uncondition.layers[layer_idx].keys.shape[1:])
+            past_key_values_uncondition.layers[layer_idx].values = past_key_values_uncondition.layers[
+                layer_idx
+            ].values.expand(batch_size, *past_key_values_uncondition.layers[layer_idx].values.shape[1:])
 
         # prepare flash cache once
         prepare_flash_kv_cache(
@@ -600,27 +658,29 @@ class NEOChatModel(PreTrainedModel):
         # init noise image tokens
         grid_h = image_size[1] // self.patch_size
         grid_w = image_size[0] // self.patch_size
-        grid_hw = torch.tensor([[grid_h, grid_w]]*batch_size, device=device)
+        grid_hw = torch.tensor([[grid_h, grid_w]] * batch_size, device=device)
 
         noise_scale = self.noise_scale
-        if self.noise_scale_mode in ("resolution", "dynamic", 'dynamic_sqrt'):
-            noise_scale = math.sqrt((grid_h*grid_w)/(merge_size**2) / self.noise_scale_base_image_seq_len)
+        if self.noise_scale_mode in ("resolution", "dynamic", "dynamic_sqrt"):
+            noise_scale = math.sqrt((grid_h * grid_w) / (merge_size ** 2) / self.noise_scale_base_image_seq_len)
             base = float(self.noise_scale_base_image_seq_len)
-            scale = math.sqrt((grid_h*grid_w)/(merge_size**2)/base)
+            scale = math.sqrt((grid_h * grid_w) / (merge_size ** 2) / base)
             noise_scale = scale * float(self.noise_scale)
-            if self.noise_scale_mode == 'dynamic_sqrt':
+            if self.noise_scale_mode == "dynamic_sqrt":
                 noise_scale = math.sqrt(noise_scale)
         noise_scale = min(noise_scale, self.noise_scale_max_value)
 
-        image_prediction = noise_scale * torch.randn((batch_size, 3, image_size[1], image_size[0]), device=device, dtype=dtype)
+        image_prediction = noise_scale * torch.randn(
+            (batch_size, 3, image_size[1], image_size[0]), device=device, dtype=dtype
+        )
 
         attention_mask_condition = {"full_attention": None}
         attention_mask_uncondition = {"full_attention": None}
 
-        timesteps = torch.linspace(0.0, 1.0, num_steps+1, device=device)
+        timesteps = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
 
         if enable_timestep_shift:
-            timesteps = self._apply_time_schedule(timesteps, token_h*token_w, timestep_shift)
+            timesteps = self._apply_time_schedule(timesteps, token_h * token_w, timestep_shift)
 
         for step_i in range(num_steps):
             t = timesteps[step_i]
@@ -628,43 +688,67 @@ class NEOChatModel(PreTrainedModel):
 
             z = self.patchify(image_prediction, self.patch_size * merge_size)
             image_input = self.patchify(image_prediction, self.patch_size, channel_first=True)
-            image_embeds = self.extract_feature(image_input.view(batch_size * grid_h*grid_w, -1), gen_model=True, grid_hw=grid_hw).view(batch_size, token_h*token_w, -1)
-            t_expanded = t.expand(batch_size*token_h*token_w)
-            timestep_embeddings = self.fm_modules['timestep_embedder'](t_expanded).view(batch_size, token_h*token_w, -1)
+            image_embeds = self.extract_feature(
+                image_input.view(batch_size * grid_h * grid_w, -1), gen_model=True, grid_hw=grid_hw
+            ).view(batch_size, token_h * token_w, -1)
+            t_expanded = t.expand(batch_size * token_h * token_w)
+            timestep_embeddings = self.fm_modules["timestep_embedder"](t_expanded).view(
+                batch_size, token_h * token_w, -1
+            )
             if self.add_noise_scale_embedding:
                 noise_scale_tensor = torch.full_like(t_expanded, noise_scale / self.noise_scale_max_value)
-                noise_embeddings = self.fm_modules['noise_scale_embedder'](noise_scale_tensor).view(batch_size, token_h*token_w, -1)
+                noise_embeddings = self.fm_modules["noise_scale_embedder"](noise_scale_tensor).view(
+                    batch_size, token_h * token_w, -1
+                )
                 timestep_embeddings += noise_embeddings
             image_embeds = image_embeds + timestep_embeddings
 
-
-            v_pred_condition = self._t2i_predict_v(image_embeds, indexes_image_condition, attention_mask_condition, past_key_values_condition, t, z, image_token_num=token_h*token_w,
-                                                   timestep_embeddings=timestep_embeddings, image_size=image_size)
-
+            v_pred_condition = self._t2i_predict_v(
+                image_embeds,
+                indexes_image_condition,
+                attention_mask_condition,
+                past_key_values_condition,
+                t,
+                z,
+                image_token_num=token_h * token_w,
+                timestep_embeddings=timestep_embeddings,
+                image_size=image_size,
+            )
 
             if t >= cfg_interval[0] and t <= cfg_interval[1] and cfg_scale > 1:
-                v_pred_uncondition = self._t2i_predict_v(image_embeds, indexes_image_uncondition, attention_mask_uncondition, past_key_values_uncondition, t, z, image_token_num=token_h*token_w,
-                                                         timestep_embeddings=timestep_embeddings, image_size=image_size)
-                if cfg_norm == 'cfg_zero_star':
+                v_pred_uncondition = self._t2i_predict_v(
+                    image_embeds,
+                    indexes_image_uncondition,
+                    attention_mask_uncondition,
+                    past_key_values_uncondition,
+                    t,
+                    z,
+                    image_token_num=token_h * token_w,
+                    timestep_embeddings=timestep_embeddings,
+                    image_size=image_size,
+                )
+                if cfg_norm == "cfg_zero_star":
                     positive_flat = v_pred_condition.view(batch_size, -1)
                     negative_flat = v_pred_uncondition.view(batch_size, -1)
 
-                    alpha = optimized_scale(positive_flat,negative_flat)
+                    alpha = optimized_scale(positive_flat, negative_flat)
                     alpha = alpha.view(batch_size, *([1] * (len(v_pred_condition.shape) - 1)))
                     alpha = alpha.to(positive_flat.dtype)
 
-                    if (step_i <= 0):
-                        v_pred = v_pred_condition*0.
+                    if step_i <= 0:
+                        v_pred = v_pred_condition * 0.0
                     else:
-                        v_pred = v_pred_uncondition * alpha + cfg_scale * (v_pred_condition - v_pred_uncondition * alpha)
+                        v_pred = v_pred_uncondition * alpha + cfg_scale * (
+                            v_pred_condition - v_pred_uncondition * alpha
+                        )
                 else:
                     v_pred = v_pred_uncondition + cfg_scale * (v_pred_condition - v_pred_uncondition)
-                    if cfg_norm == 'global':
-                        norm_v_condition = torch.norm(v_pred_condition, dim=(1,2), keepdim=True)
-                        norm_v_cfg = torch.norm(v_pred, dim=(1,2), keepdim=True)
+                    if cfg_norm == "global":
+                        norm_v_condition = torch.norm(v_pred_condition, dim=(1, 2), keepdim=True)
+                        norm_v_cfg = torch.norm(v_pred, dim=(1, 2), keepdim=True)
                         scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
                         v_pred = v_pred * scale
-                    elif cfg_norm == 'channel':
+                    elif cfg_norm == "channel":
                         norm_v_condition = torch.norm(v_pred_condition, dim=-1, keepdim=True)
                         norm_v_cfg = torch.norm(v_pred, dim=-1, keepdim=True)
                         scale = (norm_v_condition / (norm_v_cfg + 1e-8)).clamp(min=0, max=1.0)
@@ -681,7 +765,6 @@ class NEOChatModel(PreTrainedModel):
         clear_flash_kv_cache(past_key_values_uncondition)
 
         return image_prediction
-
 
     @property
     def lm_head(self):
@@ -700,25 +783,29 @@ class NEOChatModel(PreTrainedModel):
         return self.language_model.set_output_embeddings(value)
 
     def get_thw_indexes(self, input_ids, grid_hw=None):
-        img_start_shift = torch.cat([torch.zeros(1, dtype=torch.long).to(input_ids.device),
-                                     (input_ids == self.img_start_token_id).long()], dim=0)[:-1]
+        img_start_shift = torch.cat(
+            [torch.zeros(1, dtype=torch.long).to(input_ids.device), (input_ids == self.img_start_token_id).long()],
+            dim=0,
+        )[:-1]
         not_img_token = (input_ids != self.img_context_token_id).long()
-        t_indexes = ((img_start_shift + not_img_token).cumsum(0) - 1)
+        t_indexes = (img_start_shift + not_img_token).cumsum(0) - 1
         h_indexes = torch.zeros_like(t_indexes).to(t_indexes.device)
         w_indexes = torch.zeros_like(t_indexes).to(t_indexes.device)
 
         if grid_hw is not None:
-            selected = (input_ids == self.img_context_token_id)
+            selected = input_ids == self.img_context_token_id
             if selected.long().sum() > 0:
                 abs_pos_w, abs_pos_h = build_abs_positions_from_grid_hw(
-                    grid_hw // int(1 / self.downsample_ratio), device=t_indexes.device)
+                    grid_hw // int(1 / self.downsample_ratio), device=t_indexes.device
+                )
                 h_indexes[selected] = abs_pos_h.to(t_indexes.device, t_indexes.dtype)
                 w_indexes[selected] = abs_pos_w.to(t_indexes.device, t_indexes.dtype)
         return torch.stack([t_indexes, h_indexes, w_indexes], dim=0)
 
 
 NORM_MEAN = [0.5, 0.5, 0.5]
-NORM_STD  = [0.5, 0.5, 0.5]
+NORM_STD = [0.5, 0.5, 0.5]
+
 
 class NEOX2I:
     def __init__(self, model_path, device):
@@ -736,7 +823,7 @@ class NEOX2I:
         x: [B,3,H,W] normalized ((img-mean)/std). returns [0,1] clamped.
         """
         mean = torch.tensor(mean, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
-        std  = torch.tensor(std,  device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        std = torch.tensor(std, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
         return (x * std + mean).clamp(0, 1)
 
     def _get_dynamic_cache(self, past_kv):
@@ -748,15 +835,17 @@ class NEOX2I:
         for layer_idx in range(L):
             k = past_kv[layer_idx][0].unsqueeze(0).to(self.device, non_blocking=True)
             v = past_kv[layer_idx][1].unsqueeze(0).to(self.device, non_blocking=True)
-            past_kv_dc.update(key_states=k, value_states=v, layer_idx=layer_idx,)
+            past_kv_dc.update(
+                key_states=k,
+                value_states=v,
+                layer_idx=layer_idx,
+            )
         return past_kv_dc
-
 
     def t2i(self, past_kv, past_kv_txt, param: X2IParams):
         past_kv_dc = self._get_dynamic_cache(past_kv)
         past_kv_txt_dc = self._get_dynamic_cache(past_kv_txt)
-        text_lens = (param.past_kvcache.get_compressed_len(),
-                     param.past_kvcache_text.get_compressed_len())
+        text_lens = (param.past_kvcache.get_compressed_len(), param.past_kvcache_text.get_compressed_len())
         output = self.model.t2i_generate(
             past_key_values_condition=past_kv_dc,
             past_key_values_uncondition=past_kv_txt_dc,
@@ -766,7 +855,8 @@ class NEOX2I:
             image_size=(param.width, param.height),
             num_steps=param.steps,
             batch_size=param.num_images,
-            timestep_shift=param.timestep_shift)
+            timestep_shift=param.timestep_shift,
+        )
 
         return self._post_process(output)
 
@@ -774,19 +864,18 @@ class NEOX2I:
         images = self._denorm(output)
         images = (images.clamp(0, 1) * 255.0).round().to(torch.uint8).cpu()
 
-        base64_images = [
-            base64.b64encode(io.encode_jpeg(img).numpy()).decode("utf-8")
-            for img in images
-        ]
+        base64_images = [base64.b64encode(io.encode_jpeg(img).numpy()).decode("utf-8") for img in images]
         return base64_images
 
     def it2i(self, past_kv, past_kv_txt, past_kv_img, param: X2IParams):
         past_kv_dc = self._get_dynamic_cache(past_kv)
         past_kv_txt_dc = self._get_dynamic_cache(past_kv_txt)
         past_kv_img_dc = self._get_dynamic_cache(past_kv_img)
-        text_lens = (param.past_kvcache.get_compressed_len(),
-                     param.past_kvcache_text.get_compressed_len(),
-                     param.past_kvcache_img.get_compressed_len())
+        text_lens = (
+            param.past_kvcache.get_compressed_len(),
+            param.past_kvcache_text.get_compressed_len(),
+            param.past_kvcache_img.get_compressed_len(),
+        )
         output = self.model.it2i_generate(
             past_key_values_condition=past_kv_dc,
             past_key_values_text_uncondition=past_kv_txt_dc,

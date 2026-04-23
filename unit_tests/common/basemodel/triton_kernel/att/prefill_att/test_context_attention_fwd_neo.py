@@ -148,9 +148,7 @@ def _build_inputs(
         n_spans = int(torch.randint(1, num_image_spans_max + 1, (1,), generator=g).item())
         start_pack = int(b_start_loc[i].item())
         for _ in range(n_spans):
-            span_len = int(
-                torch.randint(1, max(2, image_span_len_max) + 1, (1,), generator=g).item()
-            )
+            span_len = int(torch.randint(1, max(2, image_span_len_max) + 1, (1,), generator=g).item())
             span_len = min(span_len, M)
             s_rel = int(torch.randint(0, M - span_len + 1, (1,), generator=g).item())
             b_image_token_tag[start_pack + s_rel : start_pack + s_rel + span_len] = True

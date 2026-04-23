@@ -188,12 +188,12 @@ class NeoTpMOEPartModel(Qwen3MOEModel):
         pass
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(
-            index=0, priority_list=["fa3"]
-        )(model=self)
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(
-            index=0, priority_list=["fa3"]
-        )(model=self)
+        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0, priority_list=["fa3"])(
+            model=self
+        )
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0, priority_list=["fa3"])(
+            model=self
+        )
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

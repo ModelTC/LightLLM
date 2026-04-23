@@ -5,10 +5,7 @@ from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu
 
 # =========================================================
 # GPU guard
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA not available"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 # =========================================================
 # 工具函数：生成 GPU KV cache
 def make_kv(L, T, H, D, device="cuda"):
@@ -20,14 +17,14 @@ def make_kv(L, T, H, D, device="cuda"):
 # Test 1: 基础功能（每 token 对应一个 page slot）
 def test_basic_copy():
     L, T, H, D = 2, 8, 4, 16
-    B = 1   # token_block_size
-    P = 4   # all_page_num
+    B = 1  # token_block_size
+    P = 4  # all_page_num
 
     gpu_kv = make_kv(L, T, H, D)
     cpu_kv = torch.zeros((P, L, B, H, D), dtype=torch.float32, pin_memory=True)
 
     token_indexes = torch.tensor([1, 3, 5, 7], device="cuda")
-    page_indexes  = torch.tensor([0, 1, 2, 3], device="cuda")
+    page_indexes = torch.tensor([0, 1, 2, 3], device="cuda")
 
     offload_gpu_kv_to_cpu_all(
         token_indexes,
@@ -43,10 +40,10 @@ def test_basic_copy():
 
     for i in range(len(token_indexes)):
         token = token_indexes[i].item()
-        page  = page_indexes[i].item()
+        page = page_indexes[i].item()
 
         expected = gpu_kv[:, token, :, :].cpu()  # (L,H,D)
-        actual   = cpu_kv[page, :, 0, :, :]      # (L,H,D)
+        actual = cpu_kv[page, :, 0, :, :]  # (L,H,D)
 
         assert torch.allclose(expected, actual)
 
@@ -62,7 +59,7 @@ def test_random_tokens():
     cpu_kv = torch.zeros((P, L, B, H, D), pin_memory=True)
 
     token_indexes = torch.tensor([10, 2, 7, 15, 0, 3], device="cuda")
-    page_indexes  = torch.arange(6, device="cuda")
+    page_indexes = torch.arange(6, device="cuda")
 
     offload_gpu_kv_to_cpu_all(
         token_indexes,
@@ -80,10 +77,7 @@ def test_random_tokens():
         t = token_indexes[i].item()
         p = page_indexes[i].item()
 
-        assert torch.allclose(
-            cpu_kv[p, :, 0, :, :],
-            gpu_kv[:, t, :, :].cpu()
-        )
+        assert torch.allclose(cpu_kv[p, :, 0, :, :], gpu_kv[:, t, :, :].cpu())
 
 
 # =========================================================
@@ -100,7 +94,7 @@ def test_with_scale():
     cpu_scale = torch.zeros((P, L, B, H, D // 8), pin_memory=True)
 
     token_indexes = torch.tensor([1, 2, 3], device="cuda")
-    page_indexes  = torch.tensor([0, 1, 2], device="cuda")
+    page_indexes = torch.tensor([0, 1, 2], device="cuda")
 
     offload_gpu_kv_to_cpu_all(
         token_indexes,
@@ -119,16 +113,10 @@ def test_with_scale():
         p = page_indexes[i].item()
 
         # KV
-        assert torch.allclose(
-            cpu_kv[p, :, 0, :, :],
-            gpu_kv[:, t, :, :].cpu()
-        )
+        assert torch.allclose(cpu_kv[p, :, 0, :, :], gpu_kv[:, t, :, :].cpu())
 
         # scale
-        assert torch.allclose(
-            cpu_scale[p, :, 0, :],
-            gpu_scale[:, t, :].cpu()
-        )
+        assert torch.allclose(cpu_scale[p, :, 0, :], gpu_scale[:, t, :].cpu())
 
 
 # =========================================================
@@ -144,11 +132,14 @@ def test_tp_split():
     cpu_kv = torch.zeros((P, L, B, H, D), pin_memory=True)
 
     token_indexes = torch.tensor([1, 2], device="cuda")
-    page_indexes  = torch.tensor([0, 1], device="cuda")
+    page_indexes = torch.tensor([0, 1], device="cuda")
 
     offload_gpu_kv_to_cpu_all(
-        token_indexes, gpu_kv, None,
-        cpu_kv, None,
+        token_indexes,
+        gpu_kv,
+        None,
+        cpu_kv,
+        None,
         page_indexes,
         tp_index=0,
         tp_world_size=tp_world_size,
@@ -156,8 +147,11 @@ def test_tp_split():
     )
 
     offload_gpu_kv_to_cpu_all(
-        token_indexes, gpu_kv, None,
-        cpu_kv, None,
+        token_indexes,
+        gpu_kv,
+        None,
+        cpu_kv,
+        None,
         page_indexes,
         tp_index=1,
         tp_world_size=tp_world_size,
@@ -170,15 +164,9 @@ def test_tp_split():
         t = token_indexes[i].item()
         p = page_indexes[i].item()
 
-        assert torch.allclose(
-            cpu_kv[p, :, 0, :split, :],
-            gpu_kv[:, t, :split, :].cpu()
-        )
+        assert torch.allclose(cpu_kv[p, :, 0, :split, :], gpu_kv[:, t, :split, :].cpu())
 
-        assert torch.allclose(
-            cpu_kv[p, :, 0, split:, :],
-            gpu_kv[:, t, split:, :].cpu()
-        )
+        assert torch.allclose(cpu_kv[p, :, 0, split:, :], gpu_kv[:, t, split:, :].cpu())
 
 
 # =========================================================
@@ -192,7 +180,7 @@ def test_empty():
     cpu_kv = torch.zeros((P, L, B, H, D), pin_memory=True)
 
     token_indexes = torch.tensor([], dtype=torch.long, device="cuda")
-    page_indexes  = torch.tensor([], dtype=torch.long, device="cuda")
+    page_indexes = torch.tensor([], dtype=torch.long, device="cuda")
 
     offload_gpu_kv_to_cpu_all(
         token_indexes,
@@ -207,6 +195,7 @@ def test_empty():
     )
 
     assert torch.all(cpu_kv == 0)
+
 
 if __name__ == "__main__":
     pytest.main()

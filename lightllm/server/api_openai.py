@@ -185,9 +185,7 @@ def _get_images_and_audios(request: ChatCompletionRequest):
                         # Local file path with file:// prefix
                         file_path = img[7:]  # Remove "file://" prefix
                         with open(file_path, "rb") as f:
-                            images.append(
-                                {"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")}
-                            )
+                            images.append({"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")})
                     else:
                         raise ValueError(
                             "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
@@ -222,7 +220,7 @@ def _get_tools(request: ChatCompletionRequest):
             tools = [item.function.model_dump() for item in request.tools]
     return tools
 
-    
+
 def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
     """Split a complete JSON argument string into OpenAI-style deltas."""
     if not arguments:

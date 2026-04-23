@@ -172,9 +172,7 @@ def _build_inputs(
         n_spans = int(torch.randint(1, num_image_spans_max + 1, (1,), generator=g).item())
         start_pack = int(b_q_start_loc[i].item())
         for _ in range(n_spans):
-            span_len = int(
-                torch.randint(1, max(2, image_span_len_max) + 1, (1,), generator=g).item()
-            )
+            span_len = int(torch.randint(1, max(2, image_span_len_max) + 1, (1,), generator=g).item())
             span_len = min(span_len, M)
             s_rel = int(torch.randint(0, M - span_len + 1, (1,), generator=g).item())
             b_image_token_tag[start_pack + s_rel : start_pack + s_rel + span_len] = True
@@ -214,9 +212,9 @@ def _fa3_prefill_with_image_tag(inputs: dict) -> torch.Tensor:
     device = q.device
 
     # Build page_table[b, p] = req_to_token_indexs[b_req_idx[b], p].
-    page_table = inputs["req_to_token_indexs"][
-        inputs["b_req_idx"].long(), : inputs["max_seq_len_in_batch"]
-    ].to(torch.int32)
+    page_table = inputs["req_to_token_indexs"][inputs["b_req_idx"].long(), : inputs["max_seq_len_in_batch"]].to(
+        torch.int32
+    )
 
     q_seq_lens_t = inputs["b_seq_len"].to(torch.int32) - inputs["b_prompt_cache_len"].to(torch.int32)
 
@@ -366,9 +364,7 @@ def _run_case(
         (3, 8, 2, 128, torch.bfloat16, 6, 8, 1024),
     ],
 )
-def test_fa3_neo_prefill_with_image_tag(
-    batch, Hq, Hk, D, dtype, seed, max_q_seq_len, max_prompt_cache_len
-):
+def test_fa3_neo_prefill_with_image_tag(batch, Hq, Hk, D, dtype, seed, max_q_seq_len, max_prompt_cache_len):
     abs_err, rel_err, cos = _run_case(
         batch=batch,
         Hq=Hq,
@@ -426,9 +422,7 @@ def _bench_case(
     o_triton = torch.empty_like(inputs["q"])
     # Kernel signature requires position_ids but the current masking path does
     # not read it; zeros are fine for perf measurement.
-    position_ids_0 = torch.zeros(
-        inputs["q"].shape[0], dtype=torch.int32, device=inputs["q"].device
-    )
+    position_ids_0 = torch.zeros(inputs["q"].shape[0], dtype=torch.int32, device=inputs["q"].device)
 
     def triton_run():
         context_attention_fwd_neo(

@@ -352,7 +352,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["colocate", "separate"],
         default="colocate",
-        help="Deployment mode for the x2i server. 'colocate' means the x2i server will run on the same gpus as the llm server, ",
+        help="Deployment mode for the x2i server. 'colocate' means the x2i server will "
+        "run on the same gpus as the llm server, ",
     )
     parser.add_argument(
         "--x2i_use_naive_impl",

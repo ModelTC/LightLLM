@@ -22,16 +22,17 @@ class TransTask:
     sync_event: torch.cuda.Event
     buffer_index: int
 
+
 class PastKVCacheModule(object):
     def __init__(self, backend):
         from .base_backend import ModeBackend
+
         self.backend: ModeBackend = backend
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=False)
         self.page_index_buffer = torch.empty((1024 * LIGHTLLM_TOKEN_HASH_LIST_SIZE,), dtype=torch.int32, device="cuda")
         self.page_index_buffer_free_index = list(range(1024))
         self.past_kv_cache_task: Deque[TransTask] = deque()
         self.sync_task_status_group = create_new_group_for_current_dp("gloo")
-
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -71,8 +72,9 @@ class PastKVCacheModule(object):
             if req.past_kv_cache_task_status.is_running():
                 continue
 
-            assert req.past_kv_cache_task_status.is_not_started(), \
-                f"req {req.req_id} has invalid past kv cache task status {req.past_kv_cache_task_status}"
+            assert (
+                req.past_kv_cache_task_status.is_not_started()
+            ), f"req {req.req_id} has invalid past kv cache task status {req.past_kv_cache_task_status}"
 
             if self.need_sync_compute_stream():
                 g_infer_context.get_overlap_stream().synchronize()
@@ -95,7 +97,9 @@ class PastKVCacheModule(object):
             start = free_index * LIGHTLLM_TOKEN_HASH_LIST_SIZE
             end = start + req.shm_req.past_kv_cache_page_indexes.size
 
-            page_indexes = torch.tensor(req.shm_req.past_kv_cache_page_indexes.get_all(), dtype=torch.int32, device='cpu', pin_memory=True)
+            page_indexes = torch.tensor(
+                req.shm_req.past_kv_cache_page_indexes.get_all(), dtype=torch.int32, device="cpu", pin_memory=True
+            )
             num_tokens = req.shm_req.input_len
 
             assert req.cur_kv_len >= num_tokens
@@ -104,13 +108,12 @@ class PastKVCacheModule(object):
             cuda_page_indexes = self.page_index_buffer[start:end]
             cuda_page_indexes.copy_(page_indexes)
 
-            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0: num_tokens]
+            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:num_tokens]
             mem_manager = self.backend.model.mem_manager
-
 
             if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
                 cpu_cache_meta = self.past_kv_cache_client.kv_cache_tensor_meta
-                cpu_kv_cache = self.past_kv_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0:cpu_cache_meta.head_dim]
+                cpu_kv_cache = self.past_kv_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
                 cpu_kv_cache_scale = self.past_kv_cache_client.cpu_kv_cache_tensor[
                     :, :, :, :, cpu_cache_meta.head_dim :
                 ].view(mem_manager.scale_buffer.dtype)
@@ -137,11 +140,7 @@ class PastKVCacheModule(object):
             sync_event.wait(g_infer_context.get_overlap_stream())
             # sync_event.synchronize()
             req.past_kv_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
-            return TransTask(
-                req_obj=req,
-                sync_event=sync_event,
-                buffer_index=free_index
-            )
+            return TransTask(req_obj=req, sync_event=sync_event, buffer_index=free_index)
 
     def update_past_kv_cache_task_states(self):
         trans_ok_tasks = []
@@ -157,7 +156,7 @@ class PastKVCacheModule(object):
         dist.all_reduce(ok_tasks_num, op=dist.ReduceOp.MIN, group=self.sync_task_status_group)
 
         if ok_tasks_num.item() > 0:
-            finished, unfinished = trans_ok_tasks[:ok_tasks_num.item()], trans_ok_tasks[ok_tasks_num.item():]
+            finished, unfinished = trans_ok_tasks[: ok_tasks_num.item()], trans_ok_tasks[ok_tasks_num.item() :]
             self.past_kv_cache_task.extendleft(reversed(unfinished))
             for task in finished:
                 task.req_obj.past_kv_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED

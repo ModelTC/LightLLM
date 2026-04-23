@@ -413,6 +413,7 @@ def normal_or_p_d_start(args):
 
     if args.enable_multimodal_x2i:
         from .x2i_server.manager import start_x2i_process, setup_devices
+
         origin_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
         setup_devices(args)
         process_manager.start_submodule_processes(

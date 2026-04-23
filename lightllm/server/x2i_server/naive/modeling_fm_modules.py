@@ -5,10 +5,13 @@ import math
 from functools import lru_cache
 
 from torch.utils.checkpoint import checkpoint
+
+
 def modulate(x, shift, scale=None):
     if shift is None:
         return x * (1 + scale)
     return x * (1 + scale) + shift
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -19,6 +22,7 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return output * self.weight
+
 
 class TimestepEmbedder(nn.Module):
     """
@@ -59,8 +63,8 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
         return t_emb
 
-class ResBlock(nn.Module):
 
+class ResBlock(nn.Module):
     def __init__(self, channels, mlp_ratio=1.0):
         super().__init__()
         self.channels = channels
@@ -80,6 +84,7 @@ class ResBlock(nn.Module):
         h = modulate(self.in_ln(x), shift_mlp, scale_mlp)
         h = self.mlp(h)
         return x + gate_mlp * h
+
 
 # class FinalLayer(nn.Module):
 
@@ -162,8 +167,8 @@ class ResBlock(nn.Module):
 
 #         return self.final_layer(x, y)
 
-class FlowMatchingHead(nn.Module):
 
+class FlowMatchingHead(nn.Module):
     def __init__(self, input_dim, out_dim, dim=1536, layers=12, mlp_ratio=1.0):
         super(FlowMatchingHead, self).__init__()
         self.net = SimpleMLPAdaLN(input_dim=input_dim, out_dim=out_dim, dim=dim, layers=layers, mlp_ratio=mlp_ratio)
@@ -181,7 +186,7 @@ class FlowMatchingHead(nn.Module):
         return x
 
 
-def precompute_freqs_cis_2d(dim: int, height: int, width:int, theta: float = 10000.0, scale=16.0):
+def precompute_freqs_cis_2d(dim: int, height: int, width: int, theta: float = 10000.0, scale=16.0):
     # assert  H * H == end
     # flat_patch_pos = torch.linspace(-1, 1, end) # N = end
     x_pos = torch.linspace(0, scale, width)
@@ -189,14 +194,15 @@ def precompute_freqs_cis_2d(dim: int, height: int, width:int, theta: float = 100
     y_pos, x_pos = torch.meshgrid(y_pos, x_pos, indexing="ij")
     y_pos = y_pos.reshape(-1)
     x_pos = x_pos.reshape(-1)
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim)) # Hc/4
-    x_freqs = torch.outer(x_pos, freqs).float() # N Hc/4
-    y_freqs = torch.outer(y_pos, freqs).float() # N Hc/4
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))  # Hc/4
+    x_freqs = torch.outer(x_pos, freqs).float()  # N Hc/4
+    y_freqs = torch.outer(y_pos, freqs).float()  # N Hc/4
     x_cis = torch.polar(torch.ones_like(x_freqs), x_freqs)
     y_cis = torch.polar(torch.ones_like(y_freqs), y_freqs)
-    freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1) # N,Hc/4,2
-    freqs_cis = freqs_cis.reshape(height*width, -1)
+    freqs_cis = torch.cat([x_cis.unsqueeze(dim=-1), y_cis.unsqueeze(dim=-1)], dim=-1)  # N,Hc/4,2
+    freqs_cis = freqs_cis.reshape(height * width, -1)
     return freqs_cis
+
 
 class NerfEmbedder(nn.Module):
     def __init__(self, in_channels, hidden_size_input, max_freqs):
@@ -204,7 +210,7 @@ class NerfEmbedder(nn.Module):
         self.max_freqs = max_freqs
         self.hidden_size_input = hidden_size_input
         self.embedder = nn.Sequential(
-            nn.Linear(in_channels+max_freqs**2, hidden_size_input, bias=True),
+            nn.Linear(in_channels + max_freqs ** 2, hidden_size_input, bias=True),
         )
 
     @lru_cache
@@ -212,7 +218,6 @@ class NerfEmbedder(nn.Module):
         pos = precompute_freqs_cis_2d(self.max_freqs ** 2 * 2, patch_size, patch_size).real
         pos = pos[None, :, :].to(device=device, dtype=dtype)
         return pos
-
 
     def forward(self, inputs):
         B, P2, C = inputs.shape
@@ -224,6 +229,7 @@ class NerfEmbedder(nn.Module):
         inputs = torch.cat([inputs, dct], dim=-1)
         inputs = self.embedder(inputs)
         return inputs
+
 
 class SimpleMLPAdaLN(nn.Module):
     """
@@ -243,7 +249,7 @@ class SimpleMLPAdaLN(nn.Module):
         z_channels,
         num_res_blocks,
         patch_size,
-        grad_checkpointing=False
+        grad_checkpointing=False,
     ):
         super().__init__()
 
@@ -254,15 +260,17 @@ class SimpleMLPAdaLN(nn.Module):
         self.grad_checkpointing = grad_checkpointing
         self.patch_size = patch_size
 
-        self.cond_embed = nn.Linear(z_channels, patch_size**2*model_channels)
+        self.cond_embed = nn.Linear(z_channels, patch_size ** 2 * model_channels)
 
         self.input_proj = nn.Linear(in_channels, model_channels)
 
         res_blocks = []
         for i in range(num_res_blocks):
-            res_blocks.append(ResBlock(
-                model_channels,
-            ))
+            res_blocks.append(
+                ResBlock(
+                    model_channels,
+                )
+            )
 
         self.res_blocks = nn.ModuleList(res_blocks)
         self.final_layer = FinalLayer(model_channels, out_channels)
@@ -275,6 +283,7 @@ class SimpleMLPAdaLN(nn.Module):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
         self.apply(_basic_init)
 
         # Zero-out adaLN modulation layers
@@ -297,7 +306,7 @@ class SimpleMLPAdaLN(nn.Module):
         x = self.input_proj(x)
         c = self.cond_embed(c)
 
-        y = c.reshape(-1, self.patch_size**2, self.model_channels)
+        y = c.reshape(-1, self.patch_size ** 2, self.model_channels)
 
         for block in self.res_blocks:
             x = block(x, y)
@@ -309,6 +318,7 @@ class FinalLayer(nn.Module):
     """
     The final layer adopted from DiT.
     """
+
     def __init__(self, model_channels, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(model_channels, elementwise_affine=False, eps=1e-6)
@@ -318,6 +328,7 @@ class FinalLayer(nn.Module):
         x = self.norm_final(x)
         x = self.linear(x)
         return x
+
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
@@ -363,7 +374,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float64)
     omega /= embed_dim / 2.0
-    omega = 1.0 / 10000**omega  # (D/2,)
+    omega = 1.0 / 10000 ** omega  # (D/2,)
 
     pos = pos.reshape(-1)  # (M,)
     out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
@@ -373,6 +384,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
+
 
 # --------------------------------------------------------
 # Interpolate position embeddings for high-resolution
@@ -385,11 +397,11 @@ def interpolate_pos_embed(model_path, pe_key: str = "gen_pos_embed", new_len: in
     pos_embed_1d = state_dict[pe_key]
     _, ori_len, embed_dim = pos_embed_1d.shape
 
-    ori_size = int(ori_len**0.5)
-    new_size = int(new_len**0.5)
+    ori_size = int(ori_len ** 0.5)
+    new_size = int(new_len ** 0.5)
 
     if ori_size != new_size:
-        logger.info("Position interpolate from %dx%d to %dx%d" % (ori_size, ori_size, new_size, new_size))
+        # logger.info("Position interpolate from %dx%d to %dx%d" % (ori_size, ori_size, new_size, new_size))
         pos_embed_2d = pos_embed_1d.reshape(-1, ori_size, ori_size, embed_dim).permute(0, 3, 1, 2)
         pos_embed_2d = torch.nn.functional.interpolate(
             pos_embed_2d, size=(new_size, new_size), mode="bicubic", align_corners=False
@@ -399,15 +411,13 @@ def interpolate_pos_embed(model_path, pe_key: str = "gen_pos_embed", new_len: in
 
     torch.save(state_dict, model_path)
 
+
 class PositionEmbedding(nn.Module):
     def __init__(self, max_num_patch_per_side, hidden_size):
         super().__init__()
         self.max_num_patch_per_side = max_num_patch_per_side
         self.hidden_size = hidden_size
-        self.pos_embed = nn.Parameter(
-            torch.zeros(max_num_patch_per_side ** 2, hidden_size),
-            requires_grad=False
-        )
+        self.pos_embed = nn.Parameter(torch.zeros(max_num_patch_per_side ** 2, hidden_size), requires_grad=False)
         self._init_weights()
 
     def _init_weights(self):
@@ -457,37 +467,37 @@ class ProgressiveConvDecoder(nn.Module):
         # self.proj = nn.Linear(hidden_dim, 1024)
         # self.act = nn.SiLU()
 
-        self.up_blocks = nn.ModuleList([
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv2d(hidden_dim, 512, kernel_size=3, padding=1),
-                nn.GroupNorm(32, 512),
-                nn.SiLU()
-            ),
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv2d(512, 256, kernel_size=3, padding=1),
-                nn.GroupNorm(32, 256),
-                nn.SiLU()
-            ),
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv2d(256, 64, kernel_size=3, padding=1),
-                nn.GroupNorm(32, 64),
-                nn.SiLU()
-            ),
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv2d(64, 32, kernel_size=3, padding=1),
-                nn.GroupNorm(16, 32),
-                nn.SiLU()
-            ),
-            nn.Sequential(
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv2d(32, 16, kernel_size=3, padding=1),
-                nn.SiLU()
-            )
-        ])
+        self.up_blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(hidden_dim, 512, kernel_size=3, padding=1),
+                    nn.GroupNorm(32, 512),
+                    nn.SiLU(),
+                ),
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(512, 256, kernel_size=3, padding=1),
+                    nn.GroupNorm(32, 256),
+                    nn.SiLU(),
+                ),
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(256, 64, kernel_size=3, padding=1),
+                    nn.GroupNorm(32, 64),
+                    nn.SiLU(),
+                ),
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"),
+                    nn.Conv2d(64, 32, kernel_size=3, padding=1),
+                    nn.GroupNorm(16, 32),
+                    nn.SiLU(),
+                ),
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="nearest"), nn.Conv2d(32, 16, kernel_size=3, padding=1), nn.SiLU()
+                ),
+            ]
+        )
 
         self.out_conv = nn.Conv2d(16, out_channels, kernel_size=3, padding=1)
 
@@ -520,8 +530,8 @@ class PatchDecoder_postps(nn.Module):
 
     def forward(self, x):
         # x shape: [B, 4096, H/32, W/32]
-        x = self.ps1(self.act1(self.conv1(x))) # -> [B, 256, H/8, W/8]
-        x = self.ps2(self.conv2(x)) # -> [B, 3, H, W]
+        x = self.ps1(self.act1(self.conv1(x)))  # -> [B, 256, H/8, W/8]
+        x = self.ps2(self.conv2(x))  # -> [B, 3, H, W]
         return x
 
 
@@ -544,10 +554,11 @@ class PatchDecoder_preps(nn.Module):
 
     def forward(self, x):
         # x shape: [B, 4096, H/32, W/32]
-        x = self.act1(self.conv1(self.ps1((x)))) # -> [B, 256, H/16, W/16]
-        x = self.act2(self.conv2(self.ps2((x)))) # -> [B, 256, H/8, W/8]
-        x = self.conv3(self.ps3((x))) # -> [B, 3, H, W]
+        x = self.act1(self.conv1(self.ps1((x))))  # -> [B, 256, H/16, W/16]
+        x = self.act2(self.conv2(self.ps2((x))))  # -> [B, 256, H/8, W/8]
+        x = self.conv3(self.ps3((x)))  # -> [B, 3, H, W]
         return x
+
 
 class PatchDecoder_preps1(nn.Module):
     def __init__(self):
@@ -566,9 +577,10 @@ class PatchDecoder_preps1(nn.Module):
 
     def forward(self, x):
         # x shape: [B, 4096, H/32, W/32]
-        x = self.act1(self.conv1(self.ps1((x)))) # -> [B, 256, H/16, W/16]
-        x = self.ps3(self.conv2(self.ps2((x)))) # -> [B, 256, H/8, W/8]
+        x = self.act1(self.conv1(self.ps1((x))))  # -> [B, 256, H/16, W/16]
+        x = self.ps3(self.conv2(self.ps2((x))))  # -> [B, 256, H/8, W/8]
         return x
+
 
 class ConvDecoder(nn.Module):
     def __init__(self, input_dim=4096, hidden_dim=1024):

@@ -706,7 +706,6 @@ def load_cpu_kv_to_gpu(
     return
 
 
-
 @triton.jit
 def _offload_gpu_kv_to_cpu_for_x2i(
     token_indexes_ptr,
@@ -800,8 +799,12 @@ def _offload_gpu_kv_to_cpu_for_x2i(
                         + cpu_k_head_index * cpu_scale_stride3
                         + head_dim_range[None, :]
                     )
-                    tl.store(cpu_scale_ptr, gpu_scale_data, mask=token_scale_mask, cache_modifier=".wt",)
-
+                    tl.store(
+                        cpu_scale_ptr,
+                        gpu_scale_data,
+                        mask=token_scale_mask,
+                        cache_modifier=".wt",
+                    )
 
             for v_head_index in range(gpu_v_head_num):
                 gpu_v_head_index = v_head_index + gpu_v_start_head_index
@@ -842,8 +845,12 @@ def _offload_gpu_kv_to_cpu_for_x2i(
                         + cpu_v_head_index * cpu_scale_stride3
                         + head_dim_range[None, :]
                     )
-                    tl.store(cpu_scale_ptr, gpu_scale_data, mask=token_scale_mask, cache_modifier=".wt",)
-
+                    tl.store(
+                        cpu_scale_ptr,
+                        gpu_scale_data,
+                        mask=token_scale_mask,
+                        cache_modifier=".wt",
+                    )
 
 
 @torch.no_grad()
@@ -955,7 +962,7 @@ def offload_gpu_kv_to_cpu_for_x2i(
     assert token_block_size == triton.next_power_of_2(token_block_size)
 
     page_num = page_indexes.shape[0]
-    grid = (grid_num, )
+    grid = (grid_num,)
     num_warps = 4
     num_stages = 1
     HAS_SCALE = gpu_kv_cache_scale is not None and cpu_kv_cache_scale is not None
@@ -968,14 +975,13 @@ def offload_gpu_kv_to_cpu_for_x2i(
         gpu_scale_stride = [0 for _ in range(5)]
         cpu_scale_stride = [0 for _ in range(5)]
 
-
     _offload_gpu_kv_to_cpu_for_x2i[grid](
-        token_indexes_ptr = token_indexes,
-        gpu_kv_cache_ptr = gpu_kv_cache,
-        gpu_stride0 = gpu_kv_cache.stride(0),
-        gpu_stride1 = gpu_kv_cache.stride(1),
-        gpu_stride2 = gpu_kv_cache.stride(2),
-        gpu_kv_cache_scale_ptr = gpu_kv_cache_scale,
+        token_indexes_ptr=token_indexes,
+        gpu_kv_cache_ptr=gpu_kv_cache,
+        gpu_stride0=gpu_kv_cache.stride(0),
+        gpu_stride1=gpu_kv_cache.stride(1),
+        gpu_stride2=gpu_kv_cache.stride(2),
+        gpu_kv_cache_scale_ptr=gpu_kv_cache_scale,
         gpu_scale_stride0=gpu_scale_stride[0],
         gpu_scale_stride1=gpu_scale_stride[1],
         gpu_scale_stride2=gpu_scale_stride[2],

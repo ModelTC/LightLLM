@@ -97,7 +97,6 @@ class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
     def _context_attention_kernel(
         self, q, kv, infer_state: NeoChatInferStateInfo, layer_weight, out=None
     ) -> torch.Tensor:
-       
 
         if _USE_TRITON_PREFILL:
             o_tensor = self.alloc_tensor(q.shape, q.dtype) if out is None else out

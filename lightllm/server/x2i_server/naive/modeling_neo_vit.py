@@ -9,9 +9,7 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_neo_vit import NEOVisionConfig
 
 
-def precompute_rope_freqs_sincos(
-    dim: int, max_position: int, base: float = 10000.0, device=None
-):
+def precompute_rope_freqs_sincos(dim: int, max_position: int, base: float = 10000.0, device=None):
     """预计算 RoPE 的 cos 和 sin 值 (1D)。"""
     inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device).float() / dim))
     t = torch.arange(max_position, device=device).type_as(inv_freq)
@@ -40,9 +38,10 @@ def build_abs_positions_from_grid_hw(grid_hw: torch.Tensor, device=None):
 
     # Generate intra-image patch index (row-major order)
     patch_id_within_image = torch.arange(N_total, device=device)
-    patch_id_within_image = patch_id_within_image - torch.cumsum(
-        torch.cat([torch.tensor([0], device=device), N[:-1]]), dim=0
-    )[patch_to_sample]
+    patch_id_within_image = (
+        patch_id_within_image
+        - torch.cumsum(torch.cat([torch.tensor([0], device=device), N[:-1]]), dim=0)[patch_to_sample]
+    )
 
     # Get H/W for each patch according to its image
     W_per_patch = W[patch_to_sample]
@@ -63,8 +62,8 @@ def apply_rotary_emb_1d(
     # positions: (..., seq_len)
     # cos_cached: (max_pos, dim_part / 2)
 
-    cos = cos_cached[positions] # Shape: (positions.shape, dim_part / 2)
-    sin = sin_cached[positions] # Shape: (positions.shape, dim_part / 2)
+    cos = cos_cached[positions]  # Shape: (positions.shape, dim_part / 2)
+    sin = sin_cached[positions]  # Shape: (positions.shape, dim_part / 2)
 
     x1 = x[..., 0::2]
     x2 = x[..., 1::2]
@@ -85,7 +84,7 @@ def apply_2d_rotary_pos_emb(
     cos_cached_y: torch.Tensor,
     sin_cached_y: torch.Tensor,
     abs_positions_x: torch.Tensor,
-    abs_positions_y: torch.Tensor
+    abs_positions_y: torch.Tensor,
 ):
     """应用2D RoPE到输入张量x。"""
     dim = x.shape[-1]
@@ -97,13 +96,9 @@ def apply_2d_rotary_pos_emb(
     x_part_2 = x[..., dim_half:]
 
     # 将与 abs_positions_x 相关的旋转应用于 x_part_1
-    rotated_part_1 = apply_rotary_emb_1d(
-        x_part_1, cos_cached_x, sin_cached_x, abs_positions_x
-    )
+    rotated_part_1 = apply_rotary_emb_1d(x_part_1, cos_cached_x, sin_cached_x, abs_positions_x)
     # 将与 abs_positions_y 相关的旋转应用于 x_part_2
-    rotated_part_2 = apply_rotary_emb_1d(
-        x_part_2, cos_cached_y, sin_cached_y, abs_positions_y
-    )
+    rotated_part_2 = apply_rotary_emb_1d(x_part_2, cos_cached_y, sin_cached_y, abs_positions_y)
 
     # 将它们重新拼接起来。确保顺序与你分割时一致。
     return torch.cat((rotated_part_1, rotated_part_2), dim=-1)
@@ -123,10 +118,16 @@ class NEOVisionEmbeddings(nn.Module):
         self.patch_size = config.patch_size
 
         self.patch_embedding = nn.Conv2d(
-            in_channels=config.num_channels, out_channels=self.embed_dim, kernel_size=self.patch_size, stride=self.patch_size
+            in_channels=config.num_channels,
+            out_channels=self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
         )
         self.dense_embedding = nn.Conv2d(
-            in_channels=self.embed_dim, out_channels=self.llm_embed_dim, kernel_size=self.downsample_factor, stride=self.downsample_factor
+            in_channels=self.embed_dim,
+            out_channels=self.llm_embed_dim,
+            kernel_size=self.downsample_factor,
+            stride=self.downsample_factor,
         )
         self.gelu = nn.GELU()
 
@@ -149,11 +150,13 @@ class NEOVisionEmbeddings(nn.Module):
         """
         abs_pos_x, abs_pos_y = build_abs_positions_from_grid_hw(grid_hw, device=patch_embeds.device)
         embeddings = apply_2d_rotary_pos_emb(
-            patch_embeds.to(torch.float32), # RoPE calculations are often more stable in float32
-            self.cos_cached_x, self.sin_cached_x,
-            self.cos_cached_y, self.sin_cached_y,
+            patch_embeds.to(torch.float32),  # RoPE calculations are often more stable in float32
+            self.cos_cached_x,
+            self.sin_cached_x,
+            self.cos_cached_y,
+            self.sin_cached_y,
             abs_pos_x,
-            abs_pos_y
+            abs_pos_y,
         ).to(self.patch_embedding.weight.dtype)
         return embeddings
 
@@ -164,14 +167,14 @@ class NEOVisionEmbeddings(nn.Module):
             3,
             self.patch_size,
             self.patch_size,
-        )   #  [28072, 768] -> [28072, 3, 16, 16]
+        )  # [28072, 768] -> [28072, 3, 16, 16]
         patch_embeds = self.gelu(self.patch_embedding(pixel_values)).view(-1, self.embed_dim)
         self.cos_cached_x = self.cos_cached_x.to(patch_embeds.device)
         self.sin_cached_x = self.sin_cached_x.to(patch_embeds.device)
         self.cos_cached_y = self.cos_cached_y.to(patch_embeds.device)
         self.sin_cached_y = self.sin_cached_y.to(patch_embeds.device)
-        patch_embeds = self._apply_2d_rotary_pos_emb(patch_embeds, grid_hw) # [28072, 1024]
-        assert (grid_hw[:,0] * grid_hw[:,1]).sum() == patch_embeds.shape[0]
+        patch_embeds = self._apply_2d_rotary_pos_emb(patch_embeds, grid_hw)  # [28072, 1024]
+        assert (grid_hw[:, 0] * grid_hw[:, 1]).sum() == patch_embeds.shape[0]
 
         patches_list = []
         cur_position = 0
@@ -186,18 +189,18 @@ class NEOVisionEmbeddings(nn.Module):
         embeddings = torch.cat(patches_list, dim=0)  # (N_total // downsample_factor**2, C)
 
         assert cur_position == patch_embeds.shape[0]
-        assert embeddings.shape[0] == int(patch_embeds.shape[0] / self.downsample_factor**2)
+        assert embeddings.shape[0] == int(patch_embeds.shape[0] / self.downsample_factor ** 2)
 
         return embeddings
 
 
 class NEOVisionModel(PreTrainedModel):
-    main_input_name = 'pixel_values'
+    main_input_name = "pixel_values"
     _supports_flash_attn_2 = True
     supports_gradient_checkpointing = True
     config_class = NEOVisionConfig
     # support transformers 4.51.+
-    _tp_plan = ''
+    _tp_plan = ""
 
     def __init__(self, config: NEOVisionConfig):
         super().__init__(config)
@@ -206,12 +209,12 @@ class NEOVisionModel(PreTrainedModel):
         self.embeddings = NEOVisionEmbeddings(config)
 
     def forward(
-            self,
-            pixel_values: Optional[torch.FloatTensor] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-            pixel_embeds: Optional[torch.FloatTensor] = None,
-            grid_hw: Optional[torch.Tensor] = None
+        self,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        pixel_embeds: Optional[torch.FloatTensor] = None,
+        grid_hw: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -219,7 +222,7 @@ class NEOVisionModel(PreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if pixel_values is None and pixel_embeds is None:
-            raise ValueError('You have to specify pixel_values or pixel_embeds')
+            raise ValueError("You have to specify pixel_values or pixel_embeds")
 
         if pixel_embeds is not None:
             hidden_states = pixel_embeds

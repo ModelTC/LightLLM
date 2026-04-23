@@ -48,6 +48,7 @@ from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from .past_kv_cache import PastKVCacheModule
 
+
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
@@ -658,7 +659,8 @@ class ModeBackend:
 
         if self.args.enable_multimodal_x2i:
             true_finished_reqs = self.past_kv_cache_module.offload_finished_reqs_to_past_kv_cache(
-                finished_reqs=true_finished_reqs)
+                finished_reqs=true_finished_reqs
+            )
 
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)

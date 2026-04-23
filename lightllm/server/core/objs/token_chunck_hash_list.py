@@ -91,10 +91,10 @@ class CpuCachePageList(ctypes.Structure):
 
 class PastKVCachePageList(CpuCachePageList):
     _pack_ = 4
-    _fields_ = CpuCachePageList._fields_ +[
+    _fields_ = CpuCachePageList._fields_ + [
         ("token_len", ctypes.c_int),  # 对应的token数量
         ("img_tokens", ctypes.c_int),
-        ("img_len", ctypes.c_int)
+        ("img_len", ctypes.c_int),
     ]
 
     def __init__(self, token_len: int = 0):
