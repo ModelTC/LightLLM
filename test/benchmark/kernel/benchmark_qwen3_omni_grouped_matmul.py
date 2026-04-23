@@ -13,8 +13,14 @@ shown with a starred column name (`flashinfer*`) to flag the different workload.
 Sweeps num_tokens (called batch_size following vLLM's benchmark_moe.py
 convention: MoE's GEMM dim M is just num_tokens, the seq dim is irrelevant
 once tokens are flattened). Reports median ms via
-triton.testing.do_bench_cudagraph. A provider that fails cudagraph capture
-falls back to do_bench for that cell only (tagged in the output).
+triton.testing.do_bench_cudagraph.
+
+LightLLM and vLLM share the same (topk_ids, topk_weights) — canonical
+softmax + topk (+ renorm), computed once per cell outside the timed region —
+so those two columns are strictly apples-to-apples on routing. All
+per-provider setup (quant config, LightLLM's in-place scratch buffer,
+vLLM's FusedMoEQuantConfig) also happens outside the timed region; only the
+fused_experts call itself is timed.
 
 Model / SGLang paths resolve from env vars first, then from the repo-relative
 defaults:
@@ -30,6 +36,8 @@ Usage (from LightLLM repo root):
     python test/benchmark/kernel/benchmark_qwen3_omni_grouped_matmul.py --quant-mode block128
     python test/benchmark/kernel/benchmark_qwen3_omni_grouped_matmul.py \\
         --providers lightllm,vllm,flashinfer --flashinfer-per-tensor-fallback
+    python test/benchmark/kernel/benchmark_qwen3_omni_grouped_matmul.py \\
+        --providers lightllm,vllm --batch-sizes 512 --profile
 """
 import argparse
 import gc
@@ -44,9 +52,6 @@ import triton
 
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import (
     fused_experts as lightllm_fused_experts,
-)
-from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import (
-    select_experts as lightllm_select_experts,
 )
 
 
@@ -211,32 +216,41 @@ def build_inputs(num_tokens, cfg, tp_size, dtype, quant_mode, device="cuda", gen
     )
 
 
-def prepare_lightllm(inputs, cfg, quant_mode):
-    topk_w, topk_ids = lightllm_select_experts(
-        hidden_states=inputs["x"],
-        router_logits=inputs["gate"],
-        correction_bias=None,
-        use_grouped_topk=False,
-        top_k=cfg["topk"],
-        renormalize=cfg["norm_topk_prob"],
-        topk_group=None,
-        num_expert_group=None,
-        scoring_func="softmax",
-    )
-    return {"topk_weights": topk_w, "topk_ids": topk_ids}
+def compute_shared_topk(inputs, cfg):
+    """Canonical router output shared across providers.
+
+    softmax + topk (+ renorm). Returns fp32 weights and int32 ids, which are
+    the dtypes both LightLLM's and vLLM's fused_experts expect, so the same
+    tensors can be fed to each without per-provider conversion.
+    """
+    scores = torch.softmax(inputs["gate"], dim=-1)
+    topk_w, topk_ids = torch.topk(scores, k=cfg["topk"], dim=-1)
+    if cfg["norm_topk_prob"]:
+        topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
+    return {
+        "topk_weights": topk_w.to(torch.float32).contiguous(),
+        "topk_ids": topk_ids.to(torch.int32).contiguous(),
+    }
+
+
+def prepare_lightllm(inputs, cfg, quant_mode, shared):
+    # LightLLM's fused_experts(inplace=True) writes through hidden_states;
+    # its inplace=False path hits a torch.ops schema bug in this build
+    # (outplace_fused_experts_impl declares return=None but the impl returns
+    # a Tensor). Pre-allocate a scratch buffer here so the timed loop doesn't
+    # pay ~0.5 ms of D2D clone per iteration. The buffer is mutated across
+    # graph replays; that is safe because MoE grouped_matmul timing is
+    # value-agnostic (control flow depends on topk_ids, not on activations).
+    return {
+        "topk_weights": shared["topk_weights"],
+        "topk_ids": shared["topk_ids"],
+        "x_buf": inputs["x"].clone(),
+    }
 
 
 def run_lightllm(inputs, cfg, quant_mode, prepared):
-    # LightLLM's fused_experts(inplace=True) writes through hidden_states and
-    # returns the same tensor; its inplace=False path hits a torch.ops schema
-    # bug in this build (outplace_fused_experts_impl declares return=None but
-    # the impl returns a Tensor). We therefore clone `x` per call so neither
-    # the repeated timed iterations nor downstream providers ever see a
-    # mutated activation. The clone is ~512 MB D2D for the largest cell at
-    # ~0.5 ms -- it IS included in the reported LightLLM timing.
-    x = inputs["x"].clone()
     return lightllm_fused_experts(
-        hidden_states=x,
+        hidden_states=prepared["x_buf"],
         w1=inputs["w1"],
         w2=inputs["w2"],
         topk_weights=prepared["topk_weights"],
@@ -248,14 +262,7 @@ def run_lightllm(inputs, cfg, quant_mode, prepared):
     )
 
 
-def prepare_vllm(inputs, cfg, quant_mode):
-    scores = torch.softmax(inputs["gate"], dim=-1)
-    topk_w, topk_ids = torch.topk(scores, k=cfg["topk"], dim=-1)
-    if cfg["norm_topk_prob"]:
-        topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
-    topk_w = topk_w.to(torch.float32)
-    topk_ids = topk_ids.to(torch.int32)
-
+def prepare_vllm(inputs, cfg, quant_mode, shared):
     if inputs["use_fp8"]:
         block_shape = [128, 128] if quant_mode == "block128" else None
         qcfg = FusedMoEQuantConfig.make(
@@ -271,7 +278,11 @@ def prepare_vllm(inputs, cfg, quant_mode):
     else:
         qcfg = None
 
-    return {"topk_weights": topk_w, "topk_ids": topk_ids, "qcfg": qcfg}
+    return {
+        "topk_weights": shared["topk_weights"],
+        "topk_ids": shared["topk_ids"],
+        "qcfg": qcfg,
+    }
 
 
 def run_vllm(inputs, cfg, quant_mode, prepared):
@@ -287,7 +298,12 @@ def run_vllm(inputs, cfg, quant_mode, prepared):
     )
 
 
-def prepare_sglang(inputs, cfg, quant_mode):
+def prepare_sglang(inputs, cfg, quant_mode, shared):
+    # sglang is currently unavailable in this workspace (sgl_kernel C++ ABI
+    # mismatch), so this path is not exercised. It still computes its own
+    # routing via sglang_select_experts rather than the shared topk; plumbing
+    # shared into a StandardTopKOutput here would be easy, but without a live
+    # sglang to validate against we leave the original behaviour.
     topk_out = sglang_select_experts(
         hidden_states=inputs["x"],
         router_logits=inputs["gate"],
@@ -313,14 +329,14 @@ def run_sglang(inputs, cfg, quant_mode, prepared):
     )
 
 
-def prepare_flashinfer(inputs, cfg, quant_mode):
-    scores = torch.softmax(inputs["gate"], dim=-1)
-    topk_w, topk_ids = torch.topk(scores, k=cfg["topk"], dim=-1)
-    if cfg["norm_topk_prob"]:
-        topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
-    topk_w = topk_w.to(torch.float32)
-    topk_ids = topk_ids.to(torch.int32)
-    return {"topk_weights": topk_w, "topk_ids": topk_ids}
+def prepare_flashinfer(inputs, cfg, quant_mode, shared):
+    # flashinfer is currently unavailable on this hardware/SM combo; this
+    # path is not exercised. The shared (fp32, int32) tensors are already in
+    # the format flashinfer wants, so we just forward them.
+    return {
+        "topk_weights": shared["topk_weights"],
+        "topk_ids": shared["topk_ids"],
+    }
 
 
 def run_flashinfer(inputs, cfg, quant_mode, prepared, allow_per_tensor_fp8_fallback=False):
@@ -404,7 +420,43 @@ PROVIDER_ERR = {
 }
 
 
-def bench_provider(fn, inputs, cfg, quant_mode, prepared, warmup, fn_kwargs=None):
+def profile_cudagraph_replay(fn, label):
+    # Profile graph replay only so the table reflects cudagraph execution.
+    # Capture a single provider call; the benchmark path below still uses
+    # triton.testing.do_bench_cudagraph's repeated capture for stable timing.
+    print(f"\n[profile] {label}")
+
+    with torch.cuda.stream(torch.cuda.Stream()):
+        fn()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        torch.cuda.synchronize()
+
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+        ) as prof:
+            graph.replay()
+            torch.cuda.synchronize()
+
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+
+
+def bench_provider(
+    fn,
+    inputs,
+    cfg,
+    quant_mode,
+    prepared,
+    warmup,
+    fn_kwargs=None,
+    profile=False,
+    profile_label=None,
+):
     fn_kwargs = fn_kwargs or {}
     for _ in range(warmup):
         fn(inputs, cfg, quant_mode, prepared, **fn_kwargs)
@@ -413,7 +465,10 @@ def bench_provider(fn, inputs, cfg, quant_mode, prepared, warmup, fn_kwargs=None
     def _closure():
         return fn(inputs, cfg, quant_mode, prepared, **fn_kwargs)
 
-    return triton.testing.do_bench_cudagraph(_closure, rep=50), False
+    if profile:
+        profile_cudagraph_replay(_closure, profile_label or fn.__name__)
+
+    return triton.testing.do_bench_cudagraph(_closure, rep=50)
 
 
 def main():
@@ -455,6 +510,16 @@ def main():
     )
     ap.add_argument("--dtype", choices=["bfloat16", "float16"], default="bfloat16")
     ap.add_argument("--warmup", type=int, default=10)
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Profile one cudagraph replay after warmup and print "
+            "prof.key_averages().table(sort_by='cuda_time_total', row_limit=20). "
+            "This runs once per provider per batch size."
+        ),
+    )
     ap.add_argument(
         "--providers",
         type=parse_str_list,
@@ -501,6 +566,8 @@ def main():
     print(f"[config] tp={args.tp} quant={args.quant_mode} dtype={args.dtype}")
     print(f"[config] sweep: batch_sizes (num_tokens) = {args.batch_sizes}")
     print(f"[config] providers: {providers}\n")
+    if args.profile:
+        print("[config] torch profiler enabled (one cudagraph replay per provider per batch size)\n")
 
     # Tag the flashinfer column so readers notice when the per-tensor FP8
     # fallback is engaged (it's a different workload from per-channel/block128).
@@ -519,34 +586,36 @@ def main():
 
     results: Dict = {}
     for num_tokens in args.batch_sizes:
-        # Reset philox state left dirty by triton.testing.do_bench_cudagraph
+        # Reset philox state left dirty by triton.testing.do_bench_cudagraph.
+        # (Note: build_inputs / compute_shared_topk use their own explicit
+        # Generator, so this seed reset is cosmetic -- kept only to be
+        # defensive against future callers that touch the default state.)
         torch.cuda.synchronize()
         torch.cuda.manual_seed_all(0)
         inputs = build_inputs(num_tokens, cfg, args.tp, dtype, args.quant_mode)
+        shared = compute_shared_topk(inputs, cfg)
 
-        # Precompute each provider's gate/topk (and per-provider setup like
-        # vLLM's FusedMoEQuantConfig) outside the timed region so the reported
-        # ms reflects the fused_experts kernel cost only.
+        # Precompute each provider's per-provider setup (quant config,
+        # LightLLM's in-place scratch buffer, etc.) outside the timed region
+        # so the reported ms reflects the fused_experts kernel cost only.
         prepared: Dict = {}
         for p in providers:
             try:
-                prepared[p] = PROVIDER_PREPARE[p](inputs, cfg, args.quant_mode)
+                prepared[p] = PROVIDER_PREPARE[p](inputs, cfg, args.quant_mode, shared)
             except Exception as e:
                 prepared[p] = None
                 print(f"\n[prepare-error] provider={p} tokens={num_tokens}: {type(e).__name__}: {e}")
 
         row_cells = []
-        fallback_flags = []
         for p in providers:
             if prepared[p] is None:
                 row_cells.append(f"{'ERR':>15}")
-                fallback_flags.append(None)
                 continue
             fn_kwargs = (
                 {"allow_per_tensor_fp8_fallback": args.flashinfer_per_tensor_fallback} if p == "flashinfer" else {}
             )
             try:
-                ms, fellback = bench_provider(
+                ms = bench_provider(
                     PROVIDERS[p],
                     inputs,
                     cfg,
@@ -554,23 +623,20 @@ def main():
                     prepared[p],
                     args.warmup,
                     fn_kwargs=fn_kwargs,
+                    profile=args.profile,
+                    profile_label=(f"provider={p} tokens={num_tokens} quant={args.quant_mode} " f"dtype={args.dtype}"),
                 )
                 row_cells.append(f"{ms:>15.3f}")
-                fallback_flags.append(p if fellback else None)
                 results[(p, num_tokens)] = ms
             except Exception as e:
                 row_cells.append(f"{'ERR':>15}")
                 print(f"\n[error] provider={p} tokens={num_tokens}: {type(e).__name__}: {e}")
-                fallback_flags.append(None)
             gc.collect()
             torch.cuda.empty_cache()
 
         print(f"{num_tokens:>8} |{''.join(row_cells)}")
-        for fb in fallback_flags:
-            if fb:
-                print(f"  [cudagraph-fallback] {fb} fell back to do_bench at tokens={num_tokens}")
 
-        del inputs, prepared
+        del inputs, prepared, shared
         torch.cuda.empty_cache()
 
 
