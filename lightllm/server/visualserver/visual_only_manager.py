@@ -12,6 +12,7 @@ import sys
 import os
 import signal
 import time
+import multiprocessing
 from lightllm.utils.net_utils import get_hostname_ip
 from .objs import VIT_Obj
 from typing import List
@@ -94,12 +95,14 @@ class VisualOnlyManager(rpyc.Service):
     async def wait_to_model_ready(self):
 
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
+        self.model_procs: List[multiprocessing.Process] = []
         self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
             for tp_rank_id in range(self.vit_tp):
 
-                rpc_model = await start_model_process()
+                rpc_model, proc = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
+                self.model_procs.append(proc)
 
         init_model_ret = []
         for dp_rank_id in range(self.vit_dp):  # async init model process
@@ -130,7 +133,14 @@ class VisualOnlyManager(rpyc.Service):
         await VisualManager.infer_images(self, dp_index=dp_index, images=images, events=events)
 
     def clean_up(self):
-        return
+        for proc in getattr(self, "model_procs", []):
+            try:
+                if proc.is_alive():
+                    logger.info(f"Killing VIT model process {proc.pid}")
+                    proc.kill()
+                    proc.join(timeout=5)
+            except (ProcessLookupError, OSError):
+                pass
 
     def exposed_remote_infer_images(self, images: List[ImageItem], ref_event: threading.Event):
         try:

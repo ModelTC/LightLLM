@@ -9,6 +9,7 @@ from rpyc.utils.factory import unix_connect
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
 from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_env_start_args
 from .model_rpc_client import VisualModelRpcClient
 from .model_rpc import VisualModelRpcServer
@@ -18,6 +19,7 @@ from ..objs import rpyc_config
 def _init_env(socket_path: str, success_event):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    start_parent_check_thread()
 
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -52,7 +54,7 @@ async def start_model_process():
     # 服务端需要调用客户端传入的event所以，客户端需要一个后台线程进行相关的处理。
     conn._bg_thread = rpyc.BgServingThread(conn, sleep_interval=0.001)
 
-    return VisualModelRpcClient(conn)
+    return VisualModelRpcClient(conn), proc
 
 
 def _generate_unix_socket_path() -> str:
