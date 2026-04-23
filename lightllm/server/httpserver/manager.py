@@ -525,6 +525,24 @@ class HttpServerManager:
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
+
+        if sampling_params.max_new_tokens is None or sampling_params.max_new_tokens == -1:
+            sampling_params.max_new_tokens = self.max_req_total_len - prompt_tokens
+            if sampling_params.max_new_tokens < 1:
+                raise ValueError(
+                    f"the input prompt token len {prompt_tokens} >= max_req_total_len {self.max_req_total_len}, "
+                    f"no space for output tokens"
+                )
+            if sampling_params.min_new_tokens > sampling_params.max_new_tokens:
+                raise ValueError(
+                    f"min_new_tokens ({sampling_params.min_new_tokens}) > auto-calculated max_new_tokens "
+                    f"({sampling_params.max_new_tokens}), consider reducing input length or min_new_tokens"
+                )
+            logger.debug(
+                f"max_new_tokens is unset, auto-calculate to {sampling_params.max_new_tokens} "
+                f"(max_req_total_len {self.max_req_total_len} - prompt_tokens {prompt_tokens})"
+            )
+
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
             if self.args.long_truncation_mode is None:
