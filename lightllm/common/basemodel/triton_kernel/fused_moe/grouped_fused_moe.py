@@ -632,12 +632,20 @@ def grouped_matmul_kernel(
 
 def _get_grouped_matmul_static_key(
     expert_weights: torch.Tensor,
+    expert_to_weights_scale: torch.Tensor,
     topk_num: int,
     out: torch.Tensor,
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
 ) -> dict:
     expert_num, n, k = expert_weights.shape
+    # Including these in the static key keeps the per-channel and block128
+    # autotune caches separate (they prefer different tile configs).
+    block_size_n = 0
+    block_size_k = 0
+    if use_fp8_w8a8 and expert_to_weights_scale is not None and expert_to_weights_scale.ndim == 3:
+        block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
+        block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
     return {
         "N": n,
         "K": k,
@@ -645,6 +653,8 @@ def _get_grouped_matmul_static_key(
         "expert_num": expert_num,
         "mul_routed_weight": mul_routed_weight,
         "use_fp8_w8a8": use_fp8_w8a8,
+        "block_size_n": block_size_n,
+        "block_size_k": block_size_k,
         "out_dtype": str(out.dtype),
     }
 
