@@ -394,6 +394,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
+        has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
         from .req_id_generator import convert_sub_id_to_group_id
 
@@ -408,6 +409,23 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
 
+            # Emit the initial role-only chunk once per choice, as required by the
+            # OpenAI SSE spec: role appears only in the first delta with content="".
+            if not has_emitted_first_chunk[choice_index]:
+                has_emitted_first_chunk[choice_index] = True
+                first_choice = ChatCompletionStreamResponseChoice(
+                    index=choice_index,
+                    delta=DeltaMessage(role="assistant", content=""),
+                    finish_reason=None,
+                )
+                first_chunk = ChatCompletionStreamResponse(
+                    id=group_request_id,
+                    created=created_time,
+                    model=request.model,
+                    choices=[first_choice],
+                )
+                yield f"data: {first_chunk.model_dump_json(exclude_none=True)}\n\n"
+
             # Handle reasoning content
             if get_env_start_args().reasoning_parser and request.separate_reasoning:
                 reasoning_text, delta = _process_reasoning_stream(
@@ -416,7 +434,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if reasoning_text:
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=choice_index,
-                        delta=DeltaMessage(role="assistant", reasoning_content=reasoning_text),
+                        delta=DeltaMessage(reasoning_content=reasoning_text),
                         finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
@@ -437,7 +455,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=choice_index,
-                        delta=DeltaMessage(role="assistant", content=normal_text),
+                        delta=DeltaMessage(content=normal_text),
                         finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
@@ -555,7 +573,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         )
                         yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
             else:
-                delta_message = DeltaMessage(role="assistant", content=delta)
+                delta_message = DeltaMessage(content=delta)
                 stream_choice = ChatCompletionStreamResponseChoice(
                     index=choice_index, delta=delta_message, finish_reason=None
                 )
@@ -598,6 +616,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 usage=usage,
             )
             yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
+
+        yield "data: [DONE]\n\n".encode("utf-8")
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
