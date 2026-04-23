@@ -48,7 +48,9 @@ def sp_pad_copy(in_tensor: torch.Tensor, sp_rank_id: int, sp_world_size: int, al
         start = sp_rank_id * split_size
         end = start + split_size
         return in_tensor[start:end, :]
-
+    assert (
+        in_token_num % sp_world_size == 0
+    ), f"in_token_num % sp_world_size != 0, in_token_num: {in_token_num}, sp_world_size: {sp_world_size}"
     out_token_num = triton.cdiv(in_token_num, sp_world_size) * sp_world_size // sp_world_size
     out_tensor = alloc_func((out_token_num, hidden_dim), dtype=in_tensor.dtype, device=in_tensor.device)
     out_token_start_index = out_token_num * sp_rank_id

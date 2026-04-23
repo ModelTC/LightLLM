@@ -2,21 +2,14 @@ import os
 import json
 import math
 import torch
-import rpyc
-import librosa
 import numpy as np
-from io import BytesIO
 from torch import Tensor, nn
 from safetensors import safe_open
 from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
-from rpyc.utils.classic import obtain
-
 from transformers.activations import ACT2FN
 
 from lightllm.server.multimodal_params import AudioItem
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
@@ -207,9 +200,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.proj2 = nn.Linear(d_model, output_dim)
         self.n_window_infer = n_window_infer
         self.conv_chunksize = conv_chunksize
-
-        self.cache_port = kvargs["cache_port"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self._init_datatype()
 
     def _init_datatype(self):
@@ -337,7 +327,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         hidden_states = self.proj2(hidden_states)
         return hidden_states
 
-    def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
+    def encode(self, audio_items: List[AudioItem]):
         uuids = []
         items: List[AudioItem] = []
         per_audio_features: List[torch.Tensor] = []
@@ -345,9 +335,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
-                audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
+                assert self.processor.sampling_rate == 16000
+                audio = item.load_audio_from_shm_payload()
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
@@ -368,24 +357,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             )
             per_audio_features.append(audio_features)
 
-        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
-        ids_to_set = []
-        for i, ready in enumerate(ready_audio):
-            if ready:
-                continue
-
-            uid = uuids[i]
-            item = items[i]
-
+        all_embeds = []
+        for i in range(len(audio_items)):
             cur_embed = per_audio_features[i]
-            cpu_embed_cache_client.copy_to_cache(
-                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
-            )
-            assert (
-                item.token_num == cur_embed.shape[0]
-            ), f"audio token num not match {item.token_num} vs {cur_embed.shape[0]} "
-            ids_to_set.append(uid)
+            all_embeds.append(cur_embed)
 
-        if ids_to_set:
-            self.cache_client.root.set_items_embed(ids=ids_to_set)
-            torch.cuda.current_stream().synchronize()
+        return all_embeds, audio_items

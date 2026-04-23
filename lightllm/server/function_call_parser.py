@@ -1720,6 +1720,248 @@ class DeepSeekV32Detector(BaseFormatDetector):
             return StreamingParseResult(normal_text="", calls=calls)
 
 
+class Qwen3CoderDetector(BaseFormatDetector):
+    """
+    Detector for Qwen3-Coder XML-style function call format.
+
+    Format Structure:
+    ```
+    <tool_call>
+    <function=function_name>
+    <parameter=param1>
+    value1
+    </parameter>
+    <parameter=param2>
+    value2
+    </parameter>
+    </function>
+    </tool_call>
+    ```
+
+    Key differences from Qwen25Detector (JSON-based):
+    - Parameters are XML key-value pairs, not JSON objects
+    - Function name is embedded in the <function=> tag attribute
+    - Values need schema-aware type conversion (string by default)
+
+    Reference: https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3-Coder-480B-A35B.html
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = "<tool_call>"
+        self.eot_token = "</tool_call>"
+        self.tool_call_separator = "\n"
+
+        # Regex patterns
+        self.tool_call_block_regex = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+        self.function_regex = re.compile(r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL)
+        self.parameter_regex = re.compile(
+            r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
+        )
+        self._normal_text_buffer = ""
+
+    def has_tool_call(self, text: str) -> bool:
+        return "<function=" in text or self.bot_token in text
+
+    def _get_param_config(self, func_name: str, tools: List[Tool]) -> Dict:
+        """Extract parameter type configuration from tool definitions."""
+        for tool in tools:
+            if tool.function.name == func_name and tool.function.parameters:
+                params = tool.function.parameters
+                if isinstance(params, dict) and "properties" in params:
+                    return params["properties"]
+                elif isinstance(params, dict):
+                    return params
+        return {}
+
+    def _convert_param_value(self, value: str, param_name: str, param_config: Dict, func_name: str) -> Any:
+        """Convert parameter value based on schema type. Safe alternative to eval()."""
+        if value.lower() == "null":
+            return None
+
+        if param_name not in param_config:
+            return value
+
+        prop = param_config.get(param_name, {})
+        param_type = str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
+
+        if param_type in ("string", "str", "enum"):
+            return value
+        elif param_type.startswith("int") or param_type == "integer":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return value
+        elif param_type in ("number", "float", "double"):
+            try:
+                fv = float(value)
+                return int(fv) if fv == int(fv) else fv
+            except (ValueError, TypeError):
+                return value
+        elif param_type in ("boolean", "bool"):
+            return value.lower() == "true"
+        elif param_type in ("object", "array"):
+            try:
+                return json.loads(value)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                try:
+                    return ast.literal_eval(value)
+                except (ValueError, SyntaxError, TypeError):
+                    return value
+        return value
+
+    def _parse_function_call(self, function_str: str, tools: List[Tool]) -> Optional[ToolCallItem]:
+        """Parse a single <function=name>...</function> block into a ToolCallItem."""
+        try:
+            end_index = function_str.index(">")
+        except ValueError:
+            return None
+
+        func_name = function_str[:end_index].strip()
+        tool_indices = self._get_tool_indices(tools)
+        if func_name not in tool_indices:
+            logger.warning(f"Model attempted to call undefined function: {func_name}")
+            return None
+
+        parameters_text = function_str[end_index + 1 :]
+        param_config = self._get_param_config(func_name, tools)
+        param_dict = {}
+
+        for match in self.parameter_regex.findall(parameters_text):
+            try:
+                idx = match.index(">")
+            except ValueError:
+                continue
+            param_name = match[:idx].strip()
+            param_value = match[idx + 1 :]
+            # Strip leading/trailing newlines from value
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+
+        return ToolCallItem(
+            tool_index=tool_indices[func_name],
+            name=func_name,
+            parameters=json.dumps(param_dict, ensure_ascii=False),
+        )
+
+    def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
+        """Build the current argument JSON from a partial XML tool-call body."""
+        param_matches = self.parameter_regex.findall(partial_body)
+        if not param_matches:
+            return None
+
+        param_config = self._get_param_config(func_name, tools)
+        param_dict = {}
+        has_visible_value = False
+
+        for match in param_matches:
+            try:
+                idx = match.index(">")
+            except ValueError:
+                continue
+
+            param_name = match[:idx].strip()
+            param_value = match[idx + 1 :]
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            if param_value.strip():
+                has_visible_value = True
+            elif (
+                f"<parameter={param_name}>" in partial_body
+                and f"<parameter={param_name}>{param_value}</parameter>" in partial_body
+            ):
+                # Closed empty-string parameter. We can safely emit it.
+                has_visible_value = True
+            else:
+                # Parameter tag is present but its value has not started streaming yet.
+                continue
+
+            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+
+        if not param_dict and not has_visible_value:
+            return None
+
+        return json.dumps(param_dict, ensure_ascii=False)
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        idx = text.find(self.bot_token)
+        normal_text = text[:idx].strip() if idx != -1 else text
+
+        if "<function=" not in text:
+            return StreamingParseResult(normal_text=normal_text, calls=[])
+
+        # Extract function blocks from tool_call blocks (or raw text as fallback)
+        tool_call_blocks = self.tool_call_block_regex.findall(text)
+        if not tool_call_blocks:
+            tool_call_blocks = [text]
+
+        calls = []
+        for block in tool_call_blocks:
+            func_matches = self.function_regex.findall(block)
+            for match in func_matches:
+                func_str = match[0] if match[0] else match[1]
+                item = self._parse_function_call(func_str, tools)
+                if item:
+                    item.tool_index = len(calls)
+                    calls.append(item)
+
+        return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        """Streaming incremental parsing for Qwen3-Coder XML tool calls."""
+        self._buffer += new_text
+        if not hasattr(self, "_tool_indices"):
+            self._tool_indices = self._get_tool_indices(tools)
+
+        normal_text = ""
+        calls: List[ToolCallItem] = []
+
+        while True:
+            current_text = self._buffer
+            tool_call_start = current_text.find(self.bot_token)
+
+            if tool_call_start == -1:
+                partial_len = self._ends_with_partial_token(current_text, self.bot_token)
+                if partial_len:
+                    return StreamingParseResult(normal_text=normal_text, calls=calls)
+                if current_text:
+                    normal_text += current_text.replace(self.eot_token, "")
+                    self._buffer = ""
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+            if tool_call_start > 0:
+                normal_text += current_text[:tool_call_start]
+                self._buffer = current_text[tool_call_start:]
+                current_text = self._buffer
+
+            eot_pos = current_text.find(self.eot_token)
+            if eot_pos == -1:
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+            complete_block = current_text[: eot_pos + len(self.eot_token)]
+            func_matches = self.function_regex.findall(complete_block)
+
+            if self.current_tool_id == -1:
+                self.current_tool_id = 0
+
+            for match in func_matches:
+                func_str = match[0] if match[0] else match[1]
+                item = self._parse_function_call(func_str, tools)
+                if item:
+                    item.tool_index = self.current_tool_id
+                    calls.append(item)
+                    self.current_tool_id += 1
+
+            self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -1739,6 +1981,7 @@ class FunctionCallParser:
         "mistral": MistralDetector,
         "qwen": Qwen25Detector,
         "qwen25": Qwen25Detector,
+        "qwen3_coder": Qwen3CoderDetector,
     }
 
     def __init__(self, tools: List[Tool], tool_call_parser: str):

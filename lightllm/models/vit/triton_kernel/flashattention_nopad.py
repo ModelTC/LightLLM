@@ -195,7 +195,8 @@ try:
             False,
             window_size[0],
             window_size[1],
-            0.0,
+            0,  # attention_chunk
+            0.0,  # softcap
             is_rotary_interleaved=False,
             scheduler_metadata=None,
             num_splits=1,
@@ -203,8 +204,7 @@ try:
             sm_margin=0,
             sinks=None,
         )
-
-        return
+        return o
 
 except ImportError:
     print("Failed to import _flash_attn_forward from hopper.flash_attn_interface.")

@@ -41,6 +41,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _ffn(self, input, infer_state, layer_weight: GptOssTransformerLayerWeight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
+        hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
         num_tokens, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
         hidden_states = layer_weight.experts.experts(
@@ -52,7 +53,8 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
         )
-        return hidden_states.view(num_tokens, hidden_dim)
+        hidden_states = hidden_states.view(num_tokens, hidden_dim)
+        return self._tpsp_reduce(input=hidden_states, infer_state=infer_state)
 
     def _context_attention_kernel(
         self,

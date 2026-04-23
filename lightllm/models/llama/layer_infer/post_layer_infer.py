@@ -58,7 +58,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         assert False, "Error State"
 
-    def token_forward(
+    def _token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
@@ -89,28 +89,11 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         gather_data = None
         return ans_logics
 
-    def tpsp_token_forward(
+    def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
-        if self.tp_world_size_ > 1:
-            assert len(input_embdings.shape) == 2
-            token_num, hidden_dim = input_embdings.shape
-            gather_data = torch.empty(
-                (self.tp_world_size_ * token_num, hidden_dim), device=input_embdings.device, dtype=input_embdings.dtype
-            )
-            all_gather(
-                [gather_data[i * token_num : (i + 1) * token_num, :] for i in range(self.tp_world_size_)],
-                input_embdings,
-                group=infer_state.dist_group,
-                async_op=False,
-            )
-            # len(infer_state.input_ids) 获取真实输入长度
-            input_embdings = gather_data[0 : len(infer_state.input_ids)]
 
-        if infer_state.need_dp_prefill_balance:
-            input_embdings = infer_state._all_to_all_unbalance_get(data=input_embdings)
-
-        return self.token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
+        return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
         self,
@@ -120,16 +103,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ):
-        if getattr(infer_state, "hook", None) is not None:
-            infer_state.hook()
-            infer_state.hook = None
 
-        logics = self.tpsp_token_forward(input_embdings, infer_state, layer_weight=layer_weight)
+        logics = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
-        if getattr(infer_state1, "hook", None) is not None:
-            infer_state1.hook()
-            infer_state1.hook = None
-
-        logics1 = self.tpsp_token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
+        logics1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
 
         return logics, logics1

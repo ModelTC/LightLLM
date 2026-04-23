@@ -424,6 +424,8 @@ class SamplingParams(ctypes.Structure):
             cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
             cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
             cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
+            if cls._repetition_penalty is None:
+                cls._repetition_penalty = 1.0
             cls._temperature = generation_cfg.get("temperature", 1.0)
             cls._top_p = generation_cfg.get("top_p", 1.0)
             cls._top_k = generation_cfg.get("top_k", -1)

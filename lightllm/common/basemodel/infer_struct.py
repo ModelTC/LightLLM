@@ -10,7 +10,7 @@ from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.dist_utils import get_global_dp_rank
+from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
@@ -144,13 +144,27 @@ class InferStateInfo:
             self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
 
-    def prefill_dp_balance(self, input_ids: torch.Tensor):
+    def call_overlap_hook(self):
+        """
+        overlap_hook 是在 microbatch overlap 的运行模式下，用于调用绑定在inferstate上的hook函数，用于
+        实现折叠通信和计算的效果，普通模式并不调用这个函数。这是个快速调用函数，用于减少重复代码。
+        """
+        if getattr(self, "hook", None) is not None:
+            self.hook()
+            self.hook = None
+        return
+
+    ##### prefill dp balance 相关的函数 #####
+
+    def prepare_prefill_dp_balance(self):
         """
         在prefill的时候, 对于处于 dp 模式下的时候，对输入的数据进行重新的调整和分配，降低各个dp处理数据量过于不一致的时候,导致
         的prefill 推理性能下降
         """
         assert self.is_prefill
         import torch.distributed as dist
+
+        input_ids = self.input_ids  # 原始输入的input_ids
 
         self.need_dp_prefill_balance = True
 
@@ -165,19 +179,31 @@ class InferStateInfo:
             group=self.dist_group.dp_prefill_balance_group,
             async_op=False,
         )
-        dp_input_lens = dp_input_lens.detach().cpu()
-        self.dp_origin_lens = dp_input_lens.tolist()
-        sum_input_len = dp_input_lens.sum().item()
-        dp_handle_lens = [sum_input_len // args.dp for _ in range(args.dp)]
-        for i in range(sum_input_len % args.dp):
-            dp_handle_lens[i] += 1
+        dp_input_lens = dp_input_lens.detach().cpu().tolist()
+        self.dp_origin_lens = dp_input_lens.copy()
+        sum_input_len = sum(dp_input_lens)
+        if not args.enable_tpsp_mix_mode:
+            dp_handle_lens = [sum_input_len // args.dp for _ in range(args.dp)]
+            for i in range(sum_input_len % args.dp):
+                dp_handle_lens[i] += 1
+        else:
+            # tpsp mix mode 需要让每个dp 的处理长度是 tp_world_size 的整数倍
+            tp_world_size = get_dp_world_size()
+            assert all(e % tp_world_size == 0 for e in dp_input_lens)
+            _dp_input_lens = [e // tp_world_size for e in dp_input_lens]
+            _sum_input_len = sum(_dp_input_lens)
+            _dp_input_lens = [_sum_input_len // args.dp for _ in range(args.dp)]
+            for i in range(_sum_input_len % args.dp):
+                _dp_input_lens[i] += 1
+            dp_handle_lens = [_dp_input_len * tp_world_size for _dp_input_len in _dp_input_lens]
+            assert sum(dp_handle_lens) == sum_input_len
 
         self.dp_handle_lens = dp_handle_lens.copy()
 
         dest_dp_inputs = [[] for _ in range(args.dp)]
         # 分配每个dp 的原始输入和分配后的原始输入
         origin_datas = collections.deque()
-        for origin_dp_index, origin_dp_input_len in enumerate(dp_input_lens.numpy()):
+        for origin_dp_index, origin_dp_input_len in enumerate(dp_input_lens):
             handle_len = dp_handle_lens[origin_dp_index]
             if origin_dp_input_len > handle_len:
                 origin_datas.append((origin_dp_index, handle_len, origin_dp_input_len))
@@ -216,29 +242,49 @@ class InferStateInfo:
         self.dp_input_split_sizes = dp_input_split_sizes
         self.dp_output_split_sizes = dp_output_split_sizes
 
-        new_input_ids = self._all_to_all_balance_get(input_ids)
         if hasattr(self, "position_ids") and self.position_ids is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_ids, 用于减少通信量
             self._unbalance_position_ids = self.position_ids
+            self._balance_position_ids = self._all_to_all_balance_get(self.position_ids, change_state=False)
 
-            self.position_ids = self._all_to_all_balance_get(self.position_ids)
         if hasattr(self, "position_cos") and self.position_cos is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_cos, 用于减少通信量
             self._unbalance_position_cos = self.position_cos
+            self._balance_position_cos = self._all_to_all_balance_get(self.position_cos, change_state=False)
 
-            self.position_cos = self._all_to_all_balance_get(self.position_cos)
         if hasattr(self, "position_sin") and self.position_sin is not None:
             # deepseekv2 mla 特殊模型需要保留原始的 position_sin, 用于减少通信量
             self._unbalance_position_sin = self.position_sin
-
-            self.position_sin = self._all_to_all_balance_get(self.position_sin)
+            self._balance_position_sin = self._all_to_all_balance_get(self.position_sin, change_state=False)
 
         self._unbalance_input_ids = self.input_ids
-        self.input_ids = new_input_ids
+        self._balance_input_ids = self._all_to_all_balance_get(input_ids, change_state=False)
 
-        return new_input_ids
+        return
 
-    def _all_to_all_balance_get(self, data: torch.Tensor):
+    def __change_to_unbalance(self):
+        self.input_ids = self._unbalance_input_ids
+        if hasattr(self, "position_ids"):
+            self.position_ids = self._unbalance_position_ids
+        if hasattr(self, "position_cos"):
+            self.position_cos = self._unbalance_position_cos
+        if hasattr(self, "position_sin"):
+            self.position_sin = self._unbalance_position_sin
+        return
+
+    def __change_to_balance(self):
+        self.input_ids = self._balance_input_ids
+        if hasattr(self, "position_ids"):
+            self.position_ids = self._balance_position_ids
+        if hasattr(self, "position_cos"):
+            self.position_cos = self._balance_position_cos
+        if hasattr(self, "position_sin"):
+            self.position_sin = self._balance_position_sin
+        return
+
+    def _all_to_all_balance_get(self, data: torch.Tensor, change_state: bool = True):
+        if change_state:
+            self.__change_to_balance()
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
@@ -266,7 +312,10 @@ class InferStateInfo:
         )
         return dest_data.view(-1, *old_shape[1:])
 
-    def _all_to_all_unbalance_get(self, data: torch.Tensor):
+    def _all_to_all_unbalance_get(self, data: torch.Tensor, change_state: bool = True):
+        if change_state:
+            self.__change_to_unbalance()
+
         dp_rank = get_global_dp_rank()
         import torch.distributed as dist
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager

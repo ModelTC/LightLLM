@@ -2,6 +2,7 @@ import os
 import torch
 import copy
 import bisect
+import triton
 from typing import List, Tuple
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
@@ -18,9 +19,9 @@ logger = init_logger(__name__)
 class PrefillCudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, decode_cuda_graph: CudaGraph):
+    def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int):
         self.graph = {}
-
+        self.tp_world_size = tp_world_size
         if decode_cuda_graph is not None:
             self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
         else:
@@ -36,6 +37,16 @@ class PrefillCudaGraph:
             if 1 < token_num < self.max_handle_token_num:
                 graph_handle_token_nums.append(token_num)
         graph_handle_token_nums.append(self.max_handle_token_num)
+
+        graph_handle_token_nums = list(set(graph_handle_token_nums))
+        graph_handle_token_nums.sort()
+        if self.args.enable_tpsp_mix_mode:
+            graph_handle_token_nums = [
+                triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in graph_handle_token_nums
+            ]
+            graph_handle_token_nums = list(set(graph_handle_token_nums))
+            graph_handle_token_nums.sort()
+
         self.graph_handle_token_nums = graph_handle_token_nums
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
 

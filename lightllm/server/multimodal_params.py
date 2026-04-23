@@ -1,13 +1,17 @@
 """Multimodal parameters for text generation."""
+import asyncio
 import os
 import librosa
 import base64
+import numpy as np
 from typing import List
 from io import BytesIO
 from PIL import Image
 from fastapi import Request
+from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
+
 
 logger = init_logger(__name__)
 
@@ -24,6 +28,8 @@ class AudioItem:
         self.start_index_in_embed_cache = None
         # the audio token num
         self.token_num = None
+        # the data md5 sum
+        self.md5 = None
         # the audio length
         self.audio_length = None
 
@@ -42,11 +48,19 @@ class AudioItem:
                 raise ValueError(f"cannot read audio which type is {self._type}!")
 
             # check if valid audio bytes
-            audio_values, _ = librosa.load(BytesIO(audio_data), sr=16000)
+            audio_values, _ = await asyncio.to_thread(librosa.load, BytesIO(audio_data), sr=16000)
+            audio_values = np.asarray(audio_values, dtype=np.float32)
+
             from lightllm.models.whisper.defaults import MIN_AUDIO_LEN
 
-            self.audio_length = max(audio_values.shape[0], MIN_AUDIO_LEN)  # 如果音频过短，会被pad到480的长度
-            self._preload_data = audio_data
+            if audio_values.shape[0] < MIN_AUDIO_LEN:
+                audio_values = np.pad(
+                    audio_values, (0, MIN_AUDIO_LEN - audio_values.shape[0]), mode="constant", constant_values=0.0
+                )
+                logger.warning(f"audio length is too short, pad to {MIN_AUDIO_LEN}")
+
+            self.audio_length = int(audio_values.shape[0])
+            self._preload_data = audio_values.tobytes()
             return
 
         except Exception as e:
@@ -65,6 +79,7 @@ class AudioItem:
         ret["token_id"] = self.token_id
         ret["token_num"] = self.token_num
         ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
+        ret["md5"] = self.md5
         return ret
 
     def to_origin_dict(self):
@@ -75,6 +90,14 @@ class AudioItem:
         ret["type"] = self._type
         ret["data"] = self._data
         return ret
+
+    def load_audio_from_shm_payload(self) -> np.ndarray:
+        audio_data = read_shm(get_shm_name_data(self.uuid))
+        audio_array = np.frombuffer(audio_data, dtype=np.float32)
+        if audio_array.shape[0] != self.audio_length:
+            logger.error(f"audio length is not match, {audio_array.shape[0]} != {self.audio_length}")
+            assert audio_array.shape[0] == self.audio_length
+        return audio_array
 
 
 class ImageItem:
@@ -89,6 +112,8 @@ class ImageItem:
         self.start_index_in_embed_cache = None
         # the image token num
         self.token_num = None
+        # the data md5 sum
+        self.md5 = None
         # the start index of the image in the input_ids
         # used for mrope position id calculation
         self.start_idx = None
@@ -141,6 +166,7 @@ class ImageItem:
         ret["token_num"] = self.token_num
         ret["grid_thwd"] = self.grid_thwd
         ret["start_idx"] = self.start_idx
+        ret["md5"] = self.md5
         return ret
 
     def to_origin_dict(self):
@@ -164,10 +190,11 @@ class MultimodalParams:
         return
 
     async def verify_and_preload(self, request: Request):
-        for image in self.images:
-            await image.preload(request)
-        for audio in self.audios:
-            await audio.preload(request)
+        tasks = [image.preload(request) for image in self.images]
+        tasks += [audio.preload(request) for audio in self.audios]
+
+        if tasks:
+            await asyncio.gather(*tasks)
         return
 
     def add_image(self, image: dict):

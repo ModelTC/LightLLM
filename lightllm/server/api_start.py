@@ -15,6 +15,7 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.utils.config_utils import has_audio_module, has_vision_module
 
@@ -57,7 +58,8 @@ def setup_signal_handlers(http_server_process, process_manager):
     signal.signal(signal.SIGINT, signal_handler)
 
     logger.info(f"start process pid {os.getpid()}")
-    logger.info(f"http server pid {http_server_process.pid}")
+    if http_server_process:
+        logger.info(f"http server pid {http_server_process.pid}")
     return
 
 
@@ -73,7 +75,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -165,6 +167,9 @@ def normal_or_p_d_start(args):
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
 
+    if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
+        args.enable_tpsp_mix_mode = True
+
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
@@ -175,6 +180,10 @@ def normal_or_p_d_start(args):
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
+
+    if args.afs_image_embed_dir is not None:
+        os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
+        os.chmod(args.afs_image_embed_dir, 0o777)
 
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
@@ -199,6 +208,32 @@ def normal_or_p_d_start(args):
             f"visual_infer_batch_size ({args.visual_infer_batch_size}) must be "
             f"a positive integer multiple of visual_dp ({args.visual_dp})"
         )
+
+    if not args.disable_audio:
+        if args.audio_tp != 1:
+            raise ValueError(
+                "audio_tp > 1 is not supported for the audio encoder yet; use --audio_dp for multi-GPU data parallel."
+            )
+        if args.audio_gpu_ids is None:
+            args.audio_gpu_ids = list(range(args.audio_dp * args.audio_tp))
+        total_audio_gpus = args.audio_dp * args.audio_tp
+        if len(args.audio_gpu_ids) < total_audio_gpus:
+            raise ValueError(
+                f"Not enough audio GPUs specified. Need at least {total_audio_gpus}, "
+                f"but got {len(args.audio_gpu_ids)}."
+            )
+        args.audio_gpu_ids = args.audio_gpu_ids[:total_audio_gpus]
+        if args.audio_dp <= 0:
+            raise ValueError("audio_dp must be a positive integer.")
+        if args.audio_infer_batch_size is None:
+            args.audio_infer_batch_size = args.audio_dp * 4
+        if args.audio_infer_batch_size < 1:
+            raise ValueError("audio_infer_batch_size must be >= 1.")
+        if args.audio_infer_batch_size // args.audio_dp < 1 or args.audio_infer_batch_size % args.audio_dp != 0:
+            raise ValueError(
+                f"audio_infer_batch_size ({args.audio_infer_batch_size}) must be "
+                f"a positive integer multiple of audio_dp ({args.audio_dp})."
+            )
 
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len
@@ -242,6 +277,10 @@ def normal_or_p_d_start(args):
         already_uesd_ports.append(args.nccl_port)
     if args.pd_decode_rpyc_port is not None:
         already_uesd_ports.append(args.pd_decode_rpyc_port)
+    if args.visual_nccl_ports is not None:
+        already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
+    if not args.disable_audio and args.audio_nccl_ports is not None:
+        already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -250,7 +289,8 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=14 + node_world_size + args.visual_dp * (args.visual_tp + 1), used_ports=already_uesd_ports
+        num=14 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
+        used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -271,14 +311,17 @@ def normal_or_p_d_start(args):
     ) = can_use_ports[0:14]
     can_use_ports = can_use_ports[14:]
 
-    visual_model_tp_ports = []
-    visual_nccl_ports = []
-    for _ in range(args.visual_dp):
-        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        visual_model_tp_ports.append(tp_ports_for_dp)
-        can_use_ports = can_use_ports[args.visual_tp :]
-        visual_nccl_ports.append(can_use_ports[0])
-        can_use_ports = can_use_ports[1:]
+    if args.visual_nccl_ports is None:
+        args.visual_nccl_ports = can_use_ports[: args.visual_dp]
+        can_use_ports = can_use_ports[args.visual_dp :]
+    else:
+        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
+
+    if args.audio_nccl_ports is None:
+        args.audio_nccl_ports = can_use_ports[: args.audio_dp]
+        can_use_ports = can_use_ports[args.audio_dp :]
+    else:
+        args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
 
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
@@ -293,7 +336,6 @@ def normal_or_p_d_start(args):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    args.visual_nccl_ports = visual_nccl_ports
     args.x2i_port = x2i_port
     args.http_server_port_for_x2i = http_server_port_for_x2i
     args.x2i_worker_task_port = x2i_worker_task_port
@@ -333,16 +375,29 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
-        from .visualserver.manager import start_visual_process
 
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_visual_process,
-            ],
-            start_args=[
-                (args, visual_model_tp_ports),
-            ],
-        )
+        if not args.visual_use_proxy_mode:
+            from .visualserver.manager import start_visual_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
+        else:
+            from .visualserver.proxy_manager import start_visual_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
 
     if not args.disable_audio:
         from .audioserver.manager import start_audio_process
@@ -496,12 +551,71 @@ def pd_master_start(args):
     http_server_process.wait()
 
 
+def visual_only_start(args):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args: StartArgs = args
+    if args.afs_image_embed_dir is not None:
+        os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
+        os.chmod(args.afs_image_embed_dir, 0o777)
+
+    already_uesd_ports = []
+    already_uesd_ports.append(args.visual_rpyc_port)
+    can_use_ports = alloc_can_use_network_port(
+        num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
+        used_ports=already_uesd_ports,
+    )
+
+    if args.visual_gpu_ids is None:
+        args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
+    if args.visual_infer_batch_size is None:
+        args.visual_infer_batch_size = args.visual_dp
+    if args.data_type is None:
+        from lightllm.utils.config_utils import get_dtype
+
+        args.data_type = get_dtype(args.model_dir)
+        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+
+    logger.info(f"alloced ports: {can_use_ports}")
+
+    args.visual_nccl_ports = can_use_ports[: args.visual_dp]
+    can_use_ports = can_use_ports[args.visual_dp :]
+    args.visual_node_id = uuid.uuid4().int
+
+    logger.info(f"all start args:{args}")
+
+    set_env_start_args(args)
+
+    from .visualserver.visual_only_manager import start_visual_process
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_visual_process,
+        ],
+        start_args=[
+            (args,),
+        ],
+    )
+    setup_signal_handlers(None, process_manager)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down...")
+        process_manager.terminate_all_processes()
+        logger.info("All processes have been terminated gracefully.")
+        sys.exit(0)
+
+
 def config_server_start(args):
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return
 
     logger.info(f"all start args:{args}")
+
+    if args.config_server_visual_redis_port is not None:
+        start_redis_service(args)
 
     set_env_start_args(args)
 
