@@ -18,13 +18,28 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
         super().__init__(tokenizer)
         self.image_processor = image_processor
-        self.min_pixel = self.image_processor.min_pixels
-        self.max_pixel = self.image_processor.max_pixels
+        self.min_pixel, self.max_pixel = self._get_min_max_pixels()
         self.patch_size = self.image_processor.patch_size
         self.merge_size = self.image_processor.merge_size
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]
         self.image_token_id = kwargs["model_cfg"]["image_token_id"]
+
+    def _get_min_max_pixels(self):
+        size_cfg = getattr(self.image_processor, "size", None)
+        if size_cfg is not None:
+            min_pixel = size_cfg.get("shortest_edge")
+            max_pixel = size_cfg.get("longest_edge")
+            if min_pixel is not None and max_pixel is not None:
+                return min_pixel, max_pixel
+
+        min_pixel = getattr(self.image_processor, "min_pixels", None)
+        max_pixel = getattr(self.image_processor, "max_pixels", None)
+        if min_pixel is None or max_pixel is None:
+            raise AttributeError(
+                "image_processor must expose size['shortest_edge'/'longest_edge'] " "or min_pixels/max_pixels"
+            )
+        return min_pixel, max_pixel
 
     def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams

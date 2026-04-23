@@ -14,8 +14,7 @@ class QWen3VLTokenizer(QWen2VLTokenizer):
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
-        self.min_pixel = self.image_processor.size["shortest_edge"]
-        self.max_pixel = self.image_processor.size["longest_edge"]
+        self.min_pixel, self.max_pixel = self._get_min_max_pixels()
         self.patch_size = self.image_processor.patch_size
         self.merge_size = self.image_processor.merge_size
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]

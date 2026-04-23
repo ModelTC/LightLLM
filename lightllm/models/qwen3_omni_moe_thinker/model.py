@@ -34,8 +34,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         self.tokenizer = tokenizer
         # image
         self.image_processor = processor.image_processor
-        self.min_pixel = self.image_processor.min_pixels
-        self.max_pixel = self.image_processor.max_pixels
+        self.min_pixel, self.max_pixel = self._get_min_max_pixels()
         self.patch_size = self.image_processor.patch_size
         self.merge_size = self.image_processor.merge_size
 
