@@ -717,7 +717,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_cpu_cache",
         action="store_true",
-        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.""",
+        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.
+        For linear attention cache reuse constraints, cpu cache token page size will be forced to
+        linear_att_page_block_num * linear_att_hash_page_size when cpu cache is enabled.""",
     )
     parser.add_argument(
         "--cpu_cache_storage_size",
@@ -760,14 +762,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=10000000,
         help="""The number of blocks for linear attention state storage.
         It controls the number of pages used for storing the attention state,
-        which can affect memory usage and mutiturn chat performance""",
+        which can affect memory usage and mutiturn chat performance.
+        Block size is linear_att_page_block_num * linear_att_hash_page_size.
+        When this value multiplied by linear_att_hash_page_size is greater than max_req_total_len,
+        block-level matching in radix cache is effectively disabled and request-level small-page
+        matching (linear_att_hash_page_size) may dominate.""",
     )
     parser.add_argument(
         "--linear_att_cache_size",
         type=int,
         default=None,
-        help="""The size of linear attn cache. If not specified, will be calculated
-        automatically based on mamba_cache_ratio or max_total_token_num.""",
+        help="""The size of linear attn cache.
+        If radix cache hit rate is low under high load due to limited small-page capacity and LRU
+        eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
         "-linear_att_ssm_data_type",
