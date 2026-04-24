@@ -165,11 +165,9 @@ class InferenceContext:
         if req.cur_kv_len == 0:
             return
 
-        if (
-            req.linear_att_cache_len <= req.cur_kv_len
-            and req.linear_att_cache_buffer_id is not None
-            and page_num % big_page_num != 0
-        ):
+        if req.linear_att_cache_len <= req.cur_kv_len and req.linear_att_cache_buffer_id is not None:
+            # 只有小页可以有 linear_att_cache_buffer_id，然后进行小页插入。
+            assert page_num % big_page_num != 0
             free_token_index.append(
                 self.req_manager.req_to_token_indexs[req.req_idx][req.linear_att_cache_len : req.cur_kv_len]
             )
@@ -349,6 +347,7 @@ class InferenceContext:
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
         assert len(b_req_idx) == len(b_seq_len)
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         copy_linear_att_state_to_kv_buffer(
             b_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -358,10 +357,11 @@ class InferenceContext:
             cpu_kv_conv_state=self.req_manager.mem_manager.conv_state_buffer,
             cpu_kv_ssm_state=self.req_manager.mem_manager.ssm_state_buffer,
             mtp_step=self.args.mtp_step,
-            big_page_token_num=self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num,
+            big_page_token_num=big_page_token_num,
         )
-        assert not self.args.disable_chunked_prefill, "chunked prefill mode is not supported for linear att mixed model"
-        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+
+        assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
+
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达linear att 块存储的临界点。
             if req.get_chuncked_input_token_len() == req.linear_att_cache_len:
@@ -563,9 +563,8 @@ class InferReq:
 
         # 申请线性att混合模型使用的缓存资源
         if g_infer_context.is_linear_att_mixed_model:
-            args = get_env_start_args()
             linear_block_num = self.shm_req.linear_att_token_hash_list.size
-            self.linear_att_cache_len = linear_block_num * args.linear_att_hash_page_size
+            self.linear_att_cache_len = linear_block_num * self.args.linear_att_hash_page_size
         return
 
     def _match_radix_cache(self):
@@ -595,14 +594,14 @@ class InferReq:
         ), "current _linear_match_radix_cache only support linear att hybrid model, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
-        linear_att_hash_page_size = get_env_start_args().linear_att_hash_page_size
+        linear_att_hash_page_size = self.args.linear_att_hash_page_size
         match_tokens = min(len(linear_hash_list) * linear_att_hash_page_size, self.get_cur_total_len() - 1)
         match_tokens = max(0, match_tokens)
         match_tokens = (match_tokens // linear_att_hash_page_size) * linear_att_hash_page_size
         match_block_num = match_tokens // linear_att_hash_page_size
         linear_hash_list = linear_hash_list[:match_block_num]
         assert len(linear_hash_list) == self.shm_req.linear_att_token_hash_list.size
-        big_page_token_num = linear_att_hash_page_size * get_env_start_args().linear_att_page_block_num
+        big_page_token_num = linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_is_disable = big_page_token_num > self.args.max_req_total_len
         if enable_prompt_cache and match_tokens > 1 and len(linear_hash_list) > 0 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
@@ -675,7 +674,7 @@ class InferReq:
                             self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                             self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         else:
-                            # 没有充足的token 容量时
+                            # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
                             share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
                             if share_node is not None:
                                 assert share_node.is_big_page_node()
