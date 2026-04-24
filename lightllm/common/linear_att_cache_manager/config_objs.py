@@ -78,7 +78,7 @@ class LinearAttCacheConfig:
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
             full_att_dtype=get_torch_dtype(args.data_type),
-            full_att_num_kv_heads=llm_config["num_attention_heads"] // tp_world_size,
+            full_att_num_kv_heads=max(1, llm_config["num_key_value_heads"] // tp_world_size),
             full_att_head_dim=llm_config["head_dim"],
             num_linear_k_heads=llm_config["linear_num_key_heads"] // tp_world_size,
             num_linear_v_heads=llm_config["linear_num_value_heads"] // tp_world_size,
