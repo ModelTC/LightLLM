@@ -80,7 +80,7 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 hypercorn==0.18.0
-flashinfer-python==0.6.3
+flashinfer-python==0.6.8.post1
 sgl-kernel==0.3.21
 httpx==0.28.1
 librosa==0.11.0
