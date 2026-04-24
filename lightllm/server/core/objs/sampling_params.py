@@ -293,6 +293,8 @@ class SamplingParams(ctypes.Structure):
         ("ignore_eos", ctypes.c_bool),
         # the max number of image patches to be used in the internvl model, for the test
         ("image_max_patch_num", ctypes.c_int),
+        ("min_pixels", ctypes.c_int),
+        ("max_pixels", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
@@ -322,6 +324,7 @@ class SamplingParams(ctypes.Structure):
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
         ("seed", ctypes.c_int64),  # random seed
+        ("img_gen_prefill", ctypes.c_bool),  # whether to prefill for image generation, need return past key values back
     ]
 
     _do_sample: bool = False
@@ -345,6 +348,8 @@ class SamplingParams(ctypes.Structure):
         self.top_k = kwargs.get("top_k", SamplingParams._top_k)
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
+        self.min_pixels = kwargs.get("min_pixels", -1)
+        self.max_pixels = kwargs.get("max_pixels", -1)
         self.max_new_tokens = kwargs.get("max_new_tokens", 16384)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
@@ -353,6 +358,8 @@ class SamplingParams(ctypes.Structure):
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
         self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
+
+        self.img_gen_prefill = kwargs.get("img_gen_prefill", False)
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -403,6 +410,9 @@ class SamplingParams(ctypes.Structure):
         ):  # temperature is too slow, change to greedy search
             self.temperature = 1.0
             self.top_k = 1
+
+        if self.img_gen_prefill:
+            self.max_new_tokens = 1
 
         self.verify()
 
@@ -483,6 +493,8 @@ class SamplingParams(ctypes.Structure):
             "top_k": self.top_k,
             "ignore_eos": self.ignore_eos,
             "image_max_patch_num": self.image_max_patch_num,
+            "min_pixels": self.min_pixels,
+            "max_pixels": self.max_pixels,
             "max_new_tokens": self.max_new_tokens,
             "min_new_tokens": self.min_new_tokens,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),

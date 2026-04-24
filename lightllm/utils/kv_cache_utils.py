@@ -59,7 +59,7 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
-    assert args.enable_cpu_cache
+    assert args.enable_cpu_cache or args.enable_multimodal_x2i
 
     mem_manager_class = select_mem_manager_class()
     if mem_manager_class is Deepseek2MemoryManager:

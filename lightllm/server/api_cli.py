@@ -337,6 +337,37 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
+        "--enable_multimodal_x2i",
+        action="store_true",
+        help="Whether or not to allow to generate images (requird --enable_multimodal).",
+    )
+    parser.add_argument(
+        "--x2i_server_used_gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use for x2i server (requird --enable_multimodal_x2i).",
+    )
+    parser.add_argument(
+        "--x2i_server_deploy_mode",
+        type=str,
+        choices=["colocate", "separate"],
+        default="colocate",
+        help="Deployment mode for the x2i server. 'colocate' means the x2i server will "
+        "run on the same gpus as the llm server, ",
+    )
+    parser.add_argument(
+        "--x2i_use_naive_impl",
+        action="store_true",
+        help="""Whether to use the native backend for x2i generation.
+        If set, it will use the naive pytorch backend mainly for testing and debugging purpose.""",
+    )
+    parser.add_argument(
+        "--x2v_gen_model_config",
+        type=str,
+        default=None,
+        help="Path of the x2v config file.",
+    )
+    parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
     parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
@@ -722,7 +753,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_storage_size",
         type=float,
-        default=2,
+        default=50,
         help="""The capacity of cpu cache. GB used.""",
     )
     parser.add_argument(

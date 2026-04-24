@@ -432,6 +432,9 @@ class InferReq:
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
 
+        # img gen req need copy kv to cpu
+        self.past_kv_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
@@ -661,6 +664,10 @@ class InferReqUpdatePack:
             # finish_token_index finish_status candetoken_out_len 是
             # detokenization 进程需要的信息，注意这些变量的写入顺序避免异步协同问题。
             shm_req.shm_cur_output_len = self.output_len
+
+            if shm_req.sample_params.img_gen_prefill:
+                # img gen prefill 需要等待 kv cache 卸载到 cpu 后才更新detokenization需要的信息
+                return
 
             if finish_status.is_finished():
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1

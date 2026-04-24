@@ -77,8 +77,7 @@ class CpuCachePageList(ctypes.Structure):
         return self.size == LIGHTLLM_TOKEN_HASH_LIST_SIZE
 
     def fill(self, data: List[int]):
-        assert self.size == 0
-        assert len(data) <= LIGHTLLM_TOKEN_HASH_LIST_SIZE
+        assert len(data) <= LIGHTLLM_TOKEN_HASH_LIST_SIZE, f"data size is too large: {len(data)}"
         self.items[0 : len(data)] = data
         self.size = len(data)
         return
@@ -88,3 +87,24 @@ class CpuCachePageList(ctypes.Structure):
 
     def get_all(self):
         return list(self.items[0 : self.size])
+
+
+class PastKVCachePageList(CpuCachePageList):
+    _pack_ = 4
+    _fields_ = CpuCachePageList._fields_ + [
+        ("token_len", ctypes.c_int),  # 对应的token数量
+        ("img_tokens", ctypes.c_int),
+        ("img_len", ctypes.c_int),
+    ]
+
+    def __init__(self, token_len: int = 0):
+        super().__init__()
+        self.token_len = token_len
+        self.img_tokens = 0
+        self.img_len = 0
+
+    def get_compressed_len(self):
+        return self.token_len - self.img_tokens + self.img_len
+
+    def __repr__(self):
+        return f"(token_len={self.token_len}, img_tokens={self.img_tokens}, img_len={self.img_len})"

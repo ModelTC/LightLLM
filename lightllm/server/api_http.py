@@ -52,12 +52,13 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
-from .api_openai import chat_completions_impl, completions_impl
+from .api_openai import chat_completions_impl, completions_impl, chat_completions_impl_v2
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     CompletionRequest,
     CompletionResponse,
+    ChatCompletionRequestV2,
     ModelCard,
     ModelListResponse,
 )
@@ -73,6 +74,7 @@ class G_Objs:
     args: StartArgs = None
     g_generate_func: Callable = None
     g_generate_stream_func: Callable = None
+    g_generate_image_func: Callable = None
     httpserver_manager: Union[HttpServerManager, HttpServerManagerForPDMaster] = None
     shared_token_load: TokenLoad = None
     # OpenAI-compatible "created" timestamp for /v1/models.
@@ -90,6 +92,11 @@ class G_Objs:
         else:
             self.g_generate_func = lightllm_generate
             self.g_generate_stream_func = lightllm_generate_stream
+
+        if args.enable_multimodal_x2i:
+            from .api_lightllm import lightllm_generate_image
+
+            self.g_generate_image_func = lightllm_generate_image
 
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
@@ -244,15 +251,15 @@ async def compat_generate(request: Request) -> Response:
         return await generate(request)
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
+# @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+# async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
+#     if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+#         return create_error_response(
+#             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+#         )
 
-    resp = await chat_completions_impl(request, raw_request)
-    return resp
+#     resp = await chat_completions_impl(request, raw_request)
+#     return resp
 
 
 @app.post("/v1/completions", response_model=CompletionResponse)
@@ -263,6 +270,30 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         )
 
     resp = await completions_impl(request, raw_request)
+    return resp
+
+
+@app.post("/generate_image")
+async def generate_image(request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
+    try:
+        return await g_objs.g_generate_image_func(request, g_objs.httpserver_manager)
+    except Exception as e:
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+
+
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def completions_v2(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+
+    resp = await chat_completions_impl_v2(request, raw_request)
     return resp
 
 

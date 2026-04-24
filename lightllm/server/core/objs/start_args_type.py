@@ -171,7 +171,7 @@ class StartArgs:
     nixl_pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
-    cpu_cache_storage_size: float = field(default=2)
+    cpu_cache_storage_size: float = field(default=20)
     cpu_cache_token_page_size: int = field(default=64)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
@@ -187,6 +187,16 @@ class StartArgs:
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)
+
+    # multi_modal_x2i
+    enable_multimodal_x2i: bool = field(default=False)
+    x2i_port: int = field(default=None)
+    http_server_port_for_x2i: int = field(default=None)
+    x2i_server_used_gpus: int = field(default=1)
+    x2i_server_deploy_mode: str = field(default="colocate")
+    x2i_use_naive_impl: bool = field(default=False)
+    x2i_worker_task_port: int = field(default=None)
+    x2i_worker_nccl_port: int = field(default=None)
 
     # hybrid attention model (Qwen3Next)
     mamba_cache_size: Optional[int] = field(default=None)
