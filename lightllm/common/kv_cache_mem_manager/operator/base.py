@@ -11,9 +11,9 @@ class BaseMemManagerOperator(ABC):
         super().__init__()
         self.mem_manager = mem_manager
 
-    # @abstractmethod
-    # def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-    #     return
+    @abstractmethod
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        pass
 
     # cpu cache 的相关操作接口
     def load_cpu_kv_to_gpu(self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client):
