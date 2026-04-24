@@ -122,6 +122,7 @@ class MultiLevelKvCacheModule(object):
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
                         cpu_cache_client=self.cpu_cache_client,
+                        req=req,
                     )
 
                 torch.cuda.current_stream().synchronize()
