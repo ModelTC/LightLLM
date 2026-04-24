@@ -1,21 +1,20 @@
 import torch
 import numpy as np
-import collections
-from typing import Tuple, Dict, Set, List, Optional, Union
+from typing import Tuple, Dict, Set, List, Optional
 from sortedcontainers import SortedSet
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from .shared_arr import SharedArray
-from .radix_cache import UniqueTimeIdGenerator, time_gen, match
+from .radix_cache import time_gen
 
 
-class PagedTreeNode:
+class LinearAttPagedTreeNode:
     def __init__(self, hash_page_size: int, big_page_num: int):
         self.hash_page_size = hash_page_size
         self.big_page_num = big_page_num
 
         # children are keyed by the last ``block_hash`` of each child
-        self.children: Dict[int, "PagedTreeNode"] = {}
-        self.parent: "PagedTreeNode" = None
+        self.children: Dict[int, "LinearAttPagedTreeNode"] = {}
+        self.parent: "LinearAttPagedTreeNode" = None
 
         # Hash of the last page in this node (None for the empty root).
         self.page_num = None  # 页面数量，只能是 1 或者 big_page_num
@@ -62,9 +61,9 @@ class PagedTreeNode:
         token_mem_index_value: torch.Tensor,
         block_hash: int,
         block_linear_idx: Optional[int],
-    ) -> "PagedTreeNode":
+    ) -> "LinearAttPagedTreeNode":
         assert len(token_id_key) == self.hash_page_size == len(token_mem_index_value)
-        child = PagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
+        child = LinearAttPagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
         child.page_hash = block_hash
         child.linear_buffer_idx = block_linear_idx
         child.token_id_key = token_id_key
@@ -81,9 +80,9 @@ class PagedTreeNode:
 
     def add_and_return_new_big_page_child(
         self, token_id_key: torch.Tensor, token_mem_index_value: torch.Tensor, block_hash: int
-    ) -> "PagedTreeNode":
+    ) -> "LinearAttPagedTreeNode":
         assert len(token_id_key) == self.hash_page_size * self.big_page_num == len(token_mem_index_value)
-        child = PagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
+        child = LinearAttPagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
         child.page_hash = block_hash
         child.linear_buffer_idx = None
         child.token_id_key = token_id_key
@@ -97,7 +96,7 @@ class PagedTreeNode:
         child.node_prefix_total_len = child.parent.node_prefix_total_len + new_len
         return child
 
-    def remove_child(self, child_node: "PagedTreeNode"):
+    def remove_child(self, child_node: "LinearAttPagedTreeNode"):
         del self.children[child_node.page_hash]
         child_node.parent = None
 
@@ -108,7 +107,7 @@ class PagedTreeNode:
         return len(self.children) == 0
 
 
-class PagedRadixCache:
+class LinearAttPagedRadixCache:
     def __init__(
         self,
         unique_name: str,
@@ -133,14 +132,14 @@ class PagedRadixCache:
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
-        self.root_node = PagedTreeNode(hash_page_size=hash_page_size, big_page_num=big_page_num)
+        self.root_node = LinearAttPagedTreeNode(hash_page_size=hash_page_size, big_page_num=big_page_num)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1
         self.root_node.page_num = self.big_page_num
 
-        self._evict_tree_set: Set[PagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
-        self._evict_tree_set_for_linear_att: Set[PagedTreeNode] = SortedSet(
+        self._evict_tree_set: Set[LinearAttPagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
+        self._evict_tree_set_for_linear_att: Set[LinearAttPagedTreeNode] = SortedSet(
             key=lambda x: x.get_compare_key_for_buffer_idx()
         )
 
@@ -152,14 +151,14 @@ class PagedRadixCache:
         self.tree_total_tokens_num.arr[0] = 0
         self.linear_att_cache_manager: LinearAttCacheManager = linear_att_cache_manager
 
-    def _discard_node(self, node: PagedTreeNode):
+    def _discard_node(self, node: LinearAttPagedTreeNode):
         if node.is_leaf():
             self._evict_tree_set.discard(node)
         if node.linear_buffer_idx is not None:
             self._evict_tree_set_for_linear_att.discard(node)
         return
 
-    def _add_node(self, node: PagedTreeNode):
+    def _add_node(self, node: LinearAttPagedTreeNode):
         if node.is_leaf():
             self._evict_tree_set.add(node)
         if node.linear_buffer_idx is not None:
@@ -172,7 +171,7 @@ class PagedRadixCache:
         value: Optional[torch.Tensor] = None,
         block_hashs: Optional[List[int]] = None,
         block_linear_idxs: Optional[List[int]] = None,
-    ) -> Tuple[int, Optional[PagedTreeNode]]:
+    ) -> Tuple[int, Optional[LinearAttPagedTreeNode]]:
         assert key is not None
         if value is None:
             value = key
@@ -209,12 +208,12 @@ class PagedRadixCache:
 
     def _insert_helper(
         self,
-        node: PagedTreeNode,
+        node: LinearAttPagedTreeNode,
         key: torch.Tensor,
         value: torch.Tensor,
         block_hashs: List[int],
         block_linear_idxs: List[int],
-    ) -> Tuple[int, Optional[PagedTreeNode]]:
+    ) -> Tuple[int, Optional[LinearAttPagedTreeNode]]:
         self._discard_node(node)
         node.update_time()
 
@@ -326,7 +325,7 @@ class PagedRadixCache:
         if len(block_hashs) == 0 or len(key) == 0:
             return None, 0, None
 
-        ans_node_list: List[PagedTreeNode] = []
+        ans_node_list: List[LinearAttPagedTreeNode] = []
         self._match_prefix_helper(
             self.root_node,
             key=key,
@@ -350,7 +349,7 @@ class PagedRadixCache:
 
     def _match_prefix_helper(
         self,
-        node: PagedTreeNode,
+        node: LinearAttPagedTreeNode,
         key: torch.Tensor,
         block_hashs: Optional[List[int]],
         ans_node_list: list,
@@ -403,7 +402,7 @@ class PagedRadixCache:
         finally:
             self._add_node(node)
 
-    def _realy_match(self, nodes: List[PagedTreeNode]) -> List[PagedTreeNode]:
+    def _realy_match(self, nodes: List[LinearAttPagedTreeNode]) -> List[LinearAttPagedTreeNode]:
         removed_list = []
         for node in reversed(nodes):
             if node.is_big_page_node():
@@ -428,7 +427,7 @@ class PagedRadixCache:
         else:
             return nodes[: -len(removed_list)]
 
-    def _try_merge(self, child_node: PagedTreeNode) -> Optional[PagedTreeNode]:
+    def _try_merge(self, child_node: LinearAttPagedTreeNode) -> Optional[LinearAttPagedTreeNode]:
         raise NotImplementedError()
 
     def merge_unreferenced_nodes(self):
@@ -439,7 +438,7 @@ class PagedRadixCache:
         self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
         return
 
-    def deref_to_first_big_page_node(self, node: PagedTreeNode) -> Optional[PagedTreeNode]:
+    def deref_to_first_big_page_node(self, node: LinearAttPagedTreeNode) -> Optional[LinearAttPagedTreeNode]:
         assert not node.is_big_page_node()
         iter_node = node
         while not iter_node.is_big_page_node():
@@ -458,7 +457,7 @@ class PagedRadixCache:
         else:
             return iter_node
 
-    def dec_node_ref_counter(self, node: PagedTreeNode):
+    def dec_node_ref_counter(self, node: LinearAttPagedTreeNode):
         if node is None:
             return
         old_node = node
@@ -473,7 +472,7 @@ class PagedRadixCache:
         self._add_node(old_node)
         return
 
-    def add_node_ref_counter(self, node: PagedTreeNode):
+    def add_node_ref_counter(self, node: LinearAttPagedTreeNode):
         if node is None:
             return
         old_node = node
@@ -488,7 +487,7 @@ class PagedRadixCache:
         self._add_node(old_node)
         return
 
-    def get_mem_index_value_by_node(self, node: PagedTreeNode) -> Optional[torch.Tensor]:
+    def get_mem_index_value_by_node(self, node: LinearAttPagedTreeNode) -> Optional[torch.Tensor]:
         if node is None:
             return None
 
@@ -509,7 +508,7 @@ class PagedRadixCache:
     def print_self(self, indent=0):
         self._print_helper(self.root_node, indent)
 
-    def _print_helper(self, node: PagedTreeNode, indent):
+    def _print_helper(self, node: LinearAttPagedTreeNode, indent):
         print(
             " " * indent,
             f"hash_info: {node.page_hash} "
@@ -551,7 +550,7 @@ class PagedRadixCache:
         if len(self._evict_tree_set_for_linear_att) == 0:
             return
 
-        node: PagedTreeNode = self._evict_tree_set_for_linear_att.pop(0)
+        node: LinearAttPagedTreeNode = self._evict_tree_set_for_linear_att.pop(0)
         self._discard_node(node)
 
         assert node.linear_buffer_idx is not None
@@ -568,7 +567,7 @@ class PagedRadixCache:
                               refed_tokens_num {self.refed_tokens_num.arr[0]}"""
         num_evicted = 0
         while num_evicted < need_remove_tokens:
-            node: PagedTreeNode = self._evict_tree_set.pop(0)
+            node: LinearAttPagedTreeNode = self._evict_tree_set.pop(0)
             self._discard_node(node)
 
             assert (
@@ -577,7 +576,7 @@ class PagedRadixCache:
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value, node.linear_buffer_idx)
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
-            parent_node: PagedTreeNode = node.parent
+            parent_node: LinearAttPagedTreeNode = node.parent
             parent_node.remove_child(node)
 
             self._add_node(parent_node)

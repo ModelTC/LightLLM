@@ -11,7 +11,10 @@ from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
-from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache, PagedTreeNode
+from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import (
+    LinearAttPagedRadixCache,
+    LinearAttPagedTreeNode,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
@@ -27,7 +30,7 @@ logger = init_logger(__name__)
 @dataclass
 class InferenceContext:
     req_manager: Union[ReqManager, ReqManagerForMamba] = None  # gpu 请求管理
-    radix_cache: Union[PagedRadixCache, RadixCache] = None
+    radix_cache: Union[LinearAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
     requests_mapping: Dict[int, "InferReq"] = None
     infer_req_ids = None
@@ -42,7 +45,7 @@ class InferenceContext:
         self,
         backend,
         req_manager: Union[ReqManager, ReqManagerForMamba],
-        radix_cache: Union[PagedRadixCache, RadixCache],
+        radix_cache: Union[LinearAttPagedRadixCache, RadixCache],
         shm_req_manager: ShmReqManager,
         vocab_size: int,
     ):
@@ -554,7 +557,7 @@ class InferReq:
         else:
             self.prefix_token_ids = []
         self.multimodal_params = self.multimodal_params.to_dict()
-        self.shared_kv_node: Union[TreeNode, PagedTreeNode] = None
+        self.shared_kv_node: Union[TreeNode, LinearAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
 
