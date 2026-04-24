@@ -111,6 +111,13 @@ class MultiLevelKvCacheModule(object):
                         )
                         assert len(mem_indexes_cuda) == len(page_indexes_cuda) * token_page_size
 
+                    # 更新 req 状态。
+                    idle_token_num -= need_token_num
+                    g_infer_context.req_manager.req_to_token_indexs[
+                        req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                    ] = mem_indexes
+                    req.cur_kv_len = req.cur_kv_len + need_token_num
+
                     mem_manager.operator.load_cpu_kv_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
@@ -119,15 +126,6 @@ class MultiLevelKvCacheModule(object):
 
                 torch.cuda.current_stream().synchronize()
 
-                idle_token_num -= need_token_num
-                g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
-                ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + need_token_num
-                if g_infer_context.is_linear_att_mixed_model:
-                    g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(
-                        req=req,
-                    )
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 

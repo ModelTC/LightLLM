@@ -7,6 +7,8 @@ from lightllm.utils.log_utils import init_logger
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+
 logger = init_logger(__name__)
 
 
@@ -16,7 +18,11 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
     """
 
     def load_cpu_kv_to_gpu(
-        self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client: "CpuKvCacheClient"
+        self,
+        mem_indexes: torch.Tensor,
+        page_indexes: torch.Tensor,
+        cpu_cache_client: "CpuKvCacheClient",
+        req: "InferReq",
     ):
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()

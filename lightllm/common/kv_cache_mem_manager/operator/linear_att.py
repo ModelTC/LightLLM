@@ -9,6 +9,8 @@ from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheC
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+
 logger = init_logger(__name__)
 
 
@@ -22,7 +24,11 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         self.linear_config = LinearAttCacheConfig.load_from_args()
 
     def load_cpu_kv_to_gpu(
-        self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client: "CpuKvCacheClient"
+        self,
+        mem_indexes: torch.Tensor,
+        page_indexes: torch.Tensor,
+        cpu_cache_client: "CpuKvCacheClient",
+        req: "InferReq",
     ):
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()
@@ -47,6 +53,13 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
         )
+
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        g_infer_context.req_manager.copy_kv_buffer_to_linear_att_state(
+            req=req,
+        )
+
         return
 
     def offload_gpu_kv_to_cpu(
