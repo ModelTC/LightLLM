@@ -276,4 +276,10 @@ def tppart_model_infer(args, model_kvargs, batch_sizes, input_len, output_len, a
         dist.barrier()
 
     ans_queue.put(True)
-    return
+
+    try:
+        ans_queue.close()
+        ans_queue.join_thread()
+    except Exception:
+        pass
+    os._exit(0)
