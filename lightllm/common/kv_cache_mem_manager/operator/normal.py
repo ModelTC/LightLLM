@@ -24,7 +24,7 @@ class NormalMemOperator(BaseMemManagerOperator):
         destindex_copy_kv(kv, mem_index, mem_manager.kv_buffer[layer_index])
         return
 
-    def load_cpu_kv_to_gpu(
+    def load_cpu_cache_to_gpu(
         self,
         mem_indexes: torch.Tensor,
         page_indexes: torch.Tensor,
@@ -51,12 +51,13 @@ class NormalMemOperator(BaseMemManagerOperator):
         )
         return
 
-    def offload_gpu_kv_to_cpu(
+    def offload_gpu_kv_to_cpu_cache(
         self,
         mem_indexes: torch.Tensor,
         page_indexes: torch.Tensor,
         page_readies: torch.Tensor,
         cpu_cache_client: "CpuKvCacheClient",
+        req: "InferReq",
     ):
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()

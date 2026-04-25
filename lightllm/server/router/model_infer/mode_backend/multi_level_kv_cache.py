@@ -118,7 +118,7 @@ class MultiLevelKvCacheModule(object):
                     ] = mem_indexes
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
-                    mem_manager.operator.load_cpu_kv_to_gpu(
+                    mem_manager.operator.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
                         cpu_cache_client=self.cpu_cache_client,
@@ -251,11 +251,12 @@ class MultiLevelKvCacheModule(object):
 
             mem_manager = self.backend.model.mem_manager
 
-            mem_manager.operator.offload_gpu_kv_to_cpu(
+            mem_manager.operator.offload_gpu_kv_to_cpu_cache(
                 mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
                 cpu_cache_client=self.cpu_cache_client,
+                req=req,
             )
 
             sync_event = torch.cuda.Event()

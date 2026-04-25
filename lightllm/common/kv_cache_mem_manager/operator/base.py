@@ -17,13 +17,18 @@ class BaseMemManagerOperator(ABC):
         pass
 
     # cpu cache 的相关操作接口
-    def load_cpu_kv_to_gpu(
+    def load_cpu_cache_to_gpu(
         self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client, req: "InferReq"
     ):
         raise NotImplementedError()
 
-    def offload_gpu_kv_to_cpu(
-        self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, page_readies: torch.Tensor, cpu_cache_client
+    def offload_gpu_kv_to_cpu_cache(
+        self,
+        mem_indexes: torch.Tensor,
+        page_indexes: torch.Tensor,
+        page_readies: torch.Tensor,
+        cpu_cache_client,
+        req: "InferReq",
     ):
         raise NotImplementedError()
 
