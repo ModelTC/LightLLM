@@ -75,7 +75,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             page_num=0,
             token_page_size=1,
             layer_num=1,
-            num_heads=linear_config.tp_world_size,
+            num_heads=1,
             head_dim=linear_config.get_cpu_cache_big_page_bytes(),
             data_type=torch.uint8,
             scale_head_dim=0,

@@ -38,25 +38,35 @@ class LinearAttCacheConfig:
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)
 
-    def get_conv_state_bytes(self):
+    def get_conv_state_bytes_per_layer(self):
         return self.get_conv_dim() * (self.conv_kernel_size - 1) * self.conv_state_dtype.itemsize
 
-    def get_ssm_state_bytes(self):
+    def get_ssm_state_bytes_per_layer(self):
         return self.num_linear_v_heads * self.head_linear_k_dim * self.head_linear_v_dim * self.ssm_state_dtype.itemsize
 
-    def get_full_att_bytes(self):
-        return 2 * self.full_att_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
-
     def get_cpu_cache_big_page_bytes(self):
+        a = self.get_cpu_cache_full_att_bytes()
+        b = self.get_cpu_cache_conv_bytes()
+        c = self.get_cpu_cache_ssm_bytes()
+
+        return triton.cdiv(a + b + c, 16) * 16
+
+    def get_cpu_cache_full_att_bytes(self):
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
-        a = self.get_full_att_bytes() * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
-        b = self.get_conv_state_bytes() * self.linear_layer_num
-        c = self.get_ssm_state_bytes() * self.linear_layer_num
+        full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
+        a = full_att_bytes * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
+        return a
 
-        return triton.cdiv(a + b + c, 16) * 16
+    def get_cpu_cache_conv_bytes(self):
+        b = self.get_conv_state_bytes_per_layer() * self.linear_layer_num * self.tp_world_size
+        return b
+
+    def get_cpu_cache_ssm_bytes(self):
+        c = self.get_ssm_state_bytes_per_layer() * self.linear_layer_num * self.tp_world_size
+        return c
 
     @staticmethod
     def load_from_args() -> "LinearAttCacheConfig":
