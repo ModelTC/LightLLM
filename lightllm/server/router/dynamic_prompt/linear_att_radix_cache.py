@@ -528,6 +528,21 @@ class LinearAttPagedRadixCache:
         ans_list.reverse()
         return torch.concat(ans_list, dim=0)
 
+    def get_big_page_ids_by_node(self, node: LinearAttPagedTreeNode) -> List[int]:
+        if node is None:
+            return []
+        if node is self.root_node:
+            return []
+
+        ans_list = []
+        while node is not self.root_node:
+            if node.is_big_page_node():
+                ans_list.append(node.big_page_buffer_idx)
+            node = node.parent
+
+        ans_list.reverse()
+        return ans_list
+
     def get_refed_tokens_num(self):
         return self.refed_tokens_num.arr[0]
 
