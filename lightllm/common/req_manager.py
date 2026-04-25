@@ -274,25 +274,24 @@ class ReqManagerForMamba(ReqManager):
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states
 
-    def copy_kv_buffer_to_linear_att_state(self, req: "InferReq"):
-        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_kv_buffer_to_linear_att_state
+    def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
 
-        copy_kv_buffer_to_linear_att_state(
-            req_idx=req.req_idx,
-            seq_len=req.cur_kv_len,
-            req_to_token_mem_index=self.req_to_token_indexs,
-            gpu_conv_state=self.req_to_conv_state.buffer,
-            gpu_ssm_state=self.req_to_ssm_state.buffer,
-            cpu_kv_conv_state=self.mem_manager.conv_state_buffer,
-            cpu_kv_ssm_state=self.mem_manager.ssm_state_buffer,
-            mtp_step=self.mtp_step,
-            big_page_token_num=self.big_page_token_num,
-        )
+        from .linear_att_cache_manager import LinearAttCacheManager
+
+        big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
+
+        conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
+        dest_req_idx = req.req_idx * (self.mtp_step + 1)
+
+        self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
+        self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
         return
 
-    def copy_cache_to_linear_att_state(self, req: "InferReq", linear_att_cache_manager: LinearAttCacheManager):
-        conv_state, ssm_state = linear_att_cache_manager.get_state_cache(
-            buffer_idx=req.shared_kv_node.linear_buffer_idx
+    def copy_small_page_buffer_to_linear_att_state(
+        self, req: "InferReq", linear_att_small_page_buffers: LinearAttCacheManager
+    ):
+        conv_state, ssm_state = linear_att_small_page_buffers.get_state_cache(
+            buffer_idx=req.shared_kv_node.small_page_buffer_idx
         )
         dest_req_idx = req.req_idx * (self.mtp_step + 1)
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。

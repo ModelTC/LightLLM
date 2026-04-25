@@ -12,8 +12,9 @@ logger = init_logger(__name__)
 class LinearAttCacheConfig:
     tp_world_size: int
     # full att 的参数
+    full_att_all_num_kv_heads: int
     full_att_dtype: torch.dtype
-    full_att_num_kv_heads: int
+    full_att_num_kv_heads: int  # 这个是 tp 后的head头数量
     full_att_head_dim: int
 
     # linear att 的参数
@@ -77,6 +78,7 @@ class LinearAttCacheConfig:
         tp_world_size = get_env_start_args().tp // get_env_start_args().dp
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
+            full_att_all_num_kv_heads=llm_config["num_key_value_heads"],
             full_att_dtype=get_torch_dtype(args.data_type),
             full_att_num_kv_heads=max(1, llm_config["num_key_value_heads"] // tp_world_size),
             full_att_head_dim=llm_config["head_dim"],

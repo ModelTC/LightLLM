@@ -68,6 +68,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         self.linear_config = LinearAttCacheConfig(
             tp_world_size=self.tp_world_size_,
+            full_att_all_num_kv_heads=self.config["num_key_value_heads"],
             full_att_dtype=self.data_type,
             full_att_num_kv_heads=self.num_kv_heads,
             full_att_head_dim=self.config["head_dim"],

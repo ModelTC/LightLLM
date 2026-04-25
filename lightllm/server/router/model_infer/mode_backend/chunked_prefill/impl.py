@@ -120,7 +120,6 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             g_infer_context.copy_linear_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,
-                b_seq_len=model_input.b_seq_len,
                 reqs=run_reqs,
             )
             sync_event = torch.cuda.Event()
@@ -206,7 +205,6 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             g_infer_context.copy_linear_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,
-                b_seq_len=model_input.b_seq_len,
                 reqs=run_reqs,
             )
             sync_event = torch.cuda.Event()

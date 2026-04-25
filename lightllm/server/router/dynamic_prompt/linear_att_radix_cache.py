@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from typing import Tuple, Dict, Set, List, Optional
-from sortedcontainers import SortedSet
+from sortedcontainers import SortedSet, SortedDict
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
@@ -31,7 +31,8 @@ class LinearAttPagedTreeNode:
         self.node_prefix_total_len = 0
 
         # Kept for parity with ``TreeNode`` (used by hybrid attention models).
-        self.linear_buffer_idx = None
+        self.small_page_buffer_idx = None  # 这个是对应小页的buffer_id, 可能存在可能不存在
+        self.big_page_buffer_idx = None  # 当初始化后，如果该页面是大页，则该buffer_id 必然存在不是None
 
     def is_big_page_node(self):
         assert self.node_prefix_total_len % self.hash_page_size == 0
@@ -42,7 +43,7 @@ class LinearAttPagedTreeNode:
         if self.is_big_page_node():
             keya = 1
         else:
-            if self.linear_buffer_idx is None:
+            if self.small_page_buffer_idx is None:
                 keya = 0
             else:
                 keya = 1
@@ -52,7 +53,7 @@ class LinearAttPagedTreeNode:
     def get_compare_key_for_buffer_idx(self):
         assert self.is_big_page_node() is False
         # 对于有 buffer_id 的节点的回收处理比较器
-        assert self.linear_buffer_idx is not None
+        assert self.small_page_buffer_idx is not None
         return (self.time_id,)
 
     def add_and_return_new_child(
@@ -60,12 +61,12 @@ class LinearAttPagedTreeNode:
         token_id_key: torch.Tensor,
         token_mem_index_value: torch.Tensor,
         block_hash: int,
-        block_linear_idx: Optional[int],
+        small_page_buffer_idx: Optional[int],
     ) -> "LinearAttPagedTreeNode":
         assert len(token_id_key) == self.hash_page_size == len(token_mem_index_value)
         child = LinearAttPagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
         child.page_hash = block_hash
-        child.linear_buffer_idx = block_linear_idx
+        child.small_page_buffer_idx = small_page_buffer_idx
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
         child.page_num = 1
@@ -79,15 +80,16 @@ class LinearAttPagedTreeNode:
         return child
 
     def add_and_return_new_big_page_child(
-        self, token_id_key: torch.Tensor, token_mem_index_value: torch.Tensor, block_hash: int
+        self, token_id_key: torch.Tensor, token_mem_index_value: torch.Tensor, block_hash: int, big_page_buffer_idx: int
     ) -> "LinearAttPagedTreeNode":
         assert len(token_id_key) == self.hash_page_size * self.big_page_num == len(token_mem_index_value)
         child = LinearAttPagedTreeNode(hash_page_size=self.hash_page_size, big_page_num=self.big_page_num)
         child.page_hash = block_hash
-        child.linear_buffer_idx = None
         child.token_id_key = token_id_key
         child.token_mem_index_value = token_mem_index_value
         child.page_num = self.big_page_num
+        child.big_page_buffer_idx = big_page_buffer_idx
+        assert child.big_page_buffer_idx is not None
         assert child.page_hash not in self.children, "duplicate last block hash in children"
         child.parent = self
         self.children[child.page_hash] = child
@@ -116,7 +118,7 @@ class LinearAttPagedRadixCache:
         hash_page_size: int,
         big_page_num: int,
         kv_cache_mem_manager=None,
-        linear_att_cache_manager=None,
+        linear_att_small_page_buffers=None,
     ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
@@ -129,6 +131,8 @@ class LinearAttPagedRadixCache:
         self.total_token_num = total_token_num
 
         self.mem_manager: MemoryManager = kv_cache_mem_manager
+
+        self.linear_att_big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -149,19 +153,19 @@ class LinearAttPagedRadixCache:
             f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
         )
         self.tree_total_tokens_num.arr[0] = 0
-        self.linear_att_cache_manager: LinearAttCacheManager = linear_att_cache_manager
+        self.linear_att_small_page_buffers: LinearAttCacheManager = linear_att_small_page_buffers
 
     def _discard_node(self, node: LinearAttPagedTreeNode):
         if node.is_leaf():
             self._evict_tree_set.discard(node)
-        if node.linear_buffer_idx is not None:
+        if node.small_page_buffer_idx is not None:
             self._evict_tree_set_for_linear_att.discard(node)
         return
 
     def _add_node(self, node: LinearAttPagedTreeNode):
         if node.is_leaf():
             self._evict_tree_set.add(node)
-        if node.linear_buffer_idx is not None:
+        if node.small_page_buffer_idx is not None:
             self._evict_tree_set_for_linear_att.add(node)
         return
 
@@ -171,6 +175,7 @@ class LinearAttPagedRadixCache:
         value: Optional[torch.Tensor] = None,
         block_hashs: Optional[List[int]] = None,
         block_linear_idxs: Optional[List[int]] = None,
+        len_to_big_page_id: Optional[SortedDict] = None,
     ) -> Tuple[int, Optional[LinearAttPagedTreeNode]]:
         assert key is not None
         if value is None:
@@ -180,6 +185,10 @@ class LinearAttPagedRadixCache:
             block_hashs = []
         if block_linear_idxs is None:
             block_linear_idxs = []
+        if len_to_big_page_id is None:
+            len_to_big_page_id = SortedDict()
+
+        assert (len(block_hashs) // self.big_page_num) >= len(len_to_big_page_id)
 
         assert (
             len(key) == len(block_hashs) * self.hash_page_size
@@ -204,7 +213,9 @@ class LinearAttPagedRadixCache:
                 block_linear_idxs[-1] is not None
             ), "the last block_linear_idx must not be None, for compatibility with non-paged radix cache"
 
-        return self._insert_helper(self.root_node, key, value, block_hashs, block_linear_idxs)
+        ans = self._insert_helper(self.root_node, key, value, block_hashs, block_linear_idxs, len_to_big_page_id)
+        assert len(len_to_big_page_id) == 0
+        return ans
 
     def _insert_helper(
         self,
@@ -213,6 +224,7 @@ class LinearAttPagedRadixCache:
         value: torch.Tensor,
         block_hashs: List[int],
         block_linear_idxs: List[int],
+        len_to_big_page_id: SortedDict,
     ) -> Tuple[int, Optional[LinearAttPagedTreeNode]]:
         self._discard_node(node)
         node.update_time()
@@ -230,6 +242,13 @@ class LinearAttPagedRadixCache:
                     assert node.is_big_page_node()
                     child = node.children[big_page_block_hash]
                     assert child.is_big_page_node()
+
+                    # 提前释放 len_to_big_page_id 对应的buffer资源
+                    new_big_page_buffer_id = len_to_big_page_id.pop(child.node_prefix_total_len, None)
+                    if new_big_page_buffer_id is not None:
+                        # 因为节点已经存在，所以无法插入，但是要释放对应的buffer_id 节点
+                        self.linear_att_big_page_buffers.free_state_cache([new_big_page_buffer_id])
+
                     # 已经存在了
                     sub_prefix_len, ans_node = self._insert_helper(
                         child,
@@ -237,15 +256,22 @@ class LinearAttPagedRadixCache:
                         value[self.big_page_tokens :],
                         block_hashs[self.big_page_num :],
                         block_linear_idxs[self.big_page_num :],
+                        len_to_big_page_id,
                     )
                     return self.big_page_tokens + sub_prefix_len, ans_node
                 else:
                     # 不存在，则新建一个大页节点
                     assert node.is_big_page_node()
+                    new_big_page_buffer_id = len_to_big_page_id.pop(
+                        node.node_prefix_total_len + self.big_page_tokens, None
+                    )
+                    assert new_big_page_buffer_id is not None
+
                     new_child = node.add_and_return_new_big_page_child(
                         big_page_token_id_key,
                         big_page_token_mem_index_value,
                         big_page_block_hash,
+                        new_big_page_buffer_id,
                     )
                     self.tree_total_tokens_num.arr[0] += self.big_page_tokens
                     assert new_child.is_big_page_node()
@@ -256,6 +282,7 @@ class LinearAttPagedRadixCache:
                         value[self.big_page_tokens :],
                         block_hashs[self.big_page_num :],
                         block_linear_idxs[self.big_page_num :],
+                        len_to_big_page_id,
                     )
                     return 0, ans_node
             else:
@@ -268,14 +295,14 @@ class LinearAttPagedRadixCache:
 
                     if block_linear_idxs[0] is not None:
                         assert len(block_hashs) == 1 == len(block_linear_idxs)
-                        if child.linear_buffer_idx is None:
+                        if child.small_page_buffer_idx is None:
                             # 将这个buffer id 移交给这个存在的节点。
                             self._discard_node(child)
-                            child.linear_buffer_idx = block_linear_idxs[0]
+                            child.small_page_buffer_idx = block_linear_idxs[0]
                             self._add_node(child)
                         else:
                             # 说明节点已经存在了，直接提前移除掉这个节点占用的线性缓存，外部不用处理这个细节了
-                            self.linear_att_cache_manager.free_state_cache(free_indexes=[block_linear_idxs[0]])
+                            self.linear_att_small_page_buffers.free_state_cache(free_indexes=[block_linear_idxs[0]])
 
                     sub_prefix_len, ans_node = self._insert_helper(
                         child,
@@ -283,6 +310,7 @@ class LinearAttPagedRadixCache:
                         value[self.hash_page_size :],
                         block_hashs[1:],
                         block_linear_idxs[1:],
+                        len_to_big_page_id,
                     )
                     return self.hash_page_size + sub_prefix_len, ans_node
                 else:
@@ -301,6 +329,7 @@ class LinearAttPagedRadixCache:
                         value[self.hash_page_size :],
                         block_hashs[1:],
                         block_linear_idxs[1:],
+                        len_to_big_page_id,
                     )
                     return 0, ans_node
 
@@ -407,7 +436,7 @@ class LinearAttPagedRadixCache:
         for node in reversed(nodes):
             if node.is_big_page_node():
                 break
-            elif node.linear_buffer_idx is not None:
+            elif node.small_page_buffer_idx is not None:
                 assert not node.is_big_page_node()
                 break
             else:
@@ -516,7 +545,7 @@ class LinearAttPagedRadixCache:
             f"v: {node.token_mem_index_value[0:10] if node.token_mem_index_value is not None else None} "
             f"refs: {node.ref_counter} time_id: {node.time_id} "
             f"prefix_total_len: {node.node_prefix_total_len} "
-            f"node_value_len: {node.node_value_len} buffer_idx: {node.linear_buffer_idx}",
+            f"node_value_len: {node.node_value_len} buffer_idx: {node.small_page_buffer_idx}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
@@ -527,25 +556,25 @@ class LinearAttPagedRadixCache:
         if need_token_num > self.mem_manager.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
             release_mems = []
-            linear_att_buffer_indexes = []
+            small_page_buffer_ids = []
 
-            def release_mem(mem_index, linear_att_buffer_index):
+            def release_mem(mem_index, linear_att_small_page_id):
                 release_mems.append(mem_index)
-                linear_att_buffer_indexes.append(linear_att_buffer_index)
+                small_page_buffer_ids.append(linear_att_small_page_id)
                 return
 
             self._evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
             self.mem_manager.free(mem_index)
-            linear_att_buffer_indexes = [idx for idx in linear_att_buffer_indexes if idx is not None]
-            if len(linear_att_buffer_indexes) > 0:
-                self.linear_att_cache_manager.free_state_cache(linear_att_buffer_indexes)
+            small_page_buffer_ids = [idx for idx in small_page_buffer_ids if idx is not None]
+            if len(small_page_buffer_ids) > 0:
+                self.linear_att_small_page_buffers.free_state_cache(small_page_buffer_ids)
         return
 
-    def free_one_linear_buffer(self):
-        if self.linear_att_cache_manager is None:
+    def free_one_small_page_linear_att_buffer(self):
+        if self.linear_att_small_page_buffers is None:
             return
-        if self.linear_att_cache_manager.get_free_cache_num() > 0:
+        if self.linear_att_small_page_buffers.get_free_cache_num() > 0:
             return
         if len(self._evict_tree_set_for_linear_att) == 0:
             return
@@ -553,9 +582,9 @@ class LinearAttPagedRadixCache:
         node: LinearAttPagedTreeNode = self._evict_tree_set_for_linear_att.pop(0)
         self._discard_node(node)
 
-        assert node.linear_buffer_idx is not None
-        self.linear_att_cache_manager.free_state_cache(free_indexes=[node.linear_buffer_idx])
-        node.linear_buffer_idx = None
+        assert node.small_page_buffer_idx is not None
+        self.linear_att_small_page_buffers.free_state_cache(free_indexes=[node.small_page_buffer_idx])
+        node.small_page_buffer_idx = None
 
         self._add_node(node)
         return
@@ -574,7 +603,12 @@ class LinearAttPagedRadixCache:
                 node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
             ), "error evict tree node state"
             num_evicted += len(node.token_mem_index_value)
-            evict_callback(node.token_mem_index_value, node.linear_buffer_idx)
+
+            if node.is_big_page_node():
+                assert node.big_page_buffer_idx is not None
+                self.linear_att_big_page_buffers.free_state_cache([node.big_page_buffer_idx])
+
+            evict_callback(node.token_mem_index_value, node.small_page_buffer_idx)
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
             parent_node: LinearAttPagedTreeNode = node.parent
             parent_node.remove_child(node)

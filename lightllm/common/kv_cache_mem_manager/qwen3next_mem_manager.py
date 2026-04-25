@@ -3,7 +3,7 @@ import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .operator import LinearAttMemOperator
 from typing import Tuple, Any
 
@@ -42,20 +42,10 @@ class Qwen3NextMemManager(MemoryManager):
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        conv_head_dim = triton.cdiv(self.linear_config.get_conv_state_bytes(), big_page_token_num)
-        ssm_head_dim = triton.cdiv(self.linear_config.get_ssm_state_bytes(), big_page_token_num)
-
-        self.conv_state_buffer = torch.empty(
-            (self.linear_config.linear_layer_num, self.size + 1, conv_head_dim),
-            dtype=torch.uint8,
-            device="cpu",
-            pin_memory=True,
-        )
-        self.ssm_state_buffer = torch.empty(
-            (self.linear_config.linear_layer_num, self.size + 1, ssm_head_dim),
-            dtype=torch.uint8,
-            device="cpu",
-            pin_memory=True,
+        # 申请大页可能需要对应的资源
+        self.linear_att_big_page_buffers = LinearAttCacheManager(
+            size=triton.cdiv(self.size, big_page_token_num),
+            linear_config=self.linear_config,
         )
         return
 
@@ -65,6 +55,5 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def _free_linear_att_buffers(self):
-        self.conv_state_buffer = None
-        self.ssm_state_buffer = None
+        self.linear_att_big_page_buffers = None
         return

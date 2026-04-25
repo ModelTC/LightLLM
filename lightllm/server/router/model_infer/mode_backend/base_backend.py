@@ -196,7 +196,7 @@ class ModeBackend:
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
-                    linear_att_cache_manager=self.linear_att_cache_manager,
+                    linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
             else:
                 self.radix_cache = RadixCache(
