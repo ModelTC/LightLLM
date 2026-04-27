@@ -34,7 +34,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
         mem_manager = infer_state.mem_manager
-        mem_manager.copy_kv_to_mem_manager(
+        mem_manager.operator.copy_kv_to_mem_manager(
             layer_index=self.layer_num_,
             mem_index=infer_state.mem_index,
             kv=cache_kv,

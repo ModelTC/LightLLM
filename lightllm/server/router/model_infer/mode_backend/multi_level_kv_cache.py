@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
@@ -26,6 +27,9 @@ class MultiLevelKvCacheModule(object):
         self.filter_group = create_new_group_for_current_dp("gloo")
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
+        self.offload_sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.offload_sync_group)
+        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
 
         self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
         self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
@@ -92,48 +96,40 @@ class MultiLevelKvCacheModule(object):
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
                         g_infer_context.get_overlap_stream().synchronize()
 
-                    # TODO 更有效的分配策略。
-                    grid_num = 16
-
                     mem_manager = self.backend.model.mem_manager
-                    if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                        cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, 0 : cpu_cache_meta.head_dim
-                        ]
-                        cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, cpu_cache_meta.head_dim :
-                        ].view(mem_manager.scale_buffer.dtype)
-                        gpu_kv_cache_scale = mem_manager.scale_buffer
-                    else:
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
-                        cpu_kv_cache_scale = None
-                        gpu_kv_cache_scale = None
+                    req_manager = self.backend.model.req_manager
 
                     mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
                         non_blocking=True
                     )
-                    # 将 cpu page 的内容拷贝到 gpu 页面中
-                    load_cpu_kv_to_gpu(
-                        gpu_mem_indexes=mem_indexes_cuda,
-                        gpu_kv_cache=mem_manager.kv_buffer,
-                        gpu_kv_cache_scale=gpu_kv_cache_scale,
-                        cpu_kv_cache=cpu_kv_cache,
-                        cpu_kv_cache_scale=cpu_kv_cache_scale,
+                    if len(mem_indexes_cuda) % token_page_size != 0:
+                        # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
+                        # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
+                        # 这里需要进行pad操作，使操作的页面是完整的。
+                        _start = cur_kv_pages * token_page_size
+                        _end = req.cur_kv_len
+                        mem_indexes_cuda = torch.cat(
+                            [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                        )
+                        assert len(mem_indexes_cuda) == len(page_indexes_cuda) * token_page_size
+
+                    # 更新 req 状态。
+                    idle_token_num -= need_token_num
+                    g_infer_context.req_manager.req_to_token_indexs[
+                        req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                    ] = mem_indexes
+                    req.cur_kv_len = req.cur_kv_len + need_token_num
+
+                    mem_manager.operator.load_cpu_cache_to_gpu(
+                        mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
-                        tp_index=self.backend.rank_in_dp,
-                        tp_world_size=self.backend.dp_world_size,
-                        grid_num=grid_num,
+                        cpu_cache_client=self.cpu_cache_client,
+                        req=req,
                     )
 
                 torch.cuda.current_stream().synchronize()
 
-                idle_token_num -= need_token_num
-                g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
-                ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + need_token_num
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
@@ -256,35 +252,19 @@ class MultiLevelKvCacheModule(object):
             assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            # TODO 更有效的分配策略。
-            grid_num = 16
-
             mem_manager = self.backend.model.mem_manager
-            if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
-                cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                    :, :, :, :, cpu_cache_meta.head_dim :
-                ].view(mem_manager.scale_buffer.dtype)
-                gpu_kv_cache_scale = mem_manager.scale_buffer
-            else:
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
-                cpu_kv_cache_scale = None
-                gpu_kv_cache_scale = None
 
-            # assert max(page_list) < self.cpu_cache_client.cpu_kv_cache_tensor.shape[0]
-            offload_gpu_kv_to_cpu(
-                token_indexes=token_indexes,
-                gpu_kv_cache=mem_manager.kv_buffer,
-                gpu_kv_cache_scale=gpu_kv_cache_scale,
-                cpu_kv_cache=cpu_kv_cache,
-                cpu_kv_cache_scale=cpu_kv_cache_scale,
+            mem_manager.operator.offload_gpu_kv_to_cpu_cache(
+                mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
-                tp_index=self.backend.rank_in_dp,
-                tp_world_size=self.backend.dp_world_size,
-                grid_num=grid_num,
+                cpu_cache_client=self.cpu_cache_client,
+                req=req,
             )
+
+            # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，
+            if self.backend.dp_world_size > 1:
+                dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
