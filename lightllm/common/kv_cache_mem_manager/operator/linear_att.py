@@ -152,3 +152,11 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
         destindex_copy_kv(kv, mem_index, mem_manager.kv_buffer[layer_index])
         return
+
+    def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
+        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
+
+        copy_kv_buffer_to_kv_buffer(
+            src_mem_index.cuda(non_blocking=True), dst_mem_index.cuda(non_blocking=True), self.mem_manager.kv_buffer
+        )
+        return

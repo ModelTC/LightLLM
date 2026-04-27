@@ -16,6 +16,9 @@ class BaseMemManagerOperator(ABC):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         pass
 
+    def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
+        raise NotImplementedError()
+
     # cpu cache 的相关操作接口
     def load_cpu_cache_to_gpu(
         self, mem_indexes: torch.Tensor, page_indexes: torch.Tensor, cpu_cache_client, req: "InferReq"

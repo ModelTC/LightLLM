@@ -694,11 +694,9 @@ class InferReq:
                                 self.req_idx, cur_big_page_tokens:shared_kv_len
                             ] = tail_mems
 
-                            # TODO 将 对应的 value_tensors 中的数据 拷贝到 tail_mems 中对应的数据去，修改为封装接口
-                            radix_cache.mem_manager.kv_buffer[:, tail_mems, ...].copy_(
-                                radix_cache.mem_manager.kv_buffer[
-                                    :, value_tensor[cur_big_page_tokens:shared_kv_len], ...
-                                ]
+                            # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
+                            radix_cache.mem_manager.operator.copy_mem_to_mem(
+                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
