@@ -27,6 +27,9 @@ class MultiLevelKvCacheModule(object):
         self.filter_group = create_new_group_for_current_dp("gloo")
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
+        self.offload_sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.offload_sync_group)
+        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
 
         self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
         self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
@@ -258,6 +261,10 @@ class MultiLevelKvCacheModule(object):
                 cpu_cache_client=self.cpu_cache_client,
                 req=req,
             )
+
+            # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，
+            if self.backend.dp_world_size > 1:
+                dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
             sync_event = torch.cuda.Event()
             sync_event.record()

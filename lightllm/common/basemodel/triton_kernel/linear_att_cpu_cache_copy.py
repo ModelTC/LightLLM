@@ -121,7 +121,7 @@ def _copy_kv_buffer_to_cpu_cache(
 
         for i in range(tl.cdiv(cpu_kv_ssm_tail_dim, BLOCK) * run_flag):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
-            mask = gpu_start_i < cpu_kv_conv_tail_dim
+            mask = gpu_start_i < cpu_kv_ssm_tail_dim
 
             cpu_kv_ssm_data = tl.load(
                 cpu_kv_ssm_state + big_page_idx * cpu_kv_ssm_stride_s + gpu_start_i,
