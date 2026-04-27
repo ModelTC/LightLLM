@@ -38,7 +38,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
         mem_manager: Qwen3NextMemManager = self.mem_manager
 
-        big_page_num = len(mem_indexes) % args.cpu_cache_token_page_size
+        big_page_num = len(mem_indexes) // args.cpu_cache_token_page_size
         max_kv_len = req.cur_kv_len
         assert max_kv_len % args.cpu_cache_token_page_size == 0
 
