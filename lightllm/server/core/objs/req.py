@@ -6,7 +6,7 @@ import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
-from .token_chunck_hash_list import TokenHashList, CpuCachePageList
+from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
@@ -121,6 +121,8 @@ class Req(ctypes.Structure):
         ("linear_att_token_hash_list", TokenHashList),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
         ("token_hash_list", TokenHashList),
+        # 用于存储每个cpu cache 页面对应的真实token数量，用于linear att的qwen3.5等模型的碎片化处理最后一个页面的问题
+        ("token_hash_page_len_list", TokenPageLenList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
     ]
@@ -183,10 +185,44 @@ class Req(ctypes.Structure):
 
         self.post_init()
 
-        if get_env_start_args().enable_cpu_cache:
-            self._fill_input_token_hash()
-        if is_linear_att_mixed_model(get_env_start_args().model_dir):
+        args = get_env_start_args()
+        if is_linear_att_mixed_model(args.model_dir):
             self._fill_linear_att_token_hash()
+            if args.enable_cpu_cache:
+                token_hash_list = self.linear_att_token_hash_list.get_all()
+                linear_att_hash_page_size = args.linear_att_hash_page_size
+                block_num = args.linear_att_page_block_num
+                cpu_cache_page_size = args.cpu_cache_token_page_size
+                assert cpu_cache_page_size == linear_att_hash_page_size * block_num
+                cpu_cache_hash_list = []
+                cpu_cache_page_len_list = []
+                cum_sum_len = 0
+                for i in range(len(token_hash_list)):
+                    if i % block_num == (block_num - 1):
+                        cpu_cache_hash_list.append(token_hash_list[i])
+                        cum_sum_len += cpu_cache_page_size
+                        cpu_cache_page_len_list.append(cum_sum_len)
+                    elif i == len(token_hash_list) - 1:
+                        cpu_cache_hash_list.append(token_hash_list[len(token_hash_list) - 1])
+                        page_num = (i % block_num) + 1
+                        cum_sum_len += page_num * linear_att_hash_page_size
+                        cpu_cache_page_len_list.append(cum_sum_len)
+
+                self.token_hash_list = TokenHashList()
+                self.token_hash_list.clear()
+                self.token_hash_list.fill(cpu_cache_hash_list)
+                self.token_hash_page_len_list = TokenPageLenList()
+                self.token_hash_page_len_list.clear()
+                self.token_hash_page_len_list.fill(cpu_cache_page_len_list)
+        else:
+            if args.enable_cpu_cache:
+                self._fill_input_token_hash()
+                page_num = self.token_hash_list.size
+                cpu_cache_page_len_list = [args.cpu_cache_token_page_size * (i + 1) for i in range(page_num)]
+                self.token_hash_page_len_list = TokenPageLenList()
+                self.token_hash_page_len_list.clear()
+                self.token_hash_page_len_list.fill(cpu_cache_page_len_list)
+
         return
 
     def post_init(self):

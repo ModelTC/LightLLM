@@ -88,3 +88,12 @@ class CpuCachePageList(ctypes.Structure):
 
     def get_all(self):
         return list(self.items[0 : self.size])
+
+
+class TokenPageLenList(CpuCachePageList):
+    """
+    用于记录cpu cache 每个 page 对应的真实token数量, 用于支持含有 linear_att 的如qwen3.5 模型的cpu cache的
+    的最后一个页面的非满页面的碎片化处理。
+    """
+
+    pass

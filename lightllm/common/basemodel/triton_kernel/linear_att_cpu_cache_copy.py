@@ -458,3 +458,65 @@ def copy_cpu_cache_to_kv_buffer(
         head_scale_size=head_scale_size,
         BLOCK=BLOCK,
     )
+
+
+@triton.jit
+def _copy_linear_att_state_to_linear_att_state(
+    src_conv_state,
+    dst_conv_state,
+    src_ssm_state,
+    dst_ssm_state,
+    conv_size,
+    ssm_size,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    grid_num = tl.num_programs(0)
+
+    # copy conv state
+    num_conv_blocks = tl.cdiv(conv_size, BLOCK)
+    for i in range(pid, num_conv_blocks, grid_num):
+        start = i * BLOCK + tl.arange(0, BLOCK)
+        mask = start < conv_size
+        data = tl.load(src_conv_state + start, mask=mask, other=0)
+        tl.store(dst_conv_state + start, data, mask=mask)
+
+    # copy ssm state
+    num_ssm_blocks = tl.cdiv(ssm_size, BLOCK)
+    for i in range(pid, num_ssm_blocks, grid_num):
+        start = i * BLOCK + tl.arange(0, BLOCK)
+        mask = start < ssm_size
+        data = tl.load(src_ssm_state + start, mask=mask, other=0)
+        tl.store(dst_ssm_state + start, data, mask=mask)
+
+
+def copy_linear_att_state_to_linear_att_state(
+    src_conv_state: torch.Tensor,
+    src_ssm_state: torch.Tensor,
+    dst_conv_state: torch.Tensor,
+    dst_ssm_state: torch.Tensor,
+    grid_num: int = 16,
+):
+    assert src_conv_state.shape == dst_conv_state.shape
+    assert src_ssm_state.shape == dst_ssm_state.shape
+
+    BLOCK = 4096
+
+    src_conv_flat = src_conv_state.view(-1).view(dtype=torch.uint8)
+    dst_conv_flat = dst_conv_state.view(-1).view(dtype=torch.uint8)
+    src_ssm_flat = src_ssm_state.view(-1).view(dtype=torch.uint8)
+    dst_ssm_flat = dst_ssm_state.view(-1).view(dtype=torch.uint8)
+
+    conv_size = src_conv_flat.shape[0]
+    ssm_size = src_ssm_flat.shape[0]
+
+    grid = (grid_num,)
+    _copy_linear_att_state_to_linear_att_state[grid](
+        src_conv_state=src_conv_flat,
+        dst_conv_state=dst_conv_flat,
+        src_ssm_state=src_ssm_flat,
+        dst_ssm_state=dst_ssm_flat,
+        conv_size=conv_size,
+        ssm_size=ssm_size,
+        BLOCK=BLOCK,
+    )

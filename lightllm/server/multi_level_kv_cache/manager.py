@@ -176,7 +176,13 @@ class MultiLevelKVCacheManager:
             else:
                 # 匹配 disk cache并load到cpu cache
                 finded_page_indexes, disk_page_num = self._disk_cache_match(token_hash_list, all_pages)
-                req.disk_prompt_cache_len = disk_page_num * self.args.cpu_cache_token_page_size
+                token_hash_page_len_list = req.token_hash_page_len_list.get_all()
+
+                if disk_page_num == 0:
+                    req.disk_prompt_cache_len = 0
+                else:
+                    # TODO 长度计算不对，
+                    req.disk_prompt_cache_len = token_hash_page_len_list[disk_page_num - 1]
 
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
                 time.sleep(0.01)

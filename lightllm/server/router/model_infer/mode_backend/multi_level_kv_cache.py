@@ -2,6 +2,7 @@ import threading
 import torch.distributed as dist
 import torch
 import dataclasses
+import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
@@ -72,7 +73,13 @@ class MultiLevelKvCacheModule(object):
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
-            match_tokens = len(page_list) * token_page_size
+            page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+
+            if page_list:
+                match_tokens = page_len_list[len(page_list) - 1]
+            else:
+                match_tokens = 0
+
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
                 req.shm_req.cpu_prompt_cache_len = max(
@@ -201,11 +208,15 @@ class MultiLevelKvCacheModule(object):
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
+            # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
+            token_hash_list = req.shm_req.token_hash_list.get_all()
+            token_hash_page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+            assert len(token_hash_list) == len(token_hash_page_len_list)
+
             if self.backend.is_master_in_dp:
-                # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
-                token_hash_list = req.shm_req.token_hash_list.get_all()
-                block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
-                move_block_size = min(block_size, len(token_hash_list))
+
+                find_index = bisect.bisect_right(token_hash_page_len_list, req.cur_kv_len)
+                move_block_size = find_index
 
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -248,8 +259,8 @@ class MultiLevelKvCacheModule(object):
             cuda_page_indexes.copy_(page_indexes, non_blocking=True)
             cuda_page_readies.copy_(page_readies, non_blocking=True)
 
-            move_token_num = item_size * self.args.cpu_cache_token_page_size
-            assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
+            move_token_num = token_hash_page_len_list[item_size - 1]
+            assert req.cur_kv_len >= move_token_num
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
             mem_manager = self.backend.model.mem_manager
