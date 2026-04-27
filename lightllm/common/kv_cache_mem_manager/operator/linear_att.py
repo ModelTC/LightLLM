@@ -49,6 +49,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             req.linear_att_len_to_big_page_id[max_kv_len] = page_id
             big_page_buffer_ids_cpu.append(page_id)
             max_kv_len -= args.cpu_cache_token_page_size
+            assert max_kv_len % args.cpu_cache_token_page_size == 0
 
         big_page_buffer_ids_cpu.reverse()
         big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").cuda(
