@@ -1,0 +1,16 @@
+# ============================================================================
+# Dockerfile.qwen35.ep.update — Refresh LightLLM source on top of an existing
+# lightllm:qwen35-ep image. Use when only the code changed and the environment
+# (CUDA, torch, DeepEP, NVSHMEM, etc.) is unchanged.
+#
+# Build:
+#   docker build -f docker/Dockerfile.qwen35.ep.update -t lightllm:qwen35-ep .
+# ============================================================================
+
+FROM registry.cn-tj-01.sensecore.cn/ccr-devsfttj/lightllm:qwen35-stable
+
+RUN rm -rf /lightllm
+COPY . /lightllm
+RUN uv pip install --system --no-cache -e /lightllm && uv pip install --system litellm 
+
+WORKDIR /lightllm

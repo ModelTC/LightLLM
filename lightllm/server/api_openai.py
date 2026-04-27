@@ -274,14 +274,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
+        # exclude_none=True so optional default-None fields (e.g. ``response``)
+        # don't surface in the chat-template render — Function.model_dump()
+        # otherwise emits {"response": None}, which chat.jinja's
+        # render_extra_keys turns into ``<response>null</response>`` and adds
+        # ~7 tokens per tool, drifting prompts away from other engines/clients
+        # that pass tools without that field.
         if not isinstance(request.tool_choice, str):
             tools = [
-                item.function.model_dump()
+                item.function.model_dump(exclude_none=True)
                 for item in request.tools
                 if item.function.name == request.tool_choice.function.name
             ]
         else:
-            tools = [item.function.model_dump() for item in request.tools]
+            tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
 
     if request.reasoning_effort is not None:
         if request.chat_template_kwargs is None:
