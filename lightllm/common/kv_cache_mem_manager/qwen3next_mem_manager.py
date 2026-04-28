@@ -42,11 +42,17 @@ class Qwen3NextMemManager(MemoryManager):
         big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
-        # 申请大页可能需要对应的资源
+        # 申请大页可能需要对应的资源, 多申请了两个linear att的状态，理论上这个状态
+        # 永远不会被 alloc 申请到，只会在 cpu cache中，用于过渡和存储碎页情况下的
+        # cpu cache 的页面拷贝。
         self.linear_att_big_page_buffers = LinearAttCacheManager(
-            size=triton.cdiv(self.size, big_page_token_num),
+            size=triton.cdiv(self.size, big_page_token_num) + 2,
             linear_config=self.linear_config,
+            keep_num=2,
         )
+
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 1
         return
 
     def _free_buffers(self):
