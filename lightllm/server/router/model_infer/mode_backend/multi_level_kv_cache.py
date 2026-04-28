@@ -294,7 +294,11 @@ class MultiLevelKvCacheModule(object):
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             trans_task = TransTask(
-                page_indexes=page_indexes, page_readies=page_readies, req_obj=req, sync_event=sync_event
+                move_token_num=move_token_num,
+                page_indexes=page_indexes,
+                page_readies=page_readies,
+                req_obj=req,
+                sync_event=sync_event,
             )
 
         return trans_task
@@ -334,12 +338,16 @@ class MultiLevelKvCacheModule(object):
 
         if item_size > 0:
             page_array_list = [task.page_indexes.tolist() for task in trans_ok_tasks]
+            move_token_nums = [task.move_token_num for task in trans_ok_tasks]
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
                 # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
-                for pages in page_array_list:
+                for pages, move_token_num in zip(page_array_list, move_token_nums):
                     self.cpu_cache_client.update_pages_status_to_ready(
-                        page_list=pages, deref=True, disk_offload_enable=self.args.enable_disk_cache
+                        page_list=pages,
+                        deref=True,
+                        disk_offload_enable=self.args.enable_disk_cache,
+                        token_num_in_page_list=move_token_num,
                     )
                 self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
@@ -349,6 +357,7 @@ class MultiLevelKvCacheModule(object):
 
 @dataclasses.dataclass
 class TransTask:
+    move_token_num: int
     page_indexes: torch.Tensor
     page_readies: torch.Tensor
     req_obj: InferReq
