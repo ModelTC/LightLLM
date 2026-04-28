@@ -784,6 +784,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="the data type of linear att smm data type",
     )
     parser.add_argument(
+        "--disable_linear_att_small_page_cpu_cache",
+        action="store_true",
+        default=False,
+        help="""Disable storing linear attention small page data in CPU cache.
+        This reduces CPU cache memory waste but also decreases the hit length.""",
+    )
+    parser.add_argument(
         "--hardware_platform",
         type=str,
         default="cuda",

@@ -313,7 +313,10 @@ class MultiLevelKvCacheModule(object):
         if move_block_size == len(page_len_list):
             tail_len = page_len_list[move_block_size - 1]
             if tail_len % self.args.cpu_cache_token_page_size != 0:
-                # 说明是碎页，碎页需要判定是否满足卸载条件。
+                # 全局关闭了碎页的cpu cache 存储功能。
+                if self.args.disable_linear_att_small_page_cpu_cache:
+                    return move_block_size - 1
+                # 说明是碎页，碎页需要判定是否满足cpu cache 的offload条件。
                 if req.tail_linear_att_small_page_buffer_id is None:
                     return move_block_size - 1
         return move_block_size
