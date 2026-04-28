@@ -96,6 +96,7 @@ class MultiLevelKvCacheModule(object):
 
                     # 计算需要加载的页面（只加载未匹配的部分）
                     ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
+                    assert ready_page_num <= len(page_list)
                     need_pages = page_list[ready_page_num:]  # 只取需要的页面
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
