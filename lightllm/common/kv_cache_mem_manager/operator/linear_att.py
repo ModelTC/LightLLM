@@ -155,7 +155,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
                 dst_conv_state=dst_conv_state,
                 dst_ssm_state=dst_ssm_state,
             )
-            big_page_buffer_ids_cpu.append(mem_manager.linear_att_big_page_buffers.size - 1)
+            big_page_buffer_ids_cpu.append(mem_manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID)
 
         assert len(big_page_buffer_ids_cpu) == len(page_indexes) == len(page_readies)
 
