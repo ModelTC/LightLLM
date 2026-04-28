@@ -34,14 +34,15 @@ class LinearAttMemOperator(BaseMemManagerOperator):
     ):
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()
-        assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
+        assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
+        assert len(mem_indexes) % args.linear_att_hash_page_size == 0
         assert args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 
         mem_manager: Qwen3NextMemManager = self.mem_manager
 
         big_page_num = len(mem_indexes) // args.cpu_cache_token_page_size
-        max_kv_len = req.cur_kv_len
+        max_kv_len = (req.cur_kv_len // args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
         assert max_kv_len % args.cpu_cache_token_page_size == 0
 
         big_page_buffer_ids_cpu = []
@@ -54,6 +55,20 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             assert max_kv_len % args.cpu_cache_token_page_size == 0
 
         big_page_buffer_ids_cpu.reverse()
+
+        # 碎页情况的处理
+        has_tail_page = len(mem_indexes) % args.cpu_cache_token_page_size != 0
+        if has_tail_page:
+            padded_token_num = triton.cdiv(
+                len(mem_indexes), args.cpu_cache_token_page_size
+            ) * args.cpu_cache_token_page_size - len(mem_indexes)
+            mem_indexes = torch.nn.functional.pad(
+                mem_indexes, (0, padded_token_num), mode="constant", value=mem_manager.HOLD_TOKEN_MEMINDEX
+            )
+
+            # 将对应的小叶数据拷贝到临时的大页上，再从大页上拷贝到对应的运行态页面上
+            big_page_buffer_ids_cpu.append(mem_manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID)
+
         big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").cuda(
             non_blocking=True
         )
@@ -132,7 +147,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
                 buffer_idx=req.tail_linear_att_small_page_buffer_id
             )
             dst_conv_state, dst_ssm_state = mem_manager.linear_att_big_page_buffers.get_state_cache(
-                buffer_idx=mem_manager.linear_att_big_page_buffers.size - 1
+                buffer_idx=mem_manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID,
             )
             copy_linear_att_state_to_linear_att_state(
                 src_conv_state=src_conv_state,

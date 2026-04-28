@@ -68,12 +68,12 @@ class MultiLevelKvCacheModule(object):
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
-        token_page_size = self.args.cpu_cache_token_page_size
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+            assert len(page_list) <= len(page_len_list)
 
             if page_list:
                 match_tokens = page_len_list[len(page_list) - 1]
@@ -94,8 +94,8 @@ class MultiLevelKvCacheModule(object):
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
 
                     # 计算需要加载的页面（只加载未匹配的部分）
-                    cur_kv_pages = req.cur_kv_len // token_page_size
-                    need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
+                    start_page_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
+                    need_pages = page_list[start_page_index:]  # 只取需要的页面
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
@@ -110,16 +110,26 @@ class MultiLevelKvCacheModule(object):
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
                         non_blocking=True
                     )
-                    if len(mem_indexes_cuda) % token_page_size != 0:
-                        # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
-                        # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
-                        # 这里需要进行pad操作，使操作的页面是完整的。
-                        _start = cur_kv_pages * token_page_size
-                        _end = req.cur_kv_len
-                        mem_indexes_cuda = torch.cat(
-                            [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                    # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
+                    # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
+                    # 这里需要进行pad操作，使操作的页面是完整的。
+                    if start_page_index == 0:
+                        _start = 0
+                    else:
+                        _start = page_len_list[start_page_index - 1]
+
+                    _end = req.cur_kv_len
+                    mem_indexes_cuda = torch.cat(
+                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                    )
+
+                    if start_page_index == 0:
+                        assert len(mem_indexes_cuda) == page_len_list[len(page_list) - 1]
+                    else:
+                        assert (
+                            len(mem_indexes_cuda)
+                            == page_len_list[len(page_list) - 1] - page_len_list[start_page_index - 1]
                         )
-                        assert len(mem_indexes_cuda) == len(page_indexes_cuda) * token_page_size
 
                     # 更新 req 状态。
                     idle_token_num -= need_token_num
@@ -210,13 +220,18 @@ class MultiLevelKvCacheModule(object):
         with torch.cuda.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
-            token_hash_page_len_list = req.shm_req.token_hash_page_len_list.get_all()
-            assert len(token_hash_list) == len(token_hash_page_len_list)
+            page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+            assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
 
-                find_index = bisect.bisect_right(token_hash_page_len_list, req.cur_kv_len)
+                find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
+
+                # 对于 linear att 模型， 如果最后一个页面是碎页，需要做特殊处理，判断该碎页是否满足卸载条件。
+                move_block_size = self._handle_linear_att_last_page(
+                    req=req, move_block_size=move_block_size, page_len_list=page_len_list
+                )
 
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -259,7 +274,7 @@ class MultiLevelKvCacheModule(object):
             cuda_page_indexes.copy_(page_indexes, non_blocking=True)
             cuda_page_readies.copy_(page_readies, non_blocking=True)
 
-            move_token_num = token_hash_page_len_list[item_size - 1]
+            move_token_num = page_len_list[item_size - 1]
             assert req.cur_kv_len >= move_token_num
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
@@ -285,6 +300,21 @@ class MultiLevelKvCacheModule(object):
             )
 
         return trans_task
+
+    def _handle_linear_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
+        if not g_infer_context.is_linear_att_mixed_model:
+            return move_block_size
+
+        if move_block_size == 0:
+            return 0
+
+        if move_block_size == len(page_len_list):
+            tail_len = page_len_list[move_block_size - 1]
+            if tail_len % self.args.cpu_cache_token_page_size != 0:
+                # 说明是碎页，碎页需要判定是否满足卸载条件。
+                if req.tail_linear_att_small_page_buffer_id is None:
+                    return move_block_size - 1
+        return move_block_size
 
     def update_cpu_cache_task_states(self):
         if self.backend.is_master_in_dp:
