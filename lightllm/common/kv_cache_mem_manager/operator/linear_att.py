@@ -72,6 +72,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             non_blocking=True
         )
 
+        assert len(big_page_buffer_ids_gpu) == len(page_indexes)
+
         from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
             copy_cpu_cache_to_kv_buffer,
         )
