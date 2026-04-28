@@ -7,7 +7,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
