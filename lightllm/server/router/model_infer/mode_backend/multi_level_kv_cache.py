@@ -173,10 +173,12 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-            if (
-                req.cur_kv_len < self.args.cpu_cache_token_page_size
-                or req.shm_req.input_len <= self.args.cpu_cache_token_page_size
-            ):
+            if g_infer_context.is_linear_att_mixed_model:
+                offload_limit_size = self.args.linear_att_hash_page_size
+            else:
+                offload_limit_size = self.args.cpu_cache_token_page_size
+
+            if req.cur_kv_len < offload_limit_size or req.shm_req.input_len <= offload_limit_size:
                 true_finished_reqs.append(req)
                 continue
 
