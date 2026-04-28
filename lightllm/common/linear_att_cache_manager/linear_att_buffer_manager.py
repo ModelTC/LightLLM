@@ -19,6 +19,7 @@ class LinearAttCacheManager:
         self.size = size
         self.linear_config = linear_config
         self.keep_num = keep_num
+        assert 0 <= self.keep_num <= self.size, f"invalid keep_num {self.keep_num} for size {self.size}"
         # init the layer cache
         self.conv_state_cache = LayerCache(
             size=self.size,
@@ -58,10 +59,15 @@ class LinearAttCacheManager:
         return alloc_indexes
 
     def free_state_cache(self, free_indexes: List[int]):
+        alloc_upper_bound = self.size - self.keep_num
+        for idx in free_indexes:
+            assert 0 <= idx < alloc_upper_bound, (
+                f"free index {idx} out of alloc range [0, {alloc_upper_bound}), " f"reserved tail num {self.keep_num}"
+            )
         self.free_list.extend(free_indexes)
         assert (
-            len(self.free_list) <= self.size
-        ), f"free cache num {len(self.free_list)} should not be larger than total size {self.size}"
+            len(self.free_list) <= alloc_upper_bound
+        ), f"free cache num {len(self.free_list)} should not be larger than alloc size {alloc_upper_bound}"
         return
 
     def get_free_cache_num(self):

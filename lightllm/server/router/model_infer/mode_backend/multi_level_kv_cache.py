@@ -73,6 +73,7 @@ class MultiLevelKvCacheModule(object):
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+            page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
 
             if page_list:
@@ -94,8 +95,8 @@ class MultiLevelKvCacheModule(object):
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
 
                     # 计算需要加载的页面（只加载未匹配的部分）
-                    start_page_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
-                    need_pages = page_list[start_page_index:]  # 只取需要的页面
+                    ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
+                    need_pages = page_list[ready_page_num:]  # 只取需要的页面
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
@@ -113,23 +114,17 @@ class MultiLevelKvCacheModule(object):
                     # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
                     # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
                     # 这里需要进行pad操作，使操作的页面是完整的。
-                    if start_page_index == 0:
-                        _start = 0
-                    else:
-                        _start = page_len_list[start_page_index - 1]
+                    _start = page_len_start_list[ready_page_num]
 
                     _end = req.cur_kv_len
+                    assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
                     mem_indexes_cuda = torch.cat(
                         [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
                     )
 
-                    if start_page_index == 0:
-                        assert len(mem_indexes_cuda) == page_len_list[len(page_list) - 1]
-                    else:
-                        assert (
-                            len(mem_indexes_cuda)
-                            == page_len_list[len(page_list) - 1] - page_len_list[start_page_index - 1]
-                        )
+                    assert (
+                        len(mem_indexes_cuda) == page_len_list[len(page_list) - 1] - page_len_start_list[ready_page_num]
+                    )
 
                     # 更新 req 状态。
                     idle_token_num -= need_token_num
