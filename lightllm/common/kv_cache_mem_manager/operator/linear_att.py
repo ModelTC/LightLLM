@@ -61,9 +61,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             padded_token_num = triton.cdiv(
                 len(mem_indexes), args.cpu_cache_token_page_size
             ) * args.cpu_cache_token_page_size - len(mem_indexes)
-            mem_indexes = torch.nn.functional.pad(
-                mem_indexes, (0, padded_token_num), mode="constant", value=mem_manager.HOLD_TOKEN_MEMINDEX
-            )
+            mem_indexes = torch.nn.functional.pad(mem_indexes, (0, padded_token_num), mode="constant", value=-1)
 
             # 将对应的小叶数据拷贝到临时的大页上，再从大页上拷贝到对应的运行态页面上
             big_page_buffer_ids_cpu.append(mem_manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID)
@@ -136,7 +134,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         if len(mem_indexes) % args.cpu_cache_token_page_size != 0:
             # 存在不满大页的碎页的页面存在需要复制的情况
             dst_len = triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
-            dst_mem_indexes = self.mem_indexes_buffer[0:dst_len].fill_(mem_manager.HOLD_TOKEN_MEMINDEX)
+            dst_mem_indexes = self.mem_indexes_buffer[0:dst_len].fill_(-1)
             dst_mem_indexes[0 : len(mem_indexes)].copy_(mem_indexes, non_blocking=True)
             mem_indexes = dst_mem_indexes
             assert req.tail_linear_att_small_page_buffer_id is not None

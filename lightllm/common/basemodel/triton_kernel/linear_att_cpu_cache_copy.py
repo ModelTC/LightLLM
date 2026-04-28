@@ -82,7 +82,7 @@ def _copy_kv_buffer_to_cpu_cache(
             per_token_size = gpu_full_att_tail_dim // big_page_token_num
             per_layer_size = per_token_size // full_att_layer_num
             mem_offs = gpu_start_i // (per_token_size)
-            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-1)
             layer_index = (gpu_start_i // (per_layer_size)) % full_att_layer_num
             dim_index = gpu_start_i % per_layer_size
             gpu_full_att_data = tl.load(
@@ -90,7 +90,7 @@ def _copy_kv_buffer_to_cpu_cache(
                 + mem_index * gpu_kv_full_att_stride_s
                 + layer_index * gpu_kv_full_att_stride_l
                 + dim_index * gpu_kv_full_att_stride_d,
-                mask=mask,
+                mask=mask & (mem_index != -1),
                 other=0,
             )
             dest_cpu_cache_full_att_ptr = (
@@ -99,7 +99,7 @@ def _copy_kv_buffer_to_cpu_cache(
                 + (tp_rank // head_scale_size) * cpu_cache_full_att_stride_h
                 + gpu_start_i
             )
-            tl.store(dest_cpu_cache_full_att_ptr, gpu_full_att_data, mask=mask)
+            tl.store(dest_cpu_cache_full_att_ptr, gpu_full_att_data, mask=mask & (mem_index != -1))
 
         big_page_idx = tl.load(big_page_buffer_ids + block_index)
 
@@ -308,7 +308,7 @@ def _copy_cpu_cache_to_kv_buffer(
             per_token_size = gpu_full_att_tail_dim // big_page_token_num
             per_layer_size = per_token_size // full_att_layer_num
             mem_offs = gpu_start_i // (per_token_size)
-            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-11111111)
+            mem_index = tl.load(mem_start_ptr + mem_offs, mask=mask, other=-1)
             layer_index = (gpu_start_i // (per_layer_size)) % full_att_layer_num
             dim_index = gpu_start_i % per_layer_size
 
@@ -318,7 +318,7 @@ def _copy_cpu_cache_to_kv_buffer(
                 + (tp_rank // head_scale_size) * cpu_cache_full_att_stride_h
                 + gpu_start_i
             )
-            cpu_full_att_data = tl.load(src_cpu_cache_full_att_ptr, mask=mask, other=0)
+            cpu_full_att_data = tl.load(src_cpu_cache_full_att_ptr, mask=mask & (mem_index != -1), other=0)
 
             tl.store(
                 gpu_kv_full_att_state
@@ -326,7 +326,7 @@ def _copy_cpu_cache_to_kv_buffer(
                 + layer_index * gpu_kv_full_att_stride_l
                 + dim_index * gpu_kv_full_att_stride_d,
                 cpu_full_att_data,
-                mask=mask,
+                mask=mask & (mem_index != -1),
             )
 
         big_page_idx = tl.load(big_page_buffer_ids + block_index)
