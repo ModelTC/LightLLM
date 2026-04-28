@@ -185,10 +185,13 @@ class MultiLevelKVCacheManager:
                     else:
                         all_page_num = len(finded_page_indexes)
                         cpu_match_page_num = all_page_num - disk_page_num
-                        req.disk_prompt_cache_len = (
-                            token_hash_page_len_list[all_page_num - 1]
-                            - token_hash_page_len_list[cpu_match_page_num - 1]
-                        )
+
+                        if cpu_match_page_num == 0:
+                            cpu_match_page_len = 0
+                        else:
+                            cpu_match_page_len = token_hash_page_len_list[cpu_match_page_num - 1]
+
+                        req.disk_prompt_cache_len = token_hash_page_len_list[all_page_num - 1] - cpu_match_page_len
                 except Exception as e:
                     # 因为不清楚上面的代码是否存在边界 bug，调用者是多线程的，自己打日志记录，避免
                     # 日志无法记录， 无法排查问题。
