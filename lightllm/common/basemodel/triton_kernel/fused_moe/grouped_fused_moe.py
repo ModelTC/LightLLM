@@ -21,6 +21,8 @@
 import torch
 import triton
 import triton.language as tl
+import os
+import tempfile
 from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.vllm_utils import vllm_ops
@@ -34,6 +36,58 @@ from lightllm.common.triton_utils.autotuner import autotune
 FFN_MOE_CHUNK_SIZE = 32 * 1024
 
 logger = init_logger(__name__)
+
+_TMA_CLUSTER_TO_CTA_NEEDLE = "shared::cluster.global"
+_TMA_CLUSTER_TO_CTA_REPLACE = "shared::cta.global"
+_TMA_PATCHED_PTX_CACHE: Dict[str, Optional[str]] = {}
+_TMA_PATCH_TMPDIR: Optional[str] = None
+
+
+def _patch_tma_cluster_to_cta_enabled() -> bool:
+    mode = os.getenv("LIGHTLLM_PATCH_TMA_CLUSTER_TO_CTA", "auto").lower()
+    if mode in ("0", "false", "off", "no"):
+        return False
+    if mode in ("1", "true", "on", "yes"):
+        return True
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_capability()[0] >= 12
+
+
+def _get_tma_cluster_to_cta_ptx_override(compiled) -> Optional[str]:
+    global _TMA_PATCH_TMPDIR
+
+    cache_key = getattr(compiled, "hash", None)
+    if cache_key is None:
+        cache_key = str(hash(compiled.asm.get("ptx", "")))
+    if cache_key in _TMA_PATCHED_PTX_CACHE:
+        return _TMA_PATCHED_PTX_CACHE[cache_key]
+
+    ptx = compiled.asm.get("ptx", None)
+    if ptx is None or _TMA_CLUSTER_TO_CTA_NEEDLE not in ptx:
+        _TMA_PATCHED_PTX_CACHE[cache_key] = None
+        return None
+
+    if _TMA_PATCH_TMPDIR is None:
+        _TMA_PATCH_TMPDIR = tempfile.mkdtemp(prefix="lightllm_tma_ptx_")
+
+    patched_ptx = ptx.replace(_TMA_CLUSTER_TO_CTA_NEEDLE, _TMA_CLUSTER_TO_CTA_REPLACE)
+    fd, path = tempfile.mkstemp(prefix="grouped_moe_", suffix=".ptx", dir=_TMA_PATCH_TMPDIR, text=True)
+    with os.fdopen(fd, "w") as f:
+        f.write(patched_ptx)
+    _TMA_PATCHED_PTX_CACHE[cache_key] = path
+    return path
+
+
+def _launch_grouped_matmul_kernel(grid, use_tma: bool, **kernel_kwargs):
+    if use_tma and _patch_tma_cluster_to_cta_enabled():
+        compiled = grouped_matmul_kernel.warmup(grid=grid, **kernel_kwargs)
+        ptx_override = _get_tma_cluster_to_cta_ptx_override(compiled)
+        if ptx_override is not None:
+            grouped_matmul_kernel[grid](**kernel_kwargs, ir_override=ptx_override)
+            return
+
+    grouped_matmul_kernel[grid](**kernel_kwargs)
 
 
 @triton.jit
@@ -431,6 +485,7 @@ def grouped_matmul_kernel(
     OUT_SORTED: tl.constexpr = False,
     TOKEN_INPUT_USE_TMA: tl.constexpr = False,
     WEIGHT_USE_TMA: tl.constexpr = False,
+    WARP_SPECIALIZE: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -524,7 +579,7 @@ def grouped_matmul_kernel(
 
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for k_start in range(0, k, BLOCK_SIZE_K):
+    for k_start in tl.range(0, k, BLOCK_SIZE_K, warp_specialize=WARP_SPECIALIZE):
         # hint to Triton compiler to do proper loop pipelining
         # tl.multiple_of(a_ptrs, [16, 16])
         # tl.multiple_of(b_ptrs, [16, 16])
@@ -669,6 +724,8 @@ def _get_grouped_matmul_configs():
             "num_warps": nw,
             "num_stages": ns,
             "NEED_TRANS": need_trans,
+            "USE_TMA": use_tma,
+            "WARP_SPECIALIZE": warp_spec,
         }
         for ns in [2, 3, 4, 5]
         for gm in [1, 16, 32, 64]
@@ -677,6 +734,8 @@ def _get_grouped_matmul_configs():
         for bn in [16, 32, 64, 128]
         for bk in [32, 64, 128]
         for need_trans in [True, False]
+        for use_tma in [True, False]
+        for warp_spec in [True, False]
     ]
 
 
@@ -744,6 +803,8 @@ def grouped_matmul(
                 "NEED_TRANS": False,
                 "num_warps": 4,
                 "num_stages": 1,
+                "USE_TMA": True,
+                "WARP_SPECIALIZE": False,
             }
         else:
             run_config = {
@@ -754,6 +815,8 @@ def grouped_matmul(
                 "NEED_TRANS": False,
                 "num_warps": 4,
                 "num_stages": 1,
+                "USE_TMA": True,
+                "WARP_SPECIALIZE": False,
             }
 
     BLOCK_SIZE_M = run_config["BLOCK_SIZE_M"]
@@ -763,6 +826,8 @@ def grouped_matmul(
     num_warps = run_config["num_warps"]
     num_stages = run_config["num_stages"]
     NEED_TRANS = run_config.get("NEED_TRANS", False)
+    USE_TMA = run_config.get("USE_TMA", True)
+    WARP_SPECIALIZE = run_config.get("WARP_SPECIALIZE", False)
     if not use_fp8_w8a8:
         assert NEED_TRANS is False, "only use_fp8_w8a8 mode can use NEED_TRANS to accelerate"
 
@@ -806,14 +871,15 @@ def grouped_matmul(
 
     # moe 分为 up 和 down 两次计算，当 mul_routed_weight 为 False 的时候为 up
     is_up_moe = not mul_routed_weight
+    support_tma_effective = support_tma and USE_TMA
 
     if is_up_moe:
         TOKEN_INPUT_USE_TMA = False
-        WEIGHT_USE_TMA = support_tma
-        OUT_SORTED = support_tma
+        WEIGHT_USE_TMA = support_tma_effective
+        OUT_SORTED = support_tma_effective
     else:
-        TOKEN_INPUT_USE_TMA = support_tma
-        WEIGHT_USE_TMA = support_tma
+        TOKEN_INPUT_USE_TMA = support_tma_effective
+        WEIGHT_USE_TMA = support_tma_effective
         OUT_SORTED = False
 
     if TOKEN_INPUT_USE_TMA:
@@ -840,7 +906,9 @@ def grouped_matmul(
 
     NEED_K_MASK = (k % BLOCK_SIZE_K) != 0
 
-    grouped_matmul_kernel[grid](
+    _launch_grouped_matmul_kernel(
+        grid,
+        use_tma=TOKEN_INPUT_USE_TMA or WEIGHT_USE_TMA,
         mblocks_to_tuple_info=mblocks_to_tuple_info,
         mblocks_to_tuple_info_stride_0=mblocks_to_tuple_info.stride(0),
         k=k,
@@ -897,6 +965,7 @@ def grouped_matmul(
         OUT_SORTED=OUT_SORTED,
         TOKEN_INPUT_USE_TMA=TOKEN_INPUT_USE_TMA,
         WEIGHT_USE_TMA=WEIGHT_USE_TMA,
+        WARP_SPECIALIZE=WARP_SPECIALIZE,
     )
     return (mblocks_to_tuple_info, BLOCK_SIZE_M)
 
