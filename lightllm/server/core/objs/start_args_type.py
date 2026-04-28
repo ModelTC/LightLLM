@@ -87,6 +87,7 @@ class StartArgs:
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)
     visual_use_proxy_mode: bool = field(default=False)
+    enable_symm_mem_allreduce: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
