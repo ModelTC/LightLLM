@@ -13,11 +13,12 @@ class LinearAttCacheManager:
         self,
         size: int,
         linear_config: LinearAttCacheConfig,
+        keep_num: int = 0,  # 用于记录需要保留的缓存数量，用于支持含有 linear_att 的如qwen3.5 模型的cpu cache的碎页处理。
     ):
         # init the mem state
         self.size = size
         self.linear_config = linear_config
-
+        self.keep_num = keep_num
         # init the layer cache
         self.conv_state_cache = LayerCache(
             size=self.size,
@@ -72,5 +73,5 @@ class LinearAttCacheManager:
     def clear_to_init_state(self):
         self.conv_state_cache.buffer.zero_()
         self.ssm_state_cache.buffer.zero_()
-        self.free_list = collections.deque(range(self.size))
+        self.free_list = collections.deque(range(self.size - self.keep_num))
         return

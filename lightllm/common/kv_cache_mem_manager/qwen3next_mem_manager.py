@@ -48,6 +48,7 @@ class Qwen3NextMemManager(MemoryManager):
         self.linear_att_big_page_buffers = LinearAttCacheManager(
             size=triton.cdiv(self.size, big_page_token_num) + 2,
             linear_config=self.linear_config,
+            keep_num=2,
         )
 
         self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.linear_att_big_page_buffers.size - 2
