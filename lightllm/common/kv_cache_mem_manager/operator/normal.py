@@ -45,6 +45,7 @@ class NormalMemOperator(BaseMemManagerOperator):
             gpu_kv_cache_scale=None,
             cpu_kv_cache=cpu_cache_client.cpu_kv_cache_tensor,
             cpu_kv_cache_scale=None,
+            page_indexes=page_indexes,
             tp_index=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),
             grid_num=16,

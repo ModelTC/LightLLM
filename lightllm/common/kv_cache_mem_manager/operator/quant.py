@@ -45,6 +45,7 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
             gpu_kv_cache_scale=mem_manager.scale_buffer,
             cpu_kv_cache=cpu_kv_cache,
             cpu_kv_cache_scale=cpu_kv_cache_scale,
+            page_indexes=page_indexes,
             tp_index=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),
             grid_num=16,
