@@ -73,11 +73,11 @@ def _fwd_kernel_token_att1(
 
 @torch.no_grad()
 def token_att_fwd(q, k, att_out, alibi, Req_to_tokens, B_req_idx, B_Start_Loc, B_Seqlen, max_len_in_batch):
-    BLOCK = 32
     # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
     assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
+    BLOCK = 16 if Lk == 256 else 32
     sm_scale = 1.0 / (Lk ** 0.5)
 
     batch, head_num = B_req_idx.shape[0], q.shape[1]
