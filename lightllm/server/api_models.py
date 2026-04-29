@@ -33,12 +33,6 @@ class Function(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = Field(default=None, examples=[None])
     parameters: Optional[dict] = None
-    # NOTE: ``response`` was previously declared here as ``Optional[dict] = None``
-    # but never read anywhere in the codebase. Combined with model_dump() (no
-    # exclude_none) it leaked into the chat-template render as
-    # ``<response>null</response>``, adding ~7 tokens/tool and drifting prompts
-    # vs other engines. Removed entirely; Pydantic's default extra='ignore'
-    # silently drops the field if a client still sends it.
 
 
 class Tool(BaseModel):
