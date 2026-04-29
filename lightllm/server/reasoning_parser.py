@@ -678,7 +678,7 @@ class BaseReasoningFormatDetector:
 
             return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text.rstrip())
 
-        # Always stream reasoning content immediately (vLLM-compatible behavior).
+        # Always stream reasoning content immediately.
         # stream_reasoning flag is ignored for streaming responses.
         if self._in_reasoning:
             self._buffer = ""

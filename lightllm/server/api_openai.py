@@ -510,7 +510,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         )
                         yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
                     else:
-                        # vLLM compat: merge thinking content into regular content
                         delta = reasoning_text + (delta or "")
 
             if request.tool_choice != "none" and request.tools:

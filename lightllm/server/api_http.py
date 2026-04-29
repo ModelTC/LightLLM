@@ -335,38 +335,6 @@ async def anthropic_messages(raw_request: Request) -> Response:
     return await anthropic_messages_impl(raw_request)
 
 
-@app.post("/v1/responses")
-async def openai_responses(raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-    from .api_openai_responses import openai_responses_impl
-
-    return await openai_responses_impl(raw_request)
-
-
-@app.get("/v1/responses/{response_id}")
-async def openai_responses_retrieve(response_id: str, raw_request: Request) -> Response:
-    from .api_openai_responses import _stateless_lifecycle_error
-
-    return _stateless_lifecycle_error("retrieve")
-
-
-@app.delete("/v1/responses/{response_id}")
-async def openai_responses_delete(response_id: str, raw_request: Request) -> Response:
-    from .api_openai_responses import _stateless_lifecycle_error
-
-    return _stateless_lifecycle_error("delete")
-
-
-@app.post("/v1/responses/{response_id}/cancel")
-async def openai_responses_cancel(response_id: str, raw_request: Request) -> Response:
-    from .api_openai_responses import _stateless_lifecycle_error
-
-    return _stateless_lifecycle_error("cancel")
-
-
 @app.get("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
