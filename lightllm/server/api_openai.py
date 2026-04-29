@@ -327,9 +327,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
-    if _get_reasoning_from_request(request):
-        sampling_params_dict["disable_radix_cache_insert"] = True
-
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
 
@@ -394,7 +391,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         "Failed to parse fc related info to json format!",
                     )
                 if not request.separate_reasoning:
-                    # Merge reasoning back into content (vLLM-compatible behavior)
                     text = (reasoning_text or "") + (text or "")
                     reasoning_text = None
 

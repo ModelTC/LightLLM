@@ -452,12 +452,6 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except ValueError as e:
-            logger.warning(f"group_request_id: {group_request_id} request invalid: {str(e)}")
-            if group_request_id not in self.req_id_to_out_inf:
-                await self._release_multimodal_resources(multimodal_params)
-            await self.abort(group_request_id)
-            raise e
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
             # error need to release multimodel resources.
