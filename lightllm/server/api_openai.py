@@ -289,11 +289,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         else:
             tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
 
-    if request.reasoning_effort is not None:
-        if request.chat_template_kwargs is None:
-            request.chat_template_kwargs = {}
-        request.chat_template_kwargs["reasoning_effort"] = request.reasoning_effort
-
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
         "do_sample": request.do_sample,
