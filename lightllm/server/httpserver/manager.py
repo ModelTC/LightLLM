@@ -298,6 +298,14 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        if isinstance(prompt, str):
+            max_prompt_chars = self.max_req_total_len * 8
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
+                    f"the request is rejected before tokenization."
+                )
+
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
@@ -335,12 +343,12 @@ class HttpServerManager:
             )
 
             prompt_tokens = len(prompt_ids)
+            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
             # 监控
             if group_request_id > 0:
                 self.metric_client.counter_inc("lightllm_request_count")
                 self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
                 self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -444,6 +452,12 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
+        except ValueError as e:
+            logger.warning(f"group_request_id: {group_request_id} request invalid: {str(e)}")
+            if group_request_id not in self.req_id_to_out_inf:
+                await self._release_multimodal_resources(multimodal_params)
+            await self.abort(group_request_id)
+            raise e
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
             # error need to release multimodel resources.
@@ -494,11 +508,17 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
-                prompt_ids = self.tokenizer.encode(
-                    prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                prompt_ids = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.tokenizer.encode(
+                        prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                    ),
                 )
             else:
-                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
+                prompt_ids = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens),
+                )
 
             if self.args.detail_log:
                 logger.debug(
@@ -525,6 +545,15 @@ class HttpServerManager:
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
+        # 请求未显式传 max_new_tokens 时，默认允许输出到 max_req_total_len
+        if sampling_params.max_new_tokens == -1:
+            remaining = self.max_req_total_len - prompt_tokens
+            if remaining < 1:
+                raise ValueError(
+                    f"the input prompt token len {prompt_tokens} >= max_req_total_len:"
+                    f"{self.max_req_total_len}, no space left for output"
+                )
+            sampling_params.max_new_tokens = remaining
         if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
             # use long_truncation_mode to truncate long input len req.
             if self.args.long_truncation_mode is None:
@@ -664,6 +693,7 @@ class HttpServerManager:
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
+                    metadata["prompt_cache_len"] = prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
 
                     if is_first_token:
