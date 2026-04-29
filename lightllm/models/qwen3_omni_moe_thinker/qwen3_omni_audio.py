@@ -10,9 +10,14 @@ from typing import Callable, Optional, Union, List
 from transformers.activations import ACT2FN
 
 from lightllm.server.multimodal_params import AudioItem
+from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
+
+QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
+
+logger = init_logger(__name__)
 
 
 def _get_feat_extract_output_lengths(input_lengths):
@@ -156,7 +161,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         activation_function="gelu",
         output_dim=2048,
         n_window_infer=800,
-        conv_chunksize=500,
+        conv_chunksize=QWEN3_OMNI_CONV_CHUNKSIZE,
         encoder_attention_heads=20,
         attention_dropout=0,
         activation_dropout=0,
@@ -259,6 +264,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         self.load_state_dict(weight_dict)
 
+    @torch.inference_mode()
     def forward(
         self,
         input_features,
@@ -327,6 +333,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         hidden_states = self.proj2(hidden_states)
         return hidden_states
 
+    @torch.inference_mode()
     def encode(self, audio_items: List[AudioItem]):
         uuids = []
         items: List[AudioItem] = []
@@ -363,3 +370,23 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             all_embeds.append(cur_embed)
 
         return all_embeds, audio_items
+
+    @torch.inference_mode()
+    def check_long_audio_infer(self):
+        """Exercise forward with mel length chosen so the conv loop runs once with batch dim == conv_chunksize."""
+        params = next(self.parameters())
+        device = params.device
+        dtype = params.dtype
+        frame_len = self.conv_chunksize * (self.n_window * 2)
+        logger.info(
+            "check_long_audio_infer: start frame_len=%s conv_chunksize=%s n_window=%s device=%s dtype=%s",
+            frame_len,
+            self.conv_chunksize,
+            self.n_window,
+            device,
+            dtype,
+        )
+        input_features = torch.zeros(self.num_mel_bins, frame_len, device=device, dtype=dtype)
+        feature_lens = torch.tensor([frame_len], device=device, dtype=torch.long)
+        out = self.forward(input_features, feature_lens=feature_lens)
+        logger.info("check_long_audio_infer: done output_shape=%s", tuple(out.shape))

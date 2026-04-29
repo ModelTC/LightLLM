@@ -223,3 +223,6 @@ class WhisperAudioModel:
             ans_embeds.append(cur_embed)
 
         return ans_embeds, audio_items
+
+    def check_long_audio_infer(self):
+        pass
