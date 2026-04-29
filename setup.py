@@ -28,11 +28,5 @@ setup(
         "triton",
         "orjson",
     ],
-    extras_require={
-        # /v1/messages (Anthropic Messages compatibility) uses litellm's
-        # adapter for request/response translation. Only install if you
-        # plan to serve Anthropic-SDK clients.
-        "anthropic": ["litellm>=1.52.0,<1.85"],
-    },
     package_data=package_data,
 )
