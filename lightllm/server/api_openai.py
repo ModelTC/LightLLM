@@ -47,6 +47,7 @@ from .api_models import (
     FunctionResponse,
     ToolCall,
     UsageInfo,
+    PromptTokensDetails,
     ChatMessage,
     ChatCompletionResponseChoice,
     ChatCompletionResponse,
@@ -58,11 +59,47 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
-def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+async def _safe_stream_wrapper(stream_generator):
+    """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
+    event instead of letting the exception propagate to Starlette which prints a long traceback."""
+    try:
+        async for item in stream_generator:
+            yield item
+    except ValueError as e:
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+
+
+def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
+    """Serialize a streaming chunk, explicitly including specified null fields."""
+    d = chunk.model_dump(exclude_none=True)
+    if choice_nulls and d.get("choices"):
+        for choice in d["choices"]:
+            for field in choice_nulls:
+                choice[field] = None
+    for field in response_nulls:
+        d[field] = None
+    return json.dumps(d, ensure_ascii=False)
+
+
+def create_error_response(
+    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
+) -> JSONResponse:
     from .api_http import g_objs
 
+    if err_type is None:
+        if status_code.value >= 500:
+            err_type = "InternalServerError"
+        elif status_code == HTTPStatus.NOT_FOUND:
+            err_type = "NotFoundError"
+        else:
+            err_type = "BadRequestError"
+
     g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse({"message": message}, status_code=status_code.value)
+    return JSONResponse(
+        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
+        status_code=status_code.value,
+    )
 
 
 def _process_tool_call_id(
@@ -237,14 +274,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     tools = None
     if request.tools and request.tool_choice != "none":
         # request.skip_special_tokens = False
+        # exclude_none=True so optional default-None fields (e.g. ``response``)
+        # don't surface in the chat-template render — Function.model_dump()
+        # otherwise emits {"response": None}, which chat.jinja's
+        # render_extra_keys turns into ``<response>null</response>`` and adds
+        # ~7 tokens per tool, drifting prompts away from other engines/clients
+        # that pass tools without that field.
         if not isinstance(request.tool_choice, str):
             tools = [
-                item.function.model_dump()
+                item.function.model_dump(exclude_none=True)
                 for item in request.tools
                 if item.function.name == request.tool_choice.function.name
             ]
         else:
-            tools = [item.function.model_dump() for item in request.tools]
+            tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
 
     prompt = await build_prompt(request, tools)
     sampling_params_dict = {
@@ -295,6 +338,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
         prompt_tokens_dict = {}
+        prompt_cache_len_dict = {}
         completion_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             from .req_id_generator import convert_sub_id_to_group_id
@@ -305,26 +349,28 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
+                prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
         for i in range(request.n):
             sub_req_id = sub_ids[i]
             prompt_tokens = prompt_tokens_dict[sub_req_id]
             completion_tokens = count_output_tokens_dict[sub_req_id]
+            cached_tokens = prompt_cache_len_dict.get(sub_req_id, 0)
             usage = UsageInfo(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
             )
 
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
-            full_text = text
 
             # Handle reasoning content
             reasoning_text = None
             reasoning_parser = get_env_start_args().reasoning_parser
-            if reasoning_parser and request.separate_reasoning:
+            if reasoning_parser:
                 request_enable_reasoning = _get_reasoning_from_request(request)
                 try:
                     parser = ReasoningParser(
@@ -339,17 +385,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         HTTPStatus.BAD_REQUEST,
                         "Failed to parse fc related info to json format!",
                     )
+                if not request.separate_reasoning:
+                    text = (reasoning_text or "") + (text or "")
+                    reasoning_text = None
 
             # Handle tool_calls parsing
             tool_calls = None
             tool_choice = request.tool_choice
             tools = request.tools
-            if tool_choice != "none" and any([i in full_text for i in TOOLS_TAG_LIST]):
+            if tool_choice != "none" and any([i in text for i in TOOLS_TAG_LIST]):
                 try:
                     # 为 tool_call_parser 提供默认值
                     tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
                     parser = FunctionCallParser(tools, tool_parser)
-                    full_normal_text, call_info_list = parser.parse_non_stream(full_text)
+                    text, call_info_list = parser.parse_non_stream(text)
                     tool_calls = []
                     history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
                     for call_info in call_info_list:
@@ -370,12 +419,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     )
             if tool_calls and finish_reason == "stop":
                 finish_reason = "tool_calls"
-                text = ""
             chat_message = ChatMessage(
                 role="assistant",
                 content=text if text else "",
                 tool_calls=tool_calls,
-                reasoning_content=reasoning_text if reasoning_text else "",
+                reasoning=reasoning_text if reasoning_text else "",
             )
             choice = ChatCompletionResponseChoice(
                 index=i,
@@ -391,16 +439,28 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     parser_dict = {}
     reasoning_parser_dict = {}
 
+    # Pre-generate a UUID-style request ID (matching the 36888 service format)
+    chat_completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+    # Common null fields to include in every streamed choice chunk
+    _choice_nulls = ("logprobs", "token_ids", "finish_reason")
+    _first_choice_nulls = ("logprobs", "finish_reason")
+    _final_choice_nulls = ("logprobs", "token_ids", "stop_reason")
+    _first_resp_nulls = ("prompt_token_ids",)
+
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
+        has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
         from .req_id_generator import convert_sub_id_to_group_id
 
         prompt_tokens = 0
         completion_tokens = 0
+        cached_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             prompt_tokens = metadata["prompt_tokens"]
+            cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
@@ -408,24 +468,44 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
 
+            # Emit the initial role-only chunk once per choice, as required by the
+            # OpenAI SSE spec: role appears only in the first delta with content="".
+            if not has_emitted_first_chunk[choice_index]:
+                has_emitted_first_chunk[choice_index] = True
+                first_choice = ChatCompletionStreamResponseChoice(
+                    index=choice_index,
+                    delta=DeltaMessage(role="assistant", content=""),
+                    finish_reason=None,
+                )
+                first_chunk = ChatCompletionStreamResponse(
+                    id=chat_completion_id,
+                    created=created_time,
+                    model=request.model,
+                    choices=[first_choice],
+                )
+                yield f"data: {_serialize_sse_chunk(first_chunk, _first_choice_nulls, _first_resp_nulls)}\n\n"
+
             # Handle reasoning content
-            if get_env_start_args().reasoning_parser and request.separate_reasoning:
+            if get_env_start_args().reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
                     choice_index, delta, reasoning_parser_dict, request_output, request
                 )
                 if reasoning_text:
-                    choice_data = ChatCompletionStreamResponseChoice(
-                        index=choice_index,
-                        delta=DeltaMessage(role="assistant", reasoning_content=reasoning_text),
-                        finish_reason=None,
-                    )
-                    chunk = ChatCompletionStreamResponse(
-                        id=group_request_id,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=request.model,
-                    )
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    if request.separate_reasoning:
+                        choice_data = ChatCompletionStreamResponseChoice(
+                            index=choice_index,
+                            delta=DeltaMessage(reasoning=reasoning_text),
+                            finish_reason=None,
+                        )
+                        chunk = ChatCompletionStreamResponse(
+                            id=chat_completion_id,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=request.model,
+                        )
+                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+                    else:
+                        delta = reasoning_text + (delta or "")
 
             if request.tool_choice != "none" and request.tools:
                 # parse_increment => returns (normal_text, calls)
@@ -437,16 +517,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 if normal_text and (normal_text.strip() or not has_emitted_tool_calls[sub_req_id]):
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=choice_index,
-                        delta=DeltaMessage(role="assistant", content=normal_text),
+                        delta=DeltaMessage(content=normal_text),
                         finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
-                        id=group_request_id,
+                        id=chat_completion_id,
                         created=created_time,
                         choices=[choice_data],
                         model=request.model,
                     )
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
 
                 # 2) if we found calls, we output them as separate chunk(s)
                 history_tool_calls_cnt = _get_history_tool_calls_cnt(request)
@@ -504,12 +584,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             finish_reason=None,
                         )
                         head_chunk = ChatCompletionStreamResponse(
-                            id=group_request_id,
+                            id=chat_completion_id,
                             created=created_time,
                             choices=[head_choice],
                             model=request.model,
                         )
-                        yield f"data: {head_chunk.model_dump_json(exclude_none=True)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(head_chunk, _choice_nulls)}\n\n"
 
                         for arg_delta in _split_tool_argument_delta(call_item.parameters):
                             arg_tool_call = ToolCall(
@@ -522,12 +602,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 finish_reason=None,
                             )
                             arg_chunk = ChatCompletionStreamResponse(
-                                id=group_request_id,
+                                id=chat_completion_id,
                                 created=created_time,
                                 choices=[arg_choice],
                                 model=request.model,
                             )
-                            yield f"data: {arg_chunk.model_dump_json(exclude_none=True)}\n\n"
+                            yield f"data: {_serialize_sse_chunk(arg_chunk, _choice_nulls)}\n\n"
                     else:
                         tool_call = ToolCall(
                             id=tool_call_id if is_tool_head else None,
@@ -548,27 +628,87 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             finish_reason=None,
                         )
                         chunk = ChatCompletionStreamResponse(
-                            id=group_request_id,
+                            id=chat_completion_id,
                             created=created_time,
                             choices=[choice_data],
                             model=request.model,
                         )
-                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                        yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
             else:
-                delta_message = DeltaMessage(role="assistant", content=delta)
-                stream_choice = ChatCompletionStreamResponseChoice(
-                    index=choice_index, delta=delta_message, finish_reason=None
-                )
-                stream_resp = ChatCompletionStreamResponse(
-                    id=group_request_id,
-                    created=created_time,
-                    model=request.model,
-                    choices=[stream_choice],
-                )
-                yield f"data: {stream_resp.model_dump_json(exclude_none=True)}\n\n"
+                if delta:
+                    # If this is the final token, merge content with finish_reason
+                    if current_finish_reason is not None:
+                        if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
+                            current_finish_reason = "tool_calls"
+                        delta_message = DeltaMessage(content=delta)
+                        stream_choice = ChatCompletionStreamResponseChoice(
+                            index=choice_index, delta=delta_message, finish_reason=current_finish_reason
+                        )
+                        stream_resp = ChatCompletionStreamResponse(
+                            id=chat_completion_id,
+                            created=created_time,
+                            model=request.model,
+                            choices=[stream_choice],
+                        )
+                        yield f"data: {_serialize_sse_chunk(stream_resp, _final_choice_nulls)}\n\n"
+                        # Skip the separate final-chunk logic below
+                        continue
+                    else:
+                        delta_message = DeltaMessage(content=delta)
+                        stream_choice = ChatCompletionStreamResponseChoice(
+                            index=choice_index, delta=delta_message, finish_reason=None
+                        )
+                        stream_resp = ChatCompletionStreamResponse(
+                            id=chat_completion_id,
+                            created=created_time,
+                            model=request.model,
+                            choices=[stream_choice],
+                        )
+                        yield f"data: {_serialize_sse_chunk(stream_resp, _choice_nulls)}\n\n"
 
-            # Emit a per-choice final empty chunk with finish_reason.
+            # Emit a per-choice final chunk with finish_reason (for tool_calls path
+            # or when no delta was emitted alongside finish_reason).
             if current_finish_reason is not None:
+                # Flush any buffered reasoning content that was never released
+                # (e.g., max_completion_tokens hit before </think/> was seen).
+                if get_env_start_args().reasoning_parser:
+                    parser = reasoning_parser_dict.get(choice_index)
+                    if parser is not None:
+                        flush_reasoning, flush_text = parser.flush()
+                        if flush_reasoning:
+                            if request.separate_reasoning:
+                                flush_choice = ChatCompletionStreamResponseChoice(
+                                    index=choice_index,
+                                    delta=DeltaMessage(reasoning=flush_reasoning),
+                                    finish_reason=None,
+                                )
+                            else:
+                                # vLLM compat: emit buffered thinking as content
+                                flush_choice = ChatCompletionStreamResponseChoice(
+                                    index=choice_index,
+                                    delta=DeltaMessage(content=flush_reasoning),
+                                    finish_reason=None,
+                                )
+                            flush_chunk = ChatCompletionStreamResponse(
+                                id=chat_completion_id,
+                                created=created_time,
+                                model=request.model,
+                                choices=[flush_choice],
+                            )
+                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
+                        if flush_text:
+                            flush_choice = ChatCompletionStreamResponseChoice(
+                                index=choice_index,
+                                delta=DeltaMessage(content=flush_text),
+                                finish_reason=None,
+                            )
+                            flush_chunk = ChatCompletionStreamResponse(
+                                id=chat_completion_id,
+                                created=created_time,
+                                model=request.model,
+                                choices=[flush_choice],
+                            )
+                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(
@@ -577,30 +717,34 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     finish_reason=current_finish_reason,
                 )
                 final_chunk = ChatCompletionStreamResponse(
-                    id=group_request_id,
+                    id=chat_completion_id,
                     created=created_time,
                     model=request.model,
                     choices=[final_choice],
                 )
-                yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+                yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
 
-        if request.stream_options and request.stream_options.include_usage:
-            usage = UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            )
-            usage_chunk = ChatCompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                choices=[],  # Empty choices array as per OpenAI spec
-                model=request.model,
-                usage=usage,
-            )
-            yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+        )
+        usage_chunk = ChatCompletionStreamResponse(
+            id=chat_completion_id,
+            created=created_time,
+            choices=[],  # Empty choices array as per OpenAI spec
+            model=request.model,
+            usage=usage,
+        )
+        yield f"data: {json.dumps(usage_chunk.model_dump(exclude_none=True), ensure_ascii=False)}\n\n"
+
+        yield "data: [DONE]\n\n".encode("utf-8")
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    return StreamingResponse(
+        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+    )
 
 
 async def completions_impl(request: CompletionRequest, raw_request: Request) -> Response:
@@ -755,11 +899,13 @@ async def _handle_streaming_completion(
 
         prompt_tokens = 0
         completion_tokens = 0
+        cached_tokens = 0
 
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             choice_index = sub_req_id - group_request_id
             prompt_tokens = metadata["prompt_tokens"]
+            cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
             current_finish_reason = None
             if finish_status.is_finished():
@@ -784,27 +930,29 @@ async def _handle_streaming_completion(
                 model=request.model,
                 choices=[stream_choice],
             )
-            yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+            yield f"data: {json.dumps(stream_resp.model_dump(), ensure_ascii=False)}\n\n"
 
-        yield "data: [DONE]\n\n".encode("utf-8")
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+        )
+        usage_chunk = CompletionStreamResponse(
+            id=group_request_id,
+            created=created_time,
+            choices=[],  # Empty choices array as per OpenAI spec
+            model=request.model,
+            usage=usage,
+        )
+        yield f"data: {json.dumps(usage_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
-        if request.stream_options and request.stream_options.include_usage:
-            usage = UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            )
-            usage_chunk = CompletionStreamResponse(
-                id=group_request_id,
-                created=created_time,
-                choices=[],  # Empty choices array as per OpenAI spec
-                model=request.model,
-                usage=usage,
-            )
-            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+        yield "data: [DONE]\n\n"
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    return StreamingResponse(
+        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+    )
 
 
 async def _collect_generation_results(
@@ -814,6 +962,7 @@ async def _collect_generation_results(
     count_output_tokens = 0
     finish_reason = None
     prompt_tokens = 0
+    prompt_cache_len = 0
     token_infos = [] if request.logprobs is not None else None
     prompt_logprobs = None
     prompt_token_ids = None
@@ -839,6 +988,7 @@ async def _collect_generation_results(
         if finish_status.is_finished():
             finish_reason = finish_status.get_finish_reason()
             prompt_tokens = metadata["prompt_tokens"]
+            prompt_cache_len = metadata.get("prompt_cache_len", 0)
 
     # 处理停止序列剔除
     final_text = "".join(final_output)
@@ -856,6 +1006,7 @@ async def _collect_generation_results(
         "text": final_text,
         "finish_reason": finish_reason,
         "prompt_tokens": prompt_tokens,
+        "prompt_cache_len": prompt_cache_len,
         "completion_tokens": count_output_tokens,
         "token_infos": token_infos,
         "prompt_logprobs": prompt_logprobs,
@@ -870,6 +1021,7 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
     choices = []
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_cached_tokens = 0
 
     for result in results:
         text = result["text"]
@@ -888,11 +1040,13 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
 
         total_prompt_tokens += result["prompt_tokens"]
         total_completion_tokens += result["completion_tokens"]
+        total_cached_tokens += result.get("prompt_cache_len", 0)
 
     usage = UsageInfo(
         prompt_tokens=total_prompt_tokens,
         completion_tokens=total_completion_tokens,
         total_tokens=total_prompt_tokens + total_completion_tokens,
+        prompt_tokens_details=PromptTokensDetails(cached_tokens=total_cached_tokens),
     )
 
     if is_batch:
@@ -915,8 +1069,6 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
     offset = 0
 
     def add_tokens_to_logprobs(token_ids=None, token_infos=None, logprob_map=None):
-        nonlocal offset
-
         def add_single_token(token_text: str, logprob: float):
             nonlocal offset
             all_tokens.append(token_text)
