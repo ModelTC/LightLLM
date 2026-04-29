@@ -66,7 +66,7 @@ async def _safe_stream_wrapper(stream_generator):
         async for item in stream_generator:
             yield item
     except ValueError as e:
-        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}})
+        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
 
 
@@ -79,7 +79,7 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
                 choice[field] = None
     for field in response_nulls:
         d[field] = None
-    return json.dumps(d)
+    return json.dumps(d, ensure_ascii=False)
 
 
 def create_error_response(
@@ -737,7 +737,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             model=request.model,
             usage=usage,
         )
-        yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
+        yield f"data: {json.dumps(usage_chunk.model_dump(exclude_none=True), ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n".encode("utf-8")
 
@@ -930,7 +930,7 @@ async def _handle_streaming_completion(
                 model=request.model,
                 choices=[stream_choice],
             )
-            yield f"data: {stream_resp.model_dump_json()}\n\n"
+            yield f"data: {json.dumps(stream_resp.model_dump(), ensure_ascii=False)}\n\n"
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
@@ -945,7 +945,7 @@ async def _handle_streaming_completion(
             model=request.model,
             usage=usage,
         )
-        yield f"data: {usage_chunk.model_dump_json()}\n\n"
+        yield f"data: {json.dumps(usage_chunk.model_dump(), ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
 
