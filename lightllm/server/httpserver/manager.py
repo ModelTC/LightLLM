@@ -298,13 +298,6 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-        if isinstance(prompt, str):
-            max_prompt_chars = self.max_req_total_len * 8
-            if len(prompt) > max_prompt_chars:
-                raise ValueError(
-                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
-                    f"the request is rejected before tokenization."
-                )
 
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -495,6 +488,15 @@ class HttpServerManager:
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
+            # pre-verify prompt length
+            # The average character length per token is always less than 8
+            # TODO: automatically calculate the average character length per token
+            max_prompt_chars = self.max_req_total_len * 8
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
+                    f"the request is rejected before tokenization."
+                )
             if self.enable_multimodal:
                 assert (
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
