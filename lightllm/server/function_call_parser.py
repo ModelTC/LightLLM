@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from .api_models import Tool
 
 logger = logging.getLogger(__name__)
-ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
+ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "True").upper() in ["ON", "TRUE", "1"]
 
 TOOLS_TAG_LIST = [
     "<|plugin|>",

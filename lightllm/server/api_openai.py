@@ -940,7 +940,7 @@ async def _handle_streaming_completion(
                 model=request.model,
                 choices=[stream_choice],
             )
-            yield ("data: " + json.dumps(stream_resp.dict(), ensure_ascii=False) + "\n\n").encode("utf-8")
+            yield f"data: {stream_resp.model_dump_json()}\n\n"
 
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
@@ -957,7 +957,7 @@ async def _handle_streaming_completion(
         )
         yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
-        yield "data: [DONE]\n\n".encode("utf-8")
+        yield "data: [DONE]\n\n"
 
     background_tasks = BackgroundTasks()
     return StreamingResponse(
@@ -1079,8 +1079,6 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
     offset = 0
 
     def add_tokens_to_logprobs(token_ids=None, token_infos=None, logprob_map=None):
-        nonlocal offset
-
         def add_single_token(token_text: str, logprob: float):
             nonlocal offset
             all_tokens.append(token_text)

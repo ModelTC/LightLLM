@@ -80,7 +80,6 @@ def _alias_reasoning_to_reasoning_content(messages: list) -> None:
 
 
 async def build_prompt(request, tools) -> str:
-    global tokenizer
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     _normalize_tool_call_arguments(messages)

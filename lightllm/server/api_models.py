@@ -301,7 +301,16 @@ class ChatMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     reasoning: Optional[str] = None
+    reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+
+    @model_validator(mode="after")
+    def _sync_reasoning_aliases(self):
+        if self.reasoning and not self.reasoning_content:
+            self.reasoning_content = self.reasoning
+        elif self.reasoning_content and not self.reasoning:
+            self.reasoning = self.reasoning_content
+        return self
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -328,6 +337,15 @@ class DeltaMessage(BaseModel):
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     reasoning: Optional[str] = None
+    reasoning_content: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _sync_reasoning_aliases(self):
+        if self.reasoning and not self.reasoning_content:
+            self.reasoning_content = self.reasoning
+        elif self.reasoning_content and not self.reasoning:
+            self.reasoning = self.reasoning_content
+        return self
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):
