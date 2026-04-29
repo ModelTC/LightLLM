@@ -345,8 +345,6 @@ class SamplingParams(ctypes.Structure):
         self.top_k = kwargs.get("top_k", SamplingParams._top_k)
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        # -1 作为哨兵值，表示请求未显式设置 max_new_tokens，后续会在长度校验阶段
-        # 被解析为 max_req_total_len - prompt_tokens，即允许输出到 max_req_total_len。
         self.max_new_tokens = kwargs.get("max_new_tokens", 65535)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
