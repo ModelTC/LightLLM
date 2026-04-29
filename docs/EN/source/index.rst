@@ -54,7 +54,6 @@ Documentation List
    Reward Model Deployment <tutorial/reward_model>
    OpenAI api Usage <tutorial/openai>
    Anthropic Messages API <tutorial/anthropic>
-   OpenAI Responses API <tutorial/openai_responses>
    Function Calling <tutorial/function_calling>
    Reasoning Parser <tutorial/reasoning_parser>
    APIServer Parameters <tutorial/api_server_args_zh>
