@@ -34,7 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
 from lightllm.utils.multimodal_utils import enforce_image_token_budget
 from rpyc.utils.classic import obtain
 
@@ -462,6 +462,13 @@ class HttpServerManager:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
+        except ClientDisconnected as e:
+            # Expected control-flow signal: client disconnected or another module aborted.
+            # ``self.abort(...)`` was already called by the disconnect path (and the recycle
+            # loop releases multimodal resources for in-flight requests), so just log a
+            # one-liner and re-raise — no stack trace, no double-abort.
+            logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+            raise
         except Exception as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
             # error need to release multimodel resources.
@@ -676,11 +683,11 @@ class HttpServerManager:
                 pass
 
             if req_status.aborted:
-                raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
+                raise ClientDisconnected(group_request_id, "aborted by other module")
 
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(group_request_id)
 
             async with req_status.lock:
                 event.clear()

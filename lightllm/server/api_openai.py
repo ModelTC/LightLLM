@@ -30,6 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
+from lightllm.utils.error_utils import ClientDisconnected
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -68,6 +69,9 @@ async def _safe_stream_wrapper(stream_generator):
     except ValueError as e:
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}})
         yield f"data: {error_data}\n\n"
+    except ClientDisconnected:
+        # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
+        return
 
 
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):

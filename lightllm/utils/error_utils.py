@@ -23,6 +23,17 @@ class ServerBusyError(Exception):
         return f"{self.message} (Status code: {self.status_code})"
 
 
+class ClientDisconnected(Exception):
+    """Raised when the client closed the HTTP connection mid-request, or when
+    the request was aborted by another module. This is an expected control-flow
+    signal — handlers should clean up quietly without logging a stack trace."""
+
+    def __init__(self, group_request_id: int, reason: str = "client disconnected"):
+        super().__init__(f"req_id {group_request_id} {reason}")
+        self.group_request_id = group_request_id
+        self.reason = reason
+
+
 class NixlPrefillNodeStopGenToken(Exception):
     def __init__(self, group_request_id, message="Nixl prefill node stop gen token"):
         """

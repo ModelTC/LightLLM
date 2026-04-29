@@ -19,7 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
 from lightllm.utils.multimodal_utils import enforce_image_token_budget
 from .pd_selector import create_selector
@@ -224,7 +224,7 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(group_request_id)
 
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
@@ -262,7 +262,7 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(group_request_id)
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -299,7 +299,7 @@ class HttpServerManagerForPDMaster:
             raise ServerBusyError()
 
         if await request.is_disconnected():
-            raise Exception(f"req_id {group_request_id} disconnected")
+            raise ClientDisconnected(group_request_id)
 
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
@@ -327,7 +327,7 @@ class HttpServerManagerForPDMaster:
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(group_request_id)
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
@@ -376,7 +376,7 @@ class HttpServerManagerForPDMaster:
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(group_request_id)
 
             prompt_tokens = metadata["prompt_tokens"]
             out_token_counter += 1
