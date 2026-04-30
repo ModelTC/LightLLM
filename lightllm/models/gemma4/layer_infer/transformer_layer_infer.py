@@ -198,7 +198,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
         # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
         # (not .reshape) so any non-contiguous layout from a future mem_manager
-        # backend fails loudly instead of silently copying — slice + view is
         # O(1) on the standard MemoryManager layout (inner (kv_heads, head_dim)
         # span is contiguous).
         kv_heads = self.tp_k_head_num_
@@ -211,42 +210,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # Otherwise the K/V live in the first used_cache_slots; the rest is zero pad.
         _k = _k_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
         _v = _v_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
-        return _k, _v
-
-    def _context_attention_kernel(
-        self,
-        q: torch.Tensor,
-        kv,
-        infer_state: InferStateInfo,
-        layer_weight: Gemma4TransformerLayerWeight,
-        out=None,
-    ) -> torch.Tensor:
-        _k, _v = self._get_layer_kv(infer_state)
-        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        if self.is_sliding:
-            # Sliding layers always go through the gemma4_mm Triton kernel: it
-            # handles SWA + image bidirectional masking in one pass.
-            o_tensor = self.alloc_tensor(_q.shape, q.dtype)
-            sw = (self.sliding_window_ - 1, 0) if self.sliding_window_ > 0 else (-1, -1)
-            context_attention_fwd_gemma4_mm(
-                _q,
-                _k,
-                _v,
-                o_tensor,
-                infer_state.b_req_idx,
-                infer_state.b_q_start_loc,
-                infer_state.b_seq_len,
-                infer_state.b_ready_cache_len,
-                infer_state.max_q_seq_len,
-                infer_state.req_manager.req_to_token_indexs,
-                infer_state.b_image_token_end,
-                sliding_window=sw,
-            )
-            return o_tensor.view(q.shape)
-
-        # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
-        # triton via backend1.
-        o_tensor = infer_state.prefill_att_state1.prefill_att(
             q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
@@ -275,17 +238,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         ffn1 = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
         silu_and_mul_fwd(gate_up, ffn1)
         gate_up = None
-        ffn2 = layer_weight.down_proj.mm(ffn1)
         ffn1 = None
         ffn2 = self._tpsp_reduce(input=ffn2, infer_state=infer_state)
         return ffn2
 
-    def _router_logits(self, residual, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
-        # Mirrors vllm Gemma4Router: unweighted RMSNorm -> 1/sqrt(hidden) ->
-        # per-channel scale -> bf16xbf16 -> fp32 gate matmul for stable top-k.
-        x = residual.view(-1, self.embed_dim_)
-        x = rmsnorm_forward(x=x, weight=None, eps=self.eps_, out=self.alloc_tensor(x.shape, dtype=x.dtype))
-        x = x * self.router_root_scale * layer_weight.router_input_scale_.weight
         return layer_weight.moe_gate.mm(x.to(torch.float32))
 
     def _ffn_moe(self, input, router_logits, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
@@ -380,3 +336,71 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings = self._ffn(input_embdings, infer_state, layer_weight)
 
         return self._block_epilogue(input_embdings, infer_state, layer_weight)
+
+    # ----- block-level forwards (add layer_scalar at the end) ----------
+
+    def _apply_layer_scalar(self, hidden_states, layer_weight):
+        hidden_states.mul_(layer_weight.layer_scalar_.weight)
+        return hidden_states
+
+    def context_forward(
+        self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
+    ):
+        input_embdings = input_embdings.to(torch.bfloat16)
+
+        # attn sub-block
+        input1 = self._att_norm(
+            input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight
+        ).to(torch.bfloat16)
+        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        input1 = None
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+        q = None
+        o = self._get_o(o, infer_state, layer_weight)
+        o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        o = None
+
+        # ffn sub-block
+        input1 = layer_weight.pre_feedforward_layernorm_weight_(
+            input=input_embdings.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+        ).to(torch.bfloat16)
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        input1 = None
+        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
+            input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+        ).to(torch.bfloat16)
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+
+        return self._apply_layer_scalar(input_embdings, layer_weight)
+
+    def token_forward(
+        self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
+    ):
+        input_embdings = input_embdings.to(torch.bfloat16)
+
+        input1 = self._att_norm(
+            input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight
+        ).to(torch.bfloat16)
+        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        input1 = None
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        o = self._token_attention_kernel(q, infer_state, layer_weight)
+        q = None
+        o = self._get_o(o, infer_state, layer_weight)
+        o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        o = None
+
+        input1 = layer_weight.pre_feedforward_layernorm_weight_(
+            input=input_embdings.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+        ).to(torch.bfloat16)
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        input1 = None
+        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
+            input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+        ).to(torch.bfloat16)
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+
+        return self._apply_layer_scalar(input_embdings, layer_weight)

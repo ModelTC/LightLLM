@@ -213,4 +213,3 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         freqs_f = torch.outer(t, inv_freq_full)
         self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()
         self._sin_cached_full = torch.sin(freqs_f).to(self.data_type).cuda()
-        return
