@@ -342,7 +342,7 @@ class InferStateInfo:
         )
         return origin_data.view(-1, *old_shape[1:])
 
-    # 用于 prefll cuda graph 的专用功能接口
+    # 用于 prefill cuda graph 的专用功能接口
     def prefill_cuda_graph_create_graph_obj(self):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []

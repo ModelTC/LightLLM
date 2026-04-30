@@ -538,7 +538,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         " currently only for llama and qwen model, not support ep moe model",
     )
     parser.add_argument(
-        "--prefll_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
+        "--prefill_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
     )
 
     parser.add_argument(
