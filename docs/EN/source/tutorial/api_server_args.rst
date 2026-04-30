@@ -372,7 +372,7 @@ Performance Optimization Parameters
     If small-page cache hits are poor under high load (for example, due to limited small-page count and LRU eviction),
     increasing this value can improve cache hit rate, at the cost of more memory usage.
 
-.. option:: -linear_att_ssm_data_type
+.. option:: --linear_att_ssm_data_type
 
     Data type of linear-attention SSM state, optional values:
 

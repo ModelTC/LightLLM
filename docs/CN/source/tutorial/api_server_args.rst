@@ -370,7 +370,7 @@ PD 分离模式参数
     当高负载下出现小块缓存命中不足（例如受小块数量和 LRU 淘汰影响）时，
     可以调大该参数以提升命中率，但会增加内存占用。
 
-.. option:: -linear_att_ssm_data_type
+.. option:: --linear_att_ssm_data_type
 
     线性注意力 SSM 状态的数据类型，可选值：
 
