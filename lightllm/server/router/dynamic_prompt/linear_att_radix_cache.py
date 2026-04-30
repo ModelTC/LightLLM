@@ -366,7 +366,7 @@ class LinearAttPagedRadixCache:
             return None, 0, None
 
         # 判定真正可以用的匹配节点。
-        ans_node_list = self._realy_match(ans_node_list)
+        ans_node_list = self._trim_unusable_match_tail(ans_node_list)
         if len(ans_node_list) == 0:
             return None, 0, None
 
@@ -431,7 +431,7 @@ class LinearAttPagedRadixCache:
         finally:
             self._add_node(node)
 
-    def _realy_match(self, nodes: List[LinearAttPagedTreeNode]) -> List[LinearAttPagedTreeNode]:
+    def _trim_unusable_match_tail(self, nodes: List[LinearAttPagedTreeNode]) -> List[LinearAttPagedTreeNode]:
         removed_list = []
         for node in reversed(nodes):
             if node.is_big_page_node():
@@ -444,7 +444,7 @@ class LinearAttPagedRadixCache:
 
         for node in removed_list:
             self._discard_node(node)
-            # def ref
+            # dec ref
             node.ref_counter -= 1
             if node.ref_counter == 0:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
