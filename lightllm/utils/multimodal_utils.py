@@ -20,9 +20,8 @@ def enforce_image_token_budget(token_num: int, max_tokens: Optional[int], image_
     """
     if max_tokens is not None and token_num > max_tokens:
         raise ValueError(
-            f"image[{image_index}] token_num={token_num} exceeds "
-            f"visual_image_max_tokens={max_tokens}; reduce image resolution, "
-            f"image_max_patch_num (InternVL-family), or preprocessor_config.json::max_pixels (Qwen-VL)"
+            f"image[{image_index}] is too large ({token_num} tokens exceeds limit {max_tokens}); "
+            f"please reduce the image resolution and retry."
         )
 
 

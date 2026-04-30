@@ -47,7 +47,7 @@ def clamp_processor_max_pixels(processor, visual_image_max_tokens, processor_nam
     if allowed_max_pixels < unit * unit:
         raise ValueError(
             f"visual_image_max_tokens={visual_image_max_tokens} is too small; "
-            f"need at least 1 patch's worth (={unit * unit} pixels) for {processor_name or 'processor'}."
+            f"need at least 1 patch's worth (={unit * unit} pixels)."
         )
     current_max_pixels = getattr(processor, "max_pixels", None)
     if current_max_pixels is None or allowed_max_pixels < current_max_pixels:
