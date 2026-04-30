@@ -269,8 +269,8 @@ class TpPartBaseModel:
     def _init_prefill_cuda_graph(self):
         self.prefill_graph = (
             None
-            if not get_env_start_args().enable_prefill_cudagraph
-            else PrefillCudaGraph(decode_cuda_graph=self.graph)
+            if get_env_start_args().disable_prefill_cudagraph
+            else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
         )
         if self.prefill_graph is not None:
             if get_env_start_args().enable_prefill_microbatch_overlap:

@@ -70,7 +70,7 @@ def _auto_select_backend(
 ) -> type:
     """Auto-select the best available backend with validation.
 
-    Priority: FA3 > FlashInfer > Triton
+    Priority follows the provided priority_list.
     Each backend is validated in a subprocess with ground truth checks.
     """
     backend_map = kv_type_to_backend
@@ -95,7 +95,7 @@ def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashi
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
 
-def get_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
+def get_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "fa3", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
@@ -115,7 +115,7 @@ def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "fl
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 
-def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
+def get_mla_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "fa3", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
