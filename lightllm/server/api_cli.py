@@ -382,7 +382,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority: fa3 > flashinfer > triton)""",
+                (priority: flashinfer > fa3 > triton)""",
     )
     parser.add_argument(
         "--vit_att_backend",
