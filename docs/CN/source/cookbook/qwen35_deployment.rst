@@ -74,6 +74,17 @@ Qwen3.5-397B-A17B（8×H200）
 - ``--graph_max_batch_size 128``: CUDA graph 最大批处理大小（显存不足时可减小）
 - ``--reasoning_parser qwen3``: 启用 Qwen3 推理解析器，支持思考模式
 
+线性注意力缓存调参说明
+~~~~~~~~~~~~~~~~~~~~~~
+
+Qwen3.5 使用混合注意力架构，在涉及线性注意力缓存复用时，建议关注以下参数：
+
+- ``--linear_att_hash_page_size``: 小块粒度（每个 hash bucket 的 token 数）
+- ``--linear_att_page_block_num``: 块级匹配相关配置。可将块大小近似理解为 ``linear_att_page_block_num * linear_att_hash_page_size``。
+- 当 ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len`` 时，radix cache 的块级匹配能力会近似关闭，更多依赖请求级小块匹配（小块大小为 ``linear_att_hash_page_size``）。
+- 在高负载下，小块数量不足叠加内部 LRU 淘汰，可能导致命中率下降。此时可调大 ``--linear_att_cache_size`` 提升命中率，但会增加内存占用。
+- 开启 ``--enable_cpu_cache`` 时，CPU cache 的 page 大小会被强制设置为 ``linear_att_page_block_num * linear_att_hash_page_size``，以满足内部复用约束。
+
 纯文本模式（节省显存）
 ~~~~~~~~~~~~~~~~~~~~~~~
 

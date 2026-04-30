@@ -343,6 +343,42 @@ Performance Optimization Parameters
     * ``fp8kv_sph``: FP8 static per-head quantization, uses fa3 backend
     * ``fp8kv_spt``: FP8 static per-tensor quantization, uses flashinfer backend
 
+.. option:: --linear_att_hash_page_size
+
+    Hash page size for linear attention, default is ``512``.
+
+    This controls the number of tokens per hash bucket, which can affect radix cache reuse.
+
+.. option:: --linear_att_page_block_num
+
+    Number of blocks used for linear-attention state storage, default is ``10000000``.
+
+    This controls the available pages for attention state data, which can affect memory usage and multi-turn chat performance.
+    In current behavior, block size can be approximated as
+    ``linear_att_page_block_num * linear_att_hash_page_size``.
+    When ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len``,
+    block-level matching in radix cache is effectively disabled, and request-level small-page matching
+    (small page size is ``linear_att_hash_page_size``) becomes dominant.
+    Under high load, limited small-page capacity plus internal LRU eviction can reduce cache hit rate.
+
+    When ``--enable_cpu_cache`` is enabled, CPU cache page size is forced to
+    ``linear_att_page_block_num * linear_att_hash_page_size`` to satisfy internal reuse constraints.
+
+.. option:: --linear_att_cache_size
+
+    Size of linear-attention cache.
+
+    If not specified, it will be automatically derived from cache-related settings.
+    If small-page cache hits are poor under high load (for example, due to limited small-page count and LRU eviction),
+    increasing this value can improve cache hit rate, at the cost of more memory usage.
+
+.. option:: --linear_att_ssm_data_type
+
+    Data type of linear-attention SSM state, optional values:
+
+    * ``bfloat16``
+    * ``float32`` (default)
+
 .. option:: --disable_cudagraph
 
     Disable cudagraph in the decoding phase

@@ -2,10 +2,12 @@ import threading
 import torch.distributed as dist
 import torch
 import dataclasses
+import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
@@ -26,6 +28,9 @@ class MultiLevelKvCacheModule(object):
         self.filter_group = create_new_group_for_current_dp("gloo")
         self.init_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.init_sync_group)
+        self.offload_sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.offload_sync_group)
+        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
 
         self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
         self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
@@ -63,12 +68,19 @@ class MultiLevelKvCacheModule(object):
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
-        token_page_size = self.args.cpu_cache_token_page_size
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
-            match_tokens = len(page_list) * token_page_size
+            page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+            page_len_start_list = [0] + page_len_list
+            assert len(page_list) <= len(page_len_list)
+
+            if page_list:
+                match_tokens = page_len_list[len(page_list) - 1]
+            else:
+                match_tokens = 0
+
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
                 req.shm_req.cpu_prompt_cache_len = max(
@@ -83,8 +95,9 @@ class MultiLevelKvCacheModule(object):
                         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_token_num)
 
                     # 计算需要加载的页面（只加载未匹配的部分）
-                    cur_kv_pages = req.cur_kv_len // token_page_size
-                    need_pages = page_list[cur_kv_pages:]  # 只取需要的页面
+                    ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
+                    assert ready_page_num <= len(page_list)
+                    need_pages = page_list[ready_page_num:]  # 只取需要的页面
 
                     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(need_size=need_token_num)
 
@@ -92,48 +105,44 @@ class MultiLevelKvCacheModule(object):
                         # TODO fa3 现在必须使用同步模式, 未来需要移除
                         g_infer_context.get_overlap_stream().synchronize()
 
-                    # TODO 更有效的分配策略。
-                    grid_num = 16
-
                     mem_manager = self.backend.model.mem_manager
-                    if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                        cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, 0 : cpu_cache_meta.head_dim
-                        ]
-                        cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                            :, :, :, :, cpu_cache_meta.head_dim :
-                        ].view(mem_manager.scale_buffer.dtype)
-                        gpu_kv_cache_scale = mem_manager.scale_buffer
-                    else:
-                        cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
-                        cpu_kv_cache_scale = None
-                        gpu_kv_cache_scale = None
+                    req_manager = self.backend.model.req_manager
 
                     mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
                         non_blocking=True
                     )
-                    # 将 cpu page 的内容拷贝到 gpu 页面中
-                    load_cpu_kv_to_gpu(
-                        gpu_mem_indexes=mem_indexes_cuda,
-                        gpu_kv_cache=mem_manager.kv_buffer,
-                        gpu_kv_cache_scale=gpu_kv_cache_scale,
-                        cpu_kv_cache=cpu_kv_cache,
-                        cpu_kv_cache_scale=cpu_kv_cache_scale,
+                    # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
+                    # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
+                    # 这里需要进行pad操作，使操作的页面是完整的。
+                    _start = page_len_start_list[ready_page_num]
+
+                    _end = req.cur_kv_len
+                    assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
+                    mem_indexes_cuda = torch.cat(
+                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
+                    )
+
+                    assert (
+                        len(mem_indexes_cuda) == page_len_list[len(page_list) - 1] - page_len_start_list[ready_page_num]
+                    )
+
+                    # 更新 req 状态。
+                    idle_token_num -= need_token_num
+                    g_infer_context.req_manager.req_to_token_indexs[
+                        req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
+                    ] = mem_indexes
+                    req.cur_kv_len = req.cur_kv_len + need_token_num
+
+                    mem_manager.operator.load_cpu_cache_to_gpu(
+                        mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
-                        tp_index=self.backend.rank_in_dp,
-                        tp_world_size=self.backend.dp_world_size,
-                        grid_num=grid_num,
+                        cpu_cache_client=self.cpu_cache_client,
+                        req=req,
                     )
 
                 torch.cuda.current_stream().synchronize()
 
-                idle_token_num -= need_token_num
-                g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + need_token_num)
-                ] = mem_indexes
-                req.cur_kv_len = req.cur_kv_len + need_token_num
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
@@ -164,10 +173,12 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-            if (
-                req.cur_kv_len < self.args.cpu_cache_token_page_size
-                or req.shm_req.input_len <= self.args.cpu_cache_token_page_size
-            ):
+            if g_infer_context.is_linear_att_mixed_model:
+                offload_limit_size = self.args.linear_att_hash_page_size
+            else:
+                offload_limit_size = self.args.cpu_cache_token_page_size
+
+            if req.cur_kv_len < offload_limit_size or req.shm_req.input_len <= offload_limit_size:
                 true_finished_reqs.append(req)
                 continue
 
@@ -205,11 +216,20 @@ class MultiLevelKvCacheModule(object):
         self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
     ) -> Optional["TransTask"]:
         with torch.cuda.stream(cpu_kv_cache_stream):
+            # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
+            token_hash_list = req.shm_req.token_hash_list.get_all()
+            page_len_list = req.shm_req.token_hash_page_len_list.get_all()
+            assert len(token_hash_list) == len(page_len_list)
+
             if self.backend.is_master_in_dp:
-                # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
-                token_hash_list = req.shm_req.token_hash_list.get_all()
-                block_size = req.cur_kv_len // self.args.cpu_cache_token_page_size
-                move_block_size = min(block_size, len(token_hash_list))
+
+                find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
+                move_block_size = find_index
+
+                # 对于 linear att 模型， 如果最后一个页面是碎页，需要做特殊处理，判断该碎页是否满足卸载条件。
+                move_block_size = self._handle_linear_att_last_page(
+                    req=req, move_block_size=move_block_size, page_len_list=page_len_list
+                )
 
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -252,48 +272,54 @@ class MultiLevelKvCacheModule(object):
             cuda_page_indexes.copy_(page_indexes, non_blocking=True)
             cuda_page_readies.copy_(page_readies, non_blocking=True)
 
-            move_token_num = item_size * self.args.cpu_cache_token_page_size
-            assert req.cur_kv_len >= item_size * self.args.cpu_cache_token_page_size
+            move_token_num = page_len_list[item_size - 1]
+            assert req.cur_kv_len >= move_token_num
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            # TODO 更有效的分配策略。
-            grid_num = 16
-
             mem_manager = self.backend.model.mem_manager
-            if hasattr(mem_manager, "scale_buffer") and mem_manager.scale_buffer is not None:
-                cpu_cache_meta = self.cpu_cache_client.kv_cache_tensor_meta
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor[:, :, :, :, 0 : cpu_cache_meta.head_dim]
-                cpu_kv_cache_scale = self.cpu_cache_client.cpu_kv_cache_tensor[
-                    :, :, :, :, cpu_cache_meta.head_dim :
-                ].view(mem_manager.scale_buffer.dtype)
-                gpu_kv_cache_scale = mem_manager.scale_buffer
-            else:
-                cpu_kv_cache = self.cpu_cache_client.cpu_kv_cache_tensor
-                cpu_kv_cache_scale = None
-                gpu_kv_cache_scale = None
 
-            # assert max(page_list) < self.cpu_cache_client.cpu_kv_cache_tensor.shape[0]
-            offload_gpu_kv_to_cpu(
-                token_indexes=token_indexes,
-                gpu_kv_cache=mem_manager.kv_buffer,
-                gpu_kv_cache_scale=gpu_kv_cache_scale,
-                cpu_kv_cache=cpu_kv_cache,
-                cpu_kv_cache_scale=cpu_kv_cache_scale,
+            mem_manager.operator.offload_gpu_kv_to_cpu_cache(
+                mem_indexes=token_indexes,
                 page_indexes=cuda_page_indexes,
                 page_readies=cuda_page_readies,
-                tp_index=self.backend.rank_in_dp,
-                tp_world_size=self.backend.dp_world_size,
-                grid_num=grid_num,
+                cpu_cache_client=self.cpu_cache_client,
+                req=req,
             )
+
+            # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，
+            if self.backend.dp_world_size > 1:
+                dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             trans_task = TransTask(
-                page_indexes=page_indexes, page_readies=page_readies, req_obj=req, sync_event=sync_event
+                move_token_num=move_token_num,
+                page_indexes=page_indexes,
+                page_readies=page_readies,
+                req_obj=req,
+                sync_event=sync_event,
             )
 
         return trans_task
+
+    def _handle_linear_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
+        if not g_infer_context.is_linear_att_mixed_model:
+            return move_block_size
+
+        if move_block_size == 0:
+            return 0
+
+        if move_block_size == len(page_len_list):
+            tail_len = page_len_list[move_block_size - 1]
+            if tail_len % self.args.cpu_cache_token_page_size != 0:
+                # 全局关闭了碎页的cpu cache 存储功能。
+                if self.args.disable_linear_att_small_page_cpu_cache:
+                    return move_block_size - 1
+                # 说明是碎页，碎页需要判定是否满足cpu cache 的offload条件。
+                if req.tail_linear_att_small_page_buffer_id is None:
+                    return move_block_size - 1
+        return move_block_size
 
     def update_cpu_cache_task_states(self):
         if self.backend.is_master_in_dp:
@@ -315,12 +341,16 @@ class MultiLevelKvCacheModule(object):
 
         if item_size > 0:
             page_array_list = [task.page_indexes.tolist() for task in trans_ok_tasks]
+            move_token_nums = [task.move_token_num for task in trans_ok_tasks]
             if self.backend.is_master_in_dp:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
                 # 分组update，避免不同请求的page交叉，导致disk cache hash不一致
-                for pages in page_array_list:
+                for pages, move_token_num in zip(page_array_list, move_token_nums):
                     self.cpu_cache_client.update_pages_status_to_ready(
-                        page_list=pages, deref=True, disk_offload_enable=self.args.enable_disk_cache
+                        page_list=pages,
+                        deref=True,
+                        disk_offload_enable=self.args.enable_disk_cache,
+                        token_num_in_page_list=move_token_num,
                     )
                 self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
@@ -330,6 +360,7 @@ class MultiLevelKvCacheModule(object):
 
 @dataclasses.dataclass
 class TransTask:
+    move_token_num: int
     page_indexes: torch.Tensor
     page_readies: torch.Tensor
     req_obj: InferReq

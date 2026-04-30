@@ -8,11 +8,15 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from .mem_manager import MemoryManager
+from .operator import FP8StaticPerHeadQuantMemOperator
 
 logger = init_logger(__name__)
 
 
 class FP8StaticPerHeadQuantMemManager(MemoryManager):
+
+    operator_class = FP8StaticPerHeadQuantMemOperator
+
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         # 这里用uint8存储量化后的kv，方便兼容各种torch算子。fp8量化目前采用离线方案，kv_buffer不存储scale
         super().__init__(size, torch.uint8, head_num, head_dim, layer_num, always_copy, mem_fraction)
@@ -71,21 +75,6 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
             raise FileNotFoundError(
                 f"kv_quant_calibration_config {get_env_start_args().kv_quant_calibration_config_path} not found"
             )
-
-    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        """
-        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
-        """
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
-
-        scales = self.scales
-        destindex_copy_kv_fp8(
-            kv,
-            mem_index,
-            scales[layer_index],
-            self.kv_buffer[layer_index].view(torch.float8_e4m3fn),
-        )
-        return
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
