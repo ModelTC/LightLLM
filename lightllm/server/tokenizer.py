@@ -31,6 +31,7 @@ from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
+from ..models.gemma4.model import Gemma4Tokenizer
 from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
@@ -130,5 +131,7 @@ def get_tokenizer(
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
+    elif model_type == "gemma4":
+        tokenizer = Gemma4Tokenizer(tokenizer, model_cfg)
 
     return tokenizer

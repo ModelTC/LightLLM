@@ -127,7 +127,14 @@ def context_attention_fwd(
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128, 256}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    # Larger head_dim needs smaller tiles to fit in SM shared memory.
+    # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
+    # consumes 128KB, leaving no room for K/V/scores buffers.
+    if Lk >= 512:
+        BLOCK_M = min(BLOCK_M, 32)
+    elif Lk >= 256:
+        BLOCK_M = min(BLOCK_M, 64)
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
@@ -291,7 +298,14 @@ def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, ma
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128, 256}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    # Larger head_dim needs smaller tiles to fit in SM shared memory.
+    # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
+    # consumes 128KB, leaving no room for K/V/scores buffers.
+    if Lk >= 512:
+        BLOCK_M = min(BLOCK_M, 32)
+    elif Lk >= 256:
+        BLOCK_M = min(BLOCK_M, 64)
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
@@ -463,7 +477,14 @@ def context_attention_fwd_contiguous_kv(
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128, 256}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    # Larger head_dim needs smaller tiles to fit in SM shared memory.
+    # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
+    # consumes 128KB, leaving no room for K/V/scores buffers.
+    if Lk >= 512:
+        BLOCK_M = min(BLOCK_M, 32)
+    elif Lk >= 256:
+        BLOCK_M = min(BLOCK_M, 64)
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
