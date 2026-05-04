@@ -392,7 +392,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority: flashinfer > fa3 > triton)""",
+                (priority: fa3 > flashinfer > triton)""",
     )
     parser.add_argument(
         "--vit_att_backend",
@@ -542,9 +542,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
     parser.add_argument(
-        "--disable_prefill_cudagraph",
+        "--enable_prefill_cudagraph",
         action="store_true",
-        help="Disable the cudagraph of the prefill stage,"
+        help="Enable the cudagraph of the prefill stage,"
         " currently only for llama and qwen model, not support ep moe model",
     )
     parser.add_argument(
