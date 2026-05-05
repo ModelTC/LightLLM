@@ -118,6 +118,11 @@ def normal_or_p_d_start(args):
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
 
+    # performance_mode 参数处理
+    if args.performance_mode == "personal":
+        args.running_max_req_size = 3
+        logger.info(f"performance_mode is personal, set running_max_req_size to 3")
+
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 

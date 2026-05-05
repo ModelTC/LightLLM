@@ -18,6 +18,13 @@ Basic Configuration Parameters
     * ``pd_master``: pd master node mode (for pd disaggregation running mode)
     * ``config_server``: Configuration server mode (for pd disaggregation mode, used to register pd_master nodes and get pd_master node list), specifically designed for large-scale, high-concurrency scenarios, used when `pd_master` encounters significant CPU bottlenecks.
 
+.. option:: --performance_mode, --p_mode
+
+    Performance mode for different scenarios, optional values:
+    
+    * ``None``: No performance mode applied (default)
+    * ``personal``: Private personal running mode, automatically sets running_max_req_size to 3.
+
 .. option:: --host
 
     Server listening address, default is ``127.0.0.1``

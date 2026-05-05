@@ -23,6 +23,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 specifically designed for large-scale, high-concurrency scenarios where `pd_master` encounters
                 significant CPU bottlenecks.""",
     )
+    parser.add_argument(
+        "--performance_mode",
+        "--p_mode",
+        type=str,
+        choices=["personal"],
+        default=None,
+        help="""performance mode for different scenarios.
+                None: no performance mode applied (default).
+                personal: private personal running mode, automatically sets running_max_req_size to 3.""",
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)

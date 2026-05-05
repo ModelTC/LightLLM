@@ -18,6 +18,13 @@ APIServer 参数详解
     * ``pd_master``: pd 主节点模式（用于 pd 分离运行模式）
     * ``config_server``: 配置服务器模式（用于 pd 分离模式，用于注册 pd_master 节点并获取 pd_master 节点列表）,专门为大规模、高并发场景设计，当 `pd_master` 遇到显著的 CPU 瓶颈时使用。
 
+.. option:: --performance_mode, --p_mode
+
+    不同场景的性能模式，可选值：
+    
+    * ``None``: 不应用性能模式（默认）
+    * ``personal``: 私有化个人运行模式，自动将 running_max_req_size 设置为 3。
+
 .. option:: --host
 
     服务器监听地址，默认为 ``127.0.0.1``
