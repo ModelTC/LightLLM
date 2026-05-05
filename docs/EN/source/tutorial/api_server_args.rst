@@ -23,7 +23,10 @@ Basic Configuration Parameters
     Performance mode for different scenarios, optional values:
     
     * ``None``: No performance mode applied (default)
-    * ``personal``: Private personal running mode, automatically sets running_max_req_size to 3.
+    * ``personal``: Private personal running mode, automatically sets:
+        - ``running_max_req_size`` to 3
+        - ``batch_max_tokens`` to 2048 (2k)
+        - ``chunked_prefill_size`` to 1024 (1k)
 
 .. option:: --host
 

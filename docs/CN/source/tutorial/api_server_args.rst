@@ -23,7 +23,10 @@ APIServer 参数详解
     不同场景的性能模式，可选值：
     
     * ``None``: 不应用性能模式（默认）
-    * ``personal``: 私有化个人运行模式，自动将 running_max_req_size 设置为 3。
+    * ``personal``: 私有化个人运行模式，自动设置：
+        - ``running_max_req_size`` 为 3
+        - ``batch_max_tokens`` 为 2048 (2k)
+        - ``chunked_prefill_size`` 为 1024 (1k)
 
 .. option:: --host
 
