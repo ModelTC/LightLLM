@@ -273,6 +273,22 @@ def normal_or_p_d_start(args):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
+    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
+    if args.tool_call_parser is None:
+        from lightllm.utils.config_utils import get_tool_call_parser_for_model
+
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
+    if args.reasoning_parser is None:
+        from lightllm.utils.config_utils import get_reasoning_parser_for_model
+
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
