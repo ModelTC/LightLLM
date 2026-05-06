@@ -56,6 +56,14 @@ except:
     HAS_DEEPEP = False
     logger.info("deep_ep is not installed, you can't use the api of it.")
 
+try:
+    import deep_gemm
+
+    HAS_DEEPGEMM = True
+except:
+    HAS_DEEPGEMM = False
+    logger.info("deep_gemm is not installed, you can't use the mega moe api of it.")
+
 
 class CustomProcessGroup:
     def __init__(self):
@@ -117,6 +125,8 @@ def lightllm_capture_graph(group: CustomProcessGroup = None):
 class DistributeGroupManager:
     def __init__(self):
         self.groups = []
+        self.ep_buffer = None
+        self.mega_moe_group = None
 
     def __len__(self):
         return len(self.groups)
@@ -160,6 +170,14 @@ class DistributeGroupManager:
             low_latency_mode=low_latency_mode,
             num_qps_per_rank=(self.ll_num_experts // global_world_size if low_latency_mode else 1),
         )
+
+    def get_mega_moe_group(self):
+        if self.mega_moe_group is not None:
+            return self.mega_moe_group
+        assert HAS_DEEPGEMM, "deep_gemm is required for mega moe"
+        self._set_num_sms_for_deep_gemm()
+        self.mega_moe_group = dist.new_group(list(range(get_global_world_size())))
+        return self.mega_moe_group
 
     def _set_num_sms_for_deep_gemm(self):
         try:
