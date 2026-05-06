@@ -38,7 +38,7 @@ class SamplingParams:
         top_k: int = None,  # -1 is for all
         ignore_eos: bool = False,
         image_max_patch_num: int = -1,
-        max_new_tokens: int = 16384,
+        max_new_tokens: int = 65535,
         min_new_tokens: int = 1,
         stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding

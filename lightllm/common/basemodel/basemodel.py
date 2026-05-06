@@ -12,7 +12,6 @@ from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
@@ -54,9 +53,6 @@ class TpPartBaseModel:
 
     # infer state class
     infer_state_class = InferStateInfo
-
-    # radix cache class
-    radix_cache_class = RadixCache
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
@@ -109,10 +105,14 @@ class TpPartBaseModel:
         self._init_quant()
 
         self._init_weights()
+        self._init_req_manager()
         self._init_mem_manager()
+        # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
+        # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
+        self.req_manager.mem_manager = self.mem_manager
+
         self._init_kv_move_buffer()
         self._check_mem_size()
-        self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -223,7 +223,7 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, self.mem_manager)
+        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
         return
 
     def _init_infer_layer(self, start_layer_index=0):
@@ -312,6 +312,7 @@ class TpPartBaseModel:
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
+        infer_state.b_mtp_index = model_input.b_mtp_index
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
@@ -363,6 +364,9 @@ class TpPartBaseModel:
         new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
         new_model_input.b_req_idx = F.pad(
             new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+        )
+        new_model_input.b_mtp_index = F.pad(
+            new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
         new_model_input.mem_indexes = F.pad(

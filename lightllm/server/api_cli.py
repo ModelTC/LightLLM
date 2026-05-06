@@ -23,6 +23,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 specifically designed for large-scale, high-concurrency scenarios where `pd_master` encounters
                 significant CPU bottlenecks.""",
     )
+    parser.add_argument(
+        "--performance_mode",
+        "--p_mode",
+        type=str,
+        choices=["personal"],
+        default=None,
+        help="""performance mode for different scenarios.
+                None: no performance mode applied (default).
+                personal: private personal running mode, automatically sets running_max_req_size to 3.""",
+    )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
@@ -538,7 +548,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         " currently only for llama and qwen model, not support ep moe model",
     )
     parser.add_argument(
-        "--prefll_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
+        "--prefill_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
     )
 
     parser.add_argument(
@@ -717,7 +727,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_cpu_cache",
         action="store_true",
-        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.""",
+        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.
+        For linear attention cache reuse constraints, cpu cache token page size will be forced to
+        linear_att_page_block_num * linear_att_hash_page_size when cpu cache is enabled.""",
     )
     parser.add_argument(
         "--cpu_cache_storage_size",
@@ -748,31 +760,45 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
     parser.add_argument(
-        "--mamba_cache_size",
+        "--linear_att_hash_page_size",
+        type=int,
+        default=512,
+        help="""The hash page size for linear attention.
+        It controls the number of tokens in each hash bucket, which can affect radix cache reused""",
+    )
+    parser.add_argument(
+        "--linear_att_page_block_num",
+        type=int,
+        default=10000000,
+        help="""The number of blocks for linear attention state storage.
+        It controls the number of pages used for storing the attention state,
+        which can affect memory usage and mutiturn chat performance.
+        Block size is linear_att_page_block_num * linear_att_hash_page_size.
+        When this value multiplied by linear_att_hash_page_size is greater than max_req_total_len,
+        block-level matching in radix cache is effectively disabled and request-level small-page
+        matching (linear_att_hash_page_size) may dominate.""",
+    )
+    parser.add_argument(
+        "--linear_att_cache_size",
         type=int,
         default=None,
-        help="""The size of linear attn cache. If not specified, will be calculated
-        automatically based on mamba_cache_ratio or max_total_token_num.""",
+        help="""The size of linear attn cache.
+        If radix cache hit rate is low under high load due to limited small-page capacity and LRU
+        eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
-        "--mamba_cache_ratio",
-        type=lambda v: float(v)
-        if 0.0 <= (_ := float(v)) <= 1.0
-        else (_ for _ in ()).throw(
-            argparse.ArgumentTypeError(f"--mamba_cache_ratio must be between 0.0 and 1.0, got {v}")
-        ),
-        default=0.5,
-        help="""Ratio of mamba cache to total cache memory (mamba + KV).
-        Only effective when both mamba_cache_size and max_total_token_num are not set.
-        Default is 0.5 (50%% mamba cache, 50%% KV cache).
-        Example: 0.3 -> 30%% mamba, 70%% KV; 0.7 -> 70%% mamba, 30%% KV.""",
-    )
-    parser.add_argument(
-        "--mamba_ssm_data_type",
+        "-linear_att_ssm_data_type",
         type=str,
         choices=["bfloat16", "float32"],
         default="float32",
-        help="the data type of the model weight",
+        help="the data type of linear att smm data type",
+    )
+    parser.add_argument(
+        "--disable_linear_att_small_page_cpu_cache",
+        action="store_true",
+        default=False,
+        help="""Disable storing linear attention small page data in CPU cache.
+        This reduces CPU cache memory waste but also decreases the hit length.""",
     )
     parser.add_argument(
         "--hardware_platform",

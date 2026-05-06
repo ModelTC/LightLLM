@@ -29,7 +29,7 @@ class PrefillCudaGraph:
 
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
-        self.max_handle_token_num = self.args.prefll_cudagraph_max_handle_token
+        self.max_handle_token_num = self.args.prefill_cudagraph_max_handle_token
 
         graph_handle_token_nums = []
         for i in range(2048):

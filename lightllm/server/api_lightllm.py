@@ -148,5 +148,9 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
 
+    from .api_openai import _safe_stream_wrapper
+
     background_tasks = BackgroundTasks()
-    return StreamingResponse(stream_results(), media_type="text/event-stream", background=background_tasks)
+    return StreamingResponse(
+        _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
+    )

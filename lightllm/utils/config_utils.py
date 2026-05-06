@@ -231,3 +231,19 @@ def has_audio_module(model_path: str) -> bool:
     except:
         logger.info(f"model path: {model_path} does not has audio module")
         return False
+
+
+@lru_cache(maxsize=None)
+def is_linear_att_mixed_model(model_path: str) -> bool:
+    try:
+        from transformers.configuration_utils import PretrainedConfig
+
+        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_type = model_cfg["model_type"]
+        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+            return True
+        else:
+            return False
+    except:
+        logger.info(f"model path: {model_path} does not has linear hybrid attention")
+        return False

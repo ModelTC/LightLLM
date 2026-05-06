@@ -33,7 +33,6 @@ class Function(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = Field(default=None, examples=[None])
     parameters: Optional[dict] = None
-    response: Optional[dict] = None
 
 
 class Tool(BaseModel):
@@ -96,6 +95,7 @@ class ChatCompletionMessageGenericParam(BaseModel):
     content: Union[str, List[MessageContent], None] = Field(default=None)
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
+    reasoning: Optional[str] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
 
@@ -121,7 +121,7 @@ class CompletionRequest(BaseModel):
     prompt: Union[str, List[str], List[int], List[List[int]]]
     suffix: Optional[str] = None
     max_tokens: Optional[int] = Field(
-        default=16384, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
+        default=65536, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
     )
     max_completion_tokens: Optional[int] = None
     temperature: Optional[float] = 1.0
@@ -197,7 +197,7 @@ class ChatCompletionRequest(BaseModel):
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
     max_tokens: Optional[int] = Field(
-        default=16384, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
+        default=65536, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
     )
     max_completion_tokens: Optional[int] = None
     presence_penalty: Optional[float] = 0.0
@@ -221,6 +221,7 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
+    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
@@ -278,17 +279,32 @@ class ChatCompletionRequest(BaseModel):
         return self
 
 
+class PromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
+    audio_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
     total_tokens: int = 0
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
 
 
 class ChatMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    reasoning: Optional[str] = None
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+
+    @model_validator(mode="after")
+    def _sync_reasoning_aliases(self):
+        if self.reasoning and not self.reasoning_content:
+            self.reasoning_content = self.reasoning
+        elif self.reasoning_content and not self.reasoning:
+            self.reasoning = self.reasoning_content
+        return self
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -314,7 +330,16 @@ class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
+    reasoning: Optional[str] = None
     reasoning_content: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _sync_reasoning_aliases(self):
+        if self.reasoning and not self.reasoning_content:
+            self.reasoning_content = self.reasoning
+        elif self.reasoning_content and not self.reasoning:
+            self.reasoning = self.reasoning_content
+        return self
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):
