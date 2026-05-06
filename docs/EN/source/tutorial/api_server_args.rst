@@ -302,9 +302,9 @@ Multimodal Parameters
 Performance Optimization Parameters
 -----------------------------------
 
-.. option:: --disable_custom_allreduce
+.. option:: --disable_symm_mem_allreduce
 
-    Whether to disable custom allreduce
+    Disable the default SymmMem / FlashInfer all-reduce fast path and fall back to NCCL
 
 .. option:: --enable_custom_allgather
 

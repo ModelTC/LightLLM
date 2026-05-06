@@ -349,16 +349,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
-    parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
     parser.add_argument(
-        "--enable_symm_mem_allreduce",
+        "--disable_symm_mem_allreduce",
         action="store_true",
-        help="Enable the SymmMem all-reduce stack. When enabled, LightLLM uses "
-        "FlashInfer all-reduce for tensors that match its fast-path constraints, then "
-        "falls through to torch symmetric-memory multimem / two_shot, and finally NCCL. "
-        "FlashInfer is controlled by this same flag and is not exposed separately. "
-        "Disabled by default; without this flag LightLLM keeps the previous sglang "
-        "custom-allreduce -> NCCL path.",
+        help="Disable the default SymmMem / FlashInfer all-reduce fast path and fall back to NCCL.",
     )
     parser.add_argument("--enable_custom_allgather", action="store_true", help="Whether to enable cutom allgather.")
     parser.add_argument(
