@@ -32,11 +32,11 @@ class CpuCacheCreator:
             # 是否阻塞等待pin 完成
             if not pin_no_blocking:
                 attach_handle.wait()
-            
+
             # 等待 device_ptr 被赋值
             while attach_handle.device_ptr is None:
                 time.sleep(0.01)
-            
+
             cpu_cache_tensor = self._build_tensor_view(shm_ptr=attach_handle.device_ptr)
             assert shm_ptr == cpu_cache_tensor.data_ptr()
             return cpu_cache_tensor, attach_handle
