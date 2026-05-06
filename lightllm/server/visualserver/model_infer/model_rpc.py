@@ -48,7 +48,7 @@ class VisualModelRpcServer(rpyc.Service):
         #     "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
         #     "quant_type": self.args.vit_quant_type,
         #     "quant_cfg": self.args.vit_quant_cfg,
-        #     "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+        #     "max_batch_size": max(self.infer_batch_size // self.vit_dp, 1),
         #     "vit_attn_backend": self.vit_attn_backend,
         # }
 
