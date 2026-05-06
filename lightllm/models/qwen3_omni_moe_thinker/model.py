@@ -18,6 +18,7 @@ from lightllm.models.qwen3_omni_moe_thinker.layer_weights.transformers_layer_wei
 )
 
 from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel
+from lightllm.models.qwen3_omni_moe_thinker.audio_process import MAX_AUDIO_DURATION_SECONDS
 from lightllm.models.qwen3_omni_moe_thinker.infer_struct import Qwen3OmniMOEInferStateInfo
 from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
 from lightllm.server.core.objs import SamplingParams
@@ -44,6 +45,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         self.sampling_rate = self.audio_processor.sampling_rate
         self.n_samples = self.audio_processor.n_samples
         self.hop_length = self.audio_processor.hop_length
+        self.max_audio_len = MAX_AUDIO_DURATION_SECONDS * self.sampling_rate
 
         self.image_start_id = kwargs["model_cfg"]["vision_start_token_id"]
         self.image_end_id = kwargs["model_cfg"]["vision_end_token_id"]
@@ -59,13 +61,14 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         return
 
     def get_audio_token_length(self, audio: AudioItem):
-        # 这里得处理对应奖语音长度按照 30 进行限制，后续处理中，超过30的会被截断。
-        if audio.audio_length > self.n_samples:
-            logger.warning(f"audio length {audio.audio_length} exceed max length {self.n_samples}, will be truncated.")
+        # 这里得处理对应奖语音长度按照 默认值1h 进行限制，后续处理中，超过 1h 的会被截断。
+        if audio.audio_length > self.max_audio_len:
+            logger.warning(
+                f"audio length {audio.audio_length} exceed max length {self.max_audio_len}, will be truncated."
+            )
 
-        length = min(audio.audio_length, int(self.n_samples))
+        length = min(audio.audio_length, int(self.max_audio_len))
         token_num = self._caclu_audio_token_num(length)
-        # print(f"token_num is {token_num}  n_samples is {self.n_samples} hop_length is {self.hop_length}")
         return token_num
 
     @lru_cache(maxsize=128)

@@ -37,6 +37,8 @@ class InferStateInfo:
         self.b_shared_seq_len: torch.Tensor = None  # only for diverse mode used in decode phase.
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
+        self.b_mtp_index: torch.Tensor = None
+
         self.b_seq_len: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
@@ -342,7 +344,7 @@ class InferStateInfo:
         )
         return origin_data.view(-1, *old_shape[1:])
 
-    # 用于 prefll cuda graph 的专用功能接口
+    # 用于 prefill cuda graph 的专用功能接口
     def prefill_cuda_graph_create_graph_obj(self):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []

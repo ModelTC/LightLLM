@@ -123,10 +123,58 @@ g_objs = G_Objs()
 app = FastAPI()
 g_objs.app = app
 
+_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
+_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
+_ACCESS_LOG_RESET = "\033[0m"
 
-def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
+
+class _AccessLogMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+
+        status_holder = {"status": 0}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_holder["status"] = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            if scope["type"] == "http":
+                status = status_holder["status"]
+                msg = f"{scope['method']} {scope['path']} {status}"
+                color = _ACCESS_LOG_STATUS_COLORS.get(status // 100, "")
+                if color:
+                    msg = color + msg + _ACCESS_LOG_RESET
+                logger.info(msg)
+
+
+app.add_middleware(_AccessLogMiddleware)
+
+
+def create_error_response(
+    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
+) -> JSONResponse:
+    if err_type is None:
+        if status_code.value >= 500:
+            err_type = "InternalServerError"
+        elif status_code == HTTPStatus.NOT_FOUND:
+            err_type = "NotFoundError"
+        else:
+            err_type = "BadRequestError"
+
     g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse({"message": message}, status_code=status_code.value)
+    return JSONResponse(
+        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
+        status_code=status_code.value,
+    )
 
 
 @app.get("/liveness")
@@ -201,6 +249,8 @@ async def generate(request: Request) -> Response:
     except ServerBusyError as e:
         logger.error("%s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
@@ -218,6 +268,8 @@ async def generate_stream(request: Request) -> Response:
     except ServerBusyError as e:
         logger.error("%s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
@@ -251,15 +303,18 @@ async def compat_generate(request: Request) -> Response:
         return await generate(request)
 
 
-# @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-# async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
-#     if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-#         return create_error_response(
-#             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-#         )
+@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+async def chat_completions(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
 
-#     resp = await chat_completions_impl(request, raw_request)
-#     return resp
+    try:
+        resp = await chat_completions_impl_v2(request, raw_request)
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    return resp
 
 
 @app.post("/v1/completions", response_model=CompletionResponse)
@@ -269,7 +324,10 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
 
-    resp = await completions_impl(request, raw_request)
+    try:
+        resp = await completions_impl(request, raw_request)
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     return resp
 
 
@@ -286,17 +344,6 @@ async def generate_image(request: Request) -> Response:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def completions_v2(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
-    resp = await chat_completions_impl_v2(request, raw_request)
-    return resp
-
-
 @app.post("/v1/messages")
 async def anthropic_messages(raw_request: Request) -> Response:
     if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
@@ -309,7 +356,6 @@ async def anthropic_messages(raw_request: Request) -> Response:
 
 
 @app.get("/v1/models", response_model=ModelListResponse)
-@app.post("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
     max_model_len = g_objs.args.max_req_total_len
@@ -322,7 +368,7 @@ async def get_models(raw_request: Request):
                 id=model_name,
                 created=g_objs.model_created,
                 max_model_len=max_model_len,
-                owned_by=g_objs.args.model_owner,
+                owned_by=g_objs.args.model_owner or "lightllm",
             )
         ]
     )

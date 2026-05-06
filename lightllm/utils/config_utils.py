@@ -233,3 +233,91 @@ def has_audio_module(model_path: str) -> bool:
     except:
         logger.info(f"model path: {model_path} does not has audio module")
         return False
+
+
+@lru_cache(maxsize=None)
+def is_linear_att_mixed_model(model_path: str) -> bool:
+    try:
+        from transformers.configuration_utils import PretrainedConfig
+
+        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_type = model_cfg["model_type"]
+        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+            return True
+        else:
+            return False
+    except:
+        logger.info(f"model path: {model_path} does not has linear hybrid attention")
+        return False
+
+
+def get_model_type(model_path: str) -> Optional[str]:
+    """Get model type from config.json"""
+    try:
+        config_json = get_config_json(model_path)
+        model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
+        return model_type
+    except Exception as e:
+        logger.error(f"Failed to get model_type from {model_path}: {e}")
+        return None
+
+
+def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
+    """Auto-detect tool_call_parser based on model type"""
+    model_type = get_model_type(model_path)
+    if model_type is None:
+        return None
+
+    # Qwen3.5 series
+    if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+        return "qwen3_coder"
+
+    # Qwen3 series
+    if model_type in ["qwen3", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe", "qwen3_vl_text", "qwen3_vl_moe_text"]:
+        return "qwen25"
+
+    # DeepSeek V3
+    if model_type == "deepseek_v3":
+        return "deepseekv3"
+
+    # DeepSeek V3.1
+    if model_type == "deepseek_v31":
+        return "deepseekv31"
+
+    # DeepSeek V32
+    if model_type == "deepseek_v32":
+        return "deepseekv32"
+
+    return None
+
+
+def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
+    """Auto-detect reasoning_parser based on model type"""
+    model_type = get_model_type(model_path)
+    if model_type is None:
+        return None
+
+    # Qwen3.5 and Qwen3 series
+    if model_type in [
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+        "qwen3_vl_text",
+        "qwen3_vl_moe_text",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_5_text",
+        "qwen3_5_moe_text",
+    ]:
+        return "qwen3"
+
+    # DeepSeek V3
+    if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32"]:
+        return "deepseek-v3"
+
+    # DeepSeek R1
+    if model_type == "deepseek_r1":
+        return "deepseek-r1"
+
+    return None

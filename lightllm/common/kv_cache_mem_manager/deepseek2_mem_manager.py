@@ -9,33 +9,18 @@ from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_d_node, kv_trans_v2_for_p_node
 from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
+from .operator import Deepseek2MemOperator
 
 
 logger = init_logger(__name__)
 
 
 class Deepseek2MemoryManager(MemoryManager):
+
+    operator_class = Deepseek2MemOperator
+
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
-
-    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        """
-        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
-        """
-        from ..basemodel.triton_kernel.kv_copy.mla_copy_kv import destindex_copy_kv
-
-        rope_dim = 64
-        kv_lora_rank = kv.shape[2] - rope_dim
-        assert kv_lora_rank + rope_dim == self.kv_buffer.shape[-1]
-
-        destindex_copy_kv(
-            kv[:, :, :kv_lora_rank],
-            kv[:, :, kv_lora_rank:],
-            mem_index,
-            self.kv_buffer[layer_index][:, :, :kv_lora_rank],
-            self.kv_buffer[layer_index][:, :, kv_lora_rank:],
-        )
-        return
 
     def get_att_input_params(self, layer_index: int) -> Any:
         kv = self.kv_buffer[layer_index]

@@ -31,12 +31,6 @@ class TreeNode:
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
-        # Used by hybrid attention models (e.g., Qwen3Next) to track
-        # a per-request buffer_idx alongside the token-level KV cache.
-        # Pure attention models keep buffer_idx as None.
-        self.buffer_idx = None
-        self.buffer_time = time_gen.generate_time_id()
-
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
@@ -84,9 +78,6 @@ class TreeNode:
     def update_time(self):
         self.time_id = time_gen.generate_time_id()
 
-    def update_buffer_time(self):
-        self.buffer_time = time_gen.generate_time_id()
-
     def is_leaf(self):
         return len(self.children) == 0
 
@@ -112,10 +103,10 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, kv_cache_mem_manager=None):
+    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        self.mem_manager: MemoryManager = kv_cache_mem_manager
+        self.mem_manager: MemoryManager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -354,22 +345,20 @@ class RadixCache:
 
     def _try_merge(self, child_node: TreeNode) -> Optional[TreeNode]:
         """
-        merge condition:
-        1. parent_node is not root node.
-        2. parent_node's ref_counter is 0, for hybrid attention models (e.g., Qwen35),
-           parent_node's buffer_idx is None.
-        3. child_node's ref_counter is 0.
-        4. parent_node has only one child node (i.e. child_node).
+        合并条件:
+        1. 父节点不是根节点。
+        2. 父节点的引用计数为 0。
+        3. 子节点的引用计数为 0。
+        4. 父节点只有一个子节点 (即 child_node)。
         """
         parent_node = child_node.parent
-        # condition check
+        # 条件检查
         if (
             parent_node is None
             or parent_node == self.root_node
             or parent_node.ref_counter != 0
             or len(parent_node.children) != 1
             or child_node.ref_counter != 0
-            or parent_node.buffer_idx is not None
         ):
             return None
 
@@ -500,7 +489,7 @@ class RadixCache:
             " " * indent,
             f"k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
             time_id: {node.time_id} prefix_total_len: {node.node_prefix_total_len} \
-            node_value_len: {node.node_value_len} buffer_idx: {node.buffer_idx}",
+            node_value_len: {node.node_value_len}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)

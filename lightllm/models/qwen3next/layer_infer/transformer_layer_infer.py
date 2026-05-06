@@ -6,10 +6,8 @@ from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
 )
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
-from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.qwen3next.mem_manager import Qwen3NextHybridMemManager
-from lightllm.models.llama.triton_kernel.silu_and_mul import silu_and_mul_fwd
+from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
@@ -71,7 +69,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         # SSM state dtype optimization
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
         start_args = get_env_start_args()
-        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.mamba_ssm_data_type, torch.bfloat16)
+        self.ssm_state_dtype = ssm_dtype_dict.get(start_args.linear_att_ssm_data_type, torch.bfloat16)
 
         # Pre-compute whether dtype conversion is needed
         # GDN kernel output dtype is self.data_type
@@ -248,10 +246,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_weight: Qwen3NextTransformerLayerWeight,
         is_prefill: bool,
     ):
-        assert isinstance(infer_state.mem_manager, Qwen3NextHybridMemManager)
+        assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
 
         input = input.view(-1, self.embed_dim_)
-        conv_states, ssm_states = infer_state.mem_manager.get_mamba_cache(self.layer_num_)
+        conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
 
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)

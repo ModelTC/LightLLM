@@ -118,6 +118,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
             )
+            g_infer_context.copy_linear_att_state_to_cache_buffer(
+                b_req_idx=model_input.b_req_idx,
+                reqs=run_reqs,
+            )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -198,6 +202,10 @@ class ChunkedPrefillBackend(ModeBackend):
             # mtp kv fill
             self._draft_prefill_forward(
                 model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
+            )
+            g_infer_context.copy_linear_att_state_to_cache_buffer(
+                b_req_idx=model_input.b_req_idx,
+                reqs=run_reqs,
             )
             sync_event = torch.cuda.Event()
             sync_event.record()

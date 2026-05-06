@@ -2,9 +2,13 @@ import torch
 from typing import Any
 
 from .deepseek2_mem_manager import Deepseek2MemoryManager
+from .operator import FP8PerTokenGroupQuantDeepseek3_2MemOperator
 
 
 class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
+
+    operator_class = FP8PerTokenGroupQuantDeepseek3_2MemOperator
+
     kv_nope_dim = 512
     kv_rope_dim = 64
     # 576 = 512 + 64
@@ -33,27 +37,6 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
         assert head_num == 1, "DeepSeek-V3.2 DSA FP8 path expects MQA-style head_num == 1"
         self.prefill_dtype = dtype
         super().__init__(size, torch.uint8, head_num, self.total_bytes_per_token, layer_num, always_copy, mem_fraction)
-
-    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_kv_flashmla_fp8 import (
-            destindex_copy_kv_flashmla_fp8,
-        )
-
-        rope_dim = 64
-        kv_lora_rank = kv.shape[2] - rope_dim
-        assert kv_lora_rank == 512, f"Expected kv_lora_rank=512, got {kv_lora_rank}"
-
-        o_nope = self.kv_buffer[layer_index][:, :, :512].view(torch.float8_e4m3fn)
-        o_scale = self.kv_buffer[layer_index][:, :, 512:528].view(torch.float32)
-        o_rope = self.kv_buffer[layer_index][:, :, 528 : self.flashmla_bytes_per_token].view(torch.bfloat16)
-        destindex_copy_kv_flashmla_fp8(
-            kv[:, :, :kv_lora_rank],
-            kv[:, :, kv_lora_rank:],
-            mem_index,
-            o_nope,
-            o_scale,
-            o_rope,
-        )
 
     def get_att_input_params(self, layer_index: int) -> Any:
         return self.kv_buffer[layer_index][:, :, : self.flashmla_bytes_per_token]

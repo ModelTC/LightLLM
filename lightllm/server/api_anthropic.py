@@ -42,7 +42,8 @@ def get_anthropic_messages_adapter() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "The Anthropic Messages API (/v1/messages) requires the 'litellm' package. "
-            "Install it with: pip install 'litellm>=1.52.0,<1.85'. "
+            "Install it with: pip install 'lightllm[anthropic]' "
+            "(or directly: pip install 'litellm>=1.52.0,<1.85'). "
             f"Original error: {exc}"
         ) from exc
 
@@ -76,10 +77,23 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         if "max_tokens" in anthropic_body:
             openai_dict["max_tokens"] = anthropic_body["max_tokens"]
 
+    # Forward LightLLM-specific fields nested under ``extra_body`` (OpenAI SDK
+    # convention) so clients hitting /v1/messages can reach ChatCompletionRequest
+    # options Anthropic's own schema does not expose — notably chat_template_kwargs
+    # for models with optional thinking modes (Qwen3, DeepSeek). Fields already
+    # produced by the Anthropic->OpenAI translation take precedence; unknown keys
+    # are silently dropped by Pydantic (extra='ignore').
+    extra_body = anthropic_body.get("extra_body")
+    if isinstance(extra_body, dict):
+        for k, v in extra_body.items():
+            openai_dict.setdefault(k, v)
+
     _UNKNOWN_FIELDS = {"extra_body", "metadata", "anthropic_version", "cache_control"}
-    for key in list(openai_dict.keys()):
-        if key in _UNKNOWN_FIELDS:
-            openai_dict.pop(key, None)
+    dropped = [k for k in anthropic_body if k in _UNKNOWN_FIELDS]
+    if dropped:
+        logger.debug("Dropping Anthropic-only fields not forwarded to chat pipeline: %s", dropped)
+    for key in dropped:
+        openai_dict.pop(key, None)
 
     return openai_dict, tool_name_mapping
 
@@ -409,12 +423,32 @@ async def _openai_sse_to_anthropic_events(
                         )
                         state["buffered_args"] = ""
                 else:
-                    # Already started. If deltas for a different block are
-                    # now arriving (unusual interleaving), close whatever's
-                    # currently open and reopen... but in practice OpenAI
-                    # streams tool_calls sequentially per index, so the
-                    # current_open is this same block.
+                    # Already started. A delta for this tool-call index may
+                    # arrive after a later tool-call has opened its own block.
+                    # Anthropic's protocol forbids emitting deltas against a
+                    # non-open index, so close whatever is currently open and
+                    # reopen THIS block before emitting.
                     if new_args:
+                        if current_open is None or current_open != ("tool_use", state["anthropic_index"]):
+                            if current_open is not None:
+                                yield _sse_event(
+                                    "content_block_stop",
+                                    {"type": "content_block_stop", "index": current_open[1]},
+                                )
+                            current_open = ("tool_use", state["anthropic_index"])
+                            yield _sse_event(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": state["anthropic_index"],
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": state["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
+                                        "name": state["name"],
+                                        "input": {},
+                                    },
+                                },
+                            )
                         yield _sse_event(
                             "content_block_delta",
                             {
@@ -559,5 +593,5 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         anthropic_dict = _chat_response_to_anthropic(downstream, tool_name_mapping, requested_model)
     except Exception as exc:
         logger.error("Failed to translate response to Anthropic format: %s", exc)
-        return JSONResponse(_anthropic_error_response(500, str(exc)), status_code=500)
+        return _anthropic_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
     return JSONResponse(anthropic_dict)

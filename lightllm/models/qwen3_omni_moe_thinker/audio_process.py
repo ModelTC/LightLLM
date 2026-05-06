@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from typing import TYPE_CHECKING, Any, Optional, Union, Tuple
@@ -6,6 +7,8 @@ from transformers.feature_extraction_sequence_utils import SequenceFeatureExtrac
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.utils import TensorType
 from functools import lru_cache
+
+MAX_AUDIO_DURATION_SECONDS = int(os.getenv("LIGHTLLM_MAX_AUDIO_DURATION_SECONDS", "3600"))
 
 
 class WhisperFeatureExtractor(SequenceFeatureExtractor):
@@ -47,6 +50,7 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
             norm="slaney",
             mel_scale="slaney",
         )
+        self.max_audio_len = MAX_AUDIO_DURATION_SECONDS * sampling_rate
 
     @lru_cache(maxsize=12)
     def get_hann_window(self, device: Union[str, torch.device]):
@@ -140,7 +144,7 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
         padded_inputs = self.pad(
             batched_speech,
             padding=padding,
-            max_length=max_length if max_length else self.n_samples,
+            max_length=max_length if max_length else self.max_audio_len,
             truncation=truncation,
             pad_to_multiple_of=pad_to_multiple_of,
             return_attention_mask=return_attention_mask or do_normalize,

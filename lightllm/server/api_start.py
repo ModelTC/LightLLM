@@ -17,7 +17,7 @@ from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.utils.config_utils import has_audio_module, has_vision_module
+from lightllm.utils.config_utils import has_audio_module, has_vision_module, is_linear_att_mixed_model
 
 logger = init_logger(__name__)
 
@@ -117,6 +117,17 @@ def normal_or_p_d_start(args):
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+
+    # performance_mode 参数处理
+    if args.performance_mode == "personal":
+        args.running_max_req_size = 3
+        args.batch_max_tokens = 2048
+        args.chunked_prefill_size = 1024
+        args.mem_fraction = 0.85
+        logger.info(
+            f"performance_mode is personal, set running_max_req_size to 3,"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.85"
+        )
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
@@ -254,6 +265,15 @@ def normal_or_p_d_start(args):
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
         f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
+    # linear att cache 参数自动设置
+    if args.linear_att_cache_size is None:
+        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
+        args.linear_att_cache_size = args.running_max_req_size * 2
+
+    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_prepare
@@ -265,6 +285,22 @@ def normal_or_p_d_start(args):
         from lightllm.utils.config_utils import get_eos_token_ids
 
         args.eos_id = get_eos_token_ids(args.model_dir)
+
+    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
+    if args.tool_call_parser is None:
+        from lightllm.utils.config_utils import get_tool_call_parser_for_model
+
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
+    if args.reasoning_parser is None:
+        from lightllm.utils.config_utils import get_reasoning_parser_for_model
+
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype

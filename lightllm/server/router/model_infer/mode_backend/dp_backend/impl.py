@@ -114,12 +114,18 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
 
                 if run_way.is_prefill():
+                    # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
+                    # 防止后续的推理流程读取到显存中可能存在错误的数据。
+                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
                     )
                     continue
                 elif run_way.is_decode():
+                    # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
+                    # 防止后续的推理流程读取到显存中可能存在错误的数据。
+                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
@@ -154,6 +160,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=True,
                     b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu[:run_reqs_num],
                     mask_func=None,
+                )
+                g_infer_context.copy_linear_att_state_to_cache_buffer(
+                    b_req_idx=model_input.b_req_idx[:run_reqs_num],
+                    reqs=run_reqs,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
@@ -263,6 +273,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_prefill_has_output_cpu=b_has_out_cpu,
                     mask_func=None,
                 )
+
+                if g_infer_context.is_linear_att_mixed_model:
+                    g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
+
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
@@ -384,6 +398,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                 model_output=model_output,
                 next_token_ids=draft_next_token_ids_gpu,
             )
+            if req_num > 0:
+                g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
+
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -686,6 +703,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                 ].microbatch_overlap_prefill(draft_model_input0, draft_model_input1)
                 draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
                 draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)
+
+            if req_num0 + req_num1 > 0 and g_infer_context.is_linear_att_mixed_model:
+                _b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
+                g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=_b_req_idx, reqs=run_reqs)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
