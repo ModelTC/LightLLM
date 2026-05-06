@@ -310,7 +310,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32"]:
         return "deepseek-v3"
 
-    # DeepSeek V32
+    # DeepSeek R1
     if model_type == "deepseek_r1":
         return "deepseek-r1"
 
