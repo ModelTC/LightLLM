@@ -135,18 +135,19 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return
 
     def _init_att_backend(self):
-        # Gemma-4 has per-layer heterogeneous attention shape (sliding layers
-        # use head_dim=256/16 KV heads, full-attn layers use head_dim=512/4).
-        # The flashinfer backend in this repo plans once per infer_state with
-        # a single (head_dim, num_kv_heads), so it crashes / silently produces
-        # wrong results on the layer where the shape doesn't match. FA3 reads
-        # head_dim and num_kv_heads from the per-call tensor shapes, so it
-        # supports the heterogeneous layout AND honours per-call sliding window
-        # — which is what we want on sliding layers.
-        from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+        # Gemma-4 has per-layer heterogeneous attention: sliding layers use
+        # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
+        # kv_heads=4, k_eq_v). No single backend covers both:
+        #   - FA3 caps head_dim at 256 -> can't run full-attn layers.
+        #   - Triton handles head_dim=512 (kernels widened to Lk=512) but
+        #     historically refused sliding_window.
+        #   - Flashinfer plans once per infer_state on a single shape -> can't
+        #     accommodate heterogeneous layout at all.
+        # Strategy: run full-attn layers on triton (primary backend, this
+        # method) and sliding layers on a separate backend wired via
+        # _init_att_backend1 (FA3 when available; triton-with-SWA otherwise).
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 
-        fa3_loadable = flash_attn_with_kvcache is not None
         args = get_env_start_args()
         backends = set(args.llm_prefill_att_backend + args.llm_decode_att_backend)
         for backend_name in backends:
@@ -155,23 +156,40 @@ class Gemma4TpPartModel(LlamaTpPartModel):
                 "num_kv_heads); flashinfer is not wired for the heterogeneous "
                 f"layout. Got --llm_*_att_backend={backend_name!r}."
             )
+        fa3_loadable = flash_attn_with_kvcache is not None
         if "fa3" in backends:
             assert fa3_loadable, (
-                "Requested --llm_*_att_backend=fa3 but neither sgl_kernel nor "
-                "flash_attn_3 (flash_attn_interface) imported successfully. "
-                "Build flash-attention/hopper from source against the current torch."
+                "Requested --llm_*_att_backend=fa3 but flash_attn_with_kvcache "
+                "did not import (sgl_kernel missing or wrong arch)."
             )
-        # Default policy: prefer FA3 if available (gets us real sliding-window
-        # attention on sliding layers); fall back to triton otherwise.
-        prefer_fa3 = fa3_loadable and (backends <= {"auto", "fa3"})
-        if prefer_fa3:
-            self.prefill_att_backend = Fa3AttBackend(model=self)
-            self.decode_att_backend = Fa3AttBackend(model=self)
-            self.config["_gemma4_use_swa"] = True
+
+        # Full-attn layers always go through triton.
+        self.prefill_att_backend = TritonAttBackend(model=self)
+        self.decode_att_backend = TritonAttBackend(model=self)
+
+        # Decide sliding-layer backend kind here so _init_att_backend1 can
+        # honour it. User can force triton with --llm_*_att_backend triton;
+        # otherwise prefer FA3 when loadable.
+        user_forced_triton = backends == {"triton"}
+        self._gemma4_sliding_backend_kind = (
+            "fa3" if (fa3_loadable and not user_forced_triton) else "triton"
+        )
+        # SWA is on regardless of which sliding backend was picked: FA3
+        # honours window_size per call, and the triton kernels in
+        # context_flashattention_nopad.py / gqa_flash_decoding_stage1.py mask
+        # out-of-window positions when SLIDING_WINDOW > 0.
+        self.config["_gemma4_use_swa"] = True
+
+    def _init_att_backend1(self):
+        # Sliding layers run on a dedicated backend so the head-dim/SWA
+        # mismatch with full-attn layers doesn't force a single compromise.
+        if self._gemma4_sliding_backend_kind == "fa3":
+            from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+            self.prefill_att_backend1 = Fa3AttBackend(model=self)
+            self.decode_att_backend1 = Fa3AttBackend(model=self)
         else:
-            self.prefill_att_backend = TritonAttBackend(model=self)
-            self.decode_att_backend = TritonAttBackend(model=self)
-            self.config["_gemma4_use_swa"] = False
+            self.prefill_att_backend1 = TritonAttBackend(model=self)
+            self.decode_att_backend1 = TritonAttBackend(model=self)
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()

@@ -41,6 +41,7 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -76,8 +77,18 @@ def _fwd_kernel(
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
     block_end_loc = tl.minimum(block_start_loc + BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
 
-    # causal mask
-    for start_n in range(0, block_mask * block_end_loc, BLOCK_N):
+    # When SLIDING_WINDOW > 0, the earliest k_pos relevant to any q in this
+    # block is `(block_start_loc + prompt_cache_len) - (SLIDING_WINDOW - 1)`.
+    # Round down to BLOCK_N to avoid loading blocks fully outside the window.
+    if SLIDING_WINDOW > 0:
+        win_start = block_start_loc + prompt_cache_len - (SLIDING_WINDOW - 1)
+        win_start = tl.maximum(win_start, 0)
+        win_start = (win_start // BLOCK_N) * BLOCK_N
+    else:
+        win_start = 0
+
+    # causal (+ sliding-window) mask
+    for start_n in range(win_start, block_mask * block_end_loc, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         kv_loc = tl.load(
@@ -89,7 +100,11 @@ def _fwd_kernel(
         k = tl.load(K + off_k, mask=(start_n + offs_n[None, :]) < block_end_loc, other=0.0)
         qk = tl.dot(q, k)
 
+        # causal: q_pos >= k_pos. q_pos = offs_m + prompt_cache_len, k_pos = start_n + offs_n.
         mask = offs_m[:, None] + prompt_cache_len >= (start_n + offs_n[None, :])
+        if SLIDING_WINDOW > 0:
+            # SWA: q_pos - k_pos < SLIDING_WINDOW
+            mask = mask & ((offs_m[:, None] + prompt_cache_len) - (start_n + offs_n[None, :]) < SLIDING_WINDOW)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -121,7 +136,17 @@ def _fwd_kernel(
 
 @torch.no_grad()
 def context_attention_fwd(
-    q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b_prompt_cache_len, max_input_len, req_to_token_indexs
+    q,
+    k,
+    v,
+    o,
+    b_req_idx,
+    b_start_loc,
+    b_seq_len,
+    b_prompt_cache_len,
+    max_input_len,
+    req_to_token_indexs,
+    sliding_window: int = 0,
 ):
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
@@ -178,6 +203,7 @@ def context_attention_fwd(
         BLOCK_DMODEL=Lk,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        SLIDING_WINDOW=int(sliding_window),
         num_warps=num_warps,
         num_stages=num_stages,
     )

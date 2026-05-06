@@ -39,6 +39,7 @@ def _fwd_kernel_flash_decode_stage1(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
@@ -49,6 +50,13 @@ def _fwd_kernel_flash_decode_stage1(
     req_total_block_num = tl.cdiv(cur_batch_seq_len, BLOCK_SEQ)
     if block_index >= req_total_block_num:
         return
+
+    # Decode: q is at position cur_batch_seq_len - 1; SWA keeps K at positions
+    # >= cur_batch_seq_len - SLIDING_WINDOW. win_threshold below.
+    if SLIDING_WINDOW > 0:
+        win_threshold = cur_batch_seq_len - SLIDING_WINDOW
+    else:
+        win_threshold = 0
 
     cur_q_head_offs = tl.arange(0, Q_HEAD_NUM)
     cur_q_head_range = cur_kv_head * gqa_group_size + cur_q_head_offs
@@ -76,6 +84,10 @@ def _fwd_kernel_flash_decode_stage1(
         for start_n in range(0, block_n_size, 1):
             offs_n_new = start_n * BLOCK_N + offs_n
             n_mask = offs_n_new < cur_batch_end_index
+            if SLIDING_WINDOW > 0:
+                # Drop K positions that fall outside the sliding window from
+                # the current query (last token in the sequence).
+                n_mask = n_mask & (offs_n_new >= win_threshold)
             k_loc = tl.load(
                 Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new,
                 mask=n_mask,
@@ -110,14 +122,18 @@ def _fwd_kernel_flash_decode_stage1(
         + offs_d[None, :]
     )
     off_mid_o_logexpsum = cur_batch * stride_mid_o_eb + cur_q_head_range * stride_mid_o_eh + block_index
-    tl.store(
-        Mid_O + off_mid_o,
-        acc / sum_exp[:, None],
-    )
-    tl.store(
-        Mid_O_LogExpSum + off_mid_o_logexpsum,
-        max_logic + tl.log(sum_exp),
-    )
+    if SLIDING_WINDOW > 0:
+        # When SWA masks out every K this program saw, sum_exp stays 0 and
+        # acc/sum_exp would be NaN. Store zeros + log_exp_sum=-inf so stage2
+        # naturally weights this slot to 0 in the final reduction.
+        safe_sum = tl.where(sum_exp > 0, sum_exp, 1.0)
+        out_acc = tl.where(sum_exp[:, None] > 0, acc / safe_sum[:, None], 0.0)
+        out_log = tl.where(sum_exp > 0, max_logic + tl.log(safe_sum), -float("inf"))
+    else:
+        out_acc = acc / sum_exp[:, None]
+        out_log = max_logic + tl.log(sum_exp)
+    tl.store(Mid_O + off_mid_o, out_acc)
+    tl.store(Mid_O_LogExpSum + off_mid_o_logexpsum, out_log)
     return
 
 
@@ -170,6 +186,7 @@ def flash_decode_stage1(
     mid_out,
     mid_out_logsumexp,
     block_seq,
+    sliding_window: int = 0,
     run_config: Optional[dict] = None,
 ):
     """ """
@@ -225,6 +242,7 @@ def flash_decode_stage1(
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK_N,
+        SLIDING_WINDOW=int(sliding_window),
         num_warps=num_warps,
         num_stages=num_stages,
     )

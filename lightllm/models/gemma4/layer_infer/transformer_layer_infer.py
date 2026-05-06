@@ -169,10 +169,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
     def _att_control(self):
-        # SWA is only safe with FA3 (it consumes window_size per-call). Triton
-        # backend asserts use_sliding_window is False; lightllm's flashinfer
-        # wrapper plans once and ignores per-call windows. The flag is set
-        # by Gemma4TpPartModel._init_att_backend after backend selection.
+        # FA3 consumes window_size per-call; the triton prefill/decode kernels
+        # mask out-of-window positions when SLIDING_WINDOW > 0 (see
+        # context_flashattention_nopad.py / gqa_flash_decoding_stage1.py).
+        # `_gemma4_use_swa` is set by Gemma4TpPartModel._init_att_backend.
         if self.is_sliding and self.sliding_window_ > 0 and self.network_config_.get("_gemma4_use_swa", False):
             w = self.sliding_window_ - 1
             return AttControl(use_sliding_window=True, sliding_window=(w, w))
@@ -204,7 +204,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.layer_head_dim_)
-        o_tensor = infer_state.prefill_att_state.prefill_att(
+        # Sliding layers go through the secondary backend (FA3 with SWA when
+        # available, else triton-with-SWA from path B). Full-attn layers go
+        # through the primary triton backend (head_dim=512).
+        att_state = infer_state.prefill_att_state1 if self.is_sliding else infer_state.prefill_att_state
+        o_tensor = att_state.prefill_att(
             q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
@@ -218,7 +222,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.layer_head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(
+        att_state = infer_state.decode_att_state1 if self.is_sliding else infer_state.decode_att_state
+        o_tensor = att_state.decode_att(
             q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
