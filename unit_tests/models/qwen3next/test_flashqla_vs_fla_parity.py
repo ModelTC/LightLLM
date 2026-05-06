@@ -28,9 +28,7 @@ from typing import Callable, List, Optional, Tuple
 # project root, so `import lightllm` may resolve to an unrelated system-installed
 # copy (e.g. /lightllm/) instead of the in-tree one we want to test. Force the
 # in-tree project root to the front of sys.path before any lightllm import.
-_PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir)
-)
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -55,9 +53,7 @@ def _flashqla_available() -> bool:
     return True
 
 
-FLASHQLA_REQUIRED = pytest.mark.skipif(
-    not _flashqla_available(), reason="flash_qla not installed"
-)
+FLASHQLA_REQUIRED = pytest.mark.skipif(not _flashqla_available(), reason="flash_qla not installed")
 
 
 # ----------------------- Helpers ------------------------------------------- #
@@ -106,11 +102,7 @@ def _make_inputs(
     swa = swa[torch.randperm(h_v, device=device)]
     g[:, :, ~swa] = 0.0
 
-    h0 = (
-        torch.randn(num_seqs, h_v, head_dim, head_dim, device=device, dtype=torch.float32)
-        if use_h0
-        else None
-    )
+    h0 = torch.randn(num_seqs, h_v, head_dim, head_dim, device=device, dtype=torch.float32) if use_h0 else None
     return q, k, v, g, beta, h0, cu_seqlens
 
 
@@ -171,8 +163,7 @@ def _assert_close(name: str, a: torch.Tensor, b: torch.Tensor, rel_tol: float):
     diff_max = (a - b).abs().max().item()
     rel = diff_max / max(ref_max, 1e-6)
     assert rel <= rel_tol, (
-        f"{name}: max-abs diff {diff_max:.4g} / max-abs ref {ref_max:.4g} "
-        f"= rel {rel:.4g} > tol {rel_tol:.4g}"
+        f"{name}: max-abs diff {diff_max:.4g} / max-abs ref {ref_max:.4g} " f"= rel {rel:.4g} > tol {rel_tol:.4g}"
     )
 
 
@@ -181,7 +172,7 @@ def _assert_close(name: str, a: torch.Tensor, b: torch.Tensor, rel_tol: float):
 # Qwen3-Next-style heads. (h_qk, h_v) — must satisfy h_v % h_qk == 0 (FlashQLA limit).
 # Sample a few TP slices.
 HEAD_CONFIGS = [
-    pytest.param(2, 8, id="h_qk2_h_v8"),    # ~TP8
+    pytest.param(2, 8, id="h_qk2_h_v8"),  # ~TP8
     pytest.param(4, 16, id="h_qk4_h_v16"),  # ~TP4
     pytest.param(16, 32, id="h_qk16_h_v32"),  # qwen3.5/9B/4B TP1
 ]
@@ -374,9 +365,7 @@ def _do_bench(fn: Callable[[], None], warmup: int = 10, rep: int = 50) -> float:
         return start.elapsed_time(end) / rep
 
 
-def _make_chunk_call(
-    *, disable_flashqla: bool, q, k, v, g, beta, initial_state, cu_seqlens
-) -> Callable[[], None]:
+def _make_chunk_call(*, disable_flashqla: bool, q, k, v, g, beta, initial_state, cu_seqlens) -> Callable[[], None]:
     """Switch the dispatch via env var + cache_clear, return a zero-arg call.
 
     No importlib.reload needed: `_flashqla_chunk_gated_delta_rule` re-reads the
@@ -413,8 +402,7 @@ def _make_chunk_call(
 BENCH_HEAD_DIM = 128
 
 BENCH_HDR = (
-    f"{'Model':<14} {'Seqlens':<14} {'h_qk':>4} {'h_v':>4}    "
-    f"{'flash_qla':>10}  {'fla':>10}    {'speedup':>8}"
+    f"{'Model':<14} {'Seqlens':<14} {'h_qk':>4} {'h_v':>4}    " f"{'flash_qla':>10}  {'fla':>10}    {'speedup':>8}"
 )
 
 
@@ -430,9 +418,7 @@ def _fmt_speedup(qla: float, fla: float) -> str:
     return f"{fla / qla:>6.2f}x"
 
 
-def _bench_one(
-    seqlens: List[int], h_qk: int, h_v: int, head_dim: int = BENCH_HEAD_DIM
-) -> Tuple[float, float]:
+def _bench_one(seqlens: List[int], h_qk: int, h_v: int, head_dim: int = BENCH_HEAD_DIM) -> Tuple[float, float]:
     """Returns (qla_ms, fla_ms). NaN on per-backend failure."""
     _cleanup_cuda()
     q, k, v, g, beta, h0, cu_seqlens = _make_inputs(
@@ -447,8 +433,13 @@ def _bench_one(
     try:
         qla_call = _make_chunk_call(
             disable_flashqla=False,
-            q=q, k=k, v=v, g=g, beta=beta,
-            initial_state=h0, cu_seqlens=cu_seqlens,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=h0,
+            cu_seqlens=cu_seqlens,
         )
         qla_ms = _do_bench(qla_call)
     except Exception as e:
@@ -459,8 +450,13 @@ def _bench_one(
     try:
         fla_call = _make_chunk_call(
             disable_flashqla=True,
-            q=q, k=k, v=v, g=g, beta=beta,
-            initial_state=h0, cu_seqlens=cu_seqlens,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=h0,
+            cu_seqlens=cu_seqlens,
         )
         fla_ms = _do_bench(fla_call)
     except Exception as e:
@@ -518,7 +514,5 @@ if __name__ == "__main__":
 
     gpu_name = torch.cuda.get_device_properties(0).name
     print(f"GPU: {gpu_name}    head_dim={BENCH_HEAD_DIM}")
-    print(
-        f"flash_qla=available    torch={torch.__version__}    cuda={torch.version.cuda}"
-    )
+    print(f"flash_qla=available    torch={torch.__version__}    cuda={torch.version.cuda}")
     _run_bench_table()
