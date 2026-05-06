@@ -38,7 +38,7 @@ class CpuCacheCreator:
                 time.sleep(0.01)
 
             cpu_cache_tensor = self._build_tensor_view(shm_ptr=attach_handle.device_ptr)
-            assert shm_ptr == cpu_cache_tensor.data_ptr()
+            assert attach_handle.device_ptr == cpu_cache_tensor.data_ptr()
             return cpu_cache_tensor, attach_handle
         else:
             cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
