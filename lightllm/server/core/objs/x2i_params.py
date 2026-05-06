@@ -45,6 +45,11 @@ class X2IParams(ctypes.Structure):
         ("past_kvcache_img", PastKVCachePageList),
         ("total_prompt_tokens", ctypes.c_int),
         ("request_id", ctypes.c_int64),
+        # session_id 用于在 x2i server 端按聊天会话缓存 RNG state，
+        # 解决多并发下不同 session 互相覆盖全局 torch/cuda RNG 的问题。
+        # 由 httpserver 在该 session 第一次生成图时绑定为该次的 request_id，
+        # 之后整段图文交错过程中保持不变（first_image=False 时不再覆盖）。
+        ("session_id", ctypes.c_int64),
     ]
 
     _width: int = 1024
@@ -80,6 +85,7 @@ class X2IParams(ctypes.Structure):
         self.dynamic_resolution = _get("dynamic_resolution", X2IParams._dynamic_resolution)
         self.total_prompt_tokens = 0
         self.request_id = 0
+        self.session_id = 0
         self.has_updated_hw = False
         self.first_image = True
 

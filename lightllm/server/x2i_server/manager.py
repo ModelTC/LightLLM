@@ -20,6 +20,7 @@ from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICach
 from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.start_utils import start_submodule_processes
 from .past_kv_cache_client import PastKVCacheClient
+from .rng_state_cache import RngStateCache
 
 logger = init_logger(__name__)
 
@@ -62,6 +63,10 @@ class X2IManager:
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
+        # Per-chat-session RNG snapshot, so concurrent sessions don't clobber each other's
+        # global torch / cuda RNG state between successive image generations.
+        self.rng_state_cache = RngStateCache()
+
     async def wait_to_model_ready(self):
 
         if self.world_size <= 1:
@@ -91,6 +96,22 @@ class X2IManager:
             args = [(self.args, rank, self.world_size) for rank in range(self.world_size)]
             start_submodule_processes(funcs, args)
 
+    def _prepare_seed_for_iter(self, param: X2IParams, i: int, session_id: int):
+        """决定本轮 generate() 调用要传给 pipeline 的 seed。
+
+        - 一个 chat session 的第一张图（first_image=True 且 i==0）：传种子，由 pipeline 内部 seed_all。
+        - 后续图（first_image=False 且 i==0）：先把该 session 上次保存的 RNG state 恢复回来，
+          再传 seed=None，让生成接着上一张图的 RNG 继续走。这样别的 session 中间穿插的 seed_all
+          不会污染本 session 的 RNG。
+        - 同一次调用内部 i>0 的图：天然顺延全局 RNG 即可，不重置也不恢复。
+        """
+        if i == 0:
+            if param.first_image:
+                return param.seed
+            self.rng_state_cache.restore(session_id)
+            return None
+        return None
+
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
         if self.use_naive_x2i:
             images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
@@ -105,14 +126,18 @@ class X2IManager:
             timestep_shift=param.timestep_shift,
         )
         images = []
+        session_id = param.session_id
         for i in range(param.num_images):
             self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
+            seed_arg = self._prepare_seed_for_iter(param, i, session_id)
             image = self.gen_pipe.generate(
-                seed=param.seed if param.first_image else None,
+                seed=seed_arg,
                 save_result_path="",  # 返回base64，不需要指定路径了
                 target_shape=[param.height, param.width],  # Height, Width
             )
             images.append(image)
+        # 保存当前 RNG state，下次同一 session 的图继续从这里走
+        self.rng_state_cache.save(session_id)
         return images
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
@@ -131,6 +156,8 @@ class X2IManager:
         images = []
         for i in range(param.num_images):
             self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
+            # it2i 的每张图都显式带种子（与 img_len+i 绑定），每次都会触发 seed_all，
+            # 不依赖也不会污染 t2i 的 session RNG state，无需缓存/恢复。
             image = self.gen_pipe.generate(
                 seed=param.seed + param.past_kvcache_img.img_len + i,
                 save_result_path="",  # 返回base64，不需要指定路径了

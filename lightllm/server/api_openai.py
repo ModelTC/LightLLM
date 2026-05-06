@@ -634,6 +634,7 @@ async def _get_text_generator_input(request: ChatCompletionRequest):
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
+        "seed": request.seed,
     }
     # Structured output handling
     if request.response_format:
@@ -771,6 +772,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
     x2i_params = X2IParams()
     x2i_params.init_from_image_config(request.image_config)
+    sampling_params.seed = x2i_params.seed
 
     enable_thinking = request.chat_template_kwargs.get("enable_thinking", False)
     print(f"x2i_params: {x2i_params} {image_only} {enable_thinking}", flush=True)

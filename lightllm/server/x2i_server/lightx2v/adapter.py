@@ -15,6 +15,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType
 from ..past_kv_cache_client import PastKVCacheClient
+from ..rng_state_cache import RngStateCache
 
 logger = init_logger(__name__)
 
@@ -40,6 +41,11 @@ class LightX2VServer:
         self._init_pipeline()
 
         self.task_dist_group = dist.new_group(backend="gloo", timeout=datetime.timedelta(days=30))
+
+        # Per-chat-session RNG snapshot, see lightllm/server/x2i_server/rng_state_cache.py.
+        # 各 worker 各自维护一份；由于本进程是单 stream 的串行 _process，且任务通过 broadcast
+        # 同步，因此各 rank 之间的 RNG 演进保持一致。
+        self.rng_state_cache = RngStateCache()
 
     def _init_pipeline(self):
         os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -123,13 +129,29 @@ class LightX2VServer:
                 past_kv_cache_text,
                 past_kv_cache_img,
             )
-        seed = param.seed if param.first_image else None
-        logger.info(f"seed: {seed} {param.seed} first_image: {param.first_image}")
+
+        session_id = param.session_id
+        if param.first_image:
+            # 本 session 第一张图：用传入的 seed 初始化全局 RNG
+            seed = param.seed
+        else:
+            # 后续图：恢复本 session 上次结束时的 RNG，避免被其他 session 的 seed_all 污染
+            restored = self.rng_state_cache.restore(session_id)
+            seed = None
+            if not restored:
+                logger.warning(
+                    f"session {session_id} rng state miss (maybe expired or first call after restart), "
+                    f"fallback to current global rng"
+                )
+        logger.info(f"seed: {seed} param.seed: {param.seed} first_image: {param.first_image} session_id: {session_id}")
         image = self.pipe.generate(
             seed=seed,
             save_result_path="",
             target_shape=[param.height, param.width],
         )
+
+        # 保存当前 RNG state，供同一 session 下一张图使用
+        self.rng_state_cache.save(session_id)
 
         return [image]
 

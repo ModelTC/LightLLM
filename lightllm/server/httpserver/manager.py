@@ -552,6 +552,10 @@ class HttpServerManager:
             # use the first request id as the gen image request id
             x2i_req_id = generate_req_ids[0]
             generation_params.request_id = x2i_req_id
+            # 第一次生成时，把本次 request_id 固化为 session_id，
+            # 后续同一会话的所有图都用同一个 session_id，供 x2i 端按会话缓存 RNG state。
+            if generation_params.first_image:
+                generation_params.session_id = x2i_req_id
 
             req_status = X2IReqStatus(generation_params, generate_req_ids)
             self.req_id_to_x2i_reqs[generation_params.request_id] = req_status
