@@ -308,10 +308,6 @@ PD 分离模式参数
 
     禁用默认开启的 SymmMem / FlashInfer all-reduce 快路径，并回退到 NCCL
 
-.. option:: --enable_custom_allgather
-
-    是否启用自定义 allgather
-
 .. option:: --enable_tpsp_mix_mode
 
     推理后端将使用 TP SP 混合运行模式

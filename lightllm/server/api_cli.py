@@ -354,7 +354,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the default SymmMem / FlashInfer all-reduce fast path and fall back to NCCL.",
     )
-    parser.add_argument("--enable_custom_allgather", action="store_true", help="Whether to enable cutom allgather.")
     parser.add_argument(
         "--enable_tpsp_mix_mode",
         action="store_true",

@@ -37,12 +37,9 @@ from lightllm.utils.dist_utils import (
     create_dp_special_inter_group,
 )
 from lightllm.utils.device_utils import get_device_sm_count
-from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL
-from contextlib import nullcontext, contextmanager
 
 logger = init_logger(__name__)
 
-from .custom_all_gather import CustomAllgather
 from .symm_mem_all_reduce import SymmMemAllreduce
 from .flashinfer_all_reduce import FlashInferAllReduce
 
@@ -57,7 +54,6 @@ except:
 
 class CustomProcessGroup:
     def __init__(self):
-        self.custom_gather = None
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
@@ -82,18 +78,6 @@ class CustomProcessGroup:
             self.flashinfer_reduce = fi
             logger.info("Enable FlashInfer ALLReduce.")
 
-    def init_custom_gather(self) -> None:
-        if not HAS_LIGHTLLM_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
-            return
-
-        args = get_env_start_args()
-        if not args.enable_custom_allgather:
-            return
-
-        cpu_group = create_new_group_for_current_dp("gloo")
-        self.custom_gather = CustomAllgather(cpu_group, torch.cuda.current_device())
-        logger.info("Enable Custom ALLGather.  You can disable it by settting --disable_custom_allgather")
-
     def all_reduce(self, input_: torch.Tensor) -> None:
         # Dispatch chain: FlashInfer -> SymmMem -> NCCL.
         if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(input_):
@@ -105,17 +89,7 @@ class CustomProcessGroup:
         return dist.all_reduce(input_, group=self.device_group)
 
     def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
-        if self.custom_gather is not None and self.custom_gather.should_custom_ar(input_):
-            self.custom_gather.custom_all_gather(output_, input_)
-            return
-        else:
-            return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
-
-
-@contextmanager
-def lightllm_capture_graph(group: CustomProcessGroup = None):
-    with group.custom_gather.capture() if group and group.custom_gather else nullcontext():
-        yield
+        return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
 
 class DistributeGroupManager:
@@ -129,7 +103,6 @@ class DistributeGroupManager:
         args = get_env_start_args()
         for i in range(group_size):
             group = CustomProcessGroup()
-            group.init_custom_gather()
             if not args.disable_symm_mem_allreduce:
                 group.init_symm_mem_reduce()
             self.groups.append(group)

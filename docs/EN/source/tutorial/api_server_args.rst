@@ -306,10 +306,6 @@ Performance Optimization Parameters
 
     Disable the default SymmMem / FlashInfer all-reduce fast path and fall back to NCCL
 
-.. option:: --enable_custom_allgather
-
-    Whether to enable custom allgather
-
 .. option:: --enable_tpsp_mix_mode
 
     The inference backend will use TP SP mixed running mode

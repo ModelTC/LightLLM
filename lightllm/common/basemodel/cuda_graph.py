@@ -6,7 +6,7 @@ import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
+from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
 
@@ -70,7 +70,6 @@ class CudaGraph:
             return None
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
-        dist_group: CustomProcessGroup = infer_state.dist_group
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
@@ -95,9 +94,8 @@ class CudaGraph:
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
-        with lightllm_capture_graph(dist_group):
-            with torch.cuda.graph(graph_obj, pool=self.mempool):
-                model_output = decode_func(infer_state)
+        with torch.cuda.graph(graph_obj, pool=self.mempool):
+            model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
         return model_output
@@ -108,8 +106,6 @@ class CudaGraph:
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
     ):
-        dist_group: CustomProcessGroup = infer_state.dist_group
-        dist_group1 = infer_state1.dist_group
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
@@ -132,10 +128,8 @@ class CudaGraph:
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
 
-        with lightllm_capture_graph(dist_group1):
-            with lightllm_capture_graph(dist_group):
-                with torch.cuda.graph(graph_obj, pool=self.mempool):
-                    model_output, model_output1 = decode_func(infer_state, infer_state1)
+        with torch.cuda.graph(graph_obj, pool=self.mempool):
+            model_output, model_output1 = decode_func(infer_state, infer_state1)
         self.graph[batch_size] = (
             graph_obj,
             infer_state,
