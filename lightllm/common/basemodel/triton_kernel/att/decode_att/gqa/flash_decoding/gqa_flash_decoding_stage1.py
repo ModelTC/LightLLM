@@ -58,6 +58,13 @@ def _fwd_kernel_flash_decode_stage1(
     if block_index >= req_total_block_num:
         return
 
+    # Decode: q is at position cur_batch_seq_len - 1; SWA keeps K at positions
+    # >= cur_batch_seq_len - SLIDING_WINDOW. win_threshold below.
+    if SLIDING_WINDOW > 0:
+        win_threshold = cur_batch_seq_len - SLIDING_WINDOW
+    else:
+        win_threshold = 0
+
     cur_q_head_offs = tl.arange(0, Q_HEAD_NUM)
     cur_q_head_range = cur_kv_head * gqa_group_size + cur_q_head_offs
 
@@ -84,6 +91,10 @@ def _fwd_kernel_flash_decode_stage1(
         for start_n in range(0, block_n_size, 1):
             offs_n_new = start_n * BLOCK_N + offs_n
             n_mask = offs_n_new < cur_batch_end_index
+            if SLIDING_WINDOW > 0:
+                # Drop K positions that fall outside the sliding window from
+                # the current query (last token in the sequence).
+                n_mask = n_mask & (offs_n_new >= win_threshold)
             k_loc = tl.load(
                 Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + kv_start_index + offs_n_new,
                 mask=n_mask,
