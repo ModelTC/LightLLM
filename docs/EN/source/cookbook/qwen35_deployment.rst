@@ -233,3 +233,11 @@ Hardware Requirements
 - ``--tp 8`` required to fit model weights across GPUs
 - Reduce ``--max_req_total_len`` or ``--graph_max_batch_size`` if encountering OOM errors
 - Use ``--data_type fp8_e4m3`` for FP8 KV quantization to further reduce memory pressure
+- Multimodal deployments get ViT OOM protection by default: when
+  ``--enable_multimodal`` is on, ``--visual_batch_max_tokens`` is auto-derived
+  from ``--batch_max_tokens``. The same value caps both per-step batch
+  output and per-image output (oversized images are auto-resized by the
+  Qwen-VL ``max_pixels`` clamp; anything still over budget is rejected
+  before reaching the ViT). To tighten the budget further, pass an explicit
+  value (e.g. ``--visual_batch_max_tokens 16384``); to opt out and restore
+  pre-PR behavior, pass ``--visual_batch_max_tokens 0``.

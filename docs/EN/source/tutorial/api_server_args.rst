@@ -272,6 +272,27 @@ Multimodal Parameters
 
     Number of images processed in each inference batch, default is ``1``
 
+.. option:: --visual_batch_max_tokens
+
+    Per-step ViT admission budget, measured in image output tokens (post
+    spatial_merge). The multimodal analogue of ``--batch_max_tokens``: the
+    ViT scheduler stops adding images to the current batch once their
+    cumulative ``token_num`` would exceed this value. Useful for bounding
+    peak ViT memory on dynamic-resolution models (Qwen2.5/3/3.5-VL, etc.)
+    where one 4K image or long video can contain more patches than many
+    small images combined. One image is always admitted per step to avoid
+    deadlock when a single request is larger than the budget — to make that
+    safe, the same value also drives the per-image budget: oversized images
+    are auto-resized by the Qwen-VL processor ``max_pixels`` clamp, and any
+    image that still exceeds the budget is rejected with a ``ValueError``
+    before reaching the ViT.
+
+    **Default behavior with** ``--enable_multimodal``: auto-derived from
+    ``--batch_max_tokens`` so multimodal deployments get OOM protection
+    without explicit opt-in. Pass an explicit positive integer to override.
+    Pass ``0`` to opt out and restore the pre-budget behavior (only
+    ``--visual_infer_batch_size`` applies).
+
 .. option:: --visual_gpu_ids
 
     List of GPU IDs to use, e.g., 0 1 2

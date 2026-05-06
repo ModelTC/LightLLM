@@ -272,6 +272,24 @@ def normal_or_p_d_start(args):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
 
+    # 多模态预算默认值（safety-on-by-default for multimodal deployments）：
+    # - 不传：visual_batch_max_tokens 默认等于 batch_max_tokens（LLM 和 ViT 共用预算口径）。
+    # - 传 0：显式关闭，恢复 PR 之前的"不限"行为（向后兼容用）。
+    # - 传正整数：作为显式预算使用。
+    # 同一个值同时充当 per-step batch budget、per-image hard cap 和 processor max_pixels
+    # clamp 的依据 —— "首图必放行" 规则要求单图必须能塞进一个批次，所以 batch budget 和
+    # 单图上限本来就是同一个数。
+    if args.enable_multimodal:
+        if args.visual_batch_max_tokens is None:
+            args.visual_batch_max_tokens = args.batch_max_tokens
+            logger.info(
+                f"visual_batch_max_tokens auto-derived from batch_max_tokens = {args.batch_max_tokens} "
+                f"(pass --visual_batch_max_tokens 0 to opt out)"
+            )
+        elif args.visual_batch_max_tokens == 0:
+            logger.info("visual_batch_max_tokens explicitly disabled (=0); ViT token budget off")
+            args.visual_batch_max_tokens = None
+
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_prepare

@@ -473,6 +473,30 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
     )
     parser.add_argument(
+        "--visual_batch_max_tokens",
+        type=int,
+        default=None,
+        help="""
+        Per-step ViT admission budget measured in image output tokens (post
+        spatial_merge). The ViT scheduler stops adding images to the current
+        batch once their cumulative token_num would exceed this value. Acts as
+        the multimodal analogue of --batch_max_tokens and caps peak ViT
+        memory/compute for dynamic-resolution models (Qwen2.5/3/3.5-VL, etc.).
+        One image is always admitted per step to avoid deadlock when a single
+        request is larger than the budget — to make that safe, this value
+        also drives the per-image budget: oversized images are auto-resized
+        by the Qwen-VL processor max_pixels clamp, and any image that still
+        exceeds the budget is rejected with a ValueError before reaching the
+        ViT.
+
+        Default behavior when --enable_multimodal is on: auto-derived from
+        --batch_max_tokens so multimodal deployments get OOM protection without
+        explicit opt-in. Pass an explicit positive integer to override; pass 0
+        to opt out entirely and restore the pre-budget behavior (only the
+        image-count cap --visual_infer_batch_size applies).
+        """,
+    )
+    parser.add_argument(
         "--visual_send_batch_size",
         type=int,
         default=1,
