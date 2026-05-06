@@ -218,16 +218,14 @@ def chunk_gated_delta_rule(
     """
     flashqla_fn = _flashqla_chunk_gated_delta_rule()
     if flashqla_fn is not None and not head_first:
-        q_c = q.contiguous()
-        init_c = initial_state.contiguous() if initial_state is not None else None
         return flashqla_fn(
-            q=q_c,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
+            g=g.contiguous(),
+            beta=beta.contiguous(),
             scale=scale,
-            initial_state=init_c,
+            initial_state=initial_state.contiguous() if initial_state is not None else None,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             head_first=head_first,
