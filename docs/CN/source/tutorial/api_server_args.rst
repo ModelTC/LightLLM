@@ -306,7 +306,11 @@ PD 分离模式参数
 
 .. option:: --disable_symm_mem_allreduce
 
-    禁用默认开启的 SymmMem / FlashInfer all-reduce 快路径，并回退到 NCCL
+    禁用默认开启的 SymmMem all-reduce 快路径，并回退到 NCCL
+
+.. option:: --disable_flashinfer_allreduce
+
+    禁用默认开启的 FlashInfer all-reduce 快路径，并回退到 SymmMem / NCCL
 
 .. option:: --enable_tpsp_mix_mode
 

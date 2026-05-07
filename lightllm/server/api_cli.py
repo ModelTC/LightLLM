@@ -352,7 +352,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable_symm_mem_allreduce",
         action="store_true",
-        help="Disable the default SymmMem / FlashInfer all-reduce fast path and fall back to NCCL.",
+        help="Disable the default SymmMem all-reduce fast path and fall back to NCCL.",
+    )
+    parser.add_argument(
+        "--disable_flashinfer_allreduce",
+        action="store_true",
+        help="Disable the default FlashInfer all-reduce fast path and fall back to SymmMem / NCCL.",
     )
     parser.add_argument(
         "--enable_tpsp_mix_mode",

@@ -304,7 +304,11 @@ Performance Optimization Parameters
 
 .. option:: --disable_symm_mem_allreduce
 
-    Disable the default SymmMem / FlashInfer all-reduce fast path and fall back to NCCL
+    Disable the default SymmMem all-reduce fast path and fall back to NCCL
+
+.. option:: --disable_flashinfer_allreduce
+
+    Disable the default FlashInfer all-reduce fast path and fall back to SymmMem / NCCL
 
 .. option:: --enable_tpsp_mix_mode
 
