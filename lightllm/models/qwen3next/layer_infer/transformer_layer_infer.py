@@ -1,4 +1,3 @@
-import gc
 import torch
 
 import torch.distributed as dist
@@ -223,48 +222,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if not self.is_linear_attention_layer:
             return super().context_attention_forward(input_embdings, infer_state, layer_weight)
 
-        gdn_out = self._gdn_wrapper_run(input_embdings, infer_state, layer_weight)
+        gdn_out = self.gdn_forward(input_embdings, infer_state, layer_weight, is_prefill=True)
         if self.tp_world_size_ > 1:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return gdn_out
-
-    def _gdn_wrapper_run(
-        self,
-        input_embdings: torch.Tensor,
-        infer_state: Qwen3NextInferStateInfo,
-        layer_weight: Qwen3NextTransformerLayerWeight,
-    ) -> torch.Tensor:
-        if torch.cuda.is_current_stream_capturing():
-            x = input_embdings.contiguous()
-            _x = tensor_to_no_ref_tensor(x)
-            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
-            pre_capture_graph.__exit__(None, None, None)
-
-            # Output shape mirrors gdn_forward's last step: linear_out_proj maps
-            # back to hidden_size, so o is (num_tokens, embed_dim_). We hardcode
-            # this rather than running a dry-run capture because FlashQLA's
-            # chunk_gated_delta_rule internally calls tilelang.cdiv(...).tolist()
-            # which requires a host-side sync — illegal during stream capture.
-            num_tokens = input_embdings.numel() // self.embed_dim_
-            o_shape = (num_tokens, self.embed_dim_)
-            o_dtype = input_embdings.dtype
-            o_device = input_embdings.device
-
-            infer_state.prefill_cuda_graph_create_graph_obj()
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
-            _o = tensor_to_no_ref_tensor(o)
-
-            def gdn_func(new_infer_state: Qwen3NextInferStateInfo):
-                tmp_o = self.gdn_forward(_x, new_infer_state, layer_weight, is_prefill=True)
-                tmp_o = tmp_o.view(_o.shape)
-                _o.copy_(tmp_o)
-                return
-
-            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=gdn_func, after_graph=pre_capture_graph)
-            return o
-
-        return self.gdn_forward(input_embdings, infer_state, layer_weight, is_prefill=True)
 
     def token_attention_forward(
         self,
@@ -289,16 +250,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
 
         input = input.view(-1, self.embed_dim_)
-        conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-
         mixed_qkvzba = layer_weight.linear_in_proj.mm(input)
-        mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=not is_prefill)
 
         if is_prefill:
-            core_attn_out = self._gdn_prefill_kernel(
-                mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight
-            )
+            core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
         else:
+            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=True)
+            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
             core_attn_out = self._gdn_decode_kernel(
                 mixed_qkv,
                 conv_states,
@@ -316,6 +274,54 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)
         return output
+
+    def _gdn_prefill_wrapper_run(
+        self,
+        mixed_qkvzba: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if torch.cuda.is_current_stream_capturing():
+            mixed_qkvzba = mixed_qkvzba.contiguous()
+            _mixed_qkvzba = tensor_to_no_ref_tensor(mixed_qkvzba)
+            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+            pre_capture_graph.__exit__(None, None, None)
+
+            # _gdn_prefill_kernel returns the pre-projection value stream. Its
+            # logical size is num_tokens * local value heads * value head dim.
+            # We avoid a dry-run because FlashQLA may do host-side syncs while
+            # preparing varlen chunk metadata, which is illegal during capture.
+            num_tokens = mixed_qkvzba.shape[0]
+            o_shape = (num_tokens, self.tp_num_v_heads, self.head_v_dim)
+            o_dtype = mixed_qkvzba.dtype
+            o_device = mixed_qkvzba.device
+            z_shape = o_shape
+
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+            _o = tensor_to_no_ref_tensor(o)
+            z = torch.empty(z_shape, dtype=o_dtype, device=o_device)
+            _z = tensor_to_no_ref_tensor(z)
+
+            def gdn_prefill_func(new_infer_state: Qwen3NextInferStateInfo):
+                conv_states, ssm_states = new_infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba, is_decode=False)
+                _z.copy_(tmp_z)
+                tmp_o = self._gdn_prefill_kernel(
+                    mixed_qkv, conv_states, ssm_states, a, b, new_infer_state, layer_weight
+                )
+                tmp_o = tmp_o.view(_o.shape)
+                _o.copy_(tmp_o)
+                return
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=gdn_prefill_func, after_graph=pre_capture_graph)
+            return o, z
+
+        conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+        mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=False)
+        core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
+        return core_attn_out, z
 
     def _split_qkvzba(self, mixed_qkvzba, is_decode=False):
         qkv_dim = self.tp_key_dim * 2 + self.tp_value_dim
