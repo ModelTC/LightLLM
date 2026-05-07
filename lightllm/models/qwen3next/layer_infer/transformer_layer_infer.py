@@ -1,3 +1,4 @@
+import gc
 import torch
 
 import torch.distributed as dist
@@ -7,6 +8,7 @@ from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -221,10 +223,48 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if not self.is_linear_attention_layer:
             return super().context_attention_forward(input_embdings, infer_state, layer_weight)
 
-        gdn_out = self.gdn_forward(input_embdings, infer_state, layer_weight, is_prefill=True)
+        gdn_out = self._gdn_wrapper_run(input_embdings, infer_state, layer_weight)
         if self.tp_world_size_ > 1:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return gdn_out
+
+    def _gdn_wrapper_run(
+        self,
+        input_embdings: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ) -> torch.Tensor:
+        if torch.cuda.is_current_stream_capturing():
+            x = input_embdings.contiguous()
+            _x = tensor_to_no_ref_tensor(x)
+            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
+            pre_capture_graph.__exit__(None, None, None)
+
+            # Output shape mirrors gdn_forward's last step: linear_out_proj maps
+            # back to hidden_size, so o is (num_tokens, embed_dim_). We hardcode
+            # this rather than running a dry-run capture because FlashQLA's
+            # chunk_gated_delta_rule internally calls tilelang.cdiv(...).tolist()
+            # which requires a host-side sync — illegal during stream capture.
+            num_tokens = input_embdings.numel() // self.embed_dim_
+            o_shape = (num_tokens, self.embed_dim_)
+            o_dtype = input_embdings.dtype
+            o_device = input_embdings.device
+
+            infer_state.prefill_cuda_graph_create_graph_obj()
+            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
+            _o = tensor_to_no_ref_tensor(o)
+
+            def gdn_func(new_infer_state: Qwen3NextInferStateInfo):
+                tmp_o = self.gdn_forward(_x, new_infer_state, layer_weight, is_prefill=True)
+                tmp_o = tmp_o.view(_o.shape)
+                _o.copy_(tmp_o)
+                return
+
+            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=gdn_func, after_graph=pre_capture_graph)
+            return o
+
+        return self.gdn_forward(input_embdings, infer_state, layer_weight, is_prefill=True)
 
     def token_attention_forward(
         self,
