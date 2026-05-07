@@ -16,6 +16,7 @@ from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
+from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
 
@@ -105,6 +106,13 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        if self.config.get("enable_moe_block", False):
+            # LightLLM's MoE helpers use Qwen/DeepSeek-style field names.
+            # Gemma-4 checkpoints expose equivalent values as top_k_experts
+            # and moe_intermediate_size.
+            self.config.setdefault("num_experts_per_tok", self.config["top_k_experts"])
+            self.config.setdefault("norm_topk_prob", True)
+            self.config.setdefault("scoring_func", "softmax")
         return
 
     def _verify_params(self):
@@ -112,9 +120,9 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
         num_global_kv = self.config.get("num_global_key_value_heads", self.config["num_key_value_heads"])
-        assert num_global_kv % self.tp_world_size_ == 0, (
-            f"num_global_key_value_heads={num_global_kv} must be divisible by tp={self.tp_world_size_}"
-        )
+        assert (
+            num_global_kv % self.tp_world_size_ == 0
+        ), f"num_global_key_value_heads={num_global_kv} must be divisible by tp={self.tp_world_size_}"
         return
 
     def _init_mem_manager(self):
@@ -171,9 +179,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # honour it. User can force triton with --llm_*_att_backend triton;
         # otherwise prefer FA3 when loadable.
         user_forced_triton = backends == {"triton"}
-        self._gemma4_sliding_backend_kind = (
-            "fa3" if (fa3_loadable and not user_forced_triton) else "triton"
-        )
+        self._gemma4_sliding_backend_kind = "fa3" if (fa3_loadable and not user_forced_triton) else "triton"
         # SWA is on regardless of which sliding backend was picked: FA3
         # honours window_size per call, and the triton kernels in
         # context_flashattention_nopad.py / gqa_flash_decoding_stage1.py mask
@@ -185,6 +191,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # mismatch with full-attn layers doesn't force a single compromise.
         if self._gemma4_sliding_backend_kind == "fa3":
             from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+
             self.prefill_att_backend1 = Fa3AttBackend(model=self)
             self.decode_att_backend1 = Fa3AttBackend(model=self)
         else:
@@ -193,6 +200,8 @@ class Gemma4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()
+        if self.config.get("enable_moe_block", False):
+            dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
 
     def _init_to_get_rotary_gemma4(self):
         rope_params = self.config["rope_parameters"]
@@ -231,21 +240,16 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         if rope_type == "proportional":
             rope_angles = int(full_partial * full_head_dim // 2)
             inv_freq_rot = 1.0 / (
-                full_theta
-                ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32) / full_head_dim)
+                full_theta ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32) / full_head_dim)
             )
             nope_angles = full_head_dim // 2 - rope_angles
             if nope_angles > 0:
-                inv_freq_full = torch.cat(
-                    [inv_freq_rot, torch.zeros(nope_angles, dtype=torch.float32)]
-                )
+                inv_freq_full = torch.cat([inv_freq_rot, torch.zeros(nope_angles, dtype=torch.float32)])
             else:
                 inv_freq_full = inv_freq_rot
         else:
             full_rot_dim = int(full_head_dim * full_partial)
-            inv_freq_full = 1.0 / (
-                full_theta ** (torch.arange(0, full_rot_dim, 2, dtype=torch.float32) / full_rot_dim)
-            )
+            inv_freq_full = 1.0 / (full_theta ** (torch.arange(0, full_rot_dim, 2, dtype=torch.float32) / full_rot_dim))
 
         freqs_f = torch.outer(t, inv_freq_full)
         self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()

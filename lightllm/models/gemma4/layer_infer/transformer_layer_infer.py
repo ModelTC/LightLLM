@@ -23,6 +23,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.eps_ = 1e-6
         self.embed_dim_ = network_config["hidden_size"]
+        self.is_moe = bool(network_config.get("enable_moe_block", False))
+        self.num_experts_per_tok = network_config.get("num_experts_per_tok", network_config.get("top_k_experts", 0))
+        self.norm_topk_prob = network_config.get("norm_topk_prob", True)
+        self.router_root_scale = self.embed_dim_ ** -0.5
 
         layer_type = network_config["layer_types"][layer_num]
         self.is_sliding = layer_type == "sliding_attention"
@@ -68,26 +72,16 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- norms ---------------------------------------------------------
 
-    def _att_norm(
-        self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ) -> torch.Tensor:
-        return layer_weight.att_norm_weight_(
-            input=input, eps=self.eps_, alloc_func=self.alloc_tensor
-        )
+    def _att_norm(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
+        return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
-    def _ffn_norm(
-        self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ) -> torch.Tensor:
+    def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         # NOTE: gemma packs post_attention_layernorm under `ffn_norm_weight_`
-        return layer_weight.ffn_norm_weight_(
-            input=input, eps=self.eps_, alloc_func=self.alloc_tensor
-        )
+        return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     # ----- QKV + attention ---------------------------------------------
 
-    def _get_qkv(
-        self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ) -> torch.Tensor:
+    def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
 
         head_dim = self.layer_head_dim_
@@ -156,9 +150,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         return q, cache_kv
 
-    def _get_o(
-        self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ) -> torch.Tensor:
+    def _get_o(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
         input = input.view(-1, self.tp_o_head_num_ * self.layer_head_dim_)
@@ -223,16 +215,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.layer_head_dim_)
         att_state = infer_state.decode_att_state1 if self.is_sliding else infer_state.decode_att_state
-        o_tensor = att_state.decode_att(
-            q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
-        )
+        o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
     # ----- FFN (Gemma gelu-tanh, separate gate/up/down) ----------------
 
-    def _ffn(
-        self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ) -> torch.Tensor:
+    def _ffn(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         gate = layer_weight.gate_proj.mm(input)
@@ -245,21 +233,77 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         ffn2 = self._tpsp_reduce(input=ffn2, infer_state=infer_state)
         return ffn2
 
+    def _router_logits(self, residual, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
+        router_input = residual.view(-1, self.embed_dim_).float()
+        router_input = router_input * torch.rsqrt(router_input.pow(2).mean(dim=-1, keepdim=True) + self.eps_)
+        router_input = router_input * self.router_root_scale
+        router_input = (router_input * layer_weight.router_input_scale_.weight.float()).to(torch.bfloat16)
+        return layer_weight.moe_gate.mm(router_input, use_custom_tensor_mananger=False).float()
+
+    def _moe_ffn(self, input, router_logits, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
+        input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        moe_out = layer_weight.experts.experts(
+            input,
+            router_logits=router_logits,
+            top_k=self.num_experts_per_tok,
+            renormalize=self.norm_topk_prob,
+            use_grouped_topk=False,
+            topk_group=None,
+            num_expert_group=None,
+            is_prefill=infer_state.is_prefill,
+            per_expert_scale=layer_weight.experts.per_expert_scale,
+            use_gelu=True,
+        )
+        moe_out = self._tpsp_reduce(input=moe_out, infer_state=infer_state)
+        return moe_out
+
+    def _ffn_block(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
+        residual = input_embdings
+        dense_input = layer_weight.pre_feedforward_layernorm_weight_(
+            input=residual.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+        ).to(torch.bfloat16)
+        dense_out = self._ffn(dense_input, infer_state, layer_weight)
+        dense_input = None
+
+        if self.is_moe:
+            dense_out = layer_weight.post_feedforward_layernorm_1_weight_(
+                input=dense_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+            ).to(torch.bfloat16)
+
+            router_logits = self._router_logits(residual, layer_weight)
+            moe_input = layer_weight.pre_feedforward_layernorm_2_weight_(
+                input=residual.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+            ).to(torch.bfloat16)
+            moe_out = self._moe_ffn(moe_input, router_logits, infer_state, layer_weight)
+            moe_input = None
+            router_logits = None
+            moe_out = layer_weight.post_feedforward_layernorm_2_weight_(
+                input=moe_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+            ).to(torch.bfloat16)
+            dense_out.add_(moe_out)
+            moe_out = None
+
+        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
+            input=dense_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
+        ).to(torch.bfloat16)
+        dense_out = None
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        return input_embdings
+
     # ----- block-level forwards (add layer_scalar at the end) ----------
 
     def _apply_layer_scalar(self, hidden_states, layer_weight):
         hidden_states.mul_(layer_weight.layer_scalar_.weight)
         return hidden_states
 
-    def context_forward(
-        self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ):
+    def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         input_embdings = input_embdings.to(torch.bfloat16)
 
         # attn sub-block
-        input1 = self._att_norm(
-            input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight
-        ).to(torch.bfloat16)
+        input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight).to(
+            torch.bfloat16
+        )
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
@@ -270,27 +314,16 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
-        # ffn sub-block
-        input1 = layer_weight.pre_feedforward_layernorm_weight_(
-            input=input_embdings.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(torch.bfloat16)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
-        input1 = None
-        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
-            input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(torch.bfloat16)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        input_embdings = self._ffn_block(input_embdings, infer_state, layer_weight)
 
         return self._apply_layer_scalar(input_embdings, layer_weight)
 
-    def token_forward(
-        self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
-    ):
+    def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         input_embdings = input_embdings.to(torch.bfloat16)
 
-        input1 = self._att_norm(
-            input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight
-        ).to(torch.bfloat16)
+        input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight).to(
+            torch.bfloat16
+        )
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
@@ -301,14 +334,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
-        input1 = layer_weight.pre_feedforward_layernorm_weight_(
-            input=input_embdings.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(torch.bfloat16)
-        ffn_out = self._ffn(input1, infer_state, layer_weight)
-        input1 = None
-        ffn_out = layer_weight.post_feedforward_layernorm_weight_(
-            input=ffn_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(torch.bfloat16)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        input_embdings = self._ffn_block(input_embdings, infer_state, layer_weight)
 
         return self._apply_layer_scalar(input_embdings, layer_weight)

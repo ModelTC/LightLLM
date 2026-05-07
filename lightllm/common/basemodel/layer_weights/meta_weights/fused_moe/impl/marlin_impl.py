@@ -29,7 +29,9 @@ class FuseMoeMarlin(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        use_gelu: bool = False,
     ):
+        assert not use_gelu, "FuseMoeMarlin does not support GELU expert activation."
 
         w1_weight, w1_scale, w1_zero_point = w13.weight, w13.weight_scale, w13.weight_zero_point
         w2_weight, w2_scale, w2_zero_point = w2.weight, w2.weight_scale, w2.weight_zero_point

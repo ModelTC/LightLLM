@@ -1,6 +1,10 @@
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight, COLMMWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import RMSNormWeight, ParameterWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.gemma4_packed_fused_moe_weight import (
+    Gemma4PackedFusedMoeWeight,
+)
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
@@ -16,6 +20,7 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
         return
 
     def _pre_parse_layer_shape(self, layer_num, network_config):
+        self._is_moe = bool(network_config.get("enable_moe_block", False))
         layer_type = network_config["layer_types"][layer_num]
         self._is_sliding = layer_type == "sliding_attention"
         if self._is_sliding:
@@ -59,6 +64,12 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
         self._ffn_norm_weight_name = f"{prefix}.post_attention_layernorm.weight"
         self._pre_feedforward_layernorm_name = f"{prefix}.pre_feedforward_layernorm.weight"
         self._post_feedforward_layernorm_name = f"{prefix}.post_feedforward_layernorm.weight"
+        self._post_feedforward_layernorm_1_name = f"{prefix}.post_feedforward_layernorm_1.weight"
+        self._pre_feedforward_layernorm_2_name = f"{prefix}.pre_feedforward_layernorm_2.weight"
+        self._post_feedforward_layernorm_2_name = f"{prefix}.post_feedforward_layernorm_2.weight"
+
+        self._router_input_scale_name = f"{prefix}.router.scale"
+        self._router_weight_name = f"{prefix}.router.proj.weight"
 
         self._layer_scalar_name = f"{prefix}.layer_scalar"
 
@@ -66,6 +77,8 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
         self._init_qkv()
         self._init_o()
         self._init_ffn()
+        if self._is_moe:
+            self._init_moe()
         self._init_norm()
 
     def _init_qkv(self):
@@ -139,6 +152,41 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
             quant_method=self.get_quant_method("down_proj"),
         )
 
+    def _init_moe(self):
+        enable_ep_moe = get_env_start_args().enable_ep_moe
+        assert not enable_ep_moe, "Gemma-4 MoE packed expert weights currently support TP mode only."
+
+        self.router_input_scale_ = ParameterWeight(
+            weight_name=self._router_input_scale_name,
+            data_type=self.data_type_,
+            weight_shape=(self.n_embed,),
+        )
+        self.moe_gate = ROWMMWeight(
+            in_dim=self.n_embed,
+            out_dims=[self.network_config_["num_experts"]],
+            weight_names=self._router_weight_name,
+            data_type=self.data_type_,
+            bias_names=None,
+            quant_method=self.get_quant_method("moe_gate"),
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.experts = Gemma4PackedFusedMoeWeight(
+            gate_proj_name="gate_proj",
+            down_proj_name="down_proj",
+            up_proj_name="up_proj",
+            e_score_correction_bias_name="",
+            weight_prefix=f"model.language_model.layers.{self.layer_num_}.experts",
+            n_routed_experts=self.network_config_["num_experts"],
+            hidden_size=self.network_config_["hidden_size"],
+            moe_intermediate_size=self.network_config_["moe_intermediate_size"],
+            data_type=self.data_type_,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
+            per_expert_scale_name=f"model.language_model.layers.{self.layer_num_}.router.per_expert_scale",
+        )
+
     def _init_norm(self):
         hidden_size = self.network_config_["hidden_size"]
         # Gemma-4 uses *standard* RMSNorm (x * rsqrt(var+eps) * w), NOT the
@@ -174,6 +222,22 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
             weight_name=self._post_feedforward_layernorm_name,
             data_type=self.data_type_,
         )
+        if self._is_moe:
+            self.post_feedforward_layernorm_1_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._post_feedforward_layernorm_1_name,
+                data_type=self.data_type_,
+            )
+            self.pre_feedforward_layernorm_2_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._pre_feedforward_layernorm_2_name,
+                data_type=self.data_type_,
+            )
+            self.post_feedforward_layernorm_2_weight_ = RMSNormWeight(
+                dim=hidden_size,
+                weight_name=self._post_feedforward_layernorm_2_name,
+                data_type=self.data_type_,
+            )
         # scalar multiplier applied to the attention output
         self.layer_scalar_ = ParameterWeight(
             weight_name=self._layer_scalar_name,
