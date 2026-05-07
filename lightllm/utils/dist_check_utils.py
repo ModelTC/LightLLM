@@ -141,7 +141,9 @@ def _check_ok_two_gpu_all_reduce(worker_entry: Callable[[int, int], None], init_
         torch_mp.spawn(worker_entry, args=(init_tcp_port,), nprocs=2, join=True)
         return True
     except Exception as error:
-        logger.warning("2-GPU all-reduce capability check failed for %s: %s", worker_entry.__name__, error)
+        error_str = str(error)
+        error_str = error_str[-66:].replace("\n", "")
+        logger.warning("2-GPU all-reduce capability check failed for %s: %s", worker_entry.__name__, error_str)
         return False
 
 
