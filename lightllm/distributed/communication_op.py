@@ -184,9 +184,10 @@ def all_reduce(
     if _is_single_group(group=group):
         return
     if isinstance(group, CustomProcessGroup):
-        return group.all_reduce(input_)
-    else:
-        return dist.all_reduce(input_, op, group, async_op)
+        if op == ReduceOp.SUM:
+            return group.all_reduce(input_)
+        return dist.all_reduce(input_, op, group.device_group, async_op)
+    return dist.all_reduce(input_, op, group, async_op)
 
 
 def all_gather_into_tensor(

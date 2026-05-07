@@ -18,6 +18,7 @@ from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.utils.config_utils import has_audio_module, has_vision_module, is_linear_att_mixed_model
+from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
 
@@ -370,6 +371,8 @@ def normal_or_p_d_start(args):
             """dp <= 1 does not support dp_prompt_cache_fetch;
             overriding enable_dp_prompt_cache_fetch to False"""
         )
+
+    auto_configure_allreduce_flags_from_args(args)
 
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
