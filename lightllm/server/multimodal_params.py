@@ -197,6 +197,9 @@ class MultimodalParams:
             await asyncio.gather(*tasks)
         return
 
+    def add_image(self, image: dict):
+        self.images.append(ImageItem(**image))
+
     def to_dict(self):
         ret = {}
         ret["images"] = [i.to_dict() for i in self.images]
@@ -211,3 +214,13 @@ class MultimodalParams:
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
         return ret
+
+    def free(self):
+        for image in self.images:
+            image.free()
+        for audio in self.audios:
+            audio.free()
+        return
+
+    def clone(self):
+        return MultimodalParams(**self.to_origin_dict())

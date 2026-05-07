@@ -61,7 +61,7 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
 @lru_cache(maxsize=None)
 def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
-    assert args.enable_cpu_cache
+    assert args.enable_cpu_cache or args.enable_multimodal_x2i
 
     if is_linear_att_mixed_model(args.model_dir):
         # 对于 qwen3.5 等 linear att 混合模型的特殊处理。

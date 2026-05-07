@@ -4,6 +4,20 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+
+try:
+    from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
+    import inspect
+
+    # Verify this is the neo-patched FA3 build (with image_token_tag support),
+    _sig = inspect.signature(flash_attn_with_kvcache_neo)
+    if "image_token_tag" not in _sig.parameters:
+        raise ImportError("flash_attn_interface found but missing image_token_tag support (need neo build)")
+
+    HAS_FLASH_ATTN_INTERFACE = True
+except ImportError:
+    flash_attn_with_kvcache_neo = None
+    HAS_FLASH_ATTN_INTERFACE = False
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
@@ -92,6 +106,37 @@ class Fa3PrefillAttState(BasePrefillAttState):
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
+
+        # neo_chat*: image-token bidirectional attention requires flash_attn_interface
+        # (sgl_kernel's flash_attn_with_kvcache does not support image_token_tag).
+        if att_control.image_token_tag is not None:
+            if not HAS_FLASH_ATTN_INTERFACE:
+                raise ImportError(
+                    "flash_attn_interface (fa3-neo) is required for image_token_tag bidirectional "
+                    "attention. Install it or set LIGHTLLM_NEO_PREFILL_TRITON_BACKEND=1 to use the "
+                    "triton fallback."
+                )
+            extra_kwargs = {"image_token_tag": att_control.image_token_tag}
+            o = flash_attn_with_kvcache_neo(
+                q=q,
+                k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
+                v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
+                page_table=self.page_table,
+                cache_seqlens=self.infer_state.b_seq_len,
+                cu_seqlens_q=self.cu_seqlens_q,
+                cu_seqlens_k_new=self.cu_seqlens_k,
+                max_seqlen_q=self.infer_state.max_q_seq_len,
+                softmax_scale=sm_scale,
+                causal=True,
+                window_size=window_size,
+                softcap=0.0,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                return_softmax_lse=False,
+                **extra_kwargs,
+            )
+            return o
+
         o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
