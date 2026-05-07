@@ -37,11 +37,10 @@ from lightllm.utils.dist_utils import (
     create_dp_special_inter_group,
 )
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
 
-from .symm_mem_all_reduce import SymmMemAllreduce
-from .flashinfer_all_reduce import FlashInferAllReduce
 
 try:
     import deep_ep
@@ -68,11 +67,16 @@ class CustomProcessGroup:
     def init_symm_mem_reduce(self) -> None:
         if not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
             return
-        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device())
+        from .symm_mem_all_reduce import SymmMemAllreduce
+
+        data_type = get_torch_dtype(get_env_start_args().data_type)
+        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
         if not symm.disabled:
             self.symm_mem_reduce = symm
             logger.info("Enable SymmMem ALLReduce.")
         fi_cpu_group = create_new_group_for_current_dp("gloo")
+        from .flashinfer_all_reduce import FlashInferAllReduce
+
         fi = FlashInferAllReduce(fi_cpu_group, torch.cuda.current_device())
         if not fi.disabled:
             self.flashinfer_reduce = fi

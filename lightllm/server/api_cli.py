@@ -790,7 +790,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
-        "-linear_att_ssm_data_type",
+        "--linear_att_ssm_data_type",
         type=str,
         choices=["bfloat16", "float32"],
         default="float32",
