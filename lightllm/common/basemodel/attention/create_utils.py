@@ -77,8 +77,8 @@ def _auto_select_backend(
 
     args = get_env_start_args()
     if args.enable_ep_moe:
-        logger.info("Expert parallelism with MoE enabled, prioritizing Fa3 backend")
-        priority_list = ["fa3", "triton"]
+        logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
+        priority_list = [name for name in priority_list if name != "flashinfer"]
 
     for backend_name in priority_list:
         if backend_name in backend_map[llm_dtype] and validate(backend_name):
