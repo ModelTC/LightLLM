@@ -16,8 +16,10 @@ done
 MODEL_DIR=/mtc/models/qwen3-32b 
 DRAFT_MODEL_DIR=/mtc/models/qwen3-32b-eagle3
 
-LOADWORKER=18 python -m lightllm.server.api_server --port 8088 \
---tp 4 --max_total_token_num 200000 \
+PATH=/data/nvme0/chenjunyi/miniconda3/envs/lightllm/bin:$PATH
+
+LOADWORKER=18 /data/nvme0/chenjunyi/miniconda3/envs/lightllm/bin/python -m lightllm.server.api_server --port 8088 \
+--tp 2 \
 --model_dir ${MODEL_DIR} \
 --mtp_mode eagle3 \
 --disable_dynamic_prompt_cache \
