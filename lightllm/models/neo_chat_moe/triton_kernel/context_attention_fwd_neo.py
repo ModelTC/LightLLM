@@ -13,7 +13,6 @@ def _fwd_kernel(
     V,
     sm_scale,
     Out,
-    position_ids,  # 1D: packed like Q (only NEW tokens), length == Q.shape[0]
     B_Start_Loc,
     B_Seqlen,
     Req_to_tokens,
@@ -79,7 +78,6 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, V_HEAD_DIM], dtype=tl.float32)
     # absolute q positions in the request
     q_pos = prompt_cache_len + offs_m  # [M]
-    q_gid = tl.load(position_ids + cur_batch_in_all_start_index + offs_m, mask=q_valid, other=-1)
     q_image_end = tl.load(b_image_token_end + cur_batch_in_all_start_index + offs_m, mask=q_valid, other=0)
 
     causal_end = tl.minimum(prompt_cache_len + block_start_loc + BLOCK_M, total_len)
@@ -91,13 +89,6 @@ def _fwd_kernel(
 
         k_pos = start_n + offs_n  # [N]
         k_valid = k_pos < block_end_loc
-        k_in_new = k_pos >= prompt_cache_len
-        k_rel = k_pos - prompt_cache_len
-        k_gid = tl.load(
-            position_ids + cur_batch_in_all_start_index + k_rel,
-            mask=k_valid & k_in_new,
-            other=-2,
-        )
 
         # map logical pos -> mem_index (for K/V)
         kv_loc = tl.load(
@@ -113,12 +104,7 @@ def _fwd_kernel(
         qk += tl.dot(q, k)
 
         causal_mask = q_pos[:, None] >= k_pos[None, :]
-        image_mask = (
-            (q_image_end[:, None] > 0)
-            & k_in_new[None, :]
-            & (k_pos[None, :] < q_image_end[:, None])
-            & (q_gid[:, None] == k_gid[None, :])
-        )
+        image_mask = k_pos[None, :] < q_image_end[:, None]
         mask = (causal_mask | image_mask) & k_valid[None, :]
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
 
@@ -157,7 +143,6 @@ def context_attention_fwd_neo(
     k,
     v,
     o,
-    position_ids,  # 1D packed like q (only NEW tokens)
     b_req_idx,
     b_start_loc,
     b_seq_len,
@@ -166,9 +151,6 @@ def context_attention_fwd_neo(
     req_to_token_indexs,
     b_image_token_end,
 ):
-    # minimal safety: position_ids must cover packed q rows
-    assert position_ids.numel() >= q.shape[0], (position_ids.numel(), q.shape[0])
-
     BLOCK_M = 128 if not is_tesla() else 64
 
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -191,7 +173,6 @@ def context_attention_fwd_neo(
         v,
         sm_scale,
         o,
-        position_ids,
         b_start_loc,
         b_seq_len,
         req_to_token_indexs,
@@ -227,7 +208,6 @@ def reference_attention(
     q,
     k,
     v,
-    position_ids_q,  # 1D packed like q (only NEW tokens)
     b_image_token_end,
     b_req_idx,
     b_start_loc,
@@ -253,7 +233,6 @@ def reference_attention(
 
         q_start = int(b_start_loc[b].item())
         q_blk = q[q_start : q_start + new_len]  # [M, Hq, D]
-        gid_new = position_ids_q[q_start : q_start + new_len].to(torch.int64)  # [M]
         image_end_new = b_image_token_end[q_start : q_start + new_len].to(torch.int64)  # [M]
 
         # gather K/V for full request by logical pos -> mem_index
@@ -272,22 +251,7 @@ def reference_attention(
         # build allow mask:
         # causal always
         allow = k_pos[None, :] <= q_pos[:, None]
-
-        # full-attn only inside NEW part by gid
-        # compare only when k_pos in NEW
-        k_in_new = k_pos >= prompt_len
-        k_rel = (k_pos - prompt_len).clamp_min(0)  # [L]
-        # map k_rel to gid_new, but only valid where k_in_new
-        k_gid = torch.empty((total_len,), device=device, dtype=torch.int64)
-        k_gid[:] = 10 ** 12 + k_pos  # never equal to gid_new
-        k_gid[k_in_new] = gid_new[k_rel[k_in_new]]
-
-        allow = allow | (
-            (image_end_new[:, None] > 0)
-            & k_in_new[None, :]
-            & (k_pos[None, :] < image_end_new[:, None])
-            & (gid_new[q_pos - prompt_len][:, None] == k_gid[None, :])
-        )
+        allow = allow | (k_pos[None, :] < image_end_new[:, None])
 
         # scores: [Hq, M, L]
         q_t = q_blk.permute(1, 0, 2).to(torch.float32)  # [Hq, M, D]
@@ -355,24 +319,17 @@ def make_test_case(
         req_to_token_indexs[r, :L] = pool[p : p + L].to(torch.int32)
         p += L
 
-    # position_ids_q: only NEW tokens, packed like q
-    position_ids_q = torch.empty((sum_q,), device=device, dtype=torch.int32)
     b_image_token_end = torch.zeros((sum_q,), device=device, dtype=torch.int32)
     for b in range(batch):
         M = int(new_lens[b].item())
         P = int(prompt_lens[b].item())
         start = int(b_start_loc[b].item())
 
-        gid = torch.arange(P, P + M, device=device, dtype=torch.int32)
-
         # make one repeated block inside NEW part to simulate image tokens
         if M >= 4 and torch.rand((), device=device).item() > 0.3:
             s = int(torch.randint(0, M - 2, (1,), device=device).item())
             e = min(M, s + 3)
-            gid[s:e] = gid[s]
             b_image_token_end[start + s : start + e] = P + e
-
-        position_ids_q[start : start + M] = gid
 
     q = torch.randn((sum_q, Hq, D), device=device, dtype=dtype)
     k = torch.randn((kv_size, Hk, D), device=device, dtype=dtype)
@@ -384,7 +341,6 @@ def make_test_case(
         k,
         v,
         o,
-        position_ids_q,
         b_image_token_end,
         b_req_idx,
         b_start_loc,
@@ -401,7 +357,6 @@ def check_once(device="cuda", dtype=torch.float16, seed=0):
         k,
         v,
         o,
-        position_ids_q,
         b_image_token_end,
         b_req_idx,
         b_start_loc,
@@ -416,7 +371,6 @@ def check_once(device="cuda", dtype=torch.float16, seed=0):
         k,
         v,
         o,
-        position_ids_q,
         b_req_idx,
         b_start_loc,
         b_seq_len,
@@ -430,7 +384,6 @@ def check_once(device="cuda", dtype=torch.float16, seed=0):
         q,
         k,
         v,
-        position_ids_q,
         b_image_token_end,
         b_req_idx,
         b_start_loc,

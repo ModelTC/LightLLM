@@ -106,7 +106,6 @@ class NeoChatTransformerLayerInfer(Qwen3TransformerLayerInfer):
                 kv[:, 0 : self.tp_k_head_num_, :],
                 kv[:, self.tp_k_head_num_ : self.tp_k_head_num_ + self.tp_v_head_num_, :],
                 o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
-                infer_state.position_ids[0],  # [0,0,1,2,3,3,3,4]
                 infer_state.b_req_idx,
                 infer_state.b_q_start_loc,
                 infer_state.b_seq_len,

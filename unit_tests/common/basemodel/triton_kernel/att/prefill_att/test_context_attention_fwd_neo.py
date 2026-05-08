@@ -5,7 +5,7 @@ internal block structure — it has no notion of BLOCK_N / BLOCK_M. For each
 batch element we gather K/V for the whole request (prompt + new tokens) via
 ``req_to_token_indexs`` and apply::
 
-    allow[m, k] = (k <= q_pos[m]) OR same_image_group[m, k]
+    allow[m, k] = (k <= q_pos[m]) OR (k < image_end[m])
 
 i.e. normal queries are causal, and image-token queries can only see future
 tokens from the same image span. If the Triton kernel disagrees with this
@@ -35,7 +35,6 @@ def torch_reference_context_attention_neo(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    position_ids_0: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_start_loc: torch.Tensor,
     b_seq_len: torch.Tensor,
@@ -62,7 +61,6 @@ def torch_reference_context_attention_neo(
 
         q_start = int(b_start_loc[b].item())
         q_blk = q[q_start : q_start + new]  # [M, Hq, D]
-        q_gid = position_ids_0[q_start : q_start + new].to(torch.int64)
         q_image_end = b_image_token_end[q_start : q_start + new].to(torch.int64)
 
         token_locs = req_to_token_indexs[req_idx, :total].to(torch.int64)
@@ -72,16 +70,7 @@ def torch_reference_context_attention_neo(
         q_pos = torch.arange(prompt, total, device=device, dtype=torch.int64)  # [M]
         k_pos = torch.arange(0, total, device=device, dtype=torch.int64)  # [total]
         causal = k_pos[None, :] <= q_pos[:, None]
-
-        k_gid = torch.full((total,), -1, device=device, dtype=torch.int64)
-        k_gid[prompt:total] = q_gid
-        same_image = (
-            (q_image_end[:, None] > 0)
-            & (k_pos[None, :] >= prompt)
-            & (k_pos[None, :] < q_image_end[:, None])
-            & (q_gid[:, None] == k_gid[None, :])
-        )
-        allow = causal | same_image
+        allow = causal | (k_pos[None, :] < q_image_end[:, None])
 
         out_blk = torch.empty_like(q_blk)
         for h in range(Hq):
@@ -149,12 +138,10 @@ def _build_inputs(
         p += L
 
     b_image_token_end = torch.zeros(sum_new, dtype=torch.int32)
-    position_ids_0 = torch.empty(sum_new, dtype=torch.int32)
     for i in range(batch):
         M = int(new_lens[i].item())
         P = int(prompt_lens[i].item())
         start_pack = int(b_start_loc[i].item())
-        position_ids_0[start_pack : start_pack + M] = torch.arange(P, P + M, dtype=torch.int32)
         if M < 2:
             continue
         if torch.rand((), generator=g).item() > image_prob:
@@ -172,9 +159,7 @@ def _build_inputs(
                 break
             span_len = int(torch.randint(1, max_span_len + 1, (1,), generator=g).item())
             e_rel = s_rel + span_len
-            image_gid = P + s_rel
             image_end = P + e_rel
-            position_ids_0[start_pack + s_rel : start_pack + e_rel] = image_gid
             b_image_token_end[start_pack + s_rel : start_pack + e_rel] = image_end
             cursor = e_rel
 
@@ -191,7 +176,6 @@ def _build_inputs(
         k=k,
         v=v,
         o=o,
-        position_ids_0=position_ids_0.to(device),
         b_req_idx=b_req_idx.to(device),
         b_start_loc=b_start_loc.to(device),
         b_seq_len=b_seq_len.to(device),
@@ -258,7 +242,6 @@ def _run_case(
         inputs["k"],
         inputs["v"],
         inputs["o"],
-        inputs["position_ids_0"],
         inputs["b_req_idx"],
         inputs["b_start_loc"],
         inputs["b_seq_len"],
@@ -273,7 +256,6 @@ def _run_case(
         inputs["q"],
         inputs["k"],
         inputs["v"],
-        inputs["position_ids_0"],
         inputs["b_req_idx"],
         inputs["b_start_loc"],
         inputs["b_seq_len"],
