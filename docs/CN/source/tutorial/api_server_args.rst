@@ -475,14 +475,6 @@ PD 分离模式参数
 
     使用奖励模型
 
-.. option:: --long_truncation_mode
-
-    当 input_token_len + max_new_tokens > max_req_total_len 时的处理方式，可选值：
-    
-    * ``None``: 抛出异常（默认）
-    * ``head``: 移除一些头部 token 使 input_token_len + max_new_tokens <= max_req_total_len
-    * ``center``: 移除中心位置的一些 token 使 input_token_len + max_new_tokens <= max_req_total_len
-
 .. option:: --use_tgi_api
 
     使用 tgi 输入和输出格式

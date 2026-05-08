@@ -33,6 +33,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 
 
@@ -60,6 +61,8 @@ class RouterManager:
         self.is_safe_schedule = args.router_token_ratio == 0.0
         self.load_way = args.load_way
         self.max_total_token_num = args.max_total_token_num
+        # 存储在共享内存中的真实token容量数据
+        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
         self.shm_req_manager = ShmReqManager()
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
         self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
@@ -185,6 +188,10 @@ class RouterManager:
             assert max(_nums) == min(_nums), "all rank must have same token num"
             self.max_total_token_num = _nums[0]
             self.args.max_total_token_num = self.max_total_token_num
+
+        self.shm_max_total_token_num.set_value(self.max_total_token_num)
+        logger.info(f"set shm_max_total_token_num value to {self.shm_max_total_token_num.get_value()}")
+
         if not self.args.disable_dynamic_prompt_cache:
             self.radix_cache_client = RadixCacheReadOnlyClient(
                 get_unique_server_name(),

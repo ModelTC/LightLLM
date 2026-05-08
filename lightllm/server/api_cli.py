@@ -459,16 +459,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
 
-    parser.add_argument(
-        "--long_truncation_mode",
-        type=str,
-        choices=[None, "head", "center"],
-        default=None,
-        help="""use to select the handle way when input_token_len + max_new_tokens > max_req_total_len.
-        None : raise Exception
-        head : remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
-        center : remove some tokens in center loc to make input_token_len + max_new_tokens <= max_req_total_len""",
-    )
     parser.add_argument("--use_tgi_api", action="store_true", help="use tgi input and ouput format")
     parser.add_argument(
         "--health_monitor", action="store_true", help="check the health of service and restart when error"

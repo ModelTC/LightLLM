@@ -475,14 +475,6 @@ Sampling and Generation Parameters
 
     Use reward model
 
-.. option:: --long_truncation_mode
-
-    How to handle when input_token_len + max_new_tokens > max_req_total_len, optional values:
-    
-    * ``None``: Throw exception (default)
-    * ``head``: Remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
-    * ``center``: Remove some tokens at the center position to make input_token_len + max_new_tokens <= max_req_total_len
-
 .. option:: --use_tgi_api
 
     Use tgi input and output format

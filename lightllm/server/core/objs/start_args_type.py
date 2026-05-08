@@ -101,7 +101,6 @@ class StartArgs:
     )
     return_all_prompt_logprobs: bool = field(default=False)
     use_reward_model: bool = field(default=False)
-    long_truncation_mode: Optional[str] = field(default=None, metadata={"choices": [None, "head", "center"]})
     use_tgi_api: bool = field(default=False)
     health_monitor: bool = field(default=False)
     metric_gateway: Optional[str] = field(default=None)

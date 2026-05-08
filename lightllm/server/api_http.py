@@ -358,6 +358,10 @@ async def anthropic_messages(raw_request: Request) -> Response:
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
     max_model_len = g_objs.args.max_req_total_len
+
+    if isinstance(g_objs.httpserver_manager, HttpServerManager):
+        max_model_len = g_objs.httpserver_manager.get_real_supported_max_req_total_len()
+
     if model_name == "default_model_name" and g_objs.args.model_dir:
         model_name = os.path.basename(g_objs.args.model_dir.rstrip("/"))
 
