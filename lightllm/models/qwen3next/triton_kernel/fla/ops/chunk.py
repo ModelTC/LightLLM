@@ -9,6 +9,9 @@
 # ruff: noqa: E501
 import torch
 from einops import rearrange
+import functools
+import os
+from lightllm.utils.log_utils import init_logger
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_o import chunk_fwd_o
@@ -18,6 +21,36 @@ from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
 from .utils import SUPPRESS_LEVEL, input_guard
 from .wy_fast import recompute_w_u_fwd
+
+logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _flashqla_chunk_gated_delta_rule():
+    if os.environ.get("LIGHTLLM_DISABLE_FLASHQLA", "0").lower() in ["1", "true", "yes"]:
+        return None
+    try:
+        import flash_qla
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    if torch.cuda.get_device_capability() < (9, 0):
+        return None
+    tv = torch.__version__.split("+")[0].split(".")
+    if (int(tv[0]), int(tv[1])) < (2, 8):
+        return None
+    cv = torch.version.cuda
+    if cv is None:
+        return None
+    cv_parts = cv.split(".")
+    if (int(cv_parts[0]), int(cv_parts[1])) < (12, 8):
+        return None
+    logger.info(
+        "qwen3next chunk_gated_delta_rule: using FlashQLA backend (flash_qla.chunk_gated_delta_rule); "
+        "set LIGHTLLM_DISABLE_FLASHQLA=1 to fall back to the FLA Triton kernels."
+    )
+    return flash_qla.chunk_gated_delta_rule
 
 
 def chunk_gated_delta_rule_fwd(
@@ -183,6 +216,22 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    flashqla_fn = _flashqla_chunk_gated_delta_rule()
+    if flashqla_fn is not None and not head_first:
+        return flashqla_fn(
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
+            g=g.contiguous(),
+            beta=beta.contiguous(),
+            scale=scale,
+            initial_state=initial_state.contiguous() if initial_state is not None else None,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            head_first=head_first,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
     assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
