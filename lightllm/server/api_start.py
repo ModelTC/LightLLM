@@ -4,6 +4,7 @@ import time
 import uuid
 import subprocess
 import signal
+import math
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
@@ -291,7 +292,10 @@ def normal_or_p_d_start(args):
     # linear att cache 参数自动设置
     if args.linear_att_cache_size is None:
         # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
-        args.linear_att_cache_size = args.running_max_req_size * 2
+        default_cache_size = args.running_max_req_size * 2
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
+        args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num

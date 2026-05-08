@@ -31,6 +31,13 @@ def get_tokenizer(
     return tokenizer
 
 
+def normalize_model_name(model_name: str) -> str:
+    if not model_name:
+        return model_name
+    normalized = model_name.rstrip("/\\")
+    return normalized or model_name
+
+
 def get_random_length(reqs_num: int, length: int, range_ratio: float) -> List[int]:
     lens = []
     lens = np.random.randint(
@@ -429,7 +436,7 @@ def main():
         return
 
     assert args.tokenizer_path is not None
-    model_name.append(args.tokenizer_path)
+    model_name.append(normalize_model_name(args.tokenizer_path))
     seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)

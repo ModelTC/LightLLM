@@ -25,7 +25,12 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
-        dist_group_manager.new_deepep_group(self.config["n_routed_experts"], self.config["hidden_size"])
+        dist_group_manager.new_deepep_group(
+            self.config["n_routed_experts"],
+            self.config["hidden_size"],
+            self.config.get("num_experts_per_tok", 1),
+            self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+        )
 
     def _init_to_get_yarn_rotary(self):
         rope_scaling = self.config.get("rope_scaling")

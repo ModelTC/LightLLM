@@ -4,11 +4,14 @@ from .triton_impl import FuseMoeTriton
 from lightllm.distributed import dist_group_manager
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.quantization.quantize_method import WeightPack
-from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.utils.envs_utils import (
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill,
+    get_deepep_num_max_dispatch_tokens_per_rank_decode,
+)
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,
-    _deepgemm_grouped_fp8_nt_contiguous,
+    deepgemm_grouped_fp8_nt_contiguous,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
@@ -17,9 +20,84 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.utils.device_utils import is_sm100_gpu
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
+    def _get_ep_num_sms(self) -> int:
+        return getattr(dist_group_manager, "ep_num_sms", None) or 0
+
+    def _use_sm100_fp4_moe(self) -> bool:
+        return is_sm100_gpu() and self.quant_method.method_name == "deepgemm-fp8fp4-b32"
+
+    def _get_mega_moe_weights(self, w13: WeightPack, w2: WeightPack):
+        cache_key = (
+            w13.weight.data_ptr(),
+            w13.weight_scale.data_ptr(),
+            w2.weight.data_ptr(),
+            w2.weight_scale.data_ptr(),
+        )
+        if getattr(self, "_mega_moe_weight_cache_key", None) != cache_key:
+            import deep_gemm
+
+            self._mega_moe_weight_cache = deep_gemm.transform_weights_for_mega_moe(
+                (w13.weight, w13.weight_scale),
+                (w2.weight, w2.weight_scale),
+            )
+            self._mega_moe_weight_cache_key = cache_key
+        return self._mega_moe_weight_cache
+
+    def _get_mega_moe_stats(self, num_local_experts: int, device: torch.device):
+        stats = getattr(self, "_mega_moe_stats", None)
+        if stats is None or stats.numel() != num_local_experts or stats.device != device:
+            stats = torch.zeros((num_local_experts,), device=device, dtype=torch.int32)
+            self._mega_moe_stats = stats
+        return stats
+
+    def _mega_moe(
+        self,
+        hidden_states: torch.Tensor,
+        w13: WeightPack,
+        w2: WeightPack,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        import deep_gemm
+        from deep_gemm.utils import per_token_cast_to_fp8
+
+        buffer = getattr(dist_group_manager, "ep_mega_moe_buffer", None)
+        if buffer is None:
+            raise RuntimeError("SM100 Mega MoE requires dist_group_manager.ep_mega_moe_buffer to be initialized")
+
+        num_tokens = hidden_states.shape[0]
+        if num_tokens > buffer.num_max_tokens_per_rank:
+            raise RuntimeError(
+                f"Mega MoE got {num_tokens} tokens, exceeding num_max_tokens_per_rank={buffer.num_max_tokens_per_rank}"
+            )
+
+        qinput_tensor = per_token_cast_to_fp8(
+            hidden_states,
+            use_ue8m0=True,
+            gran_k=self.quant_method.block_size,
+            use_packed_ue8m0=True,
+        )
+        l1_weights, l2_weights = self._get_mega_moe_weights(w13, w2)
+        cumulative_stats = self._get_mega_moe_stats(w13.weight.shape[0], hidden_states.device)
+        buffer.x[:num_tokens].copy_(qinput_tensor[0])
+        buffer.x_sf[:num_tokens].copy_(qinput_tensor[1])
+        buffer.topk_idx[:num_tokens].copy_(topk_ids)
+        buffer.topk_weights[:num_tokens].copy_(topk_weights)
+
+        output = torch.empty_like(hidden_states)
+        deep_gemm.fp8_fp4_mega_moe(
+            output,
+            l1_weights,
+            l2_weights,
+            buffer,
+            cumulative_local_expert_recv_stats=cumulative_stats,
+        )
+        return output
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -74,7 +152,11 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
+        if self._use_sm100_fp4_moe():
+            return self._mega_moe(input_tensor, w13, w2, topk_weights, topk_ids.to(torch.long))
+
         use_fp8_w8a8 = self.quant_method.method_name != "none"
+        buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
         output = fused_experts_impl(
             hidden_states=input_tensor,
             w1=w13_weight,
@@ -82,7 +164,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
             num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
-            buffer=dist_group_manager.ep_buffer,
+            buffer=buffer,
             is_prefill=is_prefill,
             use_fp8_w8a8=use_fp8_w8a8,
             use_fp8_all2all=use_fp8_w8a8,
@@ -118,13 +200,13 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         )
 
         topk_idx = topk_idx.to(torch.long)
-        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
+        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
-        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_buffer.low_latency_dispatch(
-            hidden_states,
-            topk_idx,
-            num_max_dispatch_tokens_per_rank,
-            self.total_expert_num_contain_redundancy,
+        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
+            topk_idx=topk_idx,
+            x=hidden_states,
+            num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
+            num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -156,6 +238,17 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             scoring_func=scoring_func,
         )
         w13_weight, w13_scale = w13.weight, w13.weight_scale
+        if self._use_sm100_fp4_moe():
+            from deep_gemm.utils import per_token_cast_to_fp8
+
+            qinput_tensor = per_token_cast_to_fp8(
+                hidden_states,
+                use_ue8m0=True,
+                gran_k=self.quant_method.block_size,
+                use_packed_ue8m0=True,
+            )
+            return topk_weights, topk_idx.to(torch.long), qinput_tensor
+
         block_size_k = 0
         if w13_weight.ndim == 3:
             block_size_k = w13_weight.shape[2] // w13_scale.shape[2]
@@ -171,38 +264,26 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         overlap_event: Optional[Any] = None,
     ):
         buffer = dist_group_manager.ep_buffer
-        # get_dispatch_layout
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            previous_event,
-        ) = buffer.get_dispatch_layout(
-            topk_idx,
-            self.total_expert_num_contain_redundancy,
-            previous_event=overlap_event,
-            async_finish=True,
-            allocate_on_comm_stream=True,
-        )
-        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = buffer.dispatch(
+        num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=True,
-            allocate_on_comm_stream=True,
+            num_experts=self.total_expert_num_contain_redundancy,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=128,
+            num_sms=self._get_ep_num_sms(),
+            previous_event=overlap_event,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+            do_cpu_sync=True,
+            do_handle_copy=False,
         )
 
         def hook():
             event.current_stream_wait()
 
-        return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, hook
+        return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
     def masked_group_gemm(
         self,
@@ -281,7 +362,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=device, dtype=hidden_dtype)
 
-            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w13_weight, w13_scale), gemm_out_a, m_indices)
+            deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w13_weight, w13_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
@@ -295,7 +376,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=device, dtype=hidden_dtype)
 
-            _deepgemm_grouped_fp8_nt_contiguous(
+            deepgemm_grouped_fp8_nt_contiguous(
                 (qsilu_out, qsilu_out_scale), (w2_weight, w2_scale), gemm_out_b, m_indices
             )
             # gather and local reduce
@@ -319,7 +400,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_weights: torch.Tensor,
         handle: Any,
     ):
-        combined_x, event_overlap, hook = dist_group_manager.ep_buffer.low_latency_combine(
+        combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
         )
         return combined_x, hook
@@ -335,8 +416,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             gemm_out_b,
             handle,
             topk_weights=None,
-            async_finish=True,
+            num_sms=self._get_ep_num_sms(),
             previous_event=overlap_event,
+            async_with_compute_stream=True,
             allocate_on_comm_stream=True,
         )
 
