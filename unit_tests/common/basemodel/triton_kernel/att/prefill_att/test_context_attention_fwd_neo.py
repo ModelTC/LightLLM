@@ -5,11 +5,11 @@ internal block structure — it has no notion of BLOCK_N / BLOCK_M. For each
 batch element we gather K/V for the whole request (prompt + new tokens) via
 ``req_to_token_indexs`` and apply::
 
-    allow[m, k] = (k <= q_pos[m]) OR image_tag[m]          for k in [0, total)
+    allow[m, k] = (k <= q_pos[m]) OR same_image_group[m, k]
 
-i.e. normal queries are causal, image-token queries can see every real key in
-the request. If the Triton kernel disagrees with this reference, the kernel is
-wrong.
+i.e. normal queries are causal, and image-token queries can only see future
+tokens from the same image span. If the Triton kernel disagrees with this
+reference, the kernel is wrong.
 
 Run directly for quick debugging:
 
@@ -35,12 +35,13 @@ def torch_reference_context_attention_neo(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    position_ids_0: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_start_loc: torch.Tensor,
     b_seq_len: torch.Tensor,
     b_prompt_cache_len: torch.Tensor,
     req_to_token_indexs: torch.Tensor,
-    b_image_token_tag: torch.Tensor,
+    b_image_token_end: torch.Tensor,
 ) -> torch.Tensor:
     device = q.device
     dtype = q.dtype
@@ -61,7 +62,8 @@ def torch_reference_context_attention_neo(
 
         q_start = int(b_start_loc[b].item())
         q_blk = q[q_start : q_start + new]  # [M, Hq, D]
-        image_tag = b_image_token_tag[q_start : q_start + new].to(torch.bool)
+        q_gid = position_ids_0[q_start : q_start + new].to(torch.int64)
+        q_image_end = b_image_token_end[q_start : q_start + new].to(torch.int64)
 
         token_locs = req_to_token_indexs[req_idx, :total].to(torch.int64)
         k_blk = k[token_locs]  # [total, Hk, D]
@@ -70,7 +72,16 @@ def torch_reference_context_attention_neo(
         q_pos = torch.arange(prompt, total, device=device, dtype=torch.int64)  # [M]
         k_pos = torch.arange(0, total, device=device, dtype=torch.int64)  # [total]
         causal = k_pos[None, :] <= q_pos[:, None]
-        allow = causal | image_tag[:, None]
+
+        k_gid = torch.full((total,), -1, device=device, dtype=torch.int64)
+        k_gid[prompt:total] = q_gid
+        same_image = (
+            (q_image_end[:, None] > 0)
+            & (k_pos[None, :] >= prompt)
+            & (k_pos[None, :] < q_image_end[:, None])
+            & (q_gid[:, None] == k_gid[None, :])
+        )
+        allow = causal | same_image
 
         out_blk = torch.empty_like(q_blk)
         for h in range(Hq):
@@ -137,33 +148,38 @@ def _build_inputs(
         req_to_token_indexs[req_id, :L] = pool[p : p + L].to(torch.int32)
         p += L
 
-    # Randomly place contiguous image-token spans inside each batch's NEW region.
-    b_image_token_tag = torch.zeros(sum_new, dtype=torch.bool)
+    b_image_token_end = torch.zeros(sum_new, dtype=torch.int32)
+    position_ids_0 = torch.empty(sum_new, dtype=torch.int32)
     for i in range(batch):
         M = int(new_lens[i].item())
+        P = int(prompt_lens[i].item())
+        start_pack = int(b_start_loc[i].item())
+        position_ids_0[start_pack : start_pack + M] = torch.arange(P, P + M, dtype=torch.int32)
         if M < 2:
             continue
         if torch.rand((), generator=g).item() > image_prob:
             continue
         n_spans = int(torch.randint(1, num_image_spans_max + 1, (1,), generator=g).item())
-        start_pack = int(b_start_loc[i].item())
+        cursor = 0
         for _ in range(n_spans):
-            span_len = int(torch.randint(1, max(2, image_span_len_max) + 1, (1,), generator=g).item())
-            span_len = min(span_len, M)
-            s_rel = int(torch.randint(0, M - span_len + 1, (1,), generator=g).item())
-            b_image_token_tag[start_pack + s_rel : start_pack + s_rel + span_len] = True
+            remaining = M - cursor
+            if remaining <= 0:
+                break
+            gap = int(torch.randint(0, remaining, (1,), generator=g).item())
+            s_rel = cursor + gap
+            max_span_len = min(image_span_len_max, M - s_rel)
+            if max_span_len <= 0:
+                break
+            span_len = int(torch.randint(1, max_span_len + 1, (1,), generator=g).item())
+            e_rel = s_rel + span_len
+            image_gid = P + s_rel
+            image_end = P + e_rel
+            position_ids_0[start_pack + s_rel : start_pack + e_rel] = image_gid
+            b_image_token_end[start_pack + s_rel : start_pack + e_rel] = image_end
+            cursor = e_rel
 
     b_seq_len = total_lens.to(torch.int32)
     b_prompt_cache_len = prompt_lens.to(torch.int32)
-
-    # position_ids[0]: kernel API still requires it even though its current
-    # mask logic only reads b_image_token_tag.
-    position_ids_0 = torch.empty(sum_new, dtype=torch.int32)
-    for i in range(batch):
-        M = int(new_lens[i].item())
-        P = int(prompt_lens[i].item())
-        s = int(b_start_loc[i].item())
-        position_ids_0[s : s + M] = torch.arange(P, P + M, dtype=torch.int32)
 
     q = torch.randn((sum_new, Hq, D), dtype=dtype, device=device)
     k = torch.randn((kv_pool_size, Hk, D), dtype=dtype, device=device)
@@ -182,13 +198,13 @@ def _build_inputs(
         b_prompt_cache_len=b_prompt_cache_len.to(device),
         max_new_len=max_new_len,
         req_to_token_indexs=req_to_token_indexs.to(device),
-        b_image_token_tag=b_image_token_tag.to(device),
+        b_image_token_end=b_image_token_end.to(device),
         new_lens=new_lens,
         prompt_lens=prompt_lens,
     )
 
 
-def _report_per_batch_error(out_triton, out_ref, new_lens, b_start_loc, image_tag, tag=""):
+def _report_per_batch_error(out_triton, out_ref, new_lens, b_start_loc, image_token_end, tag=""):
     print(f"\n[{tag}] per-batch error breakdown (abs / rel / cos):")
     for i in range(new_lens.shape[0]):
         s = int(b_start_loc[i].item())
@@ -201,7 +217,7 @@ def _report_per_batch_error(out_triton, out_ref, new_lens, b_start_loc, image_ta
         denom = b.abs().max().item() + 1e-6
         rel_err = abs_err / denom
         cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
-        n_img = int(image_tag[s : s + m].sum().item())
+        n_img = int((image_token_end[s : s + m] > 0).sum().item())
         print(
             f"  batch {i:02d} | M={m:4d} | image_tokens={n_img:4d} | "
             f"max_abs={abs_err:.4e} | max_rel={rel_err:.4e} | cos={cos:.6f}"
@@ -249,7 +265,7 @@ def _run_case(
         inputs["b_prompt_cache_len"],
         inputs["max_new_len"],
         inputs["req_to_token_indexs"],
-        inputs["b_image_token_tag"],
+        inputs["b_image_token_end"],
     )
     out_triton = inputs["o"]
 
@@ -257,12 +273,13 @@ def _run_case(
         inputs["q"],
         inputs["k"],
         inputs["v"],
+        inputs["position_ids_0"],
         inputs["b_req_idx"],
         inputs["b_start_loc"],
         inputs["b_seq_len"],
         inputs["b_prompt_cache_len"],
         inputs["req_to_token_indexs"],
-        inputs["b_image_token_tag"],
+        inputs["b_image_token_end"],
     )
 
     a = out_triton.float()
@@ -272,8 +289,8 @@ def _run_case(
     rel_err = abs_err / denom
     cos = torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0).item()
 
-    n_image = int(inputs["b_image_token_tag"].sum().item())
-    n_tokens = int(inputs["b_image_token_tag"].numel())
+    n_image = int((inputs["b_image_token_end"] > 0).sum().item())
+    n_tokens = int(inputs["b_image_token_end"].numel())
     if verbose:
         print(
             f"\ncase: batch={batch} Hq={Hq} Hk={Hk} D={D} dtype={dtype} "
@@ -289,7 +306,7 @@ def _run_case(
             out_ref,
             inputs["new_lens"],
             inputs["b_start_loc"],
-            inputs["b_image_token_tag"],
+            inputs["b_image_token_end"],
             tag=f"seed={seed}",
         )
 
