@@ -59,9 +59,6 @@ class TpPartBaseModel:
     # infer state class
     infer_state_class = InferStateInfo
 
-    def get_radix_class(self):
-        return RadixCache
-
     def __init__(self, kvargs):
         self.args = get_env_start_args()
         self.run_mode = kvargs["run_mode"]
@@ -1223,9 +1220,6 @@ class TpPartBaseModel:
         torch.cuda.empty_cache()
         gc.collect()
         self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
-        self.mem_manager.free_all()
-        self.req_manager.resume()
-        torch.cuda.synchronize()
 
     def resume_graph(self):
         torch.cuda.empty_cache()
@@ -1238,4 +1232,3 @@ class TpPartBaseModel:
         self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
         self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
         self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)
-        self.mem_manager.free_all()

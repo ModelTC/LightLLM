@@ -41,6 +41,10 @@ class ParameterWeight(BaseWeightTpl):
             t_bias = weights[self.bias_name]
             self.bias.copy_(t_bias.to(self.data_type_))
             self.bias.load_ok = True
+
+    def verify_load(self) -> bool:
+        if self.weight is not None and not getattr(self.weight, "load_ok", False):
+            return False
         if self.bias is not None and not getattr(self.bias, "load_ok", False):
             return False
         return True

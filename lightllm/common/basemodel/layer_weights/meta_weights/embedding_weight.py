@@ -36,7 +36,6 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
         self.weight.load_ok = True
-        del weights[self.weight_name]
 
     def verify_load(self):
         return self.weight.load_ok
@@ -116,7 +115,6 @@ class LMHeadWeight(EmbeddingWeight):
         ), f"loaded weight vocab_size: {loaded_vocab_size} != expected vocab_size: {self.vocab_size}"
         self.weight.copy_(t_weight[self.tp_vocab_start_id : self.tp_vocab_end_id, :].to(self.data_type_))
         self.weight.load_ok = True
-        del weights[self.weight_name]
 
     def verify_load(self):
         return self.weight.load_ok
@@ -175,7 +173,6 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
         ), f"max_position_embeddings: {loaded_max_position_embeddings} != expected: {self.max_position_embeddings}"
         self.weight.copy_(t_weight.to(self.data_type_))
         self.weight.load_ok = True
-        del weights[self.weight_name]
 
     def verify_load(self):
         return self.weight.load_ok
