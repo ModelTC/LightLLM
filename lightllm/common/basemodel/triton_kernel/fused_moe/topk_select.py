@@ -17,15 +17,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import torch
 from lightllm.utils.sgl_utils import sgl_ops
-from lightllm.utils.light_utils import light_ops
 from typing import Callable, List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.fused_moe.softmax_topk import softmax_topk
 from lightllm.common.triton_utils.autotuner import Autotuner
-
-use_cuda_grouped_topk = os.getenv("LIGHTLLM_CUDA_GROUPED_TOPK", "False").upper() in ["ON", "TRUE", "1"]
 
 
 def fused_topk(
@@ -127,44 +123,6 @@ def biased_grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-# This is used by the Deepseek-V2 model
-def cuda_grouped_topk(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    num_expert_group: int = 0,
-    topk_group: int = 0,
-    scoring_func: str = "softmax",
-):
-    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
-    assert light_ops is not None, "lightllm_kernel is not installed."
-
-    num_tokens = gating_output.shape[0]
-    topk_weights = torch.empty(num_tokens, topk, device=hidden_states.device, dtype=torch.float32)
-    topk_indices = torch.empty(num_tokens, topk, device=hidden_states.device, dtype=torch.int32)
-    token_expert_indices = torch.empty(num_tokens, topk_group, device=hidden_states.device, dtype=torch.int32)
-    group_scores = torch.empty(num_tokens, num_expert_group, device=hidden_states.device, dtype=torch.float32)
-    if correction_bias is None:
-        correction_bias = torch.zeros_like(gating_output, dtype=torch.float32)
-    light_ops.grouped_topk(
-        topk_weights,
-        correction_bias,
-        topk_indices,
-        token_expert_indices,
-        gating_output.float(),
-        num_expert_group,
-        topk_group,
-        topk,
-        renormalize,
-        scoring_func,
-        group_scores,
-    )
-
-    return topk_weights, topk_indices
-
-
 def select_experts(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -184,34 +142,22 @@ def select_experts(
     if use_grouped_topk:
         assert topk_group is not None
         assert num_expert_group is not None
-        if use_cuda_grouped_topk:
-            topk_weights, topk_ids = cuda_grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                correction_bias=correction_bias,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-            )
-        else:
-            group_score_topk_num = 1
-            # for deepseek v3
-            if topk_group == 4 and num_expert_group == 8 and top_k == 8:
-                group_score_topk_num = 2
+        group_score_topk_num = 1
+        # for deepseek v3
+        if topk_group == 4 and num_expert_group == 8 and top_k == 8:
+            group_score_topk_num = 2
 
-            topk_weights, topk_ids = triton_grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                correction_bias=correction_bias,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                group_score_used_topk_num=group_score_topk_num,
-            )
+        topk_weights, topk_ids = triton_grouped_topk(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            correction_bias=correction_bias,
+            topk=top_k,
+            renormalize=renormalize,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            scoring_func=scoring_func,
+            group_score_used_topk_num=group_score_topk_num,
+        )
 
     elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(

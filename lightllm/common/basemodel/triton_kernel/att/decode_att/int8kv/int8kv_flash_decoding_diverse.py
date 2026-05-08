@@ -1,6 +1,5 @@
 # 为 diverse mode 定制设计的 int8kv flash decoding attention 实现，可以实现更高效的多样性采样
 import torch
-from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
 from .int8kv_flash_decoding_diverse_stage2 import flash_decode_stage2
