@@ -255,7 +255,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
         else:
-            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=True)
+            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
             conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
             core_attn_out = self._gdn_decode_kernel(
                 mixed_qkv,
@@ -306,7 +306,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
             def gdn_prefill_func(new_infer_state: Qwen3NextInferStateInfo):
                 conv_states, ssm_states = new_infer_state.req_manager.get_mamba_cache(self.layer_num_)
-                mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba, is_decode=False)
+                mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba)
                 _z.copy_(tmp_z)
                 tmp_o = self._gdn_prefill_kernel(
                     mixed_qkv, conv_states, ssm_states, a, b, new_infer_state, layer_weight
@@ -319,11 +319,11 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return o, z
 
         conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-        mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba, is_decode=False)
+        mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
         return core_attn_out, z
 
-    def _split_qkvzba(self, mixed_qkvzba, is_decode=False):
+    def _split_qkvzba(self, mixed_qkvzba):
         qkv_dim = self.tp_key_dim * 2 + self.tp_value_dim
         z_end = qkv_dim + self.tp_value_dim
         b_end = z_end + self.tp_num_v_heads
