@@ -60,7 +60,6 @@ class AttControl:
     sliding_window: Tuple[int, int] = (-1, -1)
     use_att_sink: bool = False
     sink_weight: torch.Tensor = None
-    scale: float = None
     # mla 专用传参项
     mla_prefill: bool = False
     mla_prefill_dict: Dict = None
