@@ -99,7 +99,7 @@ def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]
         val = int(max_pos * factor) if multiply_factor else int(max_pos)
         if val > 0:
             logger.info(
-                "auto derived max_req_total_len=%s (rope_type=%s, max_position_embeddings=%s, factor=%s, multiply_factor=%s)",
+                "auto set max_req_total_len=%s (rope_type=%s,max_position_embeddings=%s,factor=%s, multiply_factor=%s)",
                 val,
                 rope_type,
                 max_position_embeddings,
@@ -113,7 +113,7 @@ def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]
     return None
 
 
-def ensure_max_req_total_len(args) -> None:
+def auto_set_max_req_total_len(args) -> None:
     """
     Ensure `args.max_req_total_len` is an int.
 
@@ -122,11 +122,10 @@ def ensure_max_req_total_len(args) -> None:
     """
 
     default_fallback = 16384
-    current = getattr(args, "max_req_total_len", None)
-    if current is not None:
+    if args.max_req_total_len is not None:
         return
 
-    model_dir = getattr(args, "model_dir", None)
+    model_dir = args.model_dir
     if not model_dir:
         logger.warning("model_dir is empty; fallback max_req_total_len=16384")
         args.max_req_total_len = default_fallback

@@ -4,7 +4,6 @@ import time
 import uuid
 import subprocess
 import signal
-from typing import Optional
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
@@ -22,8 +21,7 @@ from lightllm.utils.config_utils import (
     has_audio_module,
     has_vision_module,
     is_linear_att_mixed_model,
-    get_config_json,
-    ensure_max_req_total_len,
+    auto_set_max_req_total_len,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -76,7 +74,7 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
-    ensure_max_req_total_len(args)
+    auto_set_max_req_total_len(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -526,7 +524,7 @@ def pd_master_start(args):
     if args.run_mode != "pd_master":
         return
 
-    ensure_max_req_total_len(args)
+    auto_set_max_req_total_len(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
@@ -590,7 +588,7 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
-    ensure_max_req_total_len(args)
+    auto_set_max_req_total_len(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
