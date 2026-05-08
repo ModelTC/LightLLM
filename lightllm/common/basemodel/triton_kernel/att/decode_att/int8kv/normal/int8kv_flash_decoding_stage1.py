@@ -273,6 +273,11 @@ def flash_decode_stage1(
 
 
 if __name__ == "__main__":
+    from lightllm.utils.envs_utils import get_triton_autotune_level
+
+    if get_triton_autotune_level() != 2:
+        raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
+
     # static params
     kv_quant_group_size = 8
     gqa_group_size = 4
@@ -285,9 +290,6 @@ if __name__ == "__main__":
 
     q_head_num = gqa_group_size
 
-    import os
-
-    os.environ["LIGHTLLM_TRITON_AUTOTUNE_LEVEL"] = "2"
     Autotuner.start_autotune_warmup()
     # autotuing kernel
     for batch_size in batch_sizes:

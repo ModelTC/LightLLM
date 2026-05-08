@@ -1,12 +1,11 @@
 import torch
-from typing import Union
+from typing import Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.common.basemodel.attention.nsa import NsaFlashMlaSparsePrefillAttState, NsaFlashMlaSparseDecodeAttState
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
@@ -31,6 +30,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_unbalance_get(data=input)
 
         q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -74,9 +76,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
 
-        # 计算 topk_indices
+        # 计算 topk indices
         att_state = infer_state.prefill_att_state
-        topk_indices = self.indexer.get_indices(
+        topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
@@ -89,7 +91,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         att_control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
+                "topk_mem_indices": topk_mem_indices,
                 "topk_indices": topk_indices,
+                "prefill_cache_kv": kv,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
             },
@@ -114,9 +118,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
-        # 计算 topk_indices
+        # 计算 topk mem indices
         att_state = infer_state.decode_att_state
-        topk_indices = self.indexer.get_indices(
+        topk_mem_indices, _ = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
@@ -129,7 +133,8 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         att_control = AttControl(
             nsa_decode=True,
             nsa_decode_dict={
-                "topk_indices": topk_indices,
+                "layer_index": self.layer_num_,
+                "topk_mem_indices": topk_mem_indices,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
                 "qk_rope_head_dim": self.qk_rope_head_dim,
@@ -163,14 +168,14 @@ class NsaInfer:
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
 
-    def get_indices(
+    def _get_indices(
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
         infer_state: Deepseek2InferStateInfo,
-        att_state: Union[NsaFlashMlaSparsePrefillAttState, NsaFlashMlaSparseDecodeAttState],
+        att_state: Any,
         layer_weight: Deepseek3_2TransformerLayerWeight,
-    ) -> torch.Tensor:
+    ):
 
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
@@ -195,7 +200,7 @@ class NsaInfer:
             K_fp8=k_fp8,
             K_scale=k_scale,
             DestLoc=infer_state.mem_index,
-            O_buffer=infer_state.mem_manager.kv_buffer[self.layer_idx_].view(dtype=torch.uint8)[:, :, -132:],
+            O_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -211,7 +216,7 @@ class NsaInfer:
             mtp_step = get_env_start_args().mtp_step
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=infer_state.mem_manager.kv_buffer[self.layer_idx_].view(dtype=torch.uint8)[:, :, -132:],
+            I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
             b_seq_len=infer_state.b_seq_len,
             b_req_idx=infer_state.b_req_idx,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
@@ -236,12 +241,12 @@ class NsaInfer:
         # 将 topk index 转化为 mem index
         from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
 
-        b_topk_index = trans_topk_index_to_mem_index(
+        b_topk_mem_index = trans_topk_index_to_mem_index(
             topk_index=b_topk_index,
             ragged_mem_index=att_state.ragged_mem_index,
         )
 
-        return b_topk_index
+        return b_topk_mem_index, b_topk_index
 
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:

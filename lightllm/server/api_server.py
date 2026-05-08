@@ -7,7 +7,7 @@ logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
-    from .api_start import pd_master_start, normal_or_p_d_start, config_server_start
+    from .api_start import pd_master_start, normal_or_p_d_start, config_server_start, visual_only_start
 
     try:
         # this code will not be ok for settings to fork to subprocess
@@ -22,6 +22,8 @@ def launch_server(args: StartArgs):
         pd_master_start(args)
     elif args.run_mode == "config_server":
         config_server_start(args)
+    elif args.run_mode in ["visual_only"]:
+        visual_only_start(args)
     else:
         normal_or_p_d_start(args)
 

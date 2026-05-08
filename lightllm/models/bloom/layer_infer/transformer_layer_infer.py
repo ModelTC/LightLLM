@@ -71,19 +71,26 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_qkv(
         self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        input = self._tpsp_allgather(input, infer_state)
         q = layer_weight.q_proj.mm(input.view(-1, self.embed_dim_))
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
+        assert infer_state.need_dp_prefill_balance is False, "bloom does not support dp prefill balance"
         return q, cache_kv
 
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
+        assert infer_state.need_dp_prefill_balance is False, "bloom does not support dp prefill balance"
         o_tensor = layer_weight.o_proj.mm(input.view(-1, self.tp_o_head_num_ * self.head_dim_))
+        o_tensor = self._tpsp_reduce(o_tensor, infer_state)
         return o_tensor
 
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight) -> torch.Tensor:
-        ffn1_out = layer_weight.gate_up_proj.mm(input.view(-1, self.embed_dim_))
+        input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        ffn1_out = layer_weight.gate_up_proj.mm(input)
         input = None
         gelu_out = torch.nn.functional.gelu(ffn1_out, approximate="tanh")
         ffn1_out = None
         ffn2_out = layer_weight.down_proj.mm(gelu_out)
         gelu_out = None
+        ffn2_out = self._tpsp_reduce(ffn2_out, infer_state)
         return ffn2_out

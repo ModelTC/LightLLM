@@ -165,7 +165,7 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
         nsa_dict = att_control.nsa_decode_dict
-        topk_indices = nsa_dict["topk_indices"]
+        topk_mem_indices = nsa_dict["topk_mem_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
         qk_rope_head_dim = nsa_dict["qk_rope_head_dim"]
@@ -181,7 +181,7 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
             k_cache=k_rope,
             v_cache=kv_nope,
             qv=q_nope,
-            page_table=topk_indices,
+            page_table=topk_mem_indices,
             cache_seqlens=self.nsa_cache_seqlens,
             cu_seqlens_q=self.infer_state.b1_cu_q_seq_len,
             cu_seqlens_k_new=self.nsa_cu_seqlens_k_new,

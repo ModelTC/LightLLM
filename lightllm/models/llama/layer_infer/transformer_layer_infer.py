@@ -79,28 +79,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_qkv(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        q = layer_weight.q_proj.mm(input)
-        cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-
-        rotary_emb_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, 0 : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-        )
-        return q, cache_kv
-
-    def _tpsp_get_qkv(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
-    ) -> torch.Tensor:
-        if self.tp_world_size_ > 1:
-            sp_token_num, hidden_dim = input.shape
-            gather_input = self.alloc_tensor(
-                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-            )
-            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input[0 : len(infer_state.input_ids), :]
-
+        input = self._tpsp_allgather(input, infer_state)
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
@@ -120,61 +99,26 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     def _get_o(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
-        input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        o_tensor = layer_weight.o_proj.mm(input)
-        return o_tensor
-
-    def _tpsp_get_o(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
-    ) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
 
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        dest_size = triton.cdiv(input.shape[0], self.tp_world_size_) * self.tp_world_size_
-        o_tensor = self.alloc_tensor((dest_size, self.embed_dim_), dtype=input.dtype, device=input.device)
-        layer_weight.o_proj.mm(input, out=o_tensor[0 : len(infer_state.input_ids), :])
-        e_o_tensor = o_tensor[len(infer_state.input_ids) :, :]
-        if e_o_tensor.shape[0] > 0:
-            e_o_tensor.fill_(0)
+        o_tensor = layer_weight.o_proj.mm(input)
 
-        if self.tp_world_size_ > 1:
-            sp_token_num = o_tensor.shape[0] // self.tp_world_size_
-            reduce_o_tensor = self.alloc_tensor((sp_token_num, self.embed_dim_), dtype=input.dtype, device=input.device)
-            reduce_scatter_tensor(
-                output=reduce_o_tensor,
-                input=o_tensor,
-                op=dist.ReduceOp.SUM,
-                group=infer_state.dist_group,
-                async_op=False,
-            )
-            o_tensor = reduce_o_tensor
-
+        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
-        up_gate_out = layer_weight.gate_up_proj.mm(input)
-        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(up_gate_out, ffn1_out)
-        input = None
-        up_gate_out = None
-        ffn2_out = layer_weight.down_proj.mm(ffn1_out)
-        ffn1_out = None
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        ffn2_out = self._ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
         return ffn2_out
 
-    def _tpsp_ffn(
+    def _ffn_tp(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
-        if self.tp_world_size_ > 1:
-            sp_token_num, hidden_dim = input.shape
-            gather_input = self.alloc_tensor(
-                (sp_token_num * self.tp_world_size_, hidden_dim), dtype=input.dtype, device=input.device
-            )
-            all_gather_into_tensor(gather_input, input, group=infer_state.dist_group, async_op=False)
-            input = gather_input
-
         up_gate_out = layer_weight.gate_up_proj.mm(input)
         ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
         silu_and_mul_fwd(up_gate_out, ffn1_out)
@@ -182,15 +126,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         up_gate_out = None
         ffn2_out = layer_weight.down_proj.mm(ffn1_out)
         ffn1_out = None
-        if self.tp_world_size_ > 1:
-            sp_token_num = ffn2_out.shape[0] // self.tp_world_size_
-            reduce_o_tensor = self.alloc_tensor(
-                (sp_token_num, self.embed_dim_), dtype=ffn2_out.dtype, device=ffn2_out.device
-            )
-            reduce_scatter_tensor(
-                reduce_o_tensor, ffn2_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False
-            )
-            ffn2_out = reduce_o_tensor
         return ffn2_out
 
     # # keep code
@@ -213,8 +148,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ):
-        input_embdings = self.tpsp_token_forward(input_embdings, infer_state, layer_weight=layer_weight)
-        input_embdings1 = self.tpsp_token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
+        input_embdings = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
+        input_embdings1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
         return input_embdings, input_embdings1
 
     def overlap_tpsp_context_forward(
@@ -225,6 +160,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ):
-        input_embdings = self.tpsp_context_forward(input_embdings, infer_state, layer_weight=layer_weight)
-        input_embdings1 = self.tpsp_context_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
+        input_embdings = self.context_forward(input_embdings, infer_state, layer_weight=layer_weight)
+        input_embdings1 = self.context_forward(input_embdings1, infer_state1, layer_weight=layer_weight)
         return input_embdings, input_embdings1

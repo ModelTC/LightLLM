@@ -1,5 +1,5 @@
 from lightllm.common.basemodel import PreAndPostLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, GEMMANormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, NoTpGEMMANormWeight
 
 
 class Qwen3NextPreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -21,7 +21,7 @@ class Qwen3NextPreAndPostLayerWeight(PreAndPostLayerWeight):
             data_type=self.data_type_,
             embedding_weight=self.wte_weight_ if tie_word_embeddings else None,
         )
-        self.final_norm_weight_ = GEMMANormWeight(
+        self.final_norm_weight_ = NoTpGEMMANormWeight(
             dim=hidden_size,
             weight_name="model.norm.weight",
             data_type=self.data_type_,

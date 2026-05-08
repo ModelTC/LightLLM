@@ -116,7 +116,16 @@ class CpuKvCacheClient(object):
         page_list: List[int],
         deref: bool = True,
         disk_offload_enable: bool = False,
+        token_num_in_page_list: Optional[int] = None,
     ):
+        """
+        token_num_in_page_list, 只有在 disk_offload_enable 为True时, 需要传入，用于
+        判断当前请求的长度是否适合将其卸载到 disk 中, 避免往disk cache中卸载过短的数据
+        照成性能下降。
+        """
+        if disk_offload_enable and token_num_in_page_list is None:
+            raise ValueError("token_num_in_page_list must be provided when disk_offload_enable is True")
+
         offload_candidates: List[int] = []
         page_items = self.page_items.linked_items
         not_exist_none_page = True
@@ -143,11 +152,7 @@ class CpuKvCacheClient(object):
         # 控制prompt长度，较短的prompt不进行disk offload
         limit_length = get_disk_cache_prompt_limit_length()
 
-        if (
-            disk_offload_enable
-            and offload_candidates
-            and len(page_list) * self.args.cpu_cache_token_page_size >= limit_length
-        ):
+        if disk_offload_enable and offload_candidates and token_num_in_page_list >= limit_length:
             # 加引用计数，落盘成功后再减掉
             for offload_page_index in offload_candidates:
                 offload_page_item: _CpuPageStatus = page_items[offload_page_index]

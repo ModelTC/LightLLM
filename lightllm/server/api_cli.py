@@ -6,12 +6,31 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--run_mode",
         type=str,
-        choices=["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"],
+        choices=[
+            "normal",
+            "prefill",
+            "decode",
+            "nixl_prefill",
+            "nixl_decode",
+            "pd_master",
+            "config_server",
+            "visual_only",
+        ],
         default="normal",
         help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
                 specifically designed for large-scale, high-concurrency scenarios where `pd_master` encounters
                 significant CPU bottlenecks.""",
+    )
+    parser.add_argument(
+        "--performance_mode",
+        "--p_mode",
+        type=str,
+        choices=["personal"],
+        default=None,
+        help="""performance mode for different scenarios.
+                None: no performance mode applied (default).
+                personal: private personal running mode, automatically sets running_max_req_size to 3.""",
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -61,6 +80,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="The port number for the config server in config_server mode.",
     )
     parser.add_argument(
+        "--config_server_visual_redis_port",
+        type=int,
+        default=None,
+        help="""when run_mode is config_server, set this params will start a redis server,
+        when a llm infer node start to set this params, the visual infer module will start a
+        proxy module use config server to find  remote vit infer nodes to infer img""",
+    )
+    parser.add_argument(
         "--nixl_pd_kv_page_num",
         type=int,
         default=16,
@@ -79,6 +106,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default="default_model_name",
         help="just help to distinguish internal model name, use 'host:port/get_model_name' to get",
+    )
+    parser.add_argument(
+        "--model_owner",
+        type=str,
+        default=None,
+        help="the model owner, if not set, will use lightllm",
     )
 
     parser.add_argument(
@@ -379,13 +412,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm_kv_type",
         type=str,
-        choices=["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"],
+        choices=["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"],
         default="None",
         help="""kv type used in llm, None for dtype that llm used in config.json.
                 fp8kv_sph: use float8_e4m3fn to store kv cache for inference,
                 quant way is static per head kv quant.
                 fp8kv_spt: use float8_e4m3fn to store kv cache for inference,
                 quant way is static per tensor kv quant.
+                fp8kv_dsa: use DeepSeek-V3.2 DSA-specific FlashMLA FP8 sparse KV cache,
+                intended for the deepseek_v32 model path.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
                 to load pre-computed FP8 scales.
                 Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
@@ -464,6 +499,50 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
     )
     parser.add_argument(
+        "--visual_rpyc_port",
+        type=int,
+        default=None,
+        help="""
+            when run_mode is visual_only, set this port, make others to call local visual infer to
+            transfer image to embed.
+            """,
+    )
+    parser.add_argument(
+        "--audio_gpu_ids", nargs="+", type=int, default=None, help="GPU IDs for audio encoder, e.g., 0 1 2"
+    )
+    parser.add_argument(
+        "--audio_tp",
+        type=int,
+        default=1,
+        help="Tensor parallel size for audio encoder (only 1 is supported; use audio_dp to scale)",
+    )
+    parser.add_argument("--audio_dp", type=int, default=1, help="Data parallel replicas for audio encoder")
+    parser.add_argument(
+        "--audio_nccl_ports",
+        nargs="+",
+        type=int,
+        default=None,
+        help="NCCL ports per audio DP group; if omitted, auto-allocated in api_start (reserved until audio_tp>1)",
+    )
+    parser.add_argument(
+        "--audio_infer_batch_size",
+        type=int,
+        default=None,
+        help="""
+        Max audio items per GPU infer batch in audio worker (default: max(4, audio_dp),
+        must be multiple of audio_dp)
+        """,
+    )
+    parser.add_argument(
+        "--visual_use_proxy_mode",
+        action="store_true",
+        help="""
+        when run_mode is normal, set this params,
+        will call remote visual infer to transfer image to embed,
+        need set --config_server_host, --config_server_port,
+        --config_server_visual_redis_port""",
+    )
+    parser.add_argument(
         "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
     )
     parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
@@ -474,7 +553,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         " currently only for llama and qwen model, not support ep moe model",
     )
     parser.add_argument(
-        "--prefll_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
+        "--prefill_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
     )
 
     parser.add_argument(
@@ -635,9 +714,27 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""The interval of the schedule time, default is 30ms.""",
     )
     parser.add_argument(
+        "--afs_image_embed_dir",
+        type=str,
+        default=None,
+        help="path for vit embed, when use vit remote infer mode",
+    )
+    parser.add_argument(
+        "--afs_embed_capacity",
+        type=int,
+        default=250000,
+        help="""
+        capacity for vit embed in remote infer mode,
+        it control how many image can be cached in afs,
+        when the cache is full, the least recently used
+        image embed will be removed""",
+    )
+    parser.add_argument(
         "--enable_cpu_cache",
         action="store_true",
-        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.""",
+        help="""enable cpu cache to store kv cache. prefer to use hugepages for better performance.
+        For linear attention cache reuse constraints, cpu cache token page size will be forced to
+        linear_att_page_block_num * linear_att_hash_page_size when cpu cache is enabled.""",
     )
     parser.add_argument(
         "--cpu_cache_storage_size",
@@ -674,31 +771,45 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Enable prefix prompt cache fetch for data parallel inference, disabled by default.""",
     )
     parser.add_argument(
-        "--mamba_cache_size",
+        "--linear_att_hash_page_size",
+        type=int,
+        default=512,
+        help="""The hash page size for linear attention.
+        It controls the number of tokens in each hash bucket, which can affect radix cache reused""",
+    )
+    parser.add_argument(
+        "--linear_att_page_block_num",
+        type=int,
+        default=10000000,
+        help="""The number of blocks for linear attention state storage.
+        It controls the number of pages used for storing the attention state,
+        which can affect memory usage and mutiturn chat performance.
+        Block size is linear_att_page_block_num * linear_att_hash_page_size.
+        When this value multiplied by linear_att_hash_page_size is greater than max_req_total_len,
+        block-level matching in radix cache is effectively disabled and request-level small-page
+        matching (linear_att_hash_page_size) may dominate.""",
+    )
+    parser.add_argument(
+        "--linear_att_cache_size",
         type=int,
         default=None,
-        help="""The size of linear attn cache. If not specified, will be calculated
-        automatically based on mamba_cache_ratio or max_total_token_num.""",
+        help="""The size of linear attn cache.
+        If radix cache hit rate is low under high load due to limited small-page capacity and LRU
+        eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
-        "--mamba_cache_ratio",
-        type=lambda v: float(v)
-        if 0.0 <= (_ := float(v)) <= 1.0
-        else (_ for _ in ()).throw(
-            argparse.ArgumentTypeError(f"--mamba_cache_ratio must be between 0.0 and 1.0, got {v}")
-        ),
-        default=0.5,
-        help="""Ratio of mamba cache to total cache memory (mamba + KV).
-        Only effective when both mamba_cache_size and max_total_token_num are not set.
-        Default is 0.5 (50%% mamba cache, 50%% KV cache).
-        Example: 0.3 -> 30%% mamba, 70%% KV; 0.7 -> 70%% mamba, 30%% KV.""",
-    )
-    parser.add_argument(
-        "--mamba_ssm_data_type",
+        "-linear_att_ssm_data_type",
         type=str,
         choices=["bfloat16", "float32"],
         default="float32",
-        help="the data type of the model weight",
+        help="the data type of linear att smm data type",
+    )
+    parser.add_argument(
+        "--disable_linear_att_small_page_cpu_cache",
+        action="store_true",
+        default=False,
+        help="""Disable storing linear attention small page data in CPU cache.
+        This reduces CPU cache memory waste but also decreases the hit length.""",
     )
     parser.add_argument(
         "--hardware_platform",

@@ -53,6 +53,7 @@ Documentation List
    Multimodal Deployment <tutorial/multimodal>
    Reward Model Deployment <tutorial/reward_model>
    OpenAI api Usage <tutorial/openai>
+   Anthropic Messages API <tutorial/anthropic>
    Function Calling <tutorial/function_calling>
    Reasoning Parser <tutorial/reasoning_parser>
    APIServer Parameters <tutorial/api_server_args_zh>
@@ -63,6 +64,7 @@ Documentation List
    :caption: Cookbook
 
    GLM-4.7-Flash Deployment <cookbook/glm4_deployment>
+   Qwen3.5 Deployment <cookbook/qwen35_deployment>
 
 .. toctree::
    :maxdepth: 1

@@ -13,6 +13,10 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.req_manager import ReqManagerForMamba
+from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
+from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
+from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env, init_custom_process_group
@@ -185,18 +189,36 @@ class ModeBackend:
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
+        self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
 
-        radix_cache_class = self.model.get_radix_class()
-        self.radix_cache = (
-            radix_cache_class(
-                get_unique_server_name(),
-                self.model.mem_manager.size,
-                self.rank_in_node,
-                kv_cache_mem_manager=self.model.mem_manager,
+        if self.is_linear_att_mixed_model:
+            self.linear_att_cache_manager = LinearAttCacheManager(
+                size=self.args.linear_att_cache_size,
+                linear_config=self.model.req_manager.linear_config,
             )
-            if self.use_dynamic_prompt_cache
-            else None
-        )
+        else:
+            self.linear_att_cache_manager = None
+
+        if not self.use_dynamic_prompt_cache:
+            self.radix_cache = None
+        else:
+            if self.is_linear_att_mixed_model:
+                self.radix_cache = LinearAttPagedRadixCache(
+                    unique_name=get_unique_server_name(),
+                    total_token_num=self.model.mem_manager.size,
+                    rank_in_node=self.rank_in_node,
+                    hash_page_size=self.args.linear_att_hash_page_size,
+                    big_page_num=self.args.linear_att_page_block_num,
+                    kv_cache_mem_manager=self.model.mem_manager,
+                    linear_att_small_page_buffers=self.linear_att_cache_manager,
+                )
+            else:
+                self.radix_cache = RadixCache(
+                    unique_name=get_unique_server_name(),
+                    total_token_num=self.model.mem_manager.size,
+                    rank_in_node=self.rank_in_node,
+                    mem_manager=self.model.mem_manager,
+                )
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -204,18 +226,12 @@ class ModeBackend:
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
-        # Check if the model uses Mamba (linear attention) layers
-        from lightllm.common.req_manager import ReqManagerForMamba
-
-        use_mamba_model = isinstance(self.model.req_manager, ReqManagerForMamba)
-
         g_infer_context.register(
             backend=self,
             req_manager=self.model.req_manager,
             radix_cache=self.radix_cache,
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
-            use_mamba_model=use_mamba_model,
         )
 
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到

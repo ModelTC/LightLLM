@@ -21,7 +21,7 @@ def _is_port_available(port: int) -> bool:
         return False
 
 
-def alloc_can_use_network_port(num=3, used_nccl_ports=None, instance_id=0):
+def alloc_can_use_network_port(num=3, instance_id=0, used_ports=None):
     """
     Allocate available network ports within an instance-specific range.
 
@@ -35,7 +35,7 @@ def alloc_can_use_network_port(num=3, used_nccl_ports=None, instance_id=0):
     base_port = int(os.environ.get("LIGHTLLM_BASE_PORT", DEFAULT_BASE_PORT))
     range_start = base_port + instance_id * PORTS_PER_INSTANCE
     range_end = range_start + PORTS_PER_INSTANCE
-    used_set = set(used_nccl_ports) if used_nccl_ports else set()
+    used_set = set(used_ports) if used_ports else set()
 
     port_list = []
     for port in range(range_start, range_end):
@@ -48,7 +48,9 @@ def alloc_can_use_network_port(num=3, used_nccl_ports=None, instance_id=0):
             used_set.add(port)
 
     if len(port_list) >= num:
-        logger.info(f"Instance {instance_id}: allocated {len(port_list)} ports in [{range_start}, {range_end}): {port_list}")
+        logger.info(
+            f"Instance {instance_id}: allocated {len(port_list)} ports in [{range_start}, {range_end}): {port_list}"
+        )
         return port_list
 
     raise RuntimeError(

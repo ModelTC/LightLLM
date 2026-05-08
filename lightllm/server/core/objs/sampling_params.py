@@ -385,7 +385,7 @@ class SamplingParams(ctypes.Structure):
         self.top_k = -1 if top_k is None else top_k
         self.ignore_eos = kwargs.get("ignore_eos", False)
         self.image_max_patch_num = kwargs.get("image_max_patch_num", -1)
-        self.max_new_tokens = kwargs.get("max_new_tokens", 16384)
+        self.max_new_tokens = kwargs.get("max_new_tokens", 65535)
         self.min_new_tokens = kwargs.get("min_new_tokens", 1)
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
@@ -472,7 +472,6 @@ class SamplingParams(ctypes.Structure):
             cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
             if cls._repetition_penalty is None:
                 cls._repetition_penalty = 1.0
-
             cls._temperature = generation_cfg.get("temperature", 1.0)
             if cls._temperature is None:
                 cls._temperature = 1.0

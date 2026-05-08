@@ -48,7 +48,7 @@ class InMemoryCache:
         self.token_id_range_start = 0
         self.token_id_range_end = 0
         self.use_config_server = self.args.config_server_host and self.args.config_server_port
-        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=True, init_shm_data=True)
+        self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=True, init_shm_data=True, pin_shm=False)
 
     def _check_and_set_new_id_range(self, alloced_token_num):
         need_update_range = self.token_id_range_start + alloced_token_num >= self.token_id_range_end
@@ -128,16 +128,24 @@ class InMemoryCache:
 
     def _add_ref(self, md5_sum):
         rec: Record = self._md5_to_record[md5_sum]
-        self._sorted_records.remove(rec)
-        rec.ref += 1
-        self._sorted_records.add(rec)
+        self._update_record_ref(rec, 1)
         return
 
     def _del_ref(self, md5_sum):
         rec: Record = self._md5_to_record[md5_sum]
+        self._update_record_ref(rec, -1)
+        return
+
+    def _update_record_ref(self, rec: Record, delta: int):
         self._sorted_records.remove(rec)
-        rec.ref -= 1
+        rec.ref += delta
+        rec.visittime = time.time()
         self._sorted_records.add(rec)
+        return
+
+    def _update_record_ref_by_id(self, id_: int, delta: int):
+        rec: Record = self._id_to_records[id_]
+        self._update_record_ref(rec, delta)
         return
 
     def _judge_enough_token_cache(self, md5sum_list: list[str], token_num_list: list[int]) -> bool:
@@ -167,6 +175,10 @@ class InMemoryCache:
             alloc_md5_dict = self._free_to_alloc(
                 free_min_count=new_needed - (self.capacity - self.occupied), new_md5_dict=new_md5_dict
             )
+            for md5 in add_ref_m_list:
+                # 解锁
+                self._del_ref(md5)
+
             if len(alloc_md5_dict) == len(new_md5_dict):
                 for md5sum, mem_block in alloc_md5_dict.items():
                     token_num = new_md5_dict[md5sum]
@@ -190,10 +202,6 @@ class InMemoryCache:
                     self._sorted_records.add(rec)
                     self.occupied += 1
 
-                for md5 in add_ref_m_list:
-                    # 解锁
-                    self._del_ref(md5)
-
                 # 遍历加 ref
                 results = []
                 for md5 in md5sum_list:
@@ -205,6 +213,8 @@ class InMemoryCache:
                             "token_id": rec.token_id,
                             "start_index_in_embed_cache": rec.mem_block.start,
                             "token_num": rec.token_num,
+                            "data_ready": rec.data,
+                            "embed_ready": rec.embed,
                         }
                     )
 
@@ -215,10 +225,7 @@ class InMemoryCache:
     def release(self, ids: list[int]) -> None:
         with self.lock:
             for id_ in ids:
-                rec: Record = self._id_to_records[id_]
-                self._sorted_records.remove(rec)
-                rec.ref -= 1
-                self._sorted_records.add(rec)
+                self._update_record_ref_by_id(id_, -1)
 
     def set_items_data(self, ids: list[int]) -> None:
         for id_ in ids:

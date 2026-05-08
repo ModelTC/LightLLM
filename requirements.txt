@@ -80,7 +80,7 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 hypercorn==0.18.0
-flashinfer-python==0.6.3
+flashinfer-python==0.6.8.post1
 sgl-kernel==0.3.21
 httpx==0.28.1
 librosa==0.11.0
@@ -95,3 +95,6 @@ websockets==15.0.1
 cupy-cuda12x==13.6.0
 nixl==0.8.0
 torch_memory_saver==0.0.9
+xformers==0.0.33.post2
+redis==7.3.0
+litellm>=1.52.0,<1.85

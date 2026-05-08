@@ -9,9 +9,19 @@ class StartArgs:
     run_mode: str = field(
         default="normal",
         metadata={
-            "choices": ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "pd_master", "config_server"]
+            "choices": [
+                "normal",
+                "prefill",
+                "decode",
+                "nixl_prefill",
+                "nixl_decode",
+                "pd_master",
+                "config_server",
+                "visual_only",
+            ]
         },
     )
+    performance_mode: str = field(default=None, metadata={"choices": ["personal"]})
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     httpserver_workers: int = field(default=1)
@@ -23,11 +33,15 @@ class StartArgs:
     pd_master_port: int = field(default=1212)
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
+    config_server_visual_redis_port: int = field(default=None)
+    afs_image_embed_dir: str = field(default=None)
+    afs_embed_capacity: int = field(default=250000)
     pd_decode_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(
         default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
     )
     model_name: str = field(default="default_model_name")
+    model_owner: Optional[str] = field(default=None)
     model_dir: Optional[str] = field(default=None)
     tokenizer_mode: str = field(default="fast")
     load_way: str = field(default="HF")
@@ -37,7 +51,20 @@ class StartArgs:
     eos_id: Optional[List[int]] = field(default=None)
     tool_call_parser: Optional[str] = field(
         default=None,
-        metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen", "qwen3_coder"]},
+        metadata={
+            "choices": [
+                "qwen25",
+                "llama3",
+                "mistral",
+                "deepseekv3",
+                "qwen",
+                "deepseekv31",
+                "deepseekv32",
+                "glm47",
+                "kimi_k2",
+                "qwen3_coder",
+            ]
+        },
     )
     reasoning_parser: Optional[str] = field(
         default=None,
@@ -60,7 +87,7 @@ class StartArgs:
         },
     )
     chat_template: Optional[str] = field(default=None)
-    running_max_req_size: int = field(default=512)
+    running_max_req_size: int = field(default=256)
     tp: int = field(default=1)
     dp: int = field(default=1)
     nnodes: int = field(default=1)
@@ -74,7 +101,7 @@ class StartArgs:
     detail_log: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
-    router_token_ratio: float = field(default=0.0)
+    router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
@@ -87,6 +114,7 @@ class StartArgs:
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)
+    visual_use_proxy_mode: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)
@@ -105,17 +133,24 @@ class StartArgs:
     job_name: str = field(default="lightllm")
     grouping_key: List[str] = field(default_factory=lambda: [])
     push_interval: int = field(default=10)
+    visual_node_id: int = field(default=None)
     visual_infer_batch_size: int = field(default=None)
     visual_send_batch_size: int = field(default=1)
     visual_gpu_ids: List[int] = field(default=None)
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
     visual_nccl_ports: List[int] = field(default=None)
+    visual_rpyc_port: Optional[int] = field(default=None)
+    audio_gpu_ids: Optional[List[int]] = field(default=None)
+    audio_tp: int = field(default=1)
+    audio_dp: int = field(default=1)
+    audio_nccl_ports: Optional[List[int]] = field(default=None)
+    audio_infer_batch_size: Optional[int] = field(default=None)
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
-    prefll_cudagraph_max_handle_token: int = field(default=512)
-    graph_max_batch_size: int = field(default=512)
+    prefill_cudagraph_max_handle_token: int = field(default=512)
+    graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
     graph_max_len_in_batch: int = field(default=0)
@@ -124,16 +159,16 @@ class StartArgs:
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     llm_prefill_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     llm_decode_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     vit_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
+        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
     llm_kv_type: str = field(
-        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt"]}
+        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
     )
     llm_kv_quant_group_size: int = field(default=8)
     sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
@@ -151,8 +186,6 @@ class StartArgs:
                 "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
-                "qwen3next_vanilla",
-                "qwen3next_eagle",
                 None,
             ]
         },
@@ -181,10 +214,8 @@ class StartArgs:
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)
     # multi_modal
-    enable_multimodal: bool = field(default=False)
     enable_multimodal_audio: bool = field(default=False)
 
-    httpserver_workers: int = field(default=1)
     disable_shm_warning: bool = field(default=False)
     dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer"]})
     enable_custom_allgather: bool = field(default=False)
@@ -205,6 +236,8 @@ class StartArgs:
     weight_version: str = "default"
 
     # hybrid attention model (Qwen3Next)
-    mamba_cache_size: Optional[int] = field(default=None)
-    mamba_cache_ratio: Optional[float] = field(default=0.5)
-    mamba_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+    linear_att_hash_page_size: int = field(default=512)
+    linear_att_page_block_num: int = field(default=10000000)
+    disable_linear_att_small_page_cpu_cache: bool = field(default=False)
+    linear_att_cache_size: Optional[int] = field(default=None)
+    linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})

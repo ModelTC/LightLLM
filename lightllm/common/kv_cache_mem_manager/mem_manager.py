@@ -4,7 +4,6 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from typing import List, Union, Tuple, Any
-from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -20,12 +19,15 @@ from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
 from filelock import FileLock
-
+from .operator import BaseMemManagerOperator, NormalMemOperator
 
 logger = init_logger(__name__)
 
 
 class MemoryManager:
+
+    operator_class = NormalMemOperator
+
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         self.size = size
         self.head_num = head_num
@@ -66,14 +68,8 @@ class MemoryManager:
         )
         self.HOLD_TOKEN_MEMINDEX = self.size
 
-    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        """
-        将每一层生成的kv拷贝到mem manager对应mem_index 位置中
-        """
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-        destindex_copy_kv(kv, mem_index, self.kv_buffer[layer_index])
-        return
+        # 构建对外的操作类接口
+        self.operator: BaseMemManagerOperator = self.operator_class(self)
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
@@ -421,33 +417,6 @@ class MemoryManager:
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
         self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
-
-    def copy_kv_from_other_dp_ranks(
-        self,
-        mem_managers: List["MemoryManager"],
-        move_token_indexes: torch.Tensor,
-        token_dp_indexes: torch.Tensor,
-        mem_indexes: torch.Tensor,
-        dp_size_in_node: int,
-        rank_in_dp: int,
-    ):
-        if not hasattr(self, "mem_ptrs_tensor"):
-            # 构建一个2D tensor，shape为(layer_num, mem_num)
-            mems_ptr_list = []
-            for i in range(0, len(mem_managers)):
-                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
-            self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
-
-        # 一次性传输所有层
-        kv_trans_for_dp(
-            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
-            input_idx=move_token_indexes,
-            input_dp_idx=token_dp_indexes,
-            output=self.kv_buffer,
-            output_idx=mem_indexes,
-            dp_size_in_node=dp_size_in_node,
-            rank_in_dp=rank_in_dp,
-        )
 
     def write_to_shm(self, req_manager):
         """

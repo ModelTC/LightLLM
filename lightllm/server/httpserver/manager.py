@@ -161,70 +161,84 @@ class HttpServerManager:
         self.async_events_per_func: Dict[str, asyncio.Event] = {}
         return
 
+    def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
+        if self.args.detail_log:
+            cost_ms = (time.time() - start_time) * 1000.0
+            extras = " ".join(f"{k}:{v}" for k, v in kwargs.items())
+            suffix = f" {extras}" if extras else ""
+            logger.debug(f"lightllm_req_id:{group_request_id} stage:{stage} elapsed_ms:{cost_ms:.3f}{suffix}")
+        return
+
     async def _alloc_resource(self, items, md5sums, token_nums, datas):
-
-        while True:
-            records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
-
-            if records is None:
-                await asyncio.sleep(0.1)
-                continue
-
-            if isinstance(records, str) and "error" in records:
-                logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
-                raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
-
-            uid_list = []
-            for item, rec in zip(items, records):
-                item: Union[ImageItem, AudioItem] = item
-                item.uuid = rec["id"]
-                item.token_id = rec["token_id"]
-                item.token_num = rec["token_num"]
-                item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
-
-                uid_list.append(rec["id"])
-
-            ready_flags = obtain(self.cache_client.root.get_items_data(uid_list))
-            update_data_ids = []
-
-            for uid, ready, data in zip(uid_list, ready_flags, datas):
-                if not ready:
-                    create_shm(get_shm_name_data(uid), data)
-                    update_data_ids.append(uid)
-
-            if update_data_ids:
-                self.cache_client.root.set_items_data(update_data_ids)
+        if len(items) == 0:
             return
 
-    async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
-        if self.pd_mode.is_P_or_NORMAL():
+        for _ in range(2000):
             # 这里的锁是为了 防止多个含有多张图片的请求 同时申请的record数量 大于cache_capacity，从而造成死锁的问题。
             # 如果不加任何锁，假如请求1和请求2都有6张图片，而cache_capacity为10，
             # 那么如果某一时刻shm中存在请求1的5张图和请求2的5张图，将会资源竞争产生死锁。
             async with self._resource_lock:
-                items, md5sums, tokens_nums, datas = [], [], [], []
-                for img in multimodal_params.images:
-                    self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
-                    data = img.read()
-                    # must after init_imageitem_extral_params
-                    token_num = self.tokenizer.get_image_token_length(img)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
-                    md5sums.append(md5sum)
-                    tokens_nums.append(token_num)
-                    datas.append(data)
-                    items.append(img)
-                for audio in multimodal_params.audios:
-                    self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
-                    data = audio.read()
-                    token_num = self.tokenizer.get_audio_token_length(audio)
-                    md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
-                    md5sums.append(md5sum)
-                    tokens_nums.append(token_num)
-                    datas.append(data)
-                    items.append(audio)
+                records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+                if records is not None:
+                    break
+                await asyncio.sleep(0.005)
 
-                await self._alloc_resource(items, md5sums, tokens_nums, datas)
+        # 长时间无法申请到足够资源的时候，则开始进行阻塞式尝试，防止其他请求一起申请相关资源。
+        if records is None:
+            async with self._resource_lock:
+                while records is None:
+                    records = obtain(self.cache_client.root.alloc(md5sums, token_nums))
+                    if records is not None:
+                        break
+                    await asyncio.sleep(0.1)
+
+        if isinstance(records, str) and "error" in records:
+            logger.error(str(records) + "and try to set --embed_cache_storage_size bigger")
+            raise Exception(str(records) + "and try to set --embed_cache_storage_size bigger")
+
+        update_data_ids = []
+        for item, rec, data in zip(items, records, datas):
+            item: Union[ImageItem, AudioItem] = item
+            item.uuid = rec["id"]
+            item.token_id = rec["token_id"]
+            item.token_num = rec["token_num"]
+            item.start_index_in_embed_cache = rec["start_index_in_embed_cache"]
+
+            if not rec["data_ready"]:
+                create_shm(get_shm_name_data(rec["id"]), data)
+                update_data_ids.append(rec["id"])
+
+        if update_data_ids:
+            self.cache_client.root.set_items_data(update_data_ids)
+        return
+
+    async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
+        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        if self.pd_mode.is_P_or_NORMAL():
+            items, md5sums, tokens_nums, datas = [], [], [], []
+            for img in multimodal_params.images:
+                self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
+                data = img.read()
+                # must after init_imageitem_extral_params
+                token_num = self.tokenizer.get_image_token_length(img)
+                md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
+                md5sums.append(md5sum)
+                img.md5 = md5sum
+                tokens_nums.append(token_num)
+                datas.append(data)
+                items.append(img)
+            for audio in multimodal_params.audios:
+                self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
+                data = audio.read()
+                token_num = self.tokenizer.get_audio_token_length(audio)
+                md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(audio.extra_params)))
+                md5sums.append(md5sum)
+                audio.md5 = md5sum
+                tokens_nums.append(token_num)
+                datas.append(data)
+                items.append(audio)
+
+            await self._alloc_resource(items, md5sums, tokens_nums, datas)
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
@@ -335,13 +349,28 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+        audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
+        image_count = len(multimodal_params.images) if multimodal_params is not None else 0
+        self._log_stage_timing(
+            group_request_id,
+            start_time,
+            "received",
+            audio_count=audio_count,
+            image_count=image_count,
+        )
 
         try:
             if self.pd_mode.is_P_or_NORMAL():
                 await multimodal_params.verify_and_preload(request)
+                self._log_stage_timing(
+                    group_request_id,
+                    start_time,
+                    "verify_and_preload_done",
+                )
 
             # Debug logging for multimodal requests
             if multimodal_params and multimodal_params.images:
@@ -359,14 +388,24 @@ class HttpServerManager:
 
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "encode_done",
+            )
 
             prompt_tokens = len(prompt_ids)
+            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
             # 监控
             if group_request_id > 0:
                 self.metric_client.counter_inc("lightllm_request_count")
                 self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
                 self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
-            prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "check_and_repair_length_done",
+            )
 
             if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
                 # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
@@ -414,6 +453,11 @@ class HttpServerManager:
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
                 req_objs.append(req_obj)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "shm_req_init_done",
+            )
 
             req_status = ReqStatus(
                 group_request_id=group_request_id,
@@ -426,6 +470,11 @@ class HttpServerManager:
             self.req_id_to_out_inf[group_request_id] = req_status
 
             await self.transfer_to_next_module_or_node(req_status.group_req_objs)
+            self._log_stage_timing(
+                group_request_id,
+                start_time,
+                "request_forwarded",
+            )
 
             results_generator = self._wait_to_token_package(
                 start_time,
@@ -497,6 +546,15 @@ class HttpServerManager:
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
+            # pre-verify prompt length
+            # The average character length per token is always less than 8
+            # TODO: automatically calculate the average character length per token
+            max_prompt_chars = self.max_req_total_len * 8
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
+                    f"the request is rejected before tokenization."
+                )
             if self.enable_multimodal:
                 assert (
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
@@ -504,11 +562,18 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
-                prompt_ids = self.tokenizer.encode(
-                    prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                prompt_ids = await asyncio.to_thread(
+                    self.tokenizer.encode,
+                    prompt,
+                    multimodal_params,
+                    add_special_tokens=sampling_params.add_special_tokens,
                 )
             else:
-                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
+                prompt_ids = await asyncio.to_thread(
+                    self.tokenizer.encode,
+                    prompt,
+                    add_special_tokens=sampling_params.add_special_tokens,
+                )
 
             if self.args.detail_log:
                 logger.debug(
@@ -671,6 +736,9 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
+            if req_status.aborted:
+                raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
+
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise Exception(f"req_id {group_request_id} disconnected")
@@ -690,6 +758,7 @@ class HttpServerManager:
                     prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
+                    metadata["prompt_cache_len"] = prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
 
                     if is_first_token:
@@ -807,15 +876,21 @@ class HttpServerManager:
 
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
+                _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
                     if hasattr(req, "shm_routing_data") and req.shm_routing_data is not None:
                         try:
                             req.close_routing_data_shm_array()
                         except Exception as e:
                             logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
+                    _is_aborted = _is_aborted or req.is_aborted
+                    logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
+                if _is_aborted:
+                    req_status.aborted = True
+                    logger.debug(f"mark req_id {req_status.group_req_objs.group_req_id} aborted in recycle loop")
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
@@ -1053,6 +1128,7 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
+        self.aborted = False
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:

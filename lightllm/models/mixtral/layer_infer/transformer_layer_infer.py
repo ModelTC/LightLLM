@@ -14,6 +14,7 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight: MixtralTransformerLayerWeight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
+        hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
         num_tokens, hidden_dim = hidden_states.shape
 
         router_logits = layer_weight.moe_gate.mm(hidden_states)

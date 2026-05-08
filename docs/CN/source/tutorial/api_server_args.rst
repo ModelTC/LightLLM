@@ -18,6 +18,17 @@ APIServer 参数详解
     * ``pd_master``: pd 主节点模式（用于 pd 分离运行模式）
     * ``config_server``: 配置服务器模式（用于 pd 分离模式，用于注册 pd_master 节点并获取 pd_master 节点列表）,专门为大规模、高并发场景设计，当 `pd_master` 遇到显著的 CPU 瓶颈时使用。
 
+.. option:: --performance_mode, --p_mode
+
+    不同场景的性能模式，可选值：
+    
+    * ``None``: 不应用性能模式（默认）
+    * ``personal``: 私有化个人运行模式，自动设置：
+        - ``running_max_req_size`` 为 3
+        - ``batch_max_tokens`` 为 2048 (2k)
+        - ``chunked_prefill_size`` 为 1024 (1k)
+        - ``mem_fraction`` 为 0.85
+
 .. option:: --host
 
     服务器监听地址，默认为 ``127.0.0.1``
@@ -341,6 +352,41 @@ PD 分离模式参数
 
     - ``fp8kv_sph``: FP8 静态按 head 量化，对应 fa3 后端
     - ``fp8kv_spt``: FP8 静态按 tensor 量化，对应 flashinfer 后端
+
+.. option:: --linear_att_hash_page_size
+
+    线性注意力的哈希页大小，默认为 ``512``。
+
+    该参数控制每个哈希桶中的 token 数量，会影响 radix cache 的复用效果。
+
+.. option:: --linear_att_page_block_num
+
+    线性注意力状态存储使用的块数量，默认为 ``10000000``。
+
+    该参数控制用于保存注意力状态的可用页数，会影响内存占用和多轮对话性能。
+    在当前实现中，可将块大小近似理解为
+    ``linear_att_page_block_num * linear_att_hash_page_size``。
+    当 ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len`` 时，
+    radix cache 的块级匹配能力会近似被关闭，此时更依赖请求级别的小块匹配（小块大小为 ``linear_att_hash_page_size``）。
+    如果负载较高，小块数量不足叠加内部 LRU 淘汰机制，可能导致 cache 命中率下降。
+
+    当开启 ``--enable_cpu_cache`` 时，cpu cache 的 page 大小会被强制设置为
+    ``linear_att_page_block_num * linear_att_hash_page_size``，以满足内部复用约束。
+
+.. option:: --linear_att_cache_size
+
+    线性注意力缓存大小。
+
+    不指定时会根据缓存相关配置自动计算。
+    当高负载下出现小块缓存命中不足（例如受小块数量和 LRU 淘汰影响）时，
+    可以调大该参数以提升命中率，但会增加内存占用。
+
+.. option:: --linear_att_ssm_data_type
+
+    线性注意力 SSM 状态的数据类型，可选值：
+
+    * ``bfloat16``
+    * ``float32``（默认）
 
 .. option:: --disable_cudagraph
 

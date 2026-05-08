@@ -2,24 +2,22 @@ import os
 import json
 import math
 import torch
-import rpyc
-import librosa
 import numpy as np
-from io import BytesIO
 from torch import Tensor, nn
 from safetensors import safe_open
 from torch.nn import functional as F
 from typing import Callable, Optional, Union, List
-from rpyc.utils.classic import obtain
-
 from transformers.activations import ACT2FN
 
 from lightllm.server.multimodal_params import AudioItem
-from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
+
+QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
+
+logger = init_logger(__name__)
 
 
 def _get_feat_extract_output_lengths(input_lengths):
@@ -163,7 +161,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         activation_function="gelu",
         output_dim=2048,
         n_window_infer=800,
-        conv_chunksize=500,
+        conv_chunksize=QWEN3_OMNI_CONV_CHUNKSIZE,
         encoder_attention_heads=20,
         attention_dropout=0,
         activation_dropout=0,
@@ -207,9 +205,6 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self.proj2 = nn.Linear(d_model, output_dim)
         self.n_window_infer = n_window_infer
         self.conv_chunksize = conv_chunksize
-
-        self.cache_port = kvargs["cache_port"]
-        self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
         self._init_datatype()
 
     def _init_datatype(self):
@@ -269,6 +264,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         self.load_state_dict(weight_dict)
 
+    @torch.inference_mode()
     def forward(
         self,
         input_features,
@@ -337,7 +333,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         hidden_states = self.proj2(hidden_states)
         return hidden_states
 
-    def encode(self, audio_items: List[AudioItem], cpu_embed_cache_client: CpuEmbedCacheClient):
+    @torch.inference_mode()
+    def encode(self, audio_items: List[AudioItem]):
         uuids = []
         items: List[AudioItem] = []
         per_audio_features: List[torch.Tensor] = []
@@ -345,9 +342,8 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             if isinstance(item, AudioItem):
                 uuids.append(item.uuid)
                 items.append(item)
-                audio_data = read_shm(get_shm_name_data(item.uuid))
-                audio = BytesIO(audio_data)
-                audio, _ = librosa.load(audio, sr=self.processor.sampling_rate)
+                assert self.processor.sampling_rate == 16000
+                audio = item.load_audio_from_shm_payload()
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
@@ -368,24 +364,29 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             )
             per_audio_features.append(audio_features)
 
-        ready_audio = obtain(self.cache_client.root.get_items_embed(uuids))
-        ids_to_set = []
-        for i, ready in enumerate(ready_audio):
-            if ready:
-                continue
-
-            uid = uuids[i]
-            item = items[i]
-
+        all_embeds = []
+        for i in range(len(audio_items)):
             cur_embed = per_audio_features[i]
-            cpu_embed_cache_client.copy_to_cache(
-                embed_tensor=cur_embed, start_index_in_cache=item.start_index_in_embed_cache
-            )
-            assert (
-                item.token_num == cur_embed.shape[0]
-            ), f"audio token num not match {item.token_num} vs {cur_embed.shape[0]} "
-            ids_to_set.append(uid)
+            all_embeds.append(cur_embed)
 
-        if ids_to_set:
-            self.cache_client.root.set_items_embed(ids=ids_to_set)
-            torch.cuda.current_stream().synchronize()
+        return all_embeds, audio_items
+
+    @torch.inference_mode()
+    def check_long_audio_infer(self):
+        """Exercise forward with mel length chosen so the conv loop runs once with batch dim == conv_chunksize."""
+        params = next(self.parameters())
+        device = params.device
+        dtype = params.dtype
+        frame_len = self.conv_chunksize * (self.n_window * 2)
+        logger.info(
+            "check_long_audio_infer: start frame_len=%s conv_chunksize=%s n_window=%s device=%s dtype=%s",
+            frame_len,
+            self.conv_chunksize,
+            self.n_window,
+            device,
+            dtype,
+        )
+        input_features = torch.zeros(self.num_mel_bins, frame_len, device=device, dtype=dtype)
+        feature_lens = torch.tensor([frame_len], device=device, dtype=torch.long)
+        out = self.forward(input_features, feature_lens=feature_lens)
+        logger.info("check_long_audio_infer: done output_shape=%s", tuple(out.shape))

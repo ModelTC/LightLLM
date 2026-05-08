@@ -16,9 +16,10 @@ from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
+from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.config_utils import has_audio_module, has_vision_module
+from lightllm.utils.config_utils import has_audio_module, has_vision_module, is_linear_att_mixed_model
 
 logger = init_logger(__name__)
 
@@ -81,7 +82,8 @@ def setup_signal_handlers(http_server_process, process_manager):
     signal.signal(signal.SIGHUP, signal_handler)
 
     logger.info(f"start process pid {os.getpid()}")
-    logger.info(f"http server pid {http_server_process.pid}")
+    if http_server_process:
+        logger.info(f"http server pid {http_server_process.pid}")
     return
 
 
@@ -98,7 +100,7 @@ def _launch_subprocesses(args: StartArgs):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -141,6 +143,17 @@ def _launch_subprocesses(args: StartArgs):
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
 
+    # performance_mode 参数处理
+    if args.performance_mode == "personal":
+        args.running_max_req_size = 3
+        args.batch_max_tokens = 2048
+        args.chunked_prefill_size = 1024
+        args.mem_fraction = 0.85
+        logger.info(
+            f"performance_mode is personal, set running_max_req_size to 3,"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.85"
+        )
+
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 
@@ -182,6 +195,9 @@ def _launch_subprocesses(args: StartArgs):
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
 
+    if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
+        args.enable_tpsp_mix_mode = True
+
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
@@ -197,6 +213,9 @@ def _launch_subprocesses(args: StartArgs):
     # automatically set visual_dp based on visual_tp and tp
     if args.visual_tp < args.tp and args.tp % args.visual_tp == 0:
         args.visual_dp = args.tp // args.visual_tp
+    if args.afs_image_embed_dir is not None:
+        os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
+        os.chmod(args.afs_image_embed_dir, 0o777)
 
     # 检查GPU数量是否足够
     if args.visual_gpu_ids is None:
@@ -222,6 +241,32 @@ def _launch_subprocesses(args: StartArgs):
             f"a positive integer multiple of visual_dp ({args.visual_dp})"
         )
 
+    if not args.disable_audio:
+        if args.audio_tp != 1:
+            raise ValueError(
+                "audio_tp > 1 is not supported for the audio encoder yet; use --audio_dp for multi-GPU data parallel."
+            )
+        if args.audio_gpu_ids is None:
+            args.audio_gpu_ids = list(range(args.audio_dp * args.audio_tp))
+        total_audio_gpus = args.audio_dp * args.audio_tp
+        if len(args.audio_gpu_ids) < total_audio_gpus:
+            raise ValueError(
+                f"Not enough audio GPUs specified. Need at least {total_audio_gpus}, "
+                f"but got {len(args.audio_gpu_ids)}."
+            )
+        args.audio_gpu_ids = args.audio_gpu_ids[:total_audio_gpus]
+        if args.audio_dp <= 0:
+            raise ValueError("audio_dp must be a positive integer.")
+        if args.audio_infer_batch_size is None:
+            args.audio_infer_batch_size = args.audio_dp * 4
+        if args.audio_infer_batch_size < 1:
+            raise ValueError("audio_infer_batch_size must be >= 1.")
+        if args.audio_infer_batch_size // args.audio_dp < 1 or args.audio_infer_batch_size % args.audio_dp != 0:
+            raise ValueError(
+                f"audio_infer_batch_size ({args.audio_infer_batch_size}) must be "
+                f"a positive integer multiple of audio_dp ({args.audio_dp})."
+            )
+
     if args.disable_chunked_prefill:
         args.chunked_prefill_size = args.max_req_total_len
         # 普通模式下
@@ -241,6 +286,15 @@ def _launch_subprocesses(args: StartArgs):
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
         f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
+    # linear att cache 参数自动设置
+    if args.linear_att_cache_size is None:
+        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
+        args.linear_att_cache_size = args.running_max_req_size * 2
+
+    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_prepare
@@ -253,6 +307,22 @@ def _launch_subprocesses(args: StartArgs):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
+    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
+    if args.tool_call_parser is None:
+        from lightllm.utils.config_utils import get_tool_call_parser_for_model
+
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
+    if args.reasoning_parser is None:
+        from lightllm.utils.config_utils import get_reasoning_parser_for_model
+
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
@@ -264,6 +334,10 @@ def _launch_subprocesses(args: StartArgs):
         already_uesd_ports.append(args.nccl_port)
     if args.pd_decode_rpyc_port is not None:
         already_uesd_ports.append(args.pd_decode_rpyc_port)
+    if args.visual_nccl_ports is not None:
+        already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
+    if not args.disable_audio and args.audio_nccl_ports is not None:
+        already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -272,9 +346,9 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * (args.visual_tp + 1),
-        used_nccl_ports=already_uesd_ports,
+        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
         instance_id=args.lightllm_instance_id,
+        used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
     (
@@ -291,16 +365,18 @@ def _launch_subprocesses(args: StartArgs):
     ) = can_use_ports[0:10]
     can_use_ports = can_use_ports[10:]
 
-    visual_model_tp_ports = []
-    visual_nccl_ports = []
-    for _ in range(args.visual_dp):
-        tp_ports_for_dp = can_use_ports[0 : args.visual_tp]
-        visual_model_tp_ports.append(tp_ports_for_dp)
-        can_use_ports = can_use_ports[args.visual_tp :]
-        visual_nccl_ports.append(can_use_ports[0])
-        can_use_ports = can_use_ports[1:]
+    if args.visual_nccl_ports is None:
+        args.visual_nccl_ports = can_use_ports[: args.visual_dp]
+        can_use_ports = can_use_ports[args.visual_dp :]
+    else:
+        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
 
-    args.visual_nccl_ports = visual_nccl_ports
+    if args.audio_nccl_ports is None:
+        args.audio_nccl_ports = can_use_ports[: args.audio_dp]
+        can_use_ports = can_use_ports[args.audio_dp :]
+    else:
+        args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
+
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
@@ -324,7 +400,6 @@ def _launch_subprocesses(args: StartArgs):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    args.visual_nccl_ports = visual_nccl_ports
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
@@ -360,16 +435,29 @@ def _launch_subprocesses(args: StartArgs):
         )
 
     if not args.disable_vision:
-        from .visualserver.manager import start_visual_process
 
-        process_manager.start_submodule_processes(
-            start_funcs=[
-                start_visual_process,
-            ],
-            start_args=[
-                (args, visual_model_tp_ports),
-            ],
-        )
+        if not args.visual_use_proxy_mode:
+            from .visualserver.manager import start_visual_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
+        else:
+            from .visualserver.proxy_manager import start_visual_process
+
+            process_manager.start_submodule_processes(
+                start_funcs=[
+                    start_visual_process,
+                ],
+                start_args=[
+                    (args,),
+                ],
+            )
 
     if not args.disable_audio:
         from .audioserver.manager import start_audio_process
@@ -510,12 +598,71 @@ def pd_master_start(args: StartArgs):
     http_server_process.wait()
 
 
-def config_server_start(args: StartArgs):
+def visual_only_start(args):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args: StartArgs = args
+    if args.afs_image_embed_dir is not None:
+        os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
+        os.chmod(args.afs_image_embed_dir, 0o777)
+
+    already_uesd_ports = []
+    already_uesd_ports.append(args.visual_rpyc_port)
+    can_use_ports = alloc_can_use_network_port(
+        num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
+        used_ports=already_uesd_ports,
+    )
+
+    if args.visual_gpu_ids is None:
+        args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
+    if args.visual_infer_batch_size is None:
+        args.visual_infer_batch_size = args.visual_dp
+    if args.data_type is None:
+        from lightllm.utils.config_utils import get_dtype
+
+        args.data_type = get_dtype(args.model_dir)
+        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+
+    logger.info(f"alloced ports: {can_use_ports}")
+
+    args.visual_nccl_ports = can_use_ports[: args.visual_dp]
+    can_use_ports = can_use_ports[args.visual_dp :]
+    args.visual_node_id = uuid.uuid4().int
+
+    logger.info(f"all start args:{args}")
+
+    set_env_start_args(args)
+
+    from .visualserver.visual_only_manager import start_visual_process
+
+    process_manager.start_submodule_processes(
+        start_funcs=[
+            start_visual_process,
+        ],
+        start_args=[
+            (args,),
+        ],
+    )
+    setup_signal_handlers(None, process_manager)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down...")
+        process_manager.terminate_all_processes()
+        logger.info("All processes have been terminated gracefully.")
+        sys.exit(0)
+
+
+def config_server_start(args):
     set_unique_server_name(args)
     if args.run_mode != "config_server":
         return
 
     logger.info(f"all start args:{args}")
+
+    if args.config_server_visual_redis_port is not None:
+        start_redis_service(args)
 
     set_env_start_args(args)
 
