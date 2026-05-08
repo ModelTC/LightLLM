@@ -4,7 +4,10 @@ from .triton_impl import FuseMoeTriton
 from lightllm.distributed import dist_group_manager
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.quantization.quantize_method import WeightPack
-from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.utils.envs_utils import (
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill,
+    get_deepep_num_max_dispatch_tokens_per_rank_decode,
+)
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts_impl,
     masked_group_gemm,
@@ -20,6 +23,9 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
+    def _get_ep_num_sms(self) -> int:
+        return getattr(dist_group_manager, "ep_num_sms", None) or 0
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -73,6 +79,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = self.quant_method.method_name != "none"
+        buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
         output = fused_experts_impl(
             hidden_states=input_tensor,
             w1=w13_weight,
@@ -80,7 +87,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
             num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
-            buffer=dist_group_manager.ep_buffer,
+            buffer=buffer,
             is_prefill=is_prefill,
             use_fp8_w8a8=use_fp8_w8a8,
             use_fp8_all2all=use_fp8_w8a8,
@@ -116,13 +123,13 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         )
 
         topk_idx = topk_idx.to(torch.long)
-        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
+        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
-        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_buffer.low_latency_dispatch(
-            hidden_states,
-            topk_idx,
-            num_max_dispatch_tokens_per_rank,
-            self.total_expert_num_contain_redundancy,
+        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
+            topk_idx=topk_idx,
+            x=hidden_states,
+            num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
+            num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -169,38 +176,26 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         overlap_event: Optional[Any] = None,
     ):
         buffer = dist_group_manager.ep_buffer
-        # get_dispatch_layout
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            previous_event,
-        ) = buffer.get_dispatch_layout(
-            topk_idx,
-            self.total_expert_num_contain_redundancy,
-            previous_event=overlap_event,
-            async_finish=True,
-            allocate_on_comm_stream=True,
-        )
-        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = buffer.dispatch(
+        num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
             qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=True,
-            allocate_on_comm_stream=True,
+            num_experts=self.total_expert_num_contain_redundancy,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
             expert_alignment=128,
+            num_sms=self._get_ep_num_sms(),
+            previous_event=overlap_event,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+            do_cpu_sync=True,
+            do_handle_copy=False,
         )
 
         def hook():
             event.current_stream_wait()
 
-        return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, hook
+        return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
     def masked_group_gemm(
         self,
@@ -310,7 +305,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_weights: torch.Tensor,
         handle: Any,
     ):
-        combined_x, event_overlap, hook = dist_group_manager.ep_buffer.low_latency_combine(
+        combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
         )
         return combined_x, hook
@@ -326,8 +321,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             gemm_out_b,
             handle,
             topk_weights=None,
-            async_finish=True,
+            num_sms=self._get_ep_num_sms(),
             previous_event=overlap_event,
+            async_with_compute_stream=True,
             allocate_on_comm_stream=True,
         )
 

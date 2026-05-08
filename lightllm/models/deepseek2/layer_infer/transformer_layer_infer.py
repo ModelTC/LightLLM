@@ -447,9 +447,9 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_topk_weight, _0_topk_idx, _0_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
             _0_input1, _0_router_logits
         )
-        from deep_ep import Buffer
+        from deep_ep import ElasticBuffer
 
-        _0_overlap_event = Buffer.capture()
+        _0_overlap_event = ElasticBuffer.capture()
 
         # 1 attention
         _1_input1 = self._att_norm(input_embdings1, infer_state1, layer_weight)
@@ -486,8 +486,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_topk_weight, _1_topk_idx, _1_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
             _1_input1, _1_router_logits
         )
-
-        _1_overlap_event = Buffer.capture()
+        _1_overlap_event = ElasticBuffer.capture()
 
         # 0 shared expert
         if self.n_shared_experts is not None:
@@ -518,7 +517,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook()
             infer_state1.hook = None
 
-        _0_combine_event = Buffer.capture()
+        _0_combine_event = ElasticBuffer.capture()
         # 0 combine execute
         _0_ffn_out, _0_hook = layer_weight.experts.combine(_0_moe_out, _0_handle, _0_combine_event)
         infer_state.hook = _0_hook
@@ -533,7 +532,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.hook()
             infer_state.hook = None
 
-        _1_combine_event = Buffer.capture()
+        _1_combine_event = ElasticBuffer.capture()
 
         if self.n_shared_experts is not None:
             _0_ffn_out.add_(_0_shared_output)

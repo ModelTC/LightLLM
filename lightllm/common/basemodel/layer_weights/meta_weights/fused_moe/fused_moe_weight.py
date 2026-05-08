@@ -48,6 +48,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.quant_method = quant_method
         assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        self.quant_method = self._maybe_upgrade_quant_method_for_ep_moe(self.quant_method)
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
@@ -65,6 +66,27 @@ class FusedMoeWeight(BaseWeightTpl):
         )
         self.lock = threading.Lock()
         self._create_weight()
+
+    def _maybe_upgrade_quant_method_for_ep_moe(self, quant_method: QuantizationMethod) -> QuantizationMethod:
+        if not self.enable_ep_moe:
+            return quant_method
+
+        if quant_method.method_name == "none":
+            from lightllm.common.quantization.registry import QUANTMETHODS
+
+            logger.info(
+                "enable_ep_moe requires FP8 MoE expert weights; "
+                "auto-upgrading fused_moe quantization from `none` to `deepgemm-fp8w8a8-b128`."
+            )
+            quant_method = QUANTMETHODS.get("deepgemm-fp8w8a8-b128")
+
+        if quant_method.method_name != "deepgemm-fp8w8a8-b128":
+            raise ValueError(
+                f"enable_ep_moe currently only supports `deepgemm-fp8w8a8-b128` for fused_moe, "
+                f"but got `{quant_method.method_name}`."
+            )
+
+        return quant_method
 
     def _init_config(self, network_config: Dict[str, Any]):
         self.n_group = network_config.get("n_group", 0)
