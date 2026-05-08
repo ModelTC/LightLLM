@@ -133,7 +133,10 @@ PD 分离模式参数
 
 .. option:: --max_req_total_len
 
-    请求输入长度 + 请求输出长度的最大值，默认为 ``16384``
+    请求输入长度 + 请求输出长度的最大值。若未显式设置，将从模型配置自动推导，
+    若推导失败则回退到 ``16384``。
+    对于部分 RoPE 类型（如 ``yarn/dynamic/su/llama3``），推导不会直接用 ``rope_scaling.factor``
+    去乘以 ``max_position_embeddings``，以避免过度估算最大长度。
 
 .. option:: --eos_id
 

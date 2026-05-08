@@ -133,7 +133,10 @@ Memory and Batch Processing Parameters
 
 .. option:: --max_req_total_len
 
-    Maximum value of request input length + request output length, default is ``16384``
+    Maximum value of request input length + request output length. If not set, it will be
+    automatically derived from model config.json and fall back to ``16384`` if derivation fails.
+    For some RoPE types (like ``yarn/dynamic/su/llama3``), the derivation does not multiply
+    ``rope_scaling.factor`` by ``max_position_embeddings`` to avoid over-estimating the max length.
 
 .. option:: --eos_id
 

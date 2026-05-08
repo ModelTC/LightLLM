@@ -65,7 +65,8 @@ class StartArgs:
     dp: int = field(default=1)
     nnodes: int = field(default=1)
     node_rank: int = field(default=0)
-    max_req_total_len: int = field(default=2048 + 1024)
+    # If None, will be automatically derived from model config in `lightllm.server.api_start`.
+    max_req_total_len: Optional[int] = field(default=None)
     nccl_host: str = field(default="127.0.0.1")
     nccl_port: int = field(default=None)
     use_config_server_to_init_nccl: bool = field(default=False)

@@ -246,8 +246,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_req_total_len",
         type=int,
-        default=16384,
+        default=None,
         help="Maximum allowed length for a request (input tokens + output tokens). "
+        "If None, it will be automatically derived from the model config.json, "
+        "and fall back to 16384 if derivation fails. "
         "In PD (Prefill-Decode) mode, this value must be synchronized across the "
         "PD master, prefill, and decode nodes.",
     )
