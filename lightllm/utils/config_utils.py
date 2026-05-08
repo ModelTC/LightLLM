@@ -131,7 +131,12 @@ def auto_set_max_req_total_len(args) -> None:
         args.max_req_total_len = default_fallback
         return
 
-    derived = _derive_max_req_total_len_from_model_config(model_dir)
+    try:
+        derived = _derive_max_req_total_len_from_model_config(model_dir)
+    except Exception as e:
+        logger.warning(f"failed to derive max_req_total_len from model config: {e}")
+        derived = None
+
     if derived is None:
         logger.warning(f"cannot derive max_req_total_len from model config; fallback to {default_fallback}")
         args.max_req_total_len = default_fallback
