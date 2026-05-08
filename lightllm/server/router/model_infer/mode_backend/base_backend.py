@@ -283,7 +283,6 @@ class ModeBackend:
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,
-            max_req_seq_len=self.args.max_req_total_len + 8,
             dp_size_in_node=self.dp_size_in_node,
             backend=self,
         )
