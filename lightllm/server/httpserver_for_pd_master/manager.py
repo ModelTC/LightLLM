@@ -48,6 +48,11 @@ class HttpServerManagerForPDMaster:
         self.per_token_costs = MovingAverage()
         return
 
+    def get_real_supported_max_req_total_len(self):
+        # HttpServerManager.generate 会借用 _check_and_repair_length(self, ...)，其中会调用本方法。
+        # PD master 无本地 token 池 shm 计数；上限与启动参数及子节点对齐的 max_req_total_len 一致。
+        return self.max_req_total_len
+
     async def register_pd(self, pd_info_json, websocket):
         self.pd_manager.register_pd(pd_info_json, websocket)
         return
