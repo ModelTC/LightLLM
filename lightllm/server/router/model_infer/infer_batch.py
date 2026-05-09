@@ -280,8 +280,8 @@ class InferenceContext:
                 f"free a batch state:\n"
                 f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
                 f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
-                f"mem manager can alloc token num {self.req_manager.mem_manager.can_use_mem_size}\n"
-                f"mem manager total size {self.req_manager.mem_manager.size}"
+                f"mem manager can alloc token num {self.req_manager.mem_manager.allocator.can_use_mem_size}\n"
+                f"mem manager total size {self.req_manager.mem_manager.allocator.size}\n"
             )
 
         return
@@ -348,7 +348,7 @@ class InferenceContext:
             radix_cache_unref_token_num = (
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
             )
-        return self.req_manager.mem_manager.can_use_mem_size + radix_cache_unref_token_num
+        return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """

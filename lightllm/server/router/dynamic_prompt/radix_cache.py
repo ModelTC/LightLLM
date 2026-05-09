@@ -401,12 +401,6 @@ class RadixCache:
             if merged_node:
                 worklist.append(merged_node)
 
-    def assert_leafs_is_right(self):
-        for node in self.evict_tree_set:
-            if node.is_leaf() and node.ref_counter == 0:
-                a = node.token_mem_index_value.cuda()
-                assert (self.mem_manager.mem_state[a] == 1).sum().item() == len(a)
-
     def clear_tree_nodes(self):
         """
         该函数只在测试时调用
@@ -497,8 +491,8 @@ class RadixCache:
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
         assert self.mem_manager is not None
-        if need_token_num > self.mem_manager.can_use_mem_size:
-            need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
+        if need_token_num > self.mem_manager.allocator.can_use_mem_size:
+            need_evict_token_num = need_token_num - self.mem_manager.allocator.can_use_mem_size
             release_mems = []
 
             def release_mem(mem_index):
