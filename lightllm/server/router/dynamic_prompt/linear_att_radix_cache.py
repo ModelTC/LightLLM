@@ -467,6 +467,10 @@ class LinearAttPagedRadixCache:
         self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
         return
 
+    def flush_cache(self):
+        self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
+        return
+
     def deref_to_first_big_page_node(self, node: LinearAttPagedTreeNode) -> Optional[LinearAttPagedTreeNode]:
         assert not node.is_big_page_node()
         iter_node = node
