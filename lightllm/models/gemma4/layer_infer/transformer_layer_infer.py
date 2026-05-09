@@ -110,6 +110,13 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             return infer_state.position_cos_sliding, infer_state.position_sin_sliding
         return infer_state.position_cos_full, infer_state.position_sin_full
 
+    def _rope_cos_sin(self, infer_state):
+        # Tables are built in the model dtype (Gemma4TpPartModel._init_to_get_rotary_gemma4),
+        # so they already match q/k dtype — no cast needed.
+        if self.is_sliding:
+            return infer_state.position_cos_sliding, infer_state.position_sin_sliding
+        return infer_state.position_cos_full, infer_state.position_sin_full
+
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
 
@@ -117,6 +124,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_heads = self.tp_q_head_num_
         kv_heads = self.tp_k_head_num_
 
+        # Q is always computed (even on KV-shared layers). RMSNormWeight's
+        # Triton kernel accepts 3D input (it views to 2D internally) and
+        # promotes to fp32 for the variance reduction, so feed bf16 (N, heads,
+        # head_dim) straight in — no Python-side reshape or dtype round-trip.
         q = layer_weight.q_proj.mm(input).view(-1, q_heads, head_dim)
         q = layer_weight.q_norm_weight_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
 
