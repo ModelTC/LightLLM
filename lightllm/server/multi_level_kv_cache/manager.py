@@ -220,6 +220,9 @@ class MultiLevelKVCacheManager:
                     for _ in range(recv_max_count):
                         recv_obj: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         if not isinstance(recv_obj, GenerateReqIndex):
+                            # RL 等控制类 BaseReq 透传给 router 处理，避免在此被静默丢弃
+                            if isinstance(recv_obj, BaseReq):
+                                self.send_to_router.send_pyobj(recv_obj, protocol=pickle.HIGHEST_PROTOCOL)
                             continue
                         recv_objs.append(recv_obj)
 
