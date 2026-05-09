@@ -212,6 +212,9 @@ class TpPartBaseModel:
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size
+        assert (
+            self.max_total_token_num > self.batch_max_tokens
+        ), "max_total_token_num must be greater than batch_max_tokens"
         return
 
     def _init_req_manager(self):

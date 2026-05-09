@@ -135,7 +135,7 @@ def normal_or_p_d_start(args):
         args.graph_max_batch_size = 32
         logger.info(
             f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.82"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.82,"
             f"graph_max_batch_size to 32"
         )
 
