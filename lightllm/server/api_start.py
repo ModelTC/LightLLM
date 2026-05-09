@@ -130,6 +130,7 @@ def normal_or_p_d_start(args):
         args.running_max_req_size = 3
         args.batch_max_tokens = 2048
         args.chunked_prefill_size = 1024
+        args.embed_cache_storage_size = 0.8
         if args.mem_fraction > 0.82:
             args.mem_fraction = 0.82
         args.graph_max_batch_size = 32
