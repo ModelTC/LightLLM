@@ -222,9 +222,12 @@ class TpPartBaseModel:
         # 特别大，可能能分配的 kv 容量有限，无法支持 max_seq_length 的推理。所以个人模式下
         # 可以适当放宽这个限制，不做这个校验。
         if self.args.performance_mode != "personal":
-            assert (
-                self.max_seq_length <= self.max_total_token_num
-            ), "max_total_token_num must be greater than max_seq_length"
+            assert self.max_seq_length <= self.max_total_token_num, (
+                f"max_total_token_num must be >= max_seq_length, "
+                f"got max_total_token_num={self.max_total_token_num}, "
+                f"max_seq_length={self.max_seq_length}. "
+                f"Try set --max_req_total_len a smaller value < {self.max_total_token_num}."
+            )
 
         return
 
