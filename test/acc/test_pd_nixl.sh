@@ -52,10 +52,17 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES=2,3 python -m lightllm.server.api_server \
 export http_proxy=
 export https_proxy=
 $pd_master_ip 为pd_master的ip地址, 测试的时候，自己修改为对应的ip地址
+# warm up
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1" HF_ALLOW_CODE_EVAL=1 HF_DATASETS_OFFLINE=0 lm_eval \
 --model local-completions --model_args \
 '{"model":"qwen/qwen3-8b", "base_url":"http://$pd_master_ip:8089/v1/completions", "max_length": 16384, "tokenized_requests": false}' \
---tasks gsm8k --batch_size 1 --confirm_run_unsafe_code
+--tasks gsm8k --batch_size 1 --confirm_run_unsafe_code --limit 1
+
+# test
+export no_proxy="localhost,127.0.0.1,0.0.0.0,::1" HF_ALLOW_CODE_EVAL=1 HF_DATASETS_OFFLINE=0 lm_eval \
+--model local-completions --model_args \
+'{"model":"qwen/qwen3-8b", "base_url":"http://$pd_master_ip:8089/v1/completions", "max_length": 16384, "tokenized_requests": false}' \
+--tasks gsm8k --batch_size 36 --confirm_run_unsafe_code
 
 # 1. 按顺序在不同的cmd中启动上面的程序，然后再执行评测脚本，将结果写入out.txt 中，注意需要标记启动的参数和结果信息。 
 # 2. 执行评测命令的时候，需要用no_proxy 将本地local ip 排除。
