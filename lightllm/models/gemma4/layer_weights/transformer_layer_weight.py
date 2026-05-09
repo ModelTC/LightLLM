@@ -23,13 +23,16 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
         self._is_moe = bool(network_config.get("enable_moe_block", False))
         layer_type = network_config["layer_types"][layer_num]
         self._is_sliding = layer_type == "sliding_attention"
+        # Some E-series checkpoints leave num_global_key_value_heads = null;
+        # HF treats that as "fall back to num_key_value_heads".
+        num_global_kv = network_config.get("num_global_key_value_heads") or network_config["num_key_value_heads"]
         if self._is_sliding:
             self._layer_head_dim = network_config["head_dim"]
             self._layer_kv_head_num = network_config["num_key_value_heads"]
             self._layer_k_eq_v = False
         else:
             self._layer_head_dim = network_config["global_head_dim"]
-            self._layer_kv_head_num = network_config["num_global_key_value_heads"]
+            self._layer_kv_head_num = num_global_kv
             self._layer_k_eq_v = network_config.get("attention_k_eq_v", True)
 
     def _parse_config(self):
@@ -73,6 +76,11 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
 
         self._layer_scalar_name = f"{prefix}.layer_scalar"
 
+        # E-series Per-Layer Embeddings names (only loaded when PLE enabled).
+        self._per_layer_input_gate_name = f"{prefix}.per_layer_input_gate.weight"
+        self._per_layer_projection_name = f"{prefix}.per_layer_projection.weight"
+        self._post_per_layer_input_norm_name = f"{prefix}.post_per_layer_input_norm.weight"
+
     def _init_weight(self):
         self._init_qkv()
         self._init_o()
@@ -80,6 +88,33 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
         if self._is_moe:
             self._init_moe()
         self._init_norm()
+        if self.network_config_.get("hidden_size_per_layer_input"):
+            self._init_ple()
+
+    def _init_ple(self):
+        ple_dim = self.network_config_["hidden_size_per_layer_input"]
+        hidden_size = self.network_config_["hidden_size"]
+        self.per_layer_input_gate_ = ROWMMWeight(
+            in_dim=hidden_size,
+            out_dims=[ple_dim],
+            weight_names=self._per_layer_input_gate_name,
+            data_type=self.data_type_,
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.per_layer_projection_ = ROWMMWeight(
+            in_dim=ple_dim,
+            out_dims=[hidden_size],
+            weight_names=self._per_layer_projection_name,
+            data_type=self.data_type_,
+            tp_rank=0,
+            tp_world_size=1,
+        )
+        self.post_per_layer_input_norm_weight_ = RMSNormWeight(
+            dim=hidden_size,
+            weight_name=self._post_per_layer_input_norm_name,
+            data_type=self.data_type_,
+        )
 
     def _init_qkv(self):
         in_dim = self.n_embed

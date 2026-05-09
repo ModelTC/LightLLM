@@ -31,13 +31,17 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         layer_type = network_config["layer_types"][layer_num]
         self.is_sliding = layer_type == "sliding_attention"
 
+        # Some E-series checkpoints leave num_global_key_value_heads = null;
+        # HF treats that as "fall back to num_key_value_heads".
+        num_global_kv = network_config.get("num_global_key_value_heads") or network_config["num_key_value_heads"]
+
         if self.is_sliding:
             self.layer_head_dim_ = network_config["head_dim"]
             total_kv_heads = network_config["num_key_value_heads"]
             self.k_eq_v = False
         else:
             self.layer_head_dim_ = network_config["global_head_dim"]
-            total_kv_heads = network_config["num_global_key_value_heads"]
+            total_kv_heads = num_global_kv
             self.k_eq_v = network_config.get("attention_k_eq_v", True)
 
         # TP shard counts for this layer
@@ -46,9 +50,14 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.tp_v_head_num_ = self.tp_k_head_num_
         self.tp_o_head_num_ = self.tp_q_head_num_
 
-        # Uniform mem-manager layout (sliding shape per rank)
-        self.mm_head_dim_ = network_config["head_dim"]
-        self.mm_kv_head_num_ = network_config["num_key_value_heads"] // self.tp_world_size_
+        self.kv_cache_slot_dim_ = network_config["head_dim"]
+        sliding_total = network_config["num_key_value_heads"] * network_config["head_dim"]
+        full_total = num_global_kv * network_config["global_head_dim"]
+        per_token_k_width = max(sliding_total, full_total)
+        assert (
+            per_token_k_width % self.kv_cache_slot_dim_ == 0
+        ), f"per-token K width {per_token_k_width} not aligned to kv_cache_slot_dim {self.kv_cache_slot_dim_}"
+        self.kv_cache_slot_num_ = (per_token_k_width // self.kv_cache_slot_dim_) // self.tp_world_size_
 
         # Sliding window (None on full-attn layers)
         if self.is_sliding:
@@ -57,29 +66,42 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         else:
             self.sliding_window_ = 0
 
-        # Partial rotary factor for the RoPE kernel. The sliding table is sized
-        # (seq, head_dim/2) so full rotation over head_dim is the default.
-        # The full table is sized (seq, global_head_dim/2) with zero-padded
-        # frequencies (proportional RoPE) — we still pass partial_rotary_factor=1
-        # to the kernel so it walks every pair, applying identity for the zeroed
-        # frequencies.
-        self.rotary_partial_factor_ = 1.0
+        # E-series Per-Layer Embeddings gate (HF: config.hidden_size_per_layer_input,
+        # absent or 0 on 31B).
+        self.has_ple_ = bool(network_config.get("hidden_size_per_layer_input"))
+        if self.has_ple_:
+            self.ple_dim_ = network_config["hidden_size_per_layer_input"]
 
-    def _bind_func(self):
-        # Skip LlamaTransformerLayerInfer._bind_norm (it rebinds to Llama _att_norm / _ffn_norm);
-        # we want our own gemma-style norm implementations below.
-        return
+        # HF: config.num_kv_shared_layers (may be missing or null on non-E
+        # checkpoints — treat as 0).
+        kv_shared_count = network_config.get("num_kv_shared_layers") or 0
+        total_layers = network_config["num_hidden_layers"]
+        self.is_kv_shared_ = kv_shared_count > 0 and layer_num >= total_layers - kv_shared_count
+        self.kv_share_target_layer_ = None
+        if self.is_kv_shared_:
+            cutoff = total_layers - kv_shared_count
+            for j in range(layer_num - 1, -1, -1):
+                if j < cutoff and network_config["layer_types"][j] == layer_type:
+                    self.kv_share_target_layer_ = j
+                    break
+            assert self.kv_share_target_layer_ is not None, (
+                f"layer {layer_num} ({layer_type}) is KV-shared but no earlier non-shared "
+                f"layer of the same type found below cutoff={cutoff}"
+            )
 
-    # ----- norms ---------------------------------------------------------
-
-    def _att_norm(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
-        return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
-
-    def _ffn_norm(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
-        # NOTE: gemma packs post_attention_layernorm under `ffn_norm_weight_`
-        return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+        # Always 1.0: NoPE dims for full-attn layers are zero-padded into
+        # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
+        # head_dim. Don't change to 0.25 — that double-counts with the table.
+        self.partial_rotary_factor_ = 1.0
 
     # ----- QKV + attention ---------------------------------------------
+
+    def _rope_cos_sin(self, infer_state):
+        # Tables are built in the model dtype (Gemma4TpPartModel._init_to_get_rotary_gemma4),
+        # so they already match q/k dtype — no cast needed.
+        if self.is_sliding:
+            return infer_state.position_cos_sliding, infer_state.position_sin_sliding
+        return infer_state.position_cos_full, infer_state.position_sin_full
 
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
@@ -88,67 +110,76 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_heads = self.tp_q_head_num_
         kv_heads = self.tp_k_head_num_
 
+        # Q is always computed (even on KV-shared layers). RMSNormWeight's
+        # Triton kernel accepts 3D input (it views to 2D internally) and
+        # promotes to fp32 for the variance reduction, so feed bf16 (N, heads,
+        # head_dim) straight in — no Python-side reshape or dtype round-trip.
         q = layer_weight.q_proj.mm(input).view(-1, q_heads, head_dim)
+        q = layer_weight.q_norm_weight_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
+
+        cos, sin = self._rope_cos_sin(infer_state)
+
+        if self.is_kv_shared_:
+            # K/V come from target layer's already-rotated, already-normed cache.
+            # Only rotate Q here. rotary_emb_fwd writes to k in place, so pass
+            # a 1-head throwaway tensor we can discard.
+            dummy_k = torch.empty((q.shape[0], 1, head_dim), dtype=q.dtype, device=q.device)
+            rotary_emb_fwd(q, dummy_k, cos, sin, partial_rotary_factor=self.partial_rotary_factor_)
+            q = q * math.sqrt(head_dim)
+            if infer_state.need_dp_prefill_balance:
+                q = infer_state._all_to_all_unbalance_get(data=q)
+            return q, None
+
+        # ---- non-shared: full K/V path ----
         k = layer_weight.k_proj.mm(input).view(-1, kv_heads, head_dim)
         if self.k_eq_v:
-            # Full-attn layers share K weights for V.
+            # Full-attn k_eq_v variant (e.g. 31B): K weights serve as V.
             v = k.clone()
         else:
             v = layer_weight.v_proj.mm(input).view(-1, kv_heads, head_dim)
 
-        # QK RMSNorm (learnable weight, Gemma-style `(1+w)` applied in fp32).
-        # Reshape to 2D (N*heads, head_dim) so NoTpGEMMANormWeight accepts it.
-        q_flat = q.reshape(-1, head_dim).float()
-        k_flat = k.reshape(-1, head_dim).float()
-        q_flat = layer_weight.q_norm_weight_(input=q_flat, eps=self.eps_, alloc_func=self.alloc_tensor)
-        k_flat = layer_weight.k_norm_weight_(input=k_flat, eps=self.eps_, alloc_func=self.alloc_tensor)
-        q = q_flat.view(-1, q_heads, head_dim).to(input.dtype)
-        k = k_flat.view(-1, kv_heads, head_dim).to(input.dtype)
+        k = layer_weight.k_norm_weight_(input=k, eps=self.eps_, alloc_func=self.alloc_tensor)
 
         # V-norm: unweighted RMSNorm over head_dim (matches vllm's Gemma4 has_weight=False).
         v_fp = v.float()
         v_fp = v_fp * torch.rsqrt(v_fp.pow(2).mean(dim=-1, keepdim=True) + self.eps_)
         v = v_fp.to(input.dtype)
 
-        # Per-layer RoPE
-        if self.is_sliding:
-            cos = infer_state.position_cos_sliding.to(q.dtype)
-            sin = infer_state.position_sin_sliding.to(q.dtype)
-        else:
-            cos = infer_state.position_cos_full.to(q.dtype)
-            sin = infer_state.position_sin_full.to(q.dtype)
-        rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=self.rotary_partial_factor_)
+        rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=self.partial_rotary_factor_)
 
         # Gemma-4 uses scaling=1.0 in attention. The attention kernel hardcodes
         # sm_scale = 1/sqrt(head_dim); pre-scale Q by sqrt(head_dim) so the
         # kernel's division cancels out, yielding scores = Q @ K^T.
         q = q * math.sqrt(head_dim)
 
-        # Pack into the uniform mem-manager layout.
-        mm_heads = self.mm_kv_head_num_
-        mm_dim = self.mm_head_dim_
-        if self.is_sliding:
-            # (N, 2*mm_heads, mm_dim) with [:mm_heads]=K, [mm_heads:]=V
-            cache_kv = torch.cat([k, v], dim=1)
+        # Pack into the uniform KV-cache layout (N, 2*slot_num, slot_dim).
+        # K occupies slots [0, used_slots); V occupies
+        # [slot_num, slot_num + used_slots). If this layer's K/V width is
+        # smaller than the allocated cache slot width, pad with zeros.
+        cache_slot_num = self.kv_cache_slot_num_
+        cache_slot_dim = self.kv_cache_slot_dim_
+        N = k.shape[0]
+        k_packed = k.reshape(N, -1, cache_slot_dim)
+        v_packed = v.reshape(N, -1, cache_slot_dim)
+        used_cache_slots = k_packed.shape[1]
+        if used_cache_slots == cache_slot_num:
+            cache_kv = torch.cat([k_packed, v_packed], dim=1)
         else:
-            # K,V shape (N, kv_heads, layer_head_dim) e.g. (N, 2, 512) on tp=2.
-            # Reshape each half to (N, kv_heads*layer_head_dim // mm_dim, mm_dim) e.g. (N, 4, 256) on tp=2.
-            # The mem-manager layout has (N, 2*mm_heads, mm_dim) = (N, 16, 256) on tp=2 for this
-            # checkpoint — pad to that shape with zeros on unused head slots.
-            N = k.shape[0]
-            k_packed = k.reshape(N, -1, mm_dim)  # (N, kv_heads * layer_head_dim // mm_dim, mm_dim)
-            v_packed = v.reshape(N, -1, mm_dim)
-            cache_kv = self.alloc_tensor((N, 2 * mm_heads, mm_dim), dtype=k.dtype)
+            cache_kv = self.alloc_tensor((N, 2 * cache_slot_num, cache_slot_dim), dtype=k.dtype)
             cache_kv.zero_()
-            k_slots = k_packed.shape[1]
-            cache_kv[:, :k_slots, :] = k_packed
-            cache_kv[:, mm_heads : mm_heads + k_slots, :] = v_packed
+            cache_kv[:, :used_cache_slots, :] = k_packed
+            cache_kv[:, cache_slot_num : cache_slot_num + used_cache_slots, :] = v_packed
 
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)
             cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
 
         return q, cache_kv
+
+    def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
+        if self.is_kv_shared_ or cache_kv is None:
+            return
+        return super()._post_cache_kv(cache_kv, infer_state, layer_weight)
 
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
@@ -171,19 +202,20 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
-        _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
-        # _k_raw / _v_raw shape (S, mm_heads, mm_dim)
-        if self.is_sliding:
-            # sliding K is stored in the full (mm_heads, mm_dim) slot; head count matches.
-            return _k_raw, _v_raw
-        # full layer: the real K/V live in the first `kv_heads * layer_head_dim // mm_dim`
-        # head slots. Reshape to (S, kv_heads, layer_head_dim).
+        # KV-shared layers read from the target layer's cache slot.
+        layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
+        _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
+        # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim).
         kv_heads = self.tp_k_head_num_
         head_dim = self.layer_head_dim_
-        mm_dim = self.mm_head_dim_
-        k_slots = kv_heads * head_dim // mm_dim
-        _k = _k_raw[:, :k_slots, :].reshape(-1, kv_heads, head_dim)
-        _v = _v_raw[:, :k_slots, :].reshape(-1, kv_heads, head_dim)
+        cache_slot_dim = self.kv_cache_slot_dim_
+        used_cache_slots = kv_heads * head_dim // cache_slot_dim
+        if used_cache_slots == _k_raw.shape[1]:
+            # Layout already matches this layer's natural shape.
+            return _k_raw.reshape(-1, kv_heads, head_dim), _v_raw.reshape(-1, kv_heads, head_dim)
+        # Otherwise the K/V live in the first used_cache_slots; the rest is zero pad.
+        _k = _k_raw[:, :used_cache_slots, :].reshape(-1, kv_heads, head_dim)
+        _v = _v_raw[:, :used_cache_slots, :].reshape(-1, kv_heads, head_dim)
         return _k, _v
 
     def _context_attention_kernel(
@@ -234,10 +266,16 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         return ffn2
 
     def _router_logits(self, residual, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
+        # Manual unweighted RMSNorm — lightllm's RMSNormWeight has no
+        # has_weight=False mode, and bf16 variance over hidden_size loses too
+        # much precision. Keep the fp32 accumulation explicit.
         router_input = residual.view(-1, self.embed_dim_).float()
         router_input = router_input * torch.rsqrt(router_input.pow(2).mean(dim=-1, keepdim=True) + self.eps_)
         router_input = router_input * self.router_root_scale
-        router_input = (router_input * layer_weight.router_input_scale_.weight.float()).to(torch.bfloat16)
+        # bf16 weight auto-promotes against fp32 router_input; cast back to
+        # bf16 to feed moe_gate.mm.
+        router_input = (router_input * layer_weight.router_input_scale_.weight).to(torch.bfloat16)
+        # gate logits stay fp32 for top-k / softmax precision.
         return layer_weight.moe_gate.mm(router_input, use_custom_tensor_mananger=False).float()
 
     def _moe_ffn(self, input, router_logits, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
@@ -261,79 +299,106 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _ffn_block(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         residual = input_embdings
         dense_input = layer_weight.pre_feedforward_layernorm_weight_(
-            input=residual.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(torch.bfloat16)
+            input=residual, eps=self.eps_, alloc_func=self.alloc_tensor
+        )
         dense_out = self._ffn(dense_input, infer_state, layer_weight)
         dense_input = None
 
         if self.is_moe:
             dense_out = layer_weight.post_feedforward_layernorm_1_weight_(
-                input=dense_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-            ).to(torch.bfloat16)
+                input=dense_out, eps=self.eps_, alloc_func=self.alloc_tensor
+            )
 
             router_logits = self._router_logits(residual, layer_weight)
             moe_input = layer_weight.pre_feedforward_layernorm_2_weight_(
-                input=residual.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-            ).to(torch.bfloat16)
+                input=residual, eps=self.eps_, alloc_func=self.alloc_tensor
+            )
             moe_out = self._moe_ffn(moe_input, router_logits, infer_state, layer_weight)
             moe_input = None
             router_logits = None
             moe_out = layer_weight.post_feedforward_layernorm_2_weight_(
-                input=moe_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-            ).to(torch.bfloat16)
+                input=moe_out, eps=self.eps_, alloc_func=self.alloc_tensor
+            )
             dense_out.add_(moe_out)
             moe_out = None
 
         ffn_out = layer_weight.post_feedforward_layernorm_weight_(
-            input=dense_out.float(), eps=self.eps_, alloc_func=self.alloc_tensor
-        ).to(torch.bfloat16)
+            input=dense_out, eps=self.eps_, alloc_func=self.alloc_tensor
+        )
         dense_out = None
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    # ----- block-level forwards (add layer_scalar at the end) ----------
+    # ----- block-level forwards (PLE fusion + layer_scalar at the end) ----
+
+    def _apply_per_layer_embed(self, hidden_states, infer_state, layer_weight):
+        """E-series: gate hidden_states through per_layer_embed slice and add
+        the projected contribution back as a residual. Matches HF
+        Gemma4TextDecoderLayer.forward (lines 1401–1408 in transformers 5.5.4)
+        and vllm Gemma4DecoderLayer.forward (gemma4.py:744–752) — bf16 the
+        whole way, RMSNorm Triton kernel handles fp32 promotion internally.
+
+        gate / projection weights are ROWMMWeight(tp_world_size=1) — replicated
+        across TP ranks — so we drive them through `.mm()` and never need an
+        intra-block all-reduce. In TPSP mix mode, per_layer_embeds has already
+        been token-split alongside hidden_states by Gemma4PreLayerInfer's
+        _tpsp_sp_split override, so rows line up element-wise here.
+        """
+        # per_layer_embeds is (N, num_layers, ple_dim); slice this layer.
+        ple_slice = infer_state.per_layer_embeds[..., self.layer_num_, :]
+        flat = hidden_states.view(-1, self.embed_dim_)
+        gate = layer_weight.per_layer_input_gate_.mm(flat)  # (N, ple_dim)
+        gate = nn.functional.gelu(gate, approximate="tanh")
+        gated = gate * ple_slice.view(-1, self.ple_dim_)
+        contrib = layer_weight.per_layer_projection_.mm(gated)  # (N, hidden_size)
+        contrib = layer_weight.post_per_layer_input_norm_weight_(
+            input=contrib, eps=self.eps_, alloc_func=self.alloc_tensor
+        )
+        flat.add_(contrib)
+        return hidden_states
 
     def _apply_layer_scalar(self, hidden_states, layer_weight):
         hidden_states.mul_(layer_weight.layer_scalar_.weight)
         return hidden_states
 
-    def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
-        input_embdings = input_embdings.to(torch.bfloat16)
+    def _block_epilogue(self, hidden_states, infer_state, layer_weight):
+        """Shared tail for prefill/decode: PLE fusion (E-series only) then
+        layer_scalar."""
+        if self.has_ple_:
+            hidden_states = self._apply_per_layer_embed(hidden_states, infer_state, layer_weight)
+        return self._apply_layer_scalar(hidden_states, layer_weight)
 
-        # attn sub-block
-        input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight).to(
-            torch.bfloat16
-        )
+    def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
+        # input_embdings is bf16 from the pre-layer / previous block; RMSNorm
+        # (att_norm, ffn_norm) handles fp32 promotion in its Triton kernel,
+        # so the entire residual stream stays in bf16.
+        input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_), infer_state, layer_weight)
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
+        o = self._ffn_norm(o, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input_embdings = self._ffn_block(input_embdings, infer_state, layer_weight)
 
-        return self._apply_layer_scalar(input_embdings, layer_weight)
+        return self._block_epilogue(input_embdings, infer_state, layer_weight)
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
-        input_embdings = input_embdings.to(torch.bfloat16)
-
-        input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_).float(), infer_state, layer_weight).to(
-            torch.bfloat16
-        )
+        input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_), infer_state, layer_weight)
         q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
         input1 = None
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        o = self._ffn_norm(o.float(), infer_state, layer_weight).to(torch.bfloat16)
+        o = self._ffn_norm(o, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
         input_embdings = self._ffn_block(input_embdings, infer_state, layer_weight)
 
-        return self._apply_layer_scalar(input_embdings, layer_weight)
+        return self._block_epilogue(input_embdings, infer_state, layer_weight)

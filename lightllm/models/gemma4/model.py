@@ -106,6 +106,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+
         if self.config.get("enable_moe_block", False):
             # LightLLM's MoE helpers use Qwen/DeepSeek-style field names.
             # Gemma-4 checkpoints expose equivalent values as top_k_experts
@@ -119,19 +120,36 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         assert self.load_way == "HF", "Gemma-4 only supports HF format."
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
-        num_global_kv = self.config.get("num_global_key_value_heads", self.config["num_key_value_heads"])
+        # Use `or` rather than the dict.get default: E4B-style configs ship
+        # `num_global_key_value_heads: null`, which the default form would
+        # leave as None.
+        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
         assert (
             num_global_kv % self.tp_world_size_ == 0
         ), f"num_global_key_value_heads={num_global_kv} must be divisible by tp={self.tp_world_size_}"
+        kv_shared = self.config.get("num_kv_shared_layers") or 0
+        assert 0 <= kv_shared < self.config["num_hidden_layers"], (
+            f"num_kv_shared_layers={kv_shared} out of range for "
+            f"num_hidden_layers={self.config['num_hidden_layers']}"
+        )
         return
 
     def _init_mem_manager(self):
-        # Uniform per-layer KV cache layout keyed to the *sliding* attention shape
-        # (num_kv_heads=16, head_dim=256). Full-attention layers (num_kv_heads=4,
-        # head_dim=512, k_eq_v) reuse the same byte budget at <=50% utilization;
-        # the transformer-layer infer code handles the reshape when reading back.
-        head_num_per_rank = self.config["num_key_value_heads"] // self.tp_world_size_
+        # Uniform per-layer KV cache layout. The per-layer cache slot must fit
+        # whichever layer type has the largest per-token K/V width: sliding
+        # (num_key_value_heads * head_dim) or full
+        # (num_global_kv * global_head_dim). Keep cache_slot_dim = head_dim
+        # and pick cache_slot_num = max-width / head_dim. For 31B this
+        # collapses to num_key_value_heads; for E4B the full-attn shape wins
+        # (2*512 > 2*256), so it uses 4 storage slots of 256 dims.
+        # Gemma4TransformerLayerInfer.__init__ computes the same value and
+        # uses it to pack/unpack K/V at write/read time.
         head_dim = self.config["head_dim"]
+        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
+        sliding_total = self.config["num_key_value_heads"] * self.config["head_dim"]
+        full_total = num_global_kv * self.config["global_head_dim"]
+        per_token_k_width = max(sliding_total, full_total)
+        head_num_per_rank = (per_token_k_width // head_dim) // self.tp_world_size_
         self.mem_manager = select_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
