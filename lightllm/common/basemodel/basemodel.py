@@ -212,9 +212,20 @@ class TpPartBaseModel:
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size
+
         assert (
             self.max_total_token_num > self.batch_max_tokens
         ), "max_total_token_num must be greater than batch_max_tokens"
+
+        # 非个人性能模式下，需要保证 max_seq_length 小于等于 max_total_token_num,
+        # 这样才能得到完整的上下文长度的支持。个人模式主要是私有化场景，显卡显存不是
+        # 特别大，可能能分配的 kv 容量有限，无法支持 max_seq_length 的推理。所以个人模式下
+        # 可以适当放宽这个限制，不做这个校验。
+        if self.args.performance_mode != "personal":
+            assert (
+                self.max_seq_length <= self.max_total_token_num
+            ), "max_total_token_num must be greater than max_seq_length"
+
         return
 
     def _init_req_manager(self):
