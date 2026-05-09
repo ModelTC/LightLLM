@@ -24,7 +24,6 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import (
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.router.dynamic_prompt.hybrid_radix_cache import HybridRadixCache
 from .control_state import ControlState
 
 logger = init_logger(__name__)
