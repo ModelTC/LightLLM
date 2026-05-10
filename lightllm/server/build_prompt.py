@@ -94,6 +94,15 @@ async def build_prompt(request, tools) -> str:
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
 
+    # 修复一些类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
+    # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
+    from .api_openai import _get_reasoning_from_request
+
+    thinking = _get_reasoning_from_request(request)
+
+    kwargs["thinking"] = thinking
+    kwargs["enable_thinking"] = thinking
+
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except BaseException as e:
