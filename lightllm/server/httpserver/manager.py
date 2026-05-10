@@ -529,7 +529,7 @@ class HttpServerManager:
 
             if self.args.detail_log:
                 logger.debug(
-                    f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
+                    f"req_id: {sampling_params.group_request_id} prompt: {prompt}\n"
                     f"samplingparmas: {sampling_params.to_dict()}\n"
                     f"token_ids: {prompt_ids}"
                 )
