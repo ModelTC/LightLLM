@@ -27,7 +27,6 @@ APIServer 参数详解
         - ``running_max_req_size`` 为 3
         - ``batch_max_tokens`` 为 2048 (2k)
         - ``chunked_prefill_size`` 为 1024 (1k)
-        - ``mem_fraction`` 为 0.85
 
 .. option:: --host
 

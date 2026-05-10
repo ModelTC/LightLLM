@@ -131,12 +131,10 @@ def normal_or_p_d_start(args):
         args.batch_max_tokens = 2048
         args.chunked_prefill_size = 1024
         args.embed_cache_storage_size = 0.8
-        if args.mem_fraction > 0.82:
-            args.mem_fraction = 0.82
         args.graph_max_batch_size = 32
         logger.info(
             f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.82,"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
             f"graph_max_batch_size to 32"
         )
 

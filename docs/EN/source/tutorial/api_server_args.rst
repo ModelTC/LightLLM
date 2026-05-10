@@ -27,7 +27,6 @@ Basic Configuration Parameters
         - ``running_max_req_size`` to 3
         - ``batch_max_tokens`` to 2048 (2k)
         - ``chunked_prefill_size`` to 1024 (1k)
-        - ``mem_fraction`` to 0.85
 
 .. option:: --host
 
