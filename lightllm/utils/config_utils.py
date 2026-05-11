@@ -195,6 +195,9 @@ def has_vision_module(model_path: str) -> bool:
             return True
         elif model_type == "gemma3":
             return True
+        elif model_type == "gemma4":
+            model_cfg["vision_config"]
+            return model_cfg["vision_config"] is not None
         elif (
             model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
             == "qwen3_omni_moe_vision_encoder"

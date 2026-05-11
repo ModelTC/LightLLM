@@ -132,6 +132,12 @@ def get_tokenizer(
     elif model_type == "gemma3":
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
     elif model_type == "gemma4":
-        tokenizer = Gemma4Tokenizer(tokenizer, model_cfg)
+        image_processor = None
+        if "vision_config" in model_cfg and model_cfg["vision_config"] is not None:
+            from transformers import AutoProcessor
+
+            processor = AutoProcessor.from_pretrained(tokenizer_name)
+            image_processor = processor.image_processor
+        tokenizer = Gemma4Tokenizer(tokenizer, model_cfg, image_processor=image_processor)
 
     return tokenizer

@@ -5,6 +5,9 @@ import torch.nn as nn
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
+from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
+    context_attention_fwd_gemma4_mm,
+)
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
@@ -228,6 +231,32 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.layer_head_dim_)
+        # Image bidirectional attention only applies on sliding-window layers
+        # (matches HF/vllm `use_bidirectional_attention="vision"`). Full-attn
+        # layers stay on the standard causal triton path.
+        if (
+            self.is_sliding
+            and self.network_config_.get("_gemma4_use_swa", False)
+            and getattr(infer_state, "b_image_token_end", None) is not None
+        ):
+            o_tensor = self.alloc_tensor(_q.shape, q.dtype)
+            sw = self.sliding_window_ if self.sliding_window_ > 0 else 0
+            context_attention_fwd_gemma4_mm(
+                _q,
+                _k,
+                _v,
+                o_tensor,
+                infer_state.b_req_idx,
+                infer_state.b_q_start_loc,
+                infer_state.b_seq_len,
+                infer_state.b_ready_cache_len,
+                infer_state.max_q_seq_len,
+                infer_state.req_manager.req_to_token_indexs,
+                infer_state.b_image_token_end,
+                sliding_window=sw,
+            )
+            return o_tensor.view(q.shape)
+
         # Sliding layers go through the secondary backend (FA3 with SWA when
         # available, else triton-with-SWA from path B). Full-attn layers go
         # through the primary triton backend (head_dim=512).

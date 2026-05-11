@@ -81,6 +81,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
             tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
             tp_world_size=self.tp_world_size_,
+            text_embed_scale=getattr(self, "multimodal_text_embed_scale_", 1.0),
         )
         if self.tp_world_size_ > 1:
             all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
