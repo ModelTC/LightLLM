@@ -78,25 +78,13 @@ RUN if [ "${ENABLE_NIXL}" = "1" ] || [ "${ENABLE_DEEPEP}" = "1" ]; then \
 RUN if [ "${ENABLE_DEEPEP}" = "1" ]; then \
       set -e; \
       ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so; \
-      NVSHMEM_VERSION=3.3.9; \
-      CUDA_ARCHS=90; \
-      wget https://developer.download.nvidia.com/compute/redist/nvshmem/${NVSHMEM_VERSION}/source/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
-      && tar -xf nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz && mv nvshmem_src nvshmem \
-      && cd nvshmem \
-      && rm -f /root/nvshmem_src_cuda12-all-all-${NVSHMEM_VERSION}.tar.gz \
-      && NVSHMEM_SHMEM_SUPPORT=0 \
-         NVSHMEM_UCX_SUPPORT=0 \
-         NVSHMEM_USE_NCCL=0 \
-         NVSHMEM_MPI_SUPPORT=0 \
-         NVSHMEM_IBGDA_SUPPORT=1 \
-         NVSHMEM_PMIX_SUPPORT=0 \
-         NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-         NVSHMEM_USE_GDRCOPY=1 \
-         cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=/root/nvshmem/install -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS} \
-      && cmake --build build --target install -j64; \
-      DEEPEP_COMMIT=b6ce310bb0b75079682d09bc2ebc063a074fbd58; \
-      cd /root && git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout ${DEEPEP_COMMIT} && cd ..; \
-      cd /root/DeepEP && NVSHMEM_DIR=/root/nvshmem/install python setup.py install; \
+      python -m pip install --upgrade --no-deps \
+        "nvidia-nccl-cu12==2.30.4" \
+        "nvidia-nvshmem-cu12==3.5.21"; \
+      cd /root && git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout b306af06afd412c88e51e71802951606e40b7358; \
+      ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so; \
+      ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so.2 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so; \
+      pip install --no-build-isolation .; \
     fi
 
 RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
