@@ -63,6 +63,7 @@ LOADWORKER=18 NUM_MAX_DISPATCH_TOKENS_PER_RANK=256 \
 nohup python -m lightllm.server.api_server \
   --enable_ep_moe --model_dir "${MODEL_DIR}" --tp 8 --dp 8 --port 8089 \
   --max_total_token_num 60000 --graph_max_batch_size 16 --batch_max_tokens 6000 \
+  --max_req_total_len 56000 \
   --mtp_mode eagle_with_att --mtp_draft_model_dir "${MTP_DRAFT_DIR}" --mtp_step 2 \
   >> "${LOG_DIR}/server_01_baseline.log" 2>&1 &
 ```
@@ -74,6 +75,7 @@ LOADWORKER=18 NUM_MAX_DISPATCH_TOKENS_PER_RANK=256 \
 nohup python -m lightllm.server.api_server \
   --enable_ep_moe --model_dir "${MODEL_DIR}" --tp 8 --dp 8 --port 8089 \
   --max_total_token_num 60000 --graph_max_batch_size 16 --batch_max_tokens 6000 \
+  --max_req_total_len 56000 \
   --mtp_mode eagle_with_att --mtp_draft_model_dir "${MTP_DRAFT_DIR}" --mtp_step 2 \
   --enable_tpsp_mix_mode \
   >> "${LOG_DIR}/server_02_tpsp_mix.log" 2>&1 &
@@ -86,6 +88,7 @@ LOADWORKER=18 NUM_MAX_DISPATCH_TOKENS_PER_RANK=256 \
 nohup python -m lightllm.server.api_server \
   --enable_ep_moe --model_dir "${MODEL_DIR}" --tp 8 --dp 8 --port 8089 \
   --max_total_token_num 60000 --graph_max_batch_size 16 --batch_max_tokens 6000 \
+  --max_req_total_len 56000 \
   --mtp_mode eagle_with_att --mtp_draft_model_dir "${MTP_DRAFT_DIR}" --mtp_step 2 \
   --enable_prefill_microbatch_overlap --enable_decode_microbatch_overlap \
   >> "${LOG_DIR}/server_03_overlap.log" 2>&1 &
@@ -98,6 +101,7 @@ LOADWORKER=18 NUM_MAX_DISPATCH_TOKENS_PER_RANK=256 \
 nohup python -m lightllm.server.api_server \
   --enable_ep_moe --model_dir "${MODEL_DIR}" --tp 8 --dp 8 --port 8089 \
   --max_total_token_num 60000 --graph_max_batch_size 16 --batch_max_tokens 6000 \
+  --max_req_total_len 56000 \
   --mtp_mode eagle_with_att --mtp_draft_model_dir "${MTP_DRAFT_DIR}" --mtp_step 2 \
   --enable_prefill_microbatch_overlap --enable_decode_microbatch_overlap \
   --enable_dp_prefill_balance \
