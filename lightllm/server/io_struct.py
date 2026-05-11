@@ -88,9 +88,18 @@ class AbortReq(BaseReq):
     abort_all: bool = False
 
 
+def _normalize_memory_tags(tags):
+    if tags is None:
+        return None
+    return [tag if isinstance(tag, MemoryTag) else MemoryTag(tag) for tag in tags]
+
+
 @dataclass
 class ReleaseMemoryReq(BaseReq):
     tags: Optional[List[MemoryTag]] = None
+
+    def __post_init__(self):
+        self.tags = _normalize_memory_tags(self.tags)
 
 
 @dataclass
@@ -101,6 +110,9 @@ class ReleaseMemoryResp(BaseReq):
 @dataclass
 class ResumeMemoryReq(BaseReq):
     tags: Optional[List[MemoryTag]] = None
+
+    def __post_init__(self):
+        self.tags = _normalize_memory_tags(self.tags)
 
 
 @dataclass
@@ -198,7 +210,7 @@ class UpdateWeightsFromTensorRsp(BaseRsp):
 @dataclass
 class UpdateWeightsFromIPCReq(BaseReq):
     ipc_handle: str = None
-    
+
     use_shm: bool = False
 
     # Whether to flush the cache after updating weights
