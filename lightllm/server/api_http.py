@@ -69,6 +69,7 @@ from .io_struct import (
     DestroyWeightsUpdateGroupReq,
     UpdateWeightsFromDistributedReq,
     UpdateWeightsFromTensorReq,
+    UpdateWeightsFromIPCReq,
     GeneralModelToHttpRpcRsp,
 )
 from .build_prompt import build_prompt, init_tokenizer
@@ -459,6 +460,11 @@ async def update_weights_from_distributed(request: UpdateWeightsFromDistributedR
 async def update_weights_from_tensor(request: UpdateWeightsFromTensorReq, raw_request: Request):
     """Update model parameter from distributed online."""
     return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_tensor)
+
+
+@app.post("/update_weights_from_ipc")
+async def update_weights_from_ipc(request: UpdateWeightsFromIPCReq, raw_request: Request):
+    return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_ipc)
 
 
 @app.post("/flush_cache")

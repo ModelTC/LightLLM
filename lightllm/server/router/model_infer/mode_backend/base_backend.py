@@ -60,6 +60,7 @@ from lightllm.server.io_struct import (
     InitWeightsUpdateGroupReq,
     DestroyWeightsUpdateGroupReq,
     UpdateWeightsFromDistributedReq,
+    UpdateWeightsFromIPCReq,
     UpdateWeightsFromTensorReq,
 )
 
@@ -563,6 +564,35 @@ class ModeBackend:
             return True, "Succeeded to update parameter online from tensor."
 
         except Exception as e:
+            message = f"Failed to update parameter online from tensor. Reason: {e}."
+            self.logger.error(message)
+
+            return False, message
+
+    def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq):
+        try:
+            from .bucketed_weight_transfer import BucketedWeightReceiver, get_zmq_handle
+
+            zmq_handle = get_zmq_handle()
+            use_shm = request.use_shm
+            recv_device = torch.device("cuda", self.current_device_id)
+            self.logger.debug(
+                "[LightLLM] base_backend.update_weights_from_ipc: request.ipc_handle=%r, "
+                "resolved zmq_handle=%r, cuda_device_id=%s",
+                request.ipc_handle,
+                zmq_handle,
+                self.current_device_id,
+            )
+
+            bucketed_weight_receiver = BucketedWeightReceiver(
+                zmq_handle=zmq_handle, device=recv_device, use_shm=use_shm
+            )
+            bucketed_weight_receiver.receive_weights(on_bucket_received=self.model.load_weights)
+            return True, "Succeeded to update parameter online from ipc."
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             message = f"Failed to update parameter online from tensor. Reason: {e}."
             self.logger.error(message)
 

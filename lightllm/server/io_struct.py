@@ -193,3 +193,22 @@ class UpdateWeightsFromTensorReq(BaseReq):
 @dataclass
 class UpdateWeightsFromTensorRsp(BaseRsp):
     pass
+
+
+@dataclass
+class UpdateWeightsFromIPCReq(BaseReq):
+    ipc_handle: str = None
+    
+    use_shm: bool = False
+
+    # Whether to flush the cache after updating weights
+    flush_cache: bool = True
+    # Whether to abort all requests before updating weights
+    abort_all_requests: bool = False
+    # Optional: Update weight version along with weights
+    weight_version: Optional[str] = None
+
+
+@dataclass
+class UpdateWeightsFromIPCRsp(BaseRsp):
+    pass

@@ -51,6 +51,7 @@ from lightllm.server.io_struct import (
     DestroyWeightsUpdateGroupRsp,
     UpdateWeightsFromDistributedReq,
     UpdateWeightsFromDistributedRsp,
+    UpdateWeightsFromIPCReq,
     UpdateWeightsFromTensorReq,
     UpdateWeightsFromTensorRsp,
     GeneralHttpToModelRpcReq,
@@ -1104,6 +1105,17 @@ class HttpServerManager:
 
         return await self.http_to_model_special_request(
             GeneralHttpToModelRpcReq(func_name="update_weights_from_tensor", func_args=request)
+        )
+
+    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> Tuple[bool, str]:
+        if request.abort_all_requests:
+            await self.abort_request(AbortReq(abort_all=True))
+
+        if request.flush_cache:
+            await self.flush_cache(FlushCacheReq())
+
+        return await self.http_to_model_special_request(
+            GeneralHttpToModelRpcReq(func_name="update_weights_from_ipc", func_args=request)
         )
 
 
