@@ -12,6 +12,7 @@ Assumes the server is up on http://localhost:8000 and the model tokenizer
 is Qwen3.5 (matches the launch command in the PR description).
 """
 
+
 import json
 import sys
 from typing import Dict, List, Tuple
@@ -75,10 +76,7 @@ def test_invalid_token_ids():
     for tid in blocked_ids:
         print(f"        {tid:6d} <- {source_map[tid]!r}")
 
-    prompt = (
-        "Write three short English sentences about San Francisco. "
-        "Mention the bay, the bridge and the weather."
-    )
+    prompt = "Write three short English sentences about San Francisco. " "Mention the bay, the bridge and the weather."
     base_params = {
         "do_sample": False,
         "temperature": 1.0,
@@ -111,8 +109,10 @@ def test_invalid_token_ids():
     # Sanity check: the baseline should have produced at least one of the blocked tokens.
     # If it did not, the test is uninformative (but still passes the strict check above).
     if not base_hits:
-        print("      WARNING: baseline did not produce any of the target tokens; "
-              "the assertion below is trivially satisfied.")
+        print(
+            "      WARNING: baseline did not produce any of the target tokens; "
+            "the assertion below is trivially satisfied."
+        )
 
     if biased_text == base_text:
         failures.append("Biased output is identical to baseline; bias may not be applied.")
