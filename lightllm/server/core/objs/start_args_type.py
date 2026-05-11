@@ -32,7 +32,7 @@ class StartArgs:
     tokenizer_mode: str = field(default="slow")
     load_way: str = field(default="HF")
     max_total_token_num: Optional[int] = field(default=None)
-    mem_fraction: float = field(default=0.9)
+    mem_fraction: float = field(default=0.8)
     batch_max_tokens: Optional[int] = field(default=None)
     eos_id: List[int] = field(default_factory=list)
     tool_call_parser: Optional[str] = field(

@@ -145,7 +145,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mem_fraction",
         type=float,
-        default=0.9,
+        default=0.8,
         help="""Memory usage ratio, default is 0.9, you can specify a smaller value if OOM occurs at runtime.
         If max_total_token_num is not specified, it will be calculated automatically based on this value.""",
     )
