@@ -330,15 +330,14 @@ class ModeBackend:
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att", "qwen3next_vanilla"]:
+        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "qwen3next_eagle"]:
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
 
         for i in range(num_mtp_modules):
-            # Get MTP model config first to calculate mem_layer_start
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
             model_type = mtp_model_cfg.get("model_type", "")
             mtp_model_kvargs = {
@@ -353,7 +352,7 @@ class ModeBackend:
                 "data_type": main_kvargs.get("data_type", "float16"),
                 "graph_max_batch_size": main_kvargs.get("graph_max_batch_size", 16),
                 "graph_max_len_in_batch": main_kvargs.get("graph_max_len_in_batch", 8196),
-                "disable_cudagraph": True,  # Disable CUDA graphs for MTP draft models
+                "disable_cudagraph": main_kvargs.get("disable_cudagraph", False),
                 "mem_fraction": main_kvargs["mem_fraction"],
                 "batch_max_tokens": main_kvargs.get("batch_max_tokens", None),
                 "quant_type": main_kvargs.get("quant_type", None),
@@ -361,7 +360,6 @@ class ModeBackend:
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
-                "mtp_index": i,
             }
 
             # Select MTP model class based on model type
@@ -592,6 +590,7 @@ class ModeBackend:
 
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             message = f"Failed to update parameter online from tensor. Reason: {e}."
             self.logger.error(message)
