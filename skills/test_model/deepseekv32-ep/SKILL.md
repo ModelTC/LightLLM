@@ -64,7 +64,7 @@ nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" --tp 8 \
   --graph_max_batch_size 32 \
   --tool_call_parser deepseekv32 \
-  --mem_fraction 0.8 \
+  --mem_fraction 0.6 \
   --reasoning_parser deepseek-v3 \
   --dp 8 --enable_ep_moe \
   --port 8000 \
