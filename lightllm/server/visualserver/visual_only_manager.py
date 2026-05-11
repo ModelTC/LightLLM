@@ -127,8 +127,8 @@ class VisualOnlyManager(rpyc.Service):
     async def handle_images(self, images_need_infer: List[ImageItem]):
         await VisualManager.handle_images(self, images_need_infer=images_need_infer)
 
-    async def infer_images(self, dp_index: int, images, events):
-        await VisualManager.infer_images(self, dp_index=dp_index, images=images, events=events)
+    async def infer_images(self, dp_index: int, images, results):
+        await VisualManager.infer_images(self, dp_index=dp_index, images=images, results=results)
 
     def clean_up(self):
         return

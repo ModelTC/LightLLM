@@ -463,6 +463,40 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
     )
     parser.add_argument(
+        "--visual_infer_timeout",
+        type=int,
+        default=120,
+        help="""
+        Bound on how long VisualManager.handle_images() waits on the per-batch event
+        (in seconds). Prevents a stalled or crashed ViT worker from blocking visual
+        requests forever and exhausting the default asyncio executor (see the
+        2026-05-09 incident). On timeout the request is marked aborted and forwarded
+        to the next module for normal abort handling. Set to 0 to use the default.
+        """,
+    )
+    parser.add_argument(
+        "--visual_set_items_embed_timeout",
+        type=int,
+        default=30,
+        help="""
+        Bound (seconds) on the synchronous RPyC call to embed_cache_client.set_items_embed
+        inside the visualserver store worker. A hung cache server used to silently block
+        the store worker forever (2026-05-09 incident); on timeout the batch is reported
+        back as failed so manager triggers per-request abort. Set to 0 to use the default.
+        """,
+    )
+    parser.add_argument(
+        "--visual_get_items_embed_timeout",
+        type=int,
+        default=10,
+        help="""
+        Bound (seconds) on the synchronous get_items_embed cache RPC issued from
+        VisualManager.handle_group_indexes before deciding which images need ViT. Wraps
+        the call in asyncio.to_thread + wait_for so a hung cache cannot block the visual
+        event loop or skip the abort path (2026-05-09 incident).
+        """,
+    )
+    parser.add_argument(
         "--visual_batch_max_tokens",
         type=int,
         default=None,

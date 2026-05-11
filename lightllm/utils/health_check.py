@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import numpy as np
+from typing import List
 from dataclasses import dataclass
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
@@ -12,6 +13,39 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
 
 logger = init_logger(__name__)
+
+
+def scan_visual_unhealthy_sentinels(args) -> List[str]:
+    """Return human-readable descriptions of any dead visual workers.
+
+    The visualserver's watchdog writes a sentinel file at
+    ``/tmp/lightllm_visual_unhealthy_{server_name}_dp{dp}_tp{tp}`` when it
+    detects a dead ``_infer_worker`` or ``_store_worker`` thread. ``/health``
+    scans for these so the service can be marked unhealthy even when text-only
+    inference is still working — without needing the watchdog to ``os._exit``
+    or rely on an external probe.
+
+    File-path format must stay in sync with
+    ``VisualModelRpcServer._watchdog_unhealthy_path()``.
+    """
+    visual_dp = int(getattr(args, "visual_dp", 0) or 0)
+    visual_tp = int(getattr(args, "visual_tp", 0) or 0)
+    if visual_dp <= 0 or visual_tp <= 0:
+        return []
+    server_name = get_unique_server_name()
+    dead = []
+    for dp in range(visual_dp):
+        for tp in range(visual_tp):
+            path = f"/tmp/lightllm_visual_unhealthy_{server_name}_dp{dp}_tp{tp}"
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path) as fh:
+                    info = fh.read().strip()
+            except Exception:
+                info = "<read failed>"
+            dead.append(f"dp={dp} tp={tp}: {info}")
+    return dead
 
 
 @dataclass
@@ -36,6 +70,18 @@ class HealthObj:
         if self._failure_count > self._failure_threshold:
             self._is_health = False
 
+    def force_unhealth(self):
+        """Immediately mark unhealthy, bypassing the failure-count threshold.
+
+        Used by callers that have *already proven* the service is broken (e.g.
+        the visual watchdog wrote a sentinel file) and don't want the threshold
+        to keep returning 200 for the next few probes.
+        """
+        self._is_health = False
+        # Also bump failure count so the threshold-aware path stays consistent.
+        self._failure_count = max(self._failure_count + 1, self._failure_threshold + 1)
+        self.dynamic_timeout += self.timeout
+
     def set_health(self):
         self._is_health = True
         self._failure_count = 0
@@ -58,6 +104,17 @@ health_obj = HealthObj()
 
 async def health_check(args, httpserver_manager: HttpServerManager, request: Request):
     if health_obj.is_checking():
+        return health_obj.is_health()
+
+    # Short-circuit on dead visual workers FIRST, before the recent-inference fast path.
+    # A text-only inference can keep updating latest_success_infer_time_mark while the
+    # ViT path is entirely broken (2026-05-09 incident); without scanning here we would
+    # return 200 even with a confirmed-dead visual worker. force_unhealth() bypasses the
+    # failure-count threshold because the sentinel is direct evidence of breakage.
+    visual_dead = scan_visual_unhealthy_sentinels(args)
+    if visual_dead:
+        health_obj.force_unhealth()
+        logger.error(f"Health check: visual worker watchdog reports dead: {visual_dead}")
         return health_obj.is_health()
 
     if health_obj.is_health() and health_obj.has_latest_inference():

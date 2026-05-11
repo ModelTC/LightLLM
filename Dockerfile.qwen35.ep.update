@@ -1,16 +1,19 @@
 # ============================================================================
 # Dockerfile.qwen35.ep.update — Refresh LightLLM source on top of an existing
-# lightllm:qwen35-ep image. Use when only the code changed and the environment
-# (CUDA, torch, DeepEP, NVSHMEM, etc.) is unchanged.
+# lightllm:qwen35-stable image. Use when only the code changed and the
+# environment (CUDA, torch, DeepEP, NVSHMEM, etc.) is unchanged.
 #
 # Build:
-#   docker build -f docker/Dockerfile.qwen35.ep.update -t lightllm:qwen35-ep .
+#   docker build -f Dockerfile.qwen35.ep.update \
+#       -t registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm:qwen35-stable-260511 .
 # ============================================================================
 
-FROM registry.cn-tj-01.sensecore.cn/ccr-devsfttj/lightllm:qwen35-stable
+FROM registry.ms-sc-01.maoshanwangtech.com/ms-ccr/lightllm:qwen35-stable-260430
 
 RUN rm -rf /lightllm
 COPY . /lightllm
-RUN uv pip install --system --no-cache -e /lightllm && uv pip install --system litellm 
+# Install with [anthropic] extra so litellm (used by /v1/messages compatibility path,
+# setup.py:32-35) is always present regardless of what the base image happens to bundle.
+RUN uv pip install --system --no-cache -e "/lightllm[anthropic]"
 
 WORKDIR /lightllm

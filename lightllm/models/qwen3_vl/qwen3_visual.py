@@ -380,17 +380,27 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         valid_id = 0
         img_grids = []
         uuids = []
+        # 任意一张图片解码 / preprocess 失败都视为请求级失败:
+        # 跳过这张图但保留 batch 中其他图片, 否则一张截断图就会让整个 ViT worker 崩溃。
+        failed_images = []
         for i, img in enumerate(images):
-            if isinstance(img, ImageItem):
-                uuids.append(img.uuid)
+            if not isinstance(img, ImageItem):
+                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+            try:
                 image_data = read_shm(get_shm_name_data(img.uuid))
                 image_data = Image.open(BytesIO(image_data))
                 pixel_values, image_grid_thw = self.processor.preprocess(image_data)
+            except Exception as e:
+                logger.exception(
+                    f"image preprocess failed, treating as per-request error: "
+                    f"uuid={img.uuid} md5={getattr(img, 'md5', None)}: {e}"
+                )
+                failed_images.append(img)
+                continue
 
-                img_tensors.append(pixel_values)
-                img_grids.append(image_grid_thw)
-            else:
-                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+            uuids.append(img.uuid)
+            img_tensors.append(pixel_values)
+            img_grids.append(image_grid_thw)
 
             # must devide merge_length
             cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)
@@ -398,8 +408,14 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
             valid_ids.append([valid_id, valid_id + cur_num])
             valid_id += cur_num
 
+        # 失败的图片直接打通知 event, 释放 manager 端的等待和 shm req 资源。
+        # 这里通过 attribute 标记, 由调用方 (model_rpc) 负责设置 event 并释放信号量。
+        for img in failed_images:
+            img.preprocess_failed = True
+
         if len(img_tensors) <= 0:
-            return None
+            # 整 batch 都失败: 返回空结果由 _infer_worker 统一处理 preprocess_failed 的 image。
+            return None, [], []
 
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
