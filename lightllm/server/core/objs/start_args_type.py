@@ -37,6 +37,7 @@ class StartArgs:
     afs_image_embed_dir: str = field(default=None)
     afs_embed_capacity: int = field(default=250000)
     pd_decode_rpyc_port: int = field(default=None)
+    control_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(
         default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
     )

@@ -358,6 +358,8 @@ def _launch_subprocesses(args: StartArgs):
         already_uesd_ports.append(args.nccl_port)
     if args.pd_decode_rpyc_port is not None:
         already_uesd_ports.append(args.pd_decode_rpyc_port)
+    if args.control_rpyc_port is not None:
+        already_uesd_ports.append(args.control_rpyc_port)
     if args.visual_nccl_ports is not None:
         already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
     if not args.disable_audio and args.audio_nccl_ports is not None:
@@ -370,7 +372,7 @@ def _launch_subprocesses(args: StartArgs):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
+        num=11 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
         instance_id=args.lightllm_instance_id,
         used_ports=already_uesd_ports,
     )
@@ -386,8 +388,9 @@ def _launch_subprocesses(args: StartArgs):
         metric_port,
         multi_level_kv_cache_port,
         pd_decode_rpyc_port,
-    ) = can_use_ports[0:10]
-    can_use_ports = can_use_ports[10:]
+        control_rpyc_port,
+    ) = can_use_ports[0:11]
+    can_use_ports = can_use_ports[11:]
 
     if args.visual_nccl_ports is None:
         args.visual_nccl_ports = can_use_ports[: args.visual_dp]
@@ -406,6 +409,8 @@ def _launch_subprocesses(args: StartArgs):
         args.nccl_port = nccl_port
     if args.pd_decode_rpyc_port is None:
         args.pd_decode_rpyc_port = pd_decode_rpyc_port
+    if args.control_rpyc_port is None:
+        args.control_rpyc_port = control_rpyc_port
 
     set_unique_server_name(args)
 

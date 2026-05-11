@@ -5,7 +5,8 @@ import torch
 import pickle
 import inspect
 import setproctitle
-import rpyc
+import queue
+import concurrent.futures
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -13,11 +14,12 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
+    GroupReqIndexes,
     AbortedReqCmd,
     StopStrMatchedReqCmd,
 )
@@ -30,14 +32,6 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.server.io_struct import (
-    BaseReq,
-    GenerateReqIndex,
-    FlushCacheReq,
-    FlushCacheResp,
-    ReleaseMemoryReq,
-    ReleaseMemoryResp,
-    ResumeMemoryReq,
-    ResumeMemoryResp,
     GeneralHttpToModelRpcReq,
     GeneralModelToHttpRpcRsp,
 )
@@ -122,6 +116,11 @@ class RouterManager:
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
         self.router_statics = RouterStatics(self.args)
+
+        # 控制面 rpyc 队列:rpyc 线程把 (req, future) 放进来,asyncio 主循环每个 step 取出处理
+        self._control_op_queue: "queue.Queue[Tuple[GeneralHttpToModelRpcReq, concurrent.futures.Future]]" = (
+            queue.Queue()
+        )
         return
 
     async def wait_to_model_ready(self):
@@ -430,7 +429,7 @@ class RouterManager:
         else:
             return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
 
-    def _add_req(self, group_req_indexes: BaseReq):
+    def _add_req(self, group_req_indexes: GroupReqIndexes):
         req_group = []
         for req_index in group_req_indexes.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
@@ -551,15 +550,11 @@ class RouterManager:
             self.recv_max_count = 64
 
         try:
-            # 多机tp需要广播给其他node的请求
-            special_reqs = []
             # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
             for _ in range(self.recv_max_count):
-                recv_req: BaseReq = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                if isinstance(recv_req, GenerateReqIndex):
+                recv_req: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
+                if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
-                elif isinstance(recv_req, GeneralHttpToModelRpcReq):
-                    special_reqs.append(recv_req)
                 else:
                     raise ValueError(f"Unknown request type: {type(recv_req)}")
 
@@ -570,7 +565,7 @@ class RouterManager:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
-        await self._process_special_reqs(special_reqs)
+        await self._process_special_reqs()
 
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
@@ -579,14 +574,38 @@ class RouterManager:
                 self._generate_new_batch()
         return
 
-    async def _process_special_reqs(self, special_reqs: List[BaseReq]):
-        if self.is_multinode_tp:
-            special_reqs = self.broadcast_reqs_to_other_nodes(special_reqs)
-        for req in special_reqs:
-            assert isinstance(req, GeneralHttpToModelRpcReq), "special request must be GeneralHttpToModelRpcReq"
-            await self.forward_to_model(req)
+    async def _process_special_reqs(self):
+        # master: 从 rpyc 队列里取出 (req, future) — slave 的队列恒为空(无 rpyc service)
+        pairs: List[Tuple[GeneralHttpToModelRpcReq, concurrent.futures.Future]] = []
+        while True:
+            try:
+                pair = self._control_op_queue.get_nowait()
+                pairs.append(pair)
+            except queue.Empty:
+                break
 
-    def broadcast_reqs_to_other_nodes(self, reqs: List[BaseReq]):
+        reqs: List[GeneralHttpToModelRpcReq] = [req for req, _ in pairs]
+
+        # 多机 TP:master 通过 NCCL 广播 req 到 slave router;slave 在自己的主循环里到达此处时,会从 broadcast 收到 master 的 reqs
+        if self.is_multinode_tp:
+            reqs = self.broadcast_reqs_to_other_nodes(reqs)
+
+        for i, req in enumerate(reqs):
+            assert isinstance(req, GeneralHttpToModelRpcReq), "special request must be GeneralHttpToModelRpcReq"
+            try:
+                ret = await self.forward_to_model(req)
+            except BaseException as e:
+                logger.exception(f"forward_to_model failed for {req.func_name}: {e}")
+                ret = GeneralModelToHttpRpcRsp(
+                    success=False, msg=f"forward_to_model error: {e}", func_name=req.func_name
+                )
+            # 只有 master 持有 future,slave 的 pairs 始终为空
+            if i < len(pairs):
+                _, fut = pairs[i]
+                if not fut.done():
+                    fut.set_result(ret)
+
+    def broadcast_reqs_to_other_nodes(self, reqs: List[GeneralHttpToModelRpcReq]):
         req_num = len(reqs)
         if self.node_rank == 0:
             req_nums = [len(reqs)]
@@ -603,28 +622,39 @@ class RouterManager:
                 dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
         return reqs
 
-    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> None:
+    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
         forward_to_model_tasks = []
         for model_rpc_client in self.model_rpc_clients:
             forward_to_model_tasks.append(model_rpc_client.forward_to_model(req))
         all_ret = await asyncio.gather(*forward_to_model_tasks)
         succes = all(ret.success for ret in all_ret)
-        ret = all_ret[0]
+        ret: GeneralModelToHttpRpcRsp = all_ret[0]
         ret.success = succes
         if self.is_multinode_tp:
-            output_list = [None for _ in self.nnodes] if self.node_rank == 0 else None
+            output_list = [None for _ in range(self.nnodes)] if self.node_rank == 0 else None
             dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
-            for res in output_list:
-                res: GeneralModelToHttpRpcRsp
-                if not res.success:
-                    ret = res
-                    break
-
-        if self.node_rank == 0:
-            self.send_to_detokenization.send_pyobj(ret, protocol=pickle.HIGHEST_PROTOCOL)
+            if self.node_rank == 0:
+                for res in output_list:
+                    res: GeneralModelToHttpRpcRsp
+                    if not res.success:
+                        ret = res
+                        break
+        return ret
 
     def clean_up(self):
         return
+
+    def submit_control_op(self, func_name: str, func_args, timeout: float = 300.0) -> GeneralModelToHttpRpcRsp:
+        """从 rpyc 线程调用,把控制面操作投递到 asyncio 主循环,同步等结果返回。"""
+        req = GeneralHttpToModelRpcReq(func_name=func_name, func_args=func_args)
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        self._control_op_queue.put((req, fut))
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return GeneralModelToHttpRpcRsp(
+                success=False, msg=f"control op {func_name} timeout after {timeout}s", func_name=func_name
+            )
 
 
 def start_router_process(args, pipe_writer):
@@ -656,6 +686,12 @@ def start_router_process(args, pipe_writer):
         pipe_writer.send(err_str)
         router.clean_up()
         raise
+
+    # master node 启动控制面 rpyc service。slave 不需要,通过 NCCL 接收广播。
+    if args.node_rank == 0 and args.control_rpyc_port is not None:
+        from .control_rpyc import start_control_rpyc_server
+
+        start_control_rpyc_server(router, args.control_rpyc_port)
 
     pipe_writer.send("init ok")
     loop.run_until_complete(router.loop_for_fwd())

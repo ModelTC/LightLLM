@@ -12,7 +12,7 @@ from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.io_struct import BaseReq, GenerateReqIndex
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer import start_model_process, AudioModelRpcClient
@@ -77,7 +77,7 @@ class AudioManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    def get_need_infer_audios(self, group_req_indexes: GenerateReqIndex) -> List[AudioItem]:
+    def get_need_infer_audios(self, group_req_indexes: GroupReqIndexes) -> List[AudioItem]:
         shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
         is_aborted = shm_req.is_aborted
         disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
@@ -102,7 +102,7 @@ class AudioManager:
 
         return audios_need_infer
 
-    async def handle_group_indexes(self, group_req_indexes: GenerateReqIndex):
+    async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
         audios_need_infer = self.get_need_infer_audios(group_req_indexes)
 
         if len(audios_need_infer) == 0:
@@ -153,16 +153,13 @@ class AudioManager:
     async def loop_for_netio_req(self):
         try:
             while True:
-                recv_req: BaseReq = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
-                if isinstance(recv_req, GenerateReqIndex):
+                recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
+                if isinstance(recv_req, GroupReqIndexes):
                     logger.info(
                         f"audio recv req id {recv_req.group_req_id} "
                         f"audio count {len(recv_req.multimodal_params.audios)}"
                     )
                     asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
-                elif isinstance(recv_req, BaseReq):
-                    # RL 等控制类 BaseReq 透传给下一模块，最终由 router 处理
-                    self.send_to_next_module.send_pyobj(recv_req, protocol=pickle.HIGHEST_PROTOCOL)
                 else:
                     assert False, f"Error Req Inf {recv_req}"
         except Exception as e:

@@ -61,6 +61,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="p d mode, decode node used for kv move manager rpyc server port",
     )
     parser.add_argument(
+        "--control_rpyc_port",
+        type=int,
+        default=None,
+        help=(
+            "rpyc port on master router for control-plane ops "
+            "(flush_cache, update_weights, etc.); auto-allocated if unset"
+        ),
+    )
+    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="round_robin",

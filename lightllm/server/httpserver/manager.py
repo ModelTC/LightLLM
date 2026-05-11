@@ -3,14 +3,13 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
 import socket
+import rpyc
 import time
 import copy
 import hashlib
 import datetime
 import pickle
-import inspect
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -26,6 +25,7 @@ from .async_queue import AsyncQueue
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -34,34 +34,20 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.server.io_struct import (
     AbortReq,
-    BaseReq,
     FlushCacheReq,
-    FlushCacheResp,
-    GenerateReq,
-    GenerateResp,
-    GenerateReqMeta,
-    GenerateReqIndex,
     ReleaseMemoryReq,
-    ReleaseMemoryResp,
     ResumeMemoryReq,
-    ResumeMemoryResp,
     InitWeightsUpdateGroupReq,
-    InitWeightsUpdateGroupRsp,
     DestroyWeightsUpdateGroupReq,
-    DestroyWeightsUpdateGroupRsp,
     UpdateWeightsFromDistributedReq,
-    UpdateWeightsFromDistributedRsp,
-    UpdateWeightsFromIPCReq,
     UpdateWeightsFromTensorReq,
-    UpdateWeightsFromTensorRsp,
-    GeneralHttpToModelRpcReq,
+    UpdateWeightsFromIPCReq,
     GeneralModelToHttpRpcRsp,
 )
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
-from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -125,8 +111,9 @@ class HttpServerManager:
         self.shm_req_manager = ShmReqManager()
 
         # recv from detokenization
-        self.zmq_recv_socket = context.socket(zmq.PULL)
+        self.zmq_recv_socket = context.socket(zmq.SUB)
         self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -155,11 +142,9 @@ class HttpServerManager:
         self.is_pause = False
         self.is_pause_cond = asyncio.Condition()
 
-        # 交互式请求 event
-        self.flush_cache_event: Optional[asyncio.Event] = None
-        self.release_memory_event: Optional[asyncio.Event] = None
-        self.resume_memory_event: Optional[asyncio.Event] = None
-        self.async_events_per_func: Dict[str, asyncio.Event] = {}
+        # 控制面 rpyc client: master router 的 rpyc service 句柄,懒初始化
+        self._control_rpyc_lock: asyncio.Lock = asyncio.Lock()
+        self._control_rpyc_conn: Optional[rpyc.core.protocol.Connection] = None
 
         # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
         # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
@@ -294,31 +279,18 @@ class HttpServerManager:
         assert self.args.node_rank > 0
         while True:
             req_obj = await self.multinode_req_manager.recv_pyobj()
-            if req_obj is None:
+            if isinstance(req_obj, AbortReq):
+                asyncio.create_task(self.abort_request(req_obj))
                 continue
-            if isinstance(req_obj, GenerateReqMeta):
-                self.process_generate_request(req_obj)
-            elif isinstance(req_obj, AbortReq):
-                self.process_abort_request(req_obj)
-            else:
-                assert False, f"Unknown request type: {type(req_obj)}"
-        return
+            # 兼容 main 的协议: master 用 tuple 转发 generate 请求
+            prompt, sampling_params, multimodal_params = req_obj
+            results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
 
-    def process_generate_request(self, req_meta: GenerateReqMeta):
-        prompt = req_meta.prompt
-        sampling_params = req_meta.sampling_params
-        multimodal_params = req_meta.multimodal_params
-        results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
+            async def generate_wrapper(results_generator):
+                async for _, _, _, _ in results_generator:
+                    pass
 
-        async def generate_wrapper(results_generator):
-            async for _, _, _, _ in results_generator:
-                pass
-
-        asyncio.create_task(generate_wrapper(results_generator))
-        return
-
-    def process_abort_request(self, request: AbortReq):
-        asyncio.create_task(self.abort_request(request))
+            asyncio.create_task(generate_wrapper(results_generator))
         return
 
     def alloc_req_id(self, sampling_params, is_health_req: bool = False):
@@ -371,6 +343,10 @@ class HttpServerManager:
         )
 
         try:
+            original_multimodal_params = None
+            if self.is_multinode_tp_master:
+                original_multimodal_params = copy.deepcopy(multimodal_params)
+
             if self.pd_mode.is_P_or_NORMAL():
                 await multimodal_params.verify_and_preload(request)
                 self._log_stage_timing(
@@ -466,17 +442,12 @@ class HttpServerManager:
                 "shm_req_init_done",
             )
 
-            req_status = ReqStatus(
-                group_request_id=group_request_id,
-                prompt=prompt,
-                sampling_params=sampling_params,
-                multimodal_params=multimodal_params,
-                req_objs=req_objs,
-                start_time=start_time,
-            )
+            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
 
-            await self.transfer_to_next_module_or_node(req_status.group_req_objs)
+            await self.transfer_to_next_module_or_node(
+                prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
+            )
             self._log_stage_timing(
                 group_request_id,
                 start_time,
@@ -661,50 +632,45 @@ class HttpServerManager:
 
     async def transfer_to_next_module_or_node(
         self,
-        req_obj: Optional["BaseReq"] = None,
+        prompt: str,
+        sampling_params: SamplingParams,
+        original_multimodal_params: MultimodalParams,
+        group_req_objs: Optional[GroupReqObjs] = None,
     ):
         # 多节点纯tp 运行模式下，master 节点需要将请求转发给slave节点.
-        req_to_next_node = req_obj.get_req_to_next_node()
-        self.transfer_to_next_node(req_to_next_node)
-        req_to_next_module = req_obj.get_req_to_next_module()
-        await self.transfer_to_next_module(req_to_next_module)
-        return
-
-    def transfer_to_next_node(
-        self,
-        req_to_next_node: Optional["BaseReq"] = None,
-    ):
         if self.is_multinode_tp_master:
             for sender in self.multinode_req_manager:
                 sender.send_pyobj(
-                    req_to_next_node,
+                    (prompt, sampling_params, original_multimodal_params),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
+
+        await self.transfer_to_next_module(group_req_objs)
         return
 
     async def transfer_to_next_module(
         self,
-        req_to_next_module: Optional["GenerateReqIndex"] = None,
+        group_req_objs: Optional[GroupReqObjs] = None,
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
-                self.send_to_visual.send_pyobj(req_to_next_module, protocol=pickle.HIGHEST_PROTOCOL)
+                self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if not self.args.disable_audio:
-                self.send_to_audio.send_pyobj(req_to_next_module, protocol=pickle.HIGHEST_PROTOCOL)
+                self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
 
             if self.args.enable_cpu_cache:
                 self.send_to_multi_level_kv_cache.send_pyobj(
-                    req_to_next_module,
+                    group_req_objs.to_group_req_index(),
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
                 return
 
             self.send_to_router.send_pyobj(
-                req_to_next_module,
+                group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
@@ -712,7 +678,7 @@ class HttpServerManager:
         if self.pd_mode.is_D():
             # 在 D 模式下，不需要传输真的多模态参数，因为其已经被 P 处理好了
             self.send_to_router.send_pyobj(
-                req_to_next_module,
+                group_req_objs.to_group_req_index(),
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
             return
@@ -848,7 +814,7 @@ class HttpServerManager:
             logger.warning(f"aborted group_request_id {group_req_id} not exist")
             return False
 
-        group_req_objs: GenerateReq = req_status.group_req_objs
+        group_req_objs: GroupReqObjs = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
@@ -857,14 +823,16 @@ class HttpServerManager:
     async def abort_request(self, request: AbortReq):
         request_id = request.request_id
         abort_all = request.abort_all
+        # 多节点纯 tp 运行模式下,master 需要把 abort 转发给 slave,使 slave 也清掉自己 shm 里的请求。
         if self.is_multinode_tp_master:
-            self.transfer_to_next_node(req_to_next_node=request)
+            for sender in self.multinode_req_manager:
+                sender.send_pyobj(request, protocol=pickle.HIGHEST_PROTOCOL)
         if request_id is not None and not abort_all:
             await self.abort(request_id)
         if abort_all:
             for group_req_id in list(self.req_id_to_out_inf.keys()):
                 await self.abort(group_req_id)
-        pass
+        return
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
@@ -933,16 +901,12 @@ class HttpServerManager:
 
         while True:
             try:
-                recv_obj = await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
+                await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
             except asyncio.TimeoutError:
-                recv_obj = None
+                pass
 
             try:
-                if recv_obj is None or isinstance(recv_obj, GenerateResp):
-                    await self._handle_recv_generate_request(recv_obj)
-                elif isinstance(recv_obj, GeneralModelToHttpRpcRsp):
-                    await self._handle_recv_general_model_to_http_request(recv_obj)
-
+                await self._handle_token_output()
             except BaseException as e:
                 logger.exception(str(e))
                 raise e
@@ -950,7 +914,7 @@ class HttpServerManager:
             self.recycle_event.set()
         return
 
-    async def _handle_recv_generate_request(self, recv_obj: GenerateReqMeta):
+    async def _handle_token_output(self):
         for group_req_id_ in list(self.req_id_to_out_inf.keys()):
             req_status = self.req_id_to_out_inf.get(group_req_id_, None)
             if req_status is None:
@@ -1014,13 +978,6 @@ class HttpServerManager:
                 req_status.out_token_info_list.extend(token_list)
                 req_status.event.set()
 
-    async def _handle_recv_general_model_to_http_request(self, recv_obj: GeneralModelToHttpRpcRsp):
-        assert recv_obj.func_name is not None
-        event = await self.get_event_for_func(recv_obj.func_name)
-        event.result = recv_obj
-        event.set()
-        return
-
     async def pause_generation(self):
         # 因为请求是从master node转发到slave node的
         # 所以只要master暂停了，slave自然暂停。
@@ -1040,110 +997,90 @@ class HttpServerManager:
             self.is_pause = False
             self.is_pause_cond.notify_all()
 
-    async def get_event_for_func(self, func_name: str) -> asyncio.Event:
-        if func_name not in self.async_events_per_func:
-            self.async_events_per_func[func_name] = asyncio.Event()
-        return self.async_events_per_func[func_name]
+    # -------- master router 控制面 rpyc 调用 --------
 
-    async def http_to_model_special_request(
-        self, request: GeneralHttpToModelRpcReq, timeout: int = 300
-    ) -> GeneralModelToHttpRpcRsp:
-        event = await self.get_event_for_func(request.func_name)
-        await self.transfer_to_next_module(request)
-        try:
-            await asyncio.wait_for(event.wait(), timeout=timeout)
-            ret = event.result
+    async def _get_control_rpyc_conn(self):
+        """懒初始化到 master router 的 rpyc 连接;断连时自动重连。"""
+        async with self._control_rpyc_lock:
+            if self._control_rpyc_conn is not None:
+                try:
+                    self._control_rpyc_conn.ping(timeout=2)
+                    return self._control_rpyc_conn
+                except BaseException:
+                    try:
+                        self._control_rpyc_conn.close()
+                    except BaseException:
+                        pass
+                    self._control_rpyc_conn = None
 
-        except asyncio.TimeoutError:
-            ret = GeneralModelToHttpRpcRsp(success=False, msg="wait for response timeout", func_name=request.func_name)
-        except Exception as e:
-            ret = GeneralModelToHttpRpcRsp(
-                success=False, msg="wait for response error: %s" % str(e), func_name=request.func_name
+            self._control_rpyc_conn = await asyncio.to_thread(
+                rpyc.connect,
+                "127.0.0.1",
+                self.args.control_rpyc_port,
+                config={"allow_pickle": True, "sync_request_timeout": 600},
             )
-        return ret
+            self._control_rpyc_conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            return self._control_rpyc_conn
+
+    async def _call_control_rpyc(self, method_name: str, *args) -> GeneralModelToHttpRpcRsp:
+        try:
+            conn = await self._get_control_rpyc_conn()
+            ret = await asyncio.to_thread(getattr(conn.root, method_name), *args)
+            return obtain(ret)
+        except BaseException as e:
+            logger.exception(f"control rpyc call {method_name} failed: {e}")
+            return GeneralModelToHttpRpcRsp(
+                success=False, msg=f"control rpyc call {method_name} error: {e}", func_name=method_name
+            )
 
     async def flush_cache(self, request: FlushCacheReq):
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="flush_cache", func_args=request)
-        )
+        return await self._call_control_rpyc("flush_cache", request)
 
     async def release_memory_occupation(self, request: ReleaseMemoryReq):
         assert len(self.req_id_to_out_inf) == 0, "there are still requests running, cannot release memory occupation"
-        # 暂停接受请求，除非resume
         await self.pause_generation()
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="release_memory_occupation", func_args=request.tags)
-        )
+        return await self._call_control_rpyc("release_memory_occupation", request.tags)
 
     async def resume_memory_occupation(self, request: ResumeMemoryReq):
-        ret = await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="resume_memory_occupation", func_args=request.tags)
-        )
+        ret = await self._call_control_rpyc("resume_memory_occupation", request.tags)
         if ret.success:
             await self.continue_generation()
         return ret
 
     async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="init_weights_update_group", func_args=request)
-        )
+        return await self._call_control_rpyc("init_weights_update_group", request)
 
     async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="destroy_weights_update_group", func_args=request)
-        )
+        return await self._call_control_rpyc("destroy_weights_update_group", request)
 
     async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
-
         if request.abort_all_requests:
             await self.abort_request(AbortReq(abort_all=True))
-
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
+        return await self._call_control_rpyc("update_weights_from_distributed", request)
 
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="update_weights_from_distributed", func_args=request)
-        )
-
-    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> Tuple[bool, str]:
+    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
         if request.abort_all_requests:
             await self.abort_request(AbortReq(abort_all=True))
-
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
+        return await self._call_control_rpyc("update_weights_from_tensor", request)
 
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="update_weights_from_tensor", func_args=request)
-        )
-
-    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> Tuple[bool, str]:
+    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
         if request.abort_all_requests:
             await self.abort_request(AbortReq(abort_all=True))
-
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
-
-        return await self.http_to_model_special_request(
-            GeneralHttpToModelRpcReq(func_name="update_weights_from_ipc", func_args=request)
-        )
+        return await self._call_control_rpyc("update_weights_from_ipc", request)
 
 
 class ReqStatus:
-    def __init__(
-        self,
-        group_request_id: int,
-        prompt: str,
-        sampling_params: SamplingParams,
-        multimodal_params: MultimodalParams,
-        req_objs: List[Req],
-        start_time,
-    ) -> None:
+    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time) -> None:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
-        self.group_req_objs = GenerateReq(
+        self.group_req_objs = GroupReqObjs(
             group_req_id=group_request_id,
-            prompt=prompt,
-            sampling_params=sampling_params,
             multimodal_params=multimodal_params,
             shm_req_objs=req_objs,
             time_mark=start_time,

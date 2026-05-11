@@ -20,7 +20,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.server.io_struct import BaseReq, GenerateReqIndex
+from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from rpyc.utils.classic import obtain
 
 
@@ -91,7 +91,7 @@ class VisualManager:
         await asyncio.gather(*init_model_ret)
         return
 
-    def get_need_infer_images(self, group_req_indexes: GenerateReqIndex) -> List[ImageItem]:
+    def get_need_infer_images(self, group_req_indexes: GroupReqIndexes) -> List[ImageItem]:
         shm_req = self.shm_req_manager.get_req_obj_by_index(group_req_indexes.shm_req_indexes[0])
         is_aborted = shm_req.is_aborted
         disable_prompt_cache = shm_req.sample_params.disable_prompt_cache
@@ -121,7 +121,7 @@ class VisualManager:
 
         return images_need_infer
 
-    async def handle_group_indexes(self, group_req_indexes: GenerateReqIndex):
+    async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
         images_need_infer = self.get_need_infer_images(group_req_indexes)
 
         if len(images_need_infer) == 0:
@@ -174,16 +174,13 @@ class VisualManager:
     async def loop_for_netio_req(self):
         try:
             while True:
-                recv_req: BaseReq = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
-                if isinstance(recv_req, GenerateReqIndex):
+                recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
+                if isinstance(recv_req, GroupReqIndexes):
                     logger.info(
                         f"visual recv req id {recv_req.group_req_id} "
                         f"img count {len(recv_req.multimodal_params.images)}"
                     )
                     asyncio.create_task(self.handle_group_indexes(group_req_indexes=recv_req))
-                elif isinstance(recv_req, BaseReq):
-                    # RL 等控制类 BaseReq 透传给下一模块，最终由 router 处理
-                    self.send_to_next_module.send_pyobj(recv_req, protocol=pickle.HIGHEST_PROTOCOL)
                 else:
                     assert False, f"Error Req Inf {recv_req}"
         except Exception as e:
