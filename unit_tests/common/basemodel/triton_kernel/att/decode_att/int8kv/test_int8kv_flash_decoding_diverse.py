@@ -1,7 +1,6 @@
 import pytest
 
 import torch
-from lightllm.utils.light_utils import light_ops
 
 
 def alloc_tensor_func(shape, dtype, device):
@@ -41,17 +40,17 @@ class MockInferState:
 # @pytest.mark.parametrize("shared_seq_len", [512])
 @pytest.mark.parametrize("shared_seq_len", [0, 77, 256, 311, 512, 550])
 @pytest.mark.parametrize("batch_size", list(range(6, 121, 6)))
-def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_len, batch_size):
+def test_token_decode_attention_flash_decoding_diverse_matches_normal_decode(shared_seq_len, batch_size):
     """
-    测试 int8kv_flash_decoding_diverse 的 token_decode_attention_flash_decoding
-    与 ppl_int8kv_flash_decoding (baseline) 的对比。
+    diverse 与 normal 均为仓库内 Triton 实现，应数值一致（无外部 CUDA extension）。
+    diverse：int8kv_flash_decoding_diverse；对照：int8kv/normal token_decode_attention_flash_decoding。
     """
 
     from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
         token_decode_attention_flash_decoding as diverse_attention,
     )
-    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.ppl_int8kv_flash_decoding import (
-        token_decode_attention_flash_decoding as baseline_attention,
+    from lightllm.common.basemodel.triton_kernel.att.decode_att.int8kv.normal import (
+        token_decode_attention_flash_decoding as normal_decode,
     )
 
     num_heads = 32
@@ -89,7 +88,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
     b_mark_shared_group[mark_shared_group_size - 1 :: mark_shared_group_size] = mark_shared_group_size
 
-    # 创建 baseline 的 infer_state (不需要 b_shared_seq_len)
+    # 标准 int8 decode（单路径 Triton）
     baseline_infer_state = MockInferState(
         batch_size=batch_size,
         max_kv_seq_len=max_len_in_batch,
@@ -98,7 +97,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
         b_seq_len=b_seq_len,
     )
 
-    # 创建 diverse 的 infer_state
+    # diverse：多流 + 共享前缀（Triton）
     diverse_infer_state = MockInferState(
         batch_size=batch_size,
         max_kv_seq_len=max_len_in_batch,
@@ -110,7 +109,7 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     )
 
     # 运行 baseline
-    baseline_out = baseline_attention(
+    normal_out = normal_decode(
         q=q.clone(),
         infer_state=baseline_infer_state,
         cache_k=cache_k,
@@ -131,11 +130,10 @@ def test_token_decode_attention_flash_decoding_diverse_vs_baseline(shared_seq_le
     )
 
     print(f"\nshared_seq_len={shared_seq_len}\nbatch_size={batch_size}")
-    print(f"baseline_out: {baseline_out[0, 0, :4]}")
+    print(f"normal_out: {normal_out[0, 0, :4]}")
     print(f"diverse_out: {diverse_out[0, 0, :4]}")
-    print(f"max diff: {(baseline_out - diverse_out).abs().max()}")
+    print(f"max diff: {(normal_out - diverse_out).abs().max()}")
 
-    # 与 baseline 对比
     assert torch.allclose(
-        baseline_out, diverse_out, atol=1e-2, rtol=1e-2
-    ), f"Diverse attention output should match baseline for shared_seq_len={shared_seq_len}"
+        normal_out, diverse_out, atol=1e-2, rtol=1e-2
+    ), f"diverse vs normal decode mismatch for shared_seq_len={shared_seq_len}"

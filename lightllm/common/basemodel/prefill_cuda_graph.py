@@ -8,7 +8,7 @@ from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
+from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
 from .cuda_graph import CudaGraph
@@ -72,15 +72,13 @@ class PrefillCudaGraph:
         self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        dist_group: CustomProcessGroup = infer_state.dist_group
-        with lightllm_capture_graph(dist_group):
-            infer_state.mem_pool = self.mempool
-            infer_state.prefill_cuda_graph_create_graph_obj()
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
-            graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
-            graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        infer_state.mem_pool = self.mempool
+        infer_state.prefill_cuda_graph_create_graph_obj()
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+        graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
+        graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
+        graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
 
         graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
         graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]

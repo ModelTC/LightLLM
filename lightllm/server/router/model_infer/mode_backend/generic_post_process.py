@@ -207,8 +207,12 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     mask_eos_reqs_cpu = g_pin_mem_manager.gen_from_list(key="mask_eos_reqs", data=mask_eos_reqs, dtype=torch.bool)
 
     if has_invalid_token_ids:
-        invalid_token_ids_cpu = torch.tensor(invalid_token_ids, dtype=torch.int32, device="cpu", pin_memory=True)
-        cu_invalid_token_num_cpu = torch.tensor(cu_invalid_token_num, dtype=torch.int32, device="cpu", pin_memory=True)
+        invalid_token_ids_cpu = g_pin_mem_manager.gen_from_list(
+            key="invalid_token_ids", data=invalid_token_ids, dtype=torch.int32
+        )
+        cu_invalid_token_num_cpu = g_pin_mem_manager.gen_from_list(
+            key="cu_invalid_token_num", data=cu_invalid_token_num, dtype=torch.int32
+        )
 
     return (
         req_idxes_cpu.cuda(non_blocking=True),

@@ -14,6 +14,138 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
+    """
+    Derive `max_req_total_len` from model config.json.
+
+    Keep the derivation aligned with LightLLM's RoPE initialization logic:
+    - If `max_sequence_length` exists: use it directly.
+    - Otherwise: use `max_position_embeddings * rope_scaling.factor` (factor defaults to 1.0).
+    """
+
+    try:
+        cfg = get_config_json(model_dir)
+    except Exception as e:
+        logger.warning(f"failed to load config.json for max_req_total_len derive: {e}")
+        return None
+
+    candidates = [cfg]
+
+    llm_cfg = cfg.get("llm_config")
+    if isinstance(llm_cfg, dict):
+        candidates.append(llm_cfg)
+
+    text_cfg = cfg.get("text_config")
+    if isinstance(text_cfg, dict):
+        candidates.append(text_cfg)
+
+    thinker_cfg = cfg.get("thinker_config")
+    if isinstance(thinker_cfg, dict):
+        thinker_text_cfg = thinker_cfg.get("text_config")
+        if isinstance(thinker_text_cfg, dict):
+            candidates.append(thinker_text_cfg)
+
+    def _find_key(key: str):
+        for c in candidates:
+            if isinstance(c, dict) and key in c and c[key] is not None:
+                return c.get(key)
+        return None
+
+    def _find_rope_scaling() -> dict:
+        rope_scaling = _find_key("rope_scaling")
+        if rope_scaling is None:
+            return {}
+        if isinstance(rope_scaling, dict):
+            return rope_scaling
+        return {}
+
+    max_sequence_length = _find_key("max_sequence_length")
+    if max_sequence_length is not None:
+        try:
+            val = int(max_sequence_length)
+            if val > 0:
+                return val
+        except Exception:
+            return None
+
+    max_position_embeddings = _find_key("max_position_embeddings")
+    if max_position_embeddings is None:
+        return None
+
+    rope_scaling = _find_rope_scaling()
+    rope_type = None
+    for k in ("rope_type", "type", "__type"):
+        v = rope_scaling.get(k)
+        if isinstance(v, str) and v.strip():
+            rope_type = v.strip().lower()
+            break
+
+    # Align with `lightllm/models/llama/model.py` RoPE initialization:
+    # - `yarn/dynamic/su/llama3`: do NOT multiply by `rope_scaling.factor` for max length.
+    # - `default/mrope` (and unknown): multiply by factor when present.
+    no_factor_types = {"yarn", "dynamic", "su", "llama3"}
+    multiply_factor = True
+    if rope_type is not None and rope_type in no_factor_types:
+        multiply_factor = False
+
+    try:
+        factor_raw = rope_scaling.get("factor", 1.0)
+        factor = 1.0 if factor_raw is None else float(factor_raw)
+    except Exception:
+        factor = 1.0
+
+    try:
+        max_pos = float(max_position_embeddings)
+        val = int(max_pos * factor) if multiply_factor else int(max_pos)
+        if val > 0:
+            logger.info(
+                "auto set max_req_total_len=%s (rope_type=%s,max_position_embeddings=%s,factor=%s, multiply_factor=%s)",
+                val,
+                rope_type,
+                max_position_embeddings,
+                factor,
+                multiply_factor,
+            )
+            return val
+    except Exception:
+        return None
+
+    return None
+
+
+def auto_set_max_req_total_len(args) -> None:
+    """
+    Ensure `args.max_req_total_len` is an int.
+
+    If the user provides a value, keep it.
+    If it's None, auto-derive from config.json; fallback to 16384.
+    """
+
+    default_fallback = 16384
+    if args.max_req_total_len is not None:
+        return
+
+    model_dir = args.model_dir
+    if not model_dir:
+        logger.warning("model_dir is empty; fallback max_req_total_len=16384")
+        args.max_req_total_len = default_fallback
+        return
+
+    try:
+        derived = _derive_max_req_total_len_from_model_config(model_dir)
+    except Exception as e:
+        logger.warning(f"failed to derive max_req_total_len from model config: {e}")
+        derived = None
+
+    if derived is None:
+        logger.warning(f"cannot derive max_req_total_len from model config; fallback to {default_fallback}")
+        args.max_req_total_len = default_fallback
+        return
+
+    args.max_req_total_len = int(derived)
+    logger.info(f"auto derived max_req_total_len={args.max_req_total_len} from model config")
+
+
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
     for key in key_name:

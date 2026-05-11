@@ -1,4 +1,5 @@
 from lightllm.utils.log_utils import init_logger
+from typing import Optional
 
 logger = init_logger(__name__)
 
@@ -21,6 +22,20 @@ class ServerBusyError(Exception):
     def __str__(self):
         """String representation of the error"""
         return f"{self.message} (Status code: {self.status_code})"
+
+
+class ClientDisconnected(Exception):
+    """Raised when the client closed the HTTP connection mid-request, as
+    detected by ``request.is_disconnected()``. This is an expected control-flow
+    signal — handlers should clean up quietly without logging a stack trace.
+    Internal-module aborts (e.g. visual proxy failures) must NOT raise this —
+    they should surface as real server errors."""
+
+    def __init__(self, group_request_id: Optional[int] = None, reason: str = "client disconnected"):
+        prefix = f"req_id {group_request_id} " if group_request_id is not None else ""
+        super().__init__(f"{prefix}{reason}")
+        self.group_request_id = group_request_id
+        self.reason = reason
 
 
 class NixlPrefillNodeStopGenToken(Exception):

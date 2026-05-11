@@ -6,6 +6,7 @@ from PIL import Image
 from io import BytesIO
 from fastapi import Request
 from functools import lru_cache
+from lightllm.utils.error_utils import ClientDisconnected
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -53,7 +54,7 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
         async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
             if request is not None and await request.is_disconnected():
                 await response.aclose()
-                raise Exception("Request disconnected. User cancelled download.")
+                raise ClientDisconnected(reason=f"client disconnected during download of {url}")
             ans_bytes.append(chunk)
             # 接收的数据不能大于128M
             if len(ans_bytes) > 128:
