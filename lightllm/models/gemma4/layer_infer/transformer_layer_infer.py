@@ -195,12 +195,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
     def _att_control(self):
-        # FA3 consumes window_size per-call; the triton prefill/decode kernels
-        # mask out-of-window positions when SLIDING_WINDOW > 0 (see
-        # context_flashattention_nopad.py / gqa_flash_decoding_stage1.py).
+        # `sliding_window_` is the total window size including self.
         # `_gemma4_use_swa` is set by Gemma4TpPartModel._init_att_backend.
         if self.is_sliding and self.sliding_window_ > 0 and self.network_config_.get("_gemma4_use_swa", False):
-            w = self.sliding_window_ - 1
+            w = self.sliding_window_
             return AttControl(use_sliding_window=True, sliding_window=(w, w))
         return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
 
@@ -240,7 +238,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             and getattr(infer_state, "b_image_token_end", None) is not None
         ):
             o_tensor = self.alloc_tensor(_q.shape, q.dtype)
-            sw = self.sliding_window_ if self.sliding_window_ > 0 else 0
+            sw = self.sliding_window_ if self.sliding_window_ > 0 else -1
             context_attention_fwd_gemma4_mm(
                 _q,
                 _k,

@@ -16,10 +16,6 @@ class Gemma4InferStateInfo(InferStateInfo):
         # E-series only: per-layer embeddings (PLE), shape (N, num_layers, hidden_size_per_layer_input).
         # Computed once in Gemma4PreLayerInfer; sliced per layer in the transformer block.
         self.per_layer_embeds = None
-        # Per-Q image-bidi end markers, shape (sum_new_tokens,) int32.
-        # 0 for non-image Q tokens; image-span end (in absolute request position)
-        # for tokens inside an image span. Consumed by
-        # `context_attention_fwd_gemma4_mm` on sliding-window layers.
         self.b_image_token_end = None
 
     def init_some_extra_state(self, model):
