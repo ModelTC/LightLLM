@@ -341,6 +341,7 @@ class MemoryManager:
 
         self.size = new_size
         self.allocator.resize(new_size)
+        self.HOLD_TOKEN_MEMINDEX = self.size
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
         return
