@@ -106,14 +106,10 @@ class Autotuner:
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
-        self.cache_dir = os.path.join(
-            Path(__file__).parent,
-            "autotune_kernel_configs",
-            get_triton_version(),
-            get_current_device_name(),
-            self.kernel_name,
-        )
-        os.makedirs(self.cache_dir, exist_ok=True)
+        # cache_dir 依赖 get_current_device_name(),后者要求 torch.cuda.is_available()。
+        # 这里 lazy 化,避免 CPU-only 的进程(例如 Ray driver / verl rollout replica
+        # 入口)在 import 时就触发 TypeError。
+        self._cache_dir: Optional[str] = None
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -208,6 +204,25 @@ class Autotuner:
             self.fast_match_configs[static_key][run_key] = closest_config
 
         return self.fn(*args, **kwargs)
+
+    @property
+    def cache_dir(self) -> str:
+        if self._cache_dir is None:
+            device_name = get_current_device_name()
+            if device_name is None:
+                raise RuntimeError(
+                    f"Autotuner for kernel {self.kernel_name} requires a visible CUDA/MUSA device "
+                    f"to resolve its cache directory, but torch.cuda.is_available() is False."
+                )
+            self._cache_dir = os.path.join(
+                Path(__file__).parent,
+                "autotune_kernel_configs",
+                get_triton_version(),
+                device_name,
+                self.kernel_name,
+            )
+            os.makedirs(self._cache_dir, exist_ok=True)
+        return self._cache_dir
 
     def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:

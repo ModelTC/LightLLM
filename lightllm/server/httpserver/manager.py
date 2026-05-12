@@ -3,14 +3,15 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
 import socket
+import rpyc
 import time
 import copy
 import hashlib
 import datetime
 import pickle
 from frozendict import frozendict
+from .control_rpyc_client import ControlRpycClient
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
@@ -29,8 +30,21 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.common.basemodel.routing_manager import get_routing_config_shm
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
+from lightllm.server.io_struct import (
+    AbortReq,
+    FlushCacheReq,
+    ReleaseMemoryReq,
+    ResumeMemoryReq,
+    InitWeightsUpdateGroupReq,
+    DestroyWeightsUpdateGroupReq,
+    UpdateWeightsFromDistributedReq,
+    UpdateWeightsFromTensorReq,
+    UpdateWeightsFromIPCReq,
+    GeneralModelToHttpRpcRsp,
+)
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -74,7 +88,7 @@ class HttpServerManager:
                 self.multinode_req_manager = context.socket(zmq.PULL)
                 self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
                 logger.info(
-                    f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
+                    f"HttpServerManager listening for master node requests on *:{args.multinode_httpmanager_port}"
                 )
 
         self.enable_multimodal = args.enable_multimodal
@@ -122,6 +136,15 @@ class HttpServerManager:
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        # Cache routing config for MoE expert routing data extraction
+        self._routing_shm = get_routing_config_shm() if args.enable_return_routed_experts else None
+
+        self.is_pause = False
+        self.is_pause_cond = asyncio.Condition()
+
+        # 控制面 rpyc client: 到 master router 的 rpyc service, 懒初始化 + 自动重连
+        self._control_rpyc_client = ControlRpycClient(host="127.0.0.1", port=args.control_rpyc_port)
 
         # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
         # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
@@ -255,11 +278,12 @@ class HttpServerManager:
     async def loop_for_request(self):
         assert self.args.node_rank > 0
         while True:
-            (
-                prompt,
-                sampling_params,
-                multimodal_params,
-            ) = await self.multinode_req_manager.recv_pyobj()
+            req_obj = await self.multinode_req_manager.recv_pyobj()
+            if isinstance(req_obj, AbortReq):
+                asyncio.create_task(self.abort_request(req_obj))
+                continue
+            # 兼容 main 的协议: master 用 tuple 转发 generate 请求
+            prompt, sampling_params, multimodal_params = req_obj
             results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
 
             async def generate_wrapper(results_generator):
@@ -331,8 +355,20 @@ class HttpServerManager:
                     "verify_and_preload_done",
                 )
 
+            # Debug logging for multimodal requests
+            if multimodal_params and multimodal_params.images:
+                logger.debug(
+                    f"[MULTIMODAL_DEBUG] req_id={group_request_id}, "
+                    f"num_images={len(multimodal_params.images)}, "
+                    f"max_new_tokens={sampling_params.max_new_tokens}"
+                )
+
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
+
+            async with self.is_pause_cond:
+                await self.is_pause_cond.wait_for(lambda: not self.is_pause)
+
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             self._log_stage_timing(
@@ -404,12 +440,6 @@ class HttpServerManager:
                 group_request_id,
                 start_time,
                 "shm_req_init_done",
-            )
-
-            logger.debug(
-                f"alloc shm_req for req_id {group_request_id}, "
-                f"shm_req num: {sampling_params.n} details (req_id, index_in_shm_mem):  "
-                f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
             )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
@@ -537,7 +567,21 @@ class HttpServerManager:
 
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
-            if not self.enable_multimodal and not self.pd_mode.is_D():
+            if self.enable_multimodal:
+                assert (
+                    len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+                ), "too many multimodal items!"
+                if multimodal_params.audios:
+                    assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
+                await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                prompt_ids = self.tokenizer.encode(
+                    prompt,
+                    multimodal_params,
+                    add_special_tokens=sampling_params.add_special_tokens,
+                    already_tokenized=True,
+                )
+                return prompt_ids
+            elif not self.enable_multimodal and not self.pd_mode.is_D():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
@@ -776,6 +820,20 @@ class HttpServerManager:
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
 
+    async def abort_request(self, request: AbortReq):
+        request_id = request.request_id
+        abort_all = request.abort_all
+        # 多节点纯 tp 运行模式下,master 需要把 abort 转发给 slave,使 slave 也清掉自己 shm 里的请求。
+        if self.is_multinode_tp_master:
+            for sender in self.multinode_req_manager:
+                sender.send_pyobj(request, protocol=pickle.HIGHEST_PROTOCOL)
+        if request_id is not None and not abort_all:
+            await self.abort(request_id)
+        if abort_all:
+            for group_req_id in list(self.req_id_to_out_inf.keys()):
+                await self.abort(group_req_id)
+        return
+
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
 
@@ -798,6 +856,11 @@ class HttpServerManager:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
+                    if hasattr(req, "shm_routing_data") and req.shm_routing_data is not None:
+                        try:
+                            req.close_routing_data_shm_array()
+                        except Exception as e:
+                            logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
                     _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
@@ -843,66 +906,139 @@ class HttpServerManager:
                 pass
 
             try:
-                for group_req_id_ in list(self.req_id_to_out_inf.keys()):
-                    req_status = self.req_id_to_out_inf.get(group_req_id_, None)
-                    if req_status is None:
-                        continue
-
-                    token_list = []
-                    for req in req_status.group_req_objs.shm_req_objs:
-                        req_id = req.request_id
-                        read_token_count = 1
-                        if req.out_tokens_queue.is_full():
-                            read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
-
-                        for _ in range(read_token_count):
-                            if not req.out_tokens_queue.is_empty():
-
-                                text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                                req.cumlogprob += float(req.shm_logprobs.arr[src_index])
-                                metadata = {
-                                    "id": int(req.shm_prompt_ids.arr[src_index]),
-                                    "logprob": float(req.shm_logprobs.arr[src_index]),
-                                    "cumlogprob": float(req.cumlogprob) / count_output_tokens,
-                                    "special": special,
-                                    "count_output_tokens": count_output_tokens,
-                                    "prompt_cache_len": req.prompt_cache_len,
-                                    "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
-                                    "disk_prompt_cache_len": req.disk_prompt_cache_len,
-                                    "mtp_accepted_token_num": req.mtp_accepted_token_num,
-                                }
-                                if self.args.return_all_prompt_logprobs:
-                                    metadata.update(req.get_all_prompt_metadata())
-                                if self.args.use_reward_model:
-                                    metadata["score"] = float(req.reward_score)
-
-                                req.out_tokens_queue.pop_no_ret()
-
-                                finished_token_index = (
-                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
-                                )
-
-                                if finished_token_index != src_index:
-                                    token_list.append((req_id, text, metadata, FinishStatus()))
-                                else:
-                                    if req.stop_str_matched:
-                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
-                                    else:
-                                        finish_status = FinishStatus(req.finish_status.status)
-
-                                    token_list.append((req_id, text, metadata, finish_status))
-                            else:
-                                break
-
-                    async with req_status.lock:
-                        req_status.out_token_info_list.extend(token_list)
-                        req_status.event.set()
+                await self._handle_token_output()
             except BaseException as e:
                 logger.exception(str(e))
                 raise e
 
             self.recycle_event.set()
         return
+
+    async def _handle_token_output(self):
+        for group_req_id_ in list(self.req_id_to_out_inf.keys()):
+            req_status = self.req_id_to_out_inf.get(group_req_id_, None)
+            if req_status is None:
+                continue
+
+            token_list = []
+            for req in req_status.group_req_objs.shm_req_objs:
+                req_id = req.request_id
+                read_token_count = 1
+                if req.out_tokens_queue.is_full():
+                    read_token_count = LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+
+                for _ in range(read_token_count):
+                    if not req.out_tokens_queue.is_empty():
+
+                        text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
+                        req.cumlogprob += float(req.shm_logprobs.arr[src_index])
+                        metadata = {
+                            "id": int(req.shm_prompt_ids.arr[src_index]),
+                            "logprob": float(req.shm_logprobs.arr[src_index]),
+                            "cumlogprob": float(req.cumlogprob) / count_output_tokens,
+                            "special": special,
+                            "count_output_tokens": count_output_tokens,
+                            "prompt_cache_len": req.prompt_cache_len,
+                            "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
+                            "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                        }
+                        if self.args.return_all_prompt_logprobs:
+                            metadata.update(req.get_all_prompt_metadata())
+                        if self.args.use_reward_model:
+                            metadata["score"] = float(req.reward_score)
+
+                        req.out_tokens_queue.pop_no_ret()
+
+                        finished_token_index = (
+                            req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
+                        )
+
+                        if finished_token_index != src_index:
+                            token_list.append((req_id, text, metadata, FinishStatus()))
+                        else:
+                            if req.stop_str_matched:
+                                finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
+                            else:
+                                finish_status = FinishStatus(req.finish_status.status)
+
+                            if self._routing_shm is not None:
+                                _num_moe = int(self._routing_shm.arr[0])
+                                _topk = int(self._routing_shm.arr[1])
+                                _dtype_id = int(self._routing_shm.arr[2])
+                                if _num_moe > 0:
+                                    routing_meta = req.get_routing_metadata(_num_moe, _topk, dtype_id=_dtype_id)
+                                    if routing_meta is not None:
+                                        metadata["routed_experts"] = routing_meta
+
+                            token_list.append((req_id, text, metadata, finish_status))
+                    else:
+                        break
+
+            async with req_status.lock:
+                req_status.out_token_info_list.extend(token_list)
+                req_status.event.set()
+
+    async def pause_generation(self):
+        # 因为请求是从master node转发到slave node的
+        # 所以只要master暂停了，slave自然暂停。
+        if self.is_pause:
+            return
+        async with self.is_pause_cond:
+            self.is_pause = True
+            while True:
+                await self.abort_request(AbortReq(request_id=None, abort_all=True))
+                running_req_num = len(list(self.req_id_to_out_inf.keys()))
+                if running_req_num == 0:
+                    break
+                await asyncio.sleep(1.0)
+
+    async def continue_generation(self):
+        async with self.is_pause_cond:
+            self.is_pause = False
+            self.is_pause_cond.notify_all()
+
+    # -------- master router 控制面 rpyc 调用 --------
+
+    async def flush_cache(self, request: FlushCacheReq):
+        return await self._control_rpyc_client.call("flush_cache", request)
+
+    async def release_memory_occupation(self, request: ReleaseMemoryReq):
+        assert len(self.req_id_to_out_inf) == 0, "there are still requests running, cannot release memory occupation"
+        await self.pause_generation()
+        return await self._control_rpyc_client.call("release_memory_occupation", request.tags)
+
+    async def resume_memory_occupation(self, request: ResumeMemoryReq):
+        ret = await self._control_rpyc_client.call("resume_memory_occupation", request.tags)
+        if ret.success:
+            await self.continue_generation()
+        return ret
+
+    async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
+        return await self._control_rpyc_client.call("init_weights_update_group", request)
+
+    async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
+        return await self._control_rpyc_client.call("destroy_weights_update_group", request)
+
+    async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
+        if request.abort_all_requests:
+            await self.abort_request(AbortReq(abort_all=True))
+        if request.flush_cache:
+            await self.flush_cache(FlushCacheReq())
+        return await self._control_rpyc_client.call("update_weights_from_distributed", request)
+
+    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
+        if request.abort_all_requests:
+            await self.abort_request(AbortReq(abort_all=True))
+        if request.flush_cache:
+            await self.flush_cache(FlushCacheReq())
+        return await self._control_rpyc_client.call("update_weights_from_tensor", request)
+
+    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
+        if request.abort_all_requests:
+            await self.abort_request(AbortReq(abort_all=True))
+        if request.flush_cache:
+            await self.flush_cache(FlushCacheReq())
+        return await self._control_rpyc_client.call("update_weights_from_ipc", request)
 
 
 class ReqStatus:

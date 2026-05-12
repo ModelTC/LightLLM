@@ -242,6 +242,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         # == 0 时，说明不存在融合共享专家，共享专家单独加载和进行推理。
         if self.num_fused_shared_experts == 0:
             self._load_mlp(f"model.layers.{self.layer_num_}.mlp.shared_experts", is_shared_experts=True)
+        first_moe = self.network_config_["first_k_dense_replace"]
+        freq = self.network_config_.get("moe_layer_freq", 1)
+        moe_layer_index = (self.layer_num_ - first_moe) // freq
         self.experts = FusedMoeWeight(
             gate_proj_name="gate_proj",
             down_proj_name="down_proj",
@@ -256,6 +259,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             num_fused_shared_experts=self.num_fused_shared_experts,
             layer_num=self.layer_num_,
             network_config=self.network_config_,
+            moe_layer_index=moe_layer_index,
         )
 
     def _init_ffn(self):

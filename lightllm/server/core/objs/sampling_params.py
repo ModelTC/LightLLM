@@ -313,6 +313,8 @@ class SamplingParams(ctypes.Structure):
         ("ignore_eos", ctypes.c_bool),
         # the max number of image patches to be used in the internvl model, for the test
         ("image_max_patch_num", ctypes.c_int),
+        ("min_pixels", ctypes.c_int),
+        ("max_pixels", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
@@ -356,6 +358,9 @@ class SamplingParams(ctypes.Structure):
 
     def init(self, tokenizer, **kwargs):
         super().__init__()
+        # 移除kwargs中为null的参数，避免覆盖默认值
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
         self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
@@ -437,15 +442,18 @@ class SamplingParams(ctypes.Structure):
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            if cls._repetition_penalty is None:
-                cls._repetition_penalty = 1.0
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            def _cfg(key, default):
+                v = generation_cfg.get(key)
+                return v if v is not None else default
+
+            cls._do_sample = _cfg("do_sample", False)
+            cls._presence_penalty = _cfg("presence_penalty", 0.0)
+            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
+            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
+            cls._temperature = _cfg("temperature", 1.0)
+            cls._top_p = _cfg("top_p", 1.0)
+            cls._top_k = _cfg("top_k", -1)
         except:
             pass
 
@@ -512,6 +520,8 @@ class SamplingParams(ctypes.Structure):
             "image_max_patch_num": self.image_max_patch_num,
             "max_new_tokens": self.max_new_tokens,
             "min_new_tokens": self.min_new_tokens,
+            "min_pixels": self.min_pixels,
+            "max_pixels": self.max_pixels,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
             "best_of": self.best_of,

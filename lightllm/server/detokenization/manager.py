@@ -6,7 +6,6 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
 import inspect
 from lightllm.server.core.objs import ShmReqManager, StartArgs
-from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from typing import Union, Dict, List
 from .decode import decode_token
@@ -17,6 +16,7 @@ import pickle
 import time
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.core.objs.io_objs import GroupReqIndexes
 
 logger = init_logger(__name__)
 
@@ -75,7 +75,6 @@ class DeTokenizationManager:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
                         recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        assert isinstance(recv_obj, GroupReqIndexes)
                         self._add_new_group_req_index(recv_obj=recv_obj)
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调

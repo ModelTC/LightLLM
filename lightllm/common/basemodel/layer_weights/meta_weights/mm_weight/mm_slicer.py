@@ -47,17 +47,17 @@ class SliceMixinTpl(SliceMixinBase):
 
 
 # 默认weight 的shape是 outxin，这也是目前最通用的约定。
-# 所以row-wise是沿着dim=0进行切分，col-wise是沿着dim=1进行切分。
+# 这里约定row-wise沿着倒数第二维切分，col-wise沿着第一维切分。
 class RowSliceMixin(SliceMixinTpl):
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1):
         super().__init__(tp_rank, tp_world_size, repeat_times)
 
     def _slice_weight(self, weight: torch.Tensor) -> torch.Tensor:
         assert (
-            weight.shape[0] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight.shape[0] * self.repeat_times_} % {self.tp_world_size_}"
-        start, end = self._get_slice_start_end(weight.shape[0])
-        return weight[start:end, :]
+            weight.shape[-2] * self.repeat_times_ % self.tp_world_size_ == 0
+        ), f"tp slice error {weight.shape[-2] * self.repeat_times_} % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight.shape[-2])
+        return weight[..., start:end, :]
 
     def _slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         assert (
@@ -75,17 +75,17 @@ class QuantizedRowSliceMixin(RowSliceMixin):
 
     def _slice_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
         assert (
-            weight_scale.shape[0] % self.tp_world_size_ == 0
-        ), f"tp slice error {weight_scale.shape[0]} % {self.tp_world_size_}"
-        start, end = self._get_slice_start_end(weight_scale.shape[0])
-        return weight_scale[start:end]
+            weight_scale.shape[-2] % self.tp_world_size_ == 0
+        ), f"tp slice error {weight_scale.shape[-2]} % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight_scale.shape[-2])
+        return weight_scale[..., start:end, :]
 
     def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
         assert (
-            weight_zero_point.shape[0] % self.tp_world_size_ == 0
-        ), f"tp slice error {weight_zero_point.shape[0]} % {self.tp_world_size_}"
-        start, end = self._get_slice_start_end(weight_zero_point.shape[0])
-        return weight_zero_point[start:end]
+            weight_zero_point.shape[-2] % self.tp_world_size_ == 0
+        ), f"tp slice error {weight_zero_point.shape[-2]} % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight_zero_point.shape[-2])
+        return weight_zero_point[..., start:end, :]
 
 
 class ColSliceMixin(SliceMixinTpl):
@@ -94,10 +94,10 @@ class ColSliceMixin(SliceMixinTpl):
 
     def _slice_weight(self, weight: torch.Tensor) -> torch.Tensor:
         assert (
-            weight.shape[1] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight.shape[1] * self.repeat_times_ } % {self.tp_world_size_}"
-        start, end = self._get_slice_start_end(weight.shape[1])
-        return weight[:, start:end]
+            weight.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
+        ), f"tp slice error {weight.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight.shape[-1])
+        return weight[..., start:end]
 
     def _slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         return bias / self.tp_world_size_ * self.repeat_times_
@@ -110,16 +110,16 @@ class QuantizedColSliceMixin(ColSliceMixin):
     def _slice_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
         assert (
             weight_scale.shape[1] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight_scale.shape[1] * self.repeat_times_ } % {self.tp_world_size_}"
-        start, end = self._get_slice_start_end(weight_scale.shape[1])
-        return weight_scale[:, start:end]
+        ), f"tp slice error {weight_scale.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight_scale.shape[-1])
+        return weight_scale[..., start:end]
 
     def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
         assert (
-            weight_zero_point.shape[1] * self.repeat_times_ % self.tp_world_size_ == 0
-        ), f"tp slice error {weight_zero_point.shape[1] * self.repeat_times_ } % {self.tp_world_size_}"
-        start, end = self._get_slice_start_end(weight_zero_point.shape[1])
-        return weight_zero_point[:, start:end]
+            weight_zero_point.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
+        ), f"tp slice error {weight_zero_point.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight_zero_point.shape[-1])
+        return weight_zero_point[..., start:end]
 
 
 # awq 的量化权重是inxout存储格式，需要定制实现。

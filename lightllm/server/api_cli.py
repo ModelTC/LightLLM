@@ -1,8 +1,7 @@
 import argparse
 
 
-def make_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--run_mode",
@@ -60,6 +59,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="p d mode, decode node used for kv move manager rpyc server port",
+    )
+    parser.add_argument(
+        "--control_rpyc_port",
+        type=int,
+        default=None,
+        help=(
+            "rpyc port on master router for control-plane ops "
+            "(flush_cache, update_weights, etc.); auto-allocated if unset"
+        ),
     )
     parser.add_argument(
         "--select_p_d_node_strategy",
@@ -262,6 +270,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--nccl_port", type=int, default=None, help="the nccl_port to build a distributed environment for PyTorch"
+    )
+    parser.add_argument(
+        "--lightllm_instance_id",
+        type=int,
+        default=0,
+        help="Instance ID (0~7) for multi-instance port isolation. Each ID maps to a dedicated port range.",
     )
     parser.add_argument(
         "--use_config_server_to_init_nccl",
@@ -748,6 +762,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
     parser.add_argument(
+        "--enable_torch_memory_saver",
+        action="store_true",
+        help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",
+    )
+    parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
+    parser.add_argument(
         "--disk_cache_dir",
         type=str,
         default=None,
@@ -819,5 +839,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Whether to enable triton implementation for the op.
         If the op is not implemented for the platform and the hardware support triton,
         it will use triton implementation.""",
+    )
+    parser.add_argument(
+        "--enable_return_routed_experts",
+        action="store_true",
+        default=False,
+        help="Enable returning routed expert indices for MoE models (R3 feature).",
     )
     return parser

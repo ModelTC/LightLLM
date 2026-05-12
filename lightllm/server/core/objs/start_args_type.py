@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-# 只是为了更好的编程提示
+# 服务启动参数
 
 
 @dataclass
@@ -9,16 +9,27 @@ class StartArgs:
     run_mode: str = field(
         default="normal",
         metadata={
-            "choices": ["normal", "prefill", "decode", "pd_master", "nixl_prefill", "nixl_decode", "visual_only"]
+            "choices": [
+                "normal",
+                "prefill",
+                "decode",
+                "nixl_prefill",
+                "nixl_decode",
+                "pd_master",
+                "config_server",
+                "visual_only",
+            ]
         },
     )
+    performance_mode: str = field(default=None, metadata={"choices": ["personal"]})
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
+    httpserver_workers: int = field(default=1)
     zmq_mode: str = field(
         default="ipc:///tmp/",
         metadata={"help": "use socket mode or ipc mode, only can be set in ['tcp://', 'ipc:///tmp/']"},
     )
-    pd_master_ip: str = field(default="127.0.0.1")
+    pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     config_server_host: str = field(default=None)
     config_server_port: int = field(default=None)
@@ -26,18 +37,35 @@ class StartArgs:
     afs_image_embed_dir: str = field(default=None)
     afs_embed_capacity: int = field(default=250000)
     pd_decode_rpyc_port: int = field(default=None)
-    select_p_d_node_strategy: str = field(default=None)
+    control_rpyc_port: int = field(default=None)
+    select_p_d_node_strategy: str = field(
+        default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
+    )
     model_name: str = field(default="default_model_name")
+    model_owner: Optional[str] = field(default=None)
     model_dir: Optional[str] = field(default=None)
-    tokenizer_mode: str = field(default="slow")
+    tokenizer_mode: str = field(default="fast")
     load_way: str = field(default="HF")
     max_total_token_num: Optional[int] = field(default=None)
     mem_fraction: float = field(default=0.9)
     batch_max_tokens: Optional[int] = field(default=None)
-    eos_id: List[int] = field(default_factory=list)
+    eos_id: Optional[List[int]] = field(default=None)
     tool_call_parser: Optional[str] = field(
         default=None,
-        metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen", "qwen3_coder"]},
+        metadata={
+            "choices": [
+                "qwen25",
+                "llama3",
+                "mistral",
+                "deepseekv3",
+                "qwen",
+                "deepseekv31",
+                "deepseekv32",
+                "glm47",
+                "kimi_k2",
+                "qwen3_coder",
+            ]
+        },
     )
     reasoning_parser: Optional[str] = field(
         default=None,
@@ -60,7 +88,7 @@ class StartArgs:
         },
     )
     chat_template: Optional[str] = field(default=None)
-    running_max_req_size: int = field(default=512)
+    running_max_req_size: int = field(default=256)
     tp: int = field(default=1)
     dp: int = field(default=1)
     nnodes: int = field(default=1)
@@ -69,12 +97,13 @@ class StartArgs:
     max_req_total_len: Optional[int] = field(default=None)
     nccl_host: str = field(default="127.0.0.1")
     nccl_port: int = field(default=None)
+    lightllm_instance_id: int = field(default=0)
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
     disable_log_stats: bool = field(default=False)
     log_stats_interval: int = field(default=10)
-    router_token_ratio: float = field(default=0.0)
+    router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
@@ -82,7 +111,7 @@ class StartArgs:
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
-    output_constraint_mode: str = field(default="none", metadata={"choices": ["none", "simple", "xgrammar"]})
+    output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
@@ -105,12 +134,12 @@ class StartArgs:
     health_monitor: bool = field(default=False)
     metric_gateway: Optional[str] = field(default=None)
     job_name: str = field(default="lightllm")
-    grouping_key: List[str] = field(default_factory=list)
+    grouping_key: List[str] = field(default_factory=lambda: [])
     push_interval: int = field(default=10)
     visual_node_id: int = field(default=None)
     visual_infer_batch_size: int = field(default=None)
     visual_send_batch_size: int = field(default=1)
-    visual_gpu_ids: List[int] = field(default_factory=lambda: [0])
+    visual_gpu_ids: List[int] = field(default=None)
     visual_tp: int = field(default=1)
     visual_dp: int = field(default=1)
     visual_nccl_ports: List[int] = field(default=None)
@@ -128,18 +157,18 @@ class StartArgs:
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
     graph_max_len_in_batch: int = field(default=0)
-    quant_type: Optional[str] = field(default=None)
+    quant_type: Optional[str] = field(default="none")
     quant_cfg: Optional[str] = field(default=None)
-    vit_quant_type: Optional[str] = field(default=None)
+    vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     llm_prefill_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     llm_decode_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     vit_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
+        default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )
     llm_kv_type: str = field(
         default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
@@ -160,8 +189,6 @@ class StartArgs:
                 "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
-                "qwen3next_vanilla",
-                "qwen3next_eagle",
                 None,
             ]
         },
@@ -174,7 +201,7 @@ class StartArgs:
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
-    cpu_cache_token_page_size: int = field(default=64)
+    cpu_cache_token_page_size: int = field(default=256)
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)
     disk_cache_dir: Optional[str] = field(default=None)
@@ -189,6 +216,27 @@ class StartArgs:
     metric_port: int = field(default=None)
     multinode_httpmanager_port: int = field(default=12345)
     multi_level_kv_cache_port: int = field(default=None)
+    # multi_modal
+    enable_multimodal_audio: bool = field(default=False)
+
+    disable_shm_warning: bool = field(default=False)
+    dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer"]})
+    enable_custom_allgather: bool = field(default=False)
+    enable_fused_shared_experts: bool = field(default=False)
+    enable_mps: bool = field(default=False)
+    multinode_router_gloo_port: int = field(default=20001)
+    schedule_time_interval: float = field(default=0.03)
+    use_dynamic_prompt_cache: bool = field(default=False)
+    disable_custom_allreduce: bool = field(default=False)
+    enable_torch_memory_saver: bool = field(default=False)
+    enable_weight_cpu_backup: bool = field(default=False)
+    hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa"]})
+    enable_torch_fallback: bool = field(default=False)
+    enable_triton_fallback: bool = field(default=False)
+
+    enable_return_routed_experts: bool = field(default=False)
+
+    weight_version: str = "default"
 
     # hybrid attention model (Qwen3Next)
     linear_att_hash_page_size: int = field(default=512)

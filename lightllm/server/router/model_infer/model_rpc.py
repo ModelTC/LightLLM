@@ -37,6 +37,8 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
+from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
 
 logger = init_logger(__name__)
 
@@ -128,6 +130,35 @@ class ModelRpcServer(rpyc.Service):
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
+    def release_memory_occupation(self, tags: List[MemoryTag]):
+        try:
+            self.backend.release_memory_occupation(tags)
+            return True
+        except BaseException as e:
+            logger.exception(f"release memory occupation failed: {str(e)}")
+            return False
+
+    def resume_memory_occupation(self, tags: List[MemoryTag]):
+        try:
+            self.backend.resume_memory_occupation(tags)
+            return True
+        except BaseException as e:
+            logger.exception(f"resume memory occupation failed: {str(e)}")
+            return False
+
+    def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        try:
+            req = obtain(req)
+            if self.backend is None or not hasattr(self.backend, req.func_name):
+                raise ValueError(f"Backend does not support function {req.func_name}")
+            success, ret = getattr(self.backend, req.func_name)(req.func_args)
+            return GeneralModelToHttpRpcRsp(success=success, msg=str(ret), func_name=req.func_name, func_rsp=ret)
+        except BaseException as e:
+            logger.exception(f"forward to model backend failed: {str(e)}")
+            return GeneralModelToHttpRpcRsp(
+                success=False, msg=f"forward to model backend failed: {str(e)}", func_name=req.func_name
+            )
+
 
 class ModelRpcClient:
     def __init__(self, conn):
@@ -151,6 +182,7 @@ class ModelRpcClient:
 
         self._init_model = async_wrap(self.conn.root.init_model)
         self._get_max_total_token_num = async_wrap(self.conn.root.get_max_total_token_num)
+        self._forward_to_model = async_wrap(self.conn.root.forward_to_model)
         return
 
     async def init_model(self, kvargs):
@@ -160,6 +192,10 @@ class ModelRpcClient:
 
     async def get_max_total_token_num(self):
         ans = self._get_max_total_token_num()
+        return obtain(await ans)
+
+    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        ans = self._forward_to_model(req)
         return obtain(await ans)
 
 
@@ -222,7 +258,11 @@ async def start_model_process(
             success_event,
         ),
     )
-    proc.start()
+    from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
+
+    torch_memory_saver = TorchMemorySaverWrapper(args.enable_torch_memory_saver)
+    with torch_memory_saver.configure_subprocess():
+        proc.start()
 
     # Use asyncio.to_thread to make the blocking wait non-blocking
     await asyncio.to_thread(success_event.wait, timeout=40)

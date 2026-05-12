@@ -106,6 +106,7 @@ class RadixCache:
     def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
+        self.total_token_num = total_token_num
         self.mem_manager: MemoryManager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
@@ -423,6 +424,10 @@ class RadixCache:
 
         self.tree_total_tokens_num.arr[0] = 0
         self.refed_tokens_num.arr[0] = 0
+        return
+
+    def flush_cache(self):
+        self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
         return
 
     def dec_node_ref_counter(self, node: TreeNode):
