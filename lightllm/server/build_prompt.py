@@ -130,6 +130,10 @@ async def build_prompt(request, tools) -> str:
     kwargs["thinking"] = thinking
     kwargs["enable_thinking"] = thinking
 
+    # TODO thinking 模式应该是3种，一种是强制思考，一种是强制不思考，一种是模型自己决定的自适应
+    # 的思考模式。当前的代码只是实现了强制思考和强制不思考两种模式。后续要根据模型的情况，从tokenizer
+    # 上判断能支持的思考模式种类，再进行设置，才能具备更完备的处理。
+
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except BaseException as e:
