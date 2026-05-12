@@ -4,9 +4,9 @@ description: >-
   LightLLM Qwen3-VL-8B-Instruct visual separation (ViT sep / proxy): three processes in
   order—config_server on 8090; internal Redis on 6000; visual_only with visual_rpyc 8091
   and afs_image_embed_dir; normal api_server tp 2 port 8089 with visual_use_proxy_mode.
-  After normal LISTEN, required lmms_eval mmmu_val (openai_compatible, batch 900,
-  OPENAI_API_BASE http://HOST:8089/v1); lmms_eval_out, lmms_eval_console.log, mmmu_acc in summary.
-  No separate system redis for 6000. MODEL_DIR, AFS dir, CUDA split, clear proxies.
+  After HTTP /v1/models on normal, lmms_eval mmmu_val (openai_compatible, batch 900,
+  OPENAI_API_BASE http://HOST:8089/v1); restore https_proxy for Hub while no_proxy includes 127.0.0.1.
+  lmms_eval_out, console log, mmmu_acc in summary. pipefail for tee exit code.
 ---
 
 # Qwen3-VL-8B-Instruct **视觉分离（`visual_only` + `normal` + `config_server`）**
@@ -45,7 +45,7 @@ description: >-
 4. **`AFS_IMAGE_EMBED_DIR`**：**`--afs_image_embed_dir`** 指向的目录须存在或可创建；默认试跑 **`/mtc/afs/vit_embed_dir`**；不可用时 **向用户询问**。
 5. **显卡**：**`visual_only`** 与 **`normal`** 的 **`CUDA_VISIBLE_DEVICES`** **不得重叠**；先 **`nvidia-smi`** 再 **`export`**（**不要写死**示例卡号）。
 6. **`CONFIG_SERVER_HOST`**：各进程 **`--config_server_host`** 须能访问 **`config_server` 的 HTTP 服务**。**三进程同机**时常见为 **`0.0.0.0`**（与历史脚本一致）；多机时改为 **对端可达的 IP**，并保证防火墙放行 **`config_server` 端口（8090）**、**其内部 Redis 暴露端口（6000）**、**`8091`** 等。
-7. **代理**：每条 **`python`** 前 **`export http_proxy=`**、**`export https_proxy=`**。
+7. **代理**：每条 **`python`（LightLLM）** 前 **`export http_proxy=`**、**`export https_proxy=`**（与仓库其它 acc 测试一致）。**`lmms_eval` 拉取 `lmms-lab/MMMU` 时**若需经企业代理访问 Hugging Face，应在 **`no_proxy` 已包含 `127.0.0.1`** 的前提下**恢复 `https_proxy`（或等价镜像）**；否则易出现 Hub **`ConnectionError`**。仅当本机已有完整离线缓存且确认 **`datasets` 可纯离线命中**时，才可全程无代理。
 8. **`lmms-eval`**：**`python3 -m lmms_eval --help`** 可执行；否则无法完成必跑 **`mmmu_val`**。
 
 ## 可变项
@@ -59,10 +59,13 @@ description: >-
 | `VISUAL_CUDA_DEVICES` | **`visual_only`** 的 **`CUDA_VISIBLE_DEVICES`**（1 张卡）。 |
 | `LLM_CUDA_DEVICES` | **`normal`** 的 **`CUDA_VISIBLE_DEVICES`**（**`--tp 2`** → 2 张卡）。 |
 | `AFS_EMBED_CAPACITY` | **`--afs_embed_capacity`**；默认 **`250000`**；调试替换逻辑时可改为较小值（例如 **`100`**），见「调试提示」。 |
+| `ORIG_HTTP_PROXY` / `ORIG_HTTPS_PROXY` | 在清空代理启动 LightLLM **之前**备份（见 **`lmms_eval` 命令块**），评测阶段恢复以便访问 Hugging Face Hub。 |
 
 **开跑前导出示例**：
 
 ```bash
+export ORIG_HTTP_PROXY="${http_proxy-}"
+export ORIG_HTTPS_PROXY="${https_proxy-}"
 export LOG_DIR='〈日志目录〉'
 export MODEL_DIR='/mtc/models/Qwen3-VL-8B-Instruct'
 export AFS_IMAGE_EMBED_DIR='/mtc/afs/vit_embed_dir'
@@ -135,14 +138,15 @@ CUDA_VISIBLE_DEVICES="${LLM_CUDA_DEVICES}" python -m lightllm.server.api_server 
 在 **`config_server` / `visual_only` / `normal` 均就绪**、**`normal`** 仍占用 **`8089`** 时执行；**关停任一服务前须跑完本节**。评测流量只打 **`normal` HTTP**；**`OPENAI_API_BASE`** 须指向 **`http://〈可达主机〉:8089/v1`**（**末尾含 `/v1`**）。**`--model_args` 中 `model_version=` 与三进程共用的 `MODEL_DIR` 须为同一权重目录**。
 
 ```bash
-export http_proxy=
-export https_proxy=
-
 export BIND_URL_HOST='127.0.0.1'
 export PORT=8089
 export OPENAI_API_BASE="http://${BIND_URL_HOST}:${PORT}/v1"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-lightllm123}"
 export no_proxy=localhost,127.0.0.1,0.0.0.0,::1,${BIND_URL_HOST}
+
+# 若启动 LightLLM 时清空了代理，此处恢复 Hub 代理（勿把 127.0.0.1 放进 ALL_PROXY）
+export http_proxy="${ORIG_HTTP_PROXY:-}"
+export https_proxy="${ORIG_HTTPS_PROXY:-}"
 
 export LOG_DIR='〈与上文同一日志目录〉'
 export MODEL_DIR='/mtc/models/Qwen3-VL-8B-Instruct'

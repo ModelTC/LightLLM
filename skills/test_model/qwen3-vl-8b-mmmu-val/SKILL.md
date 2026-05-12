@@ -3,9 +3,9 @@ name: test-model-qwen3-vl-8b-mmmu-val
 description: >-
   LightLLM Qwen3-VL-8B-Instruct: api_server tp 2 on port 8089, then lmms-eval CLI
   (python -m lmms_eval, model openai_compatible, tasks mmmu_val, batch_size 900)
-  with OPENAI_API_BASE pointing at LightLLM OpenAI-compatible /v1. Requires lmms-eval
-  install, OPENAI_API_KEY placeholder, LOG_DIR and MODEL_DIR, nvidia-smi GPU choice,
-  proxy cleared, no_proxy for local bind, port listen checks, summary.txt. No wrapper
+  with OPENAI_API_BASE pointing at LightLLM OpenAI-compatible /v1. Restore https_proxy for Hub
+  while no_proxy includes 127.0.0.1. Requires lmms-eval install, OPENAI_API_KEY placeholder,
+  LOG_DIR and MODEL_DIR, nvidia-smi GPU choice, pipefail with tee, summary.txt. No wrapper
   script; use command line only.
 ---
 
@@ -35,7 +35,7 @@ pip install -e lmms-eval/
 2. **端口**：**`8089`** 未被占用。
 3. **`MODEL_DIR`**：**`api_server --model_dir`** 与 **`--model_args` 里的 `model_version=`** 须为**同一 Qwen3-VL-8B-Instruct 权重路径**（默认示例 **`/mtc/models/Qwen3-VL-8B-Instruct`**；不存在时向用户询问本机路径）。
 4. **`lmms-eval` 已安装**且 **`python3 -m lmms_eval`** 可用。
-5. **代理**：启动 **`api_server` 前**清空 **`http_proxy` / `https_proxy`**；跑 **`lmms_eval` 前**同样清空，并设置 **`no_proxy`**（见下文）。
+5. **代理**：启动 **`api_server` 前**清空 **`http_proxy` / `https_proxy`**；跑 **`lmms_eval` 前**将 **`no_proxy`** 设为包含本机 **`127.0.0.1`**（见下文评测块）；**若需从 Hugging Face Hub 拉取 `lmms-lab/MMMU`，评测阶段应恢复可用的 `https_proxy`（或等价镜像）**，否则清空代理后可能出现 **`ConnectionError: Couldn't reach 'lmms-lab/MMMU' on the Hub`**。
 
 ## 可变项
 
@@ -74,8 +74,11 @@ nohup python -m lightllm.server.api_server \
 设置 **`OPENAI_API_*`** 与代理后，直接 **`python3 -m lmms_eval`**（**`timeout` 可选**，例如单次上限 **3600 秒**）：
 
 ```bash
-export http_proxy=
-export https_proxy=
+# 若启动 api_server 时曾清空代理，请先保存并在评测前恢复 Hub 代理，例如：
+#   export ORIG_HTTPS_PROXY="${https_proxy-}"
+#   export http_proxy=; export https_proxy=
+#   … 启动 api_server …
+#   export https_proxy="${ORIG_HTTPS_PROXY}"
 
 export BIND_URL_HOST='127.0.0.1'
 export PORT=8089
