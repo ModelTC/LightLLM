@@ -388,8 +388,6 @@ class ModeBackend:
 
     def release_memory_occupation(self, tags: List[MemoryTag]):
         try:
-            self.model.req_manager.free_all()
-            self.model.mem_manager.free_all()
             self.model.release_memory_occupation(tags)
             self.flush_cache(request=None)
             return True, "Succeeded to release memory occupation."
