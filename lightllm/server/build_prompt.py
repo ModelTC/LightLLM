@@ -2,6 +2,7 @@ import os
 import json
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
+from functools import lru_cache
 
 logger = init_logger(__name__)
 
@@ -43,6 +44,32 @@ def init_tokenizer(args):
         except Exception as e:
             logger.warning(f"Failed to load chat_template.json from {default_chat_template_path}: {e}")
     return
+
+
+@lru_cache(maxsize=1)
+def tokenizer_supports_force_thinking() -> bool:
+    """Whether this tokenizer supports thinking / reasoning."""
+
+    assert tokenizer is not None
+
+    try:
+        ans = "thinking" in tokenizer.chat_template or "enable_thinking" in tokenizer.chat_template
+        logger.debug(f"chat_template: {tokenizer.chat_template}")
+        logger.info(f"tokenizer_supports_force_thinking : {ans}")
+        return ans
+    except:
+        pass
+
+    try:
+        ans = "thinking" in tokenizer.tokenizer.chat_template or "enable_thinking" in tokenizer.tokenizer.chat_template
+        logger.debug(f"tokenizer.tokenizer.chat_template: {tokenizer.tokenizer.chat_template}")
+        logger.info(f"tokenizer_supports_force_thinking : {ans}")
+        return ans
+    except:
+        pass
+
+    logger.info("tokenizer_supports_force_thinking : False")
+    return False
 
 
 def _normalize_tool_call_arguments(messages: list) -> None:

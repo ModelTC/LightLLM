@@ -155,6 +155,11 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
 
 def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     """Whether this request uses forced thinking / reasoning (parser + template)."""
+    from .build_prompt import tokenizer_supports_force_thinking
+
+    if not tokenizer_supports_force_thinking():
+        return False
+
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
