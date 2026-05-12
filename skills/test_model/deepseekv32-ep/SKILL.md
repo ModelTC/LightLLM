@@ -79,7 +79,7 @@ nohup python -m lightllm.server.api_server \
 HF_ALLOW_CODE_EVAL=1 HF_DATASETS_OFFLINE=0 \
 no_proxy=127.0.0.1,localhost,::1 \
 lm_eval --model local-completions \
-  --model_args "{\"model\":\"deepseek-ai/DeepSeek-V3.2\", \"base_url\":\"http://localhost:8000/v1/completions\", \"max_length\": 16384, \"max_gen_toks\": 4096, \"tokenizer\":\"${MODEL_DIR}\"}" \
+  --model_args "{\"model\":\"deepseek-ai/DeepSeek-V3.2\", \"base_url\":\"http://localhost:8000/v1/completions\", \"max_length\": 16384, \"tokenizer\":\"${MODEL_DIR}\"}" \
   --tasks gsm8k --batch_size 500 --confirm_run_unsafe_code \
   >> "${LOG_DIR}/eval_gsm8k.log" 2>&1
 ```
