@@ -196,7 +196,6 @@ class StartArgs:
     x2i_server_deploy_mode: str = field(default="colocate")
     x2i_use_naive_impl: bool = field(default=False)
     x2i_worker_task_port: int = field(default=None)
-    x2i_worker_nccl_port: int = field(default=None)
     x2i_enable_cfg: bool = field(default=True)
 
     # hybrid attention model (Qwen3Next)

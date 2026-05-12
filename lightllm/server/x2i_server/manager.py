@@ -1,3 +1,4 @@
+from re import X
 import zmq
 import asyncio
 import uvloop
@@ -19,6 +20,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType
 from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.start_utils import start_submodule_processes
+from lightllm.utils.net_utils import alloc_can_use_network_port
 from .past_kv_cache_client import PastKVCacheClient
 from .rng_state_cache import RngStateCache
 
@@ -52,9 +54,9 @@ class X2IManager:
         self.send_to_httpserver.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
 
         self.use_naive_x2i = args.x2i_use_naive_impl
-        self.world_size = args.x2i_server_used_gpus
+        self.x2i_server_used_gpus = args.x2i_server_used_gpus
 
-        if not self.use_naive_x2i and self.world_size > 1:
+        if not self.use_naive_x2i:
             # send to workers
             self.worker_pub = context.socket(zmq.PUSH)
             self.worker_pub.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_worker_task_port}")
@@ -70,102 +72,53 @@ class X2IManager:
         self.rng_state_cache = RngStateCache()
 
     async def wait_to_model_ready(self):
+        
+        if self.use_naive_x2i:
+            from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
 
-        if self.world_size <= 1:
-            if self.use_naive_x2i:
-                from lightllm.server.x2i_server.naive.modeling_neo_chat import NEOX2I
-
-                self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
-            else:
-                from lightx2v import LightX2VPipeline
-
-                self.gen_pipe = LightX2VPipeline(
-                    model_path=self.args.model_dir,
-                    model_cls="neopp",
-                    support_tasks=["t2i", "i2i"],
-                )
-                self.gen_pipe.create_generator(
-                    config_json=self.args.x2v_gen_model_config,
-                )
-                self.gen_pipe.modify_config(
-                    {"load_kv_cache_in_pipeline_for_debug": False, "save_result_for_debug": False}
-                )
+            self.naive_x2i = NEOX2I(self.args.model_dir, torch.cuda.current_device())
+           
         else:
-            # distribted x2v
+            # x2v server use separate processes
             from lightllm.server.x2i_server.lightx2v.adapter import start_x2v_process
 
-            funcs = [start_x2v_process] * self.world_size
-            args = [(self.args, rank, self.world_size) for rank in range(self.world_size)]
-            start_submodule_processes(funcs, args)
+            x2v_world_size = get_x2v_world_size(self.args)
 
-    def _prepare_seed_for_iter(self, param: X2IParams, i: int, session_id: int):
-        """决定本轮 generate() 调用要传给 pipeline 的 seed。
+            assert self.x2i_server_used_gpus >= x2v_world_size, "x2i_server_used_gpus must be greater than x2v_world_size"
 
-        - 一个 chat session 的第一张图（first_image=True 且 i==0）：传种子，由 pipeline 内部 seed_all。
-        - 后续图（first_image=False 且 i==0）：先把该 session 上次保存的 RNG state 恢复回来，
-          再传 seed=None，让生成接着上一张图的 RNG 继续走。这样别的 session 中间穿插的 seed_all
-          不会污染本 session 的 RNG。
-        - 同一次调用内部 i>0 的图：天然顺延全局 RNG 即可，不重置也不恢复。
-        """
-        if i == 0:
-            if param.first_image:
-                return param.seed
-            self.rng_state_cache.restore(session_id)
-            return None
-        return None
+            if self.x2i_server_used_gpus < x2v_world_size or self.x2i_server_used_gpus % x2v_world_size != 0:
+                logger.warning(f"x2i_server_used_gpus {self.x2i_server_used_gpus} is not divisible by x2v_world_size {x2v_world_size}")
+
+            x2v_dp_size = self.x2i_server_used_gpus // x2v_world_size
+
+            x2v_dp_nccl_ports = alloc_can_use_network_port(
+                num=x2v_dp_size,
+                from_port_num=15000,
+            )
+
+            cuda_visible_devices =  [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES").strip().split(",") if x.strip()]
+
+            logger.info(f"x2v_dp_nccl_ports: {x2v_dp_nccl_ports}, x2v_world_size: {x2v_world_size}, x2v_dp_size: {x2v_dp_size}")
+
+            funcs = [start_x2v_process] * x2v_dp_size * x2v_world_size
+            args = [(self.args, rank, x2v_world_size, x2v_dp_nccl_ports[dp_rank]) 
+                        for dp_rank in range(x2v_dp_size) 
+                            for rank in range(x2v_world_size)]
+
+            envs = [{"CUDA_VISIBLE_DEVICES": ",".join(cuda_visible_devices[dp_rank * x2v_world_size: (dp_rank + 1) * x2v_world_size])} 
+                        for dp_rank in range(x2v_dp_size)
+                            for _ in range(x2v_world_size)]
+
+            start_submodule_processes(funcs, args, envs)
 
     async def t2i_generate(self, past_kv_cache, past_kv_cache_text, param: X2IParams):
-        if self.use_naive_x2i:
-            images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
-            return images
-
-        self.gen_pipe.runner.set_inference_params(
-            index_offset_cond=param.past_kvcache.get_compressed_len(),
-            index_offset_uncond=param.past_kvcache_text.get_compressed_len() if self.enable_cfg else None,
-            cfg_interval=param.cfg_interval,
-            cfg_scale=param.guidance_scale,
-            cfg_norm=CfgNormType(param.cfg_norm).as_str(),
-            timestep_shift=param.timestep_shift,
-        )
-        images = []
-        session_id = param.session_id
-        for i in range(param.num_images):
-            self.gen_pipe.runner.set_kvcache(past_kv_cache, past_kv_cache_text)
-            seed_arg = self._prepare_seed_for_iter(param, i, session_id)
-            image = self.gen_pipe.generate(
-                seed=seed_arg,
-                save_result_path="",  # 返回base64，不需要指定路径了
-                target_shape=[param.height, param.width],  # Height, Width
-            )
-            images.append(image)
-        # 保存当前 RNG state，下次同一 session 的图继续从这里走
-        self.rng_state_cache.save(session_id)
+        assert self.use_naive_x2i, "t2i is not supported for non naive x2i"
+        images = self.naive_x2i.t2i(past_kv_cache, past_kv_cache_text, param)
         return images
 
     async def it2i_generate(self, past_kv_cache, past_kv_cache_text, past_kv_cache_img, param: X2IParams):
-        if self.use_naive_x2i:
-            images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
-            return images
-
-        self.gen_pipe.runner.set_inference_params(
-            index_offset_cond=param.past_kvcache.get_compressed_len(),
-            index_offset_uncond=param.past_kvcache_text.get_compressed_len() if self.enable_cfg else None,
-            cfg_interval=param.cfg_interval,
-            cfg_scale=param.guidance_scale,
-            cfg_norm=CfgNormType(param.cfg_norm).as_str(),
-            timestep_shift=param.timestep_shift,
-        )
-        images = []
-        for i in range(param.num_images):
-            self.gen_pipe.runner.set_kvcache_i2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img)
-            # it2i 的每张图都显式带种子（与 img_len+i 绑定），每次都会触发 seed_all，
-            # 不依赖也不会污染 t2i 的 session RNG state，无需缓存/恢复。
-            image = self.gen_pipe.generate(
-                seed=param.seed + param.past_kvcache_img.img_len + i,
-                save_result_path="",  # 返回base64，不需要指定路径了
-                target_shape=[param.height, param.width],  # Height, Width
-            )
-            images.append(image)
+        assert self.use_naive_x2i, "it2i is not supported for non naive x2i"
+        images = self.naive_x2i.it2i(past_kv_cache, past_kv_cache_text, past_kv_cache_img, param)
         return images
 
     async def loop_for_fwd(self):
@@ -177,7 +130,7 @@ class X2IManager:
 
                 x2i_param = self.waiting_reqs.pop(0)
 
-                if not self.use_naive_x2i and self.world_size > 1:
+                if not self.use_naive_x2i:
                     # broadcast to workers
                     self.worker_pub.send_pyobj(x2i_param, protocol=pickle.HIGHEST_PROTOCOL)
                 else:
@@ -249,6 +202,15 @@ def get_enable_cfg(args: StartArgs) -> bool:
     return config_json.get("enable_cfg", True)
 
 
+def get_x2v_world_size(args: StartArgs) -> int:
+    import json
+    with open(args.x2v_gen_model_config, "r") as f:
+        config_json = json.load(f)
+    
+    return (config_json.get("parallel", {}).get("cfg_p_size", 1) * 
+            config_json.get("parallel", {}).get("seq_p_size", 1))
+
+
 def setup_devices(args: StartArgs):
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     logger.info(f"current devices: {devices} {torch.cuda.device_count()}")
@@ -262,12 +224,13 @@ def setup_devices(args: StartArgs):
     if len(devices) < llm_need_gpus + x2i_need_gpus:
         raise ValueError(f"devices {devices} not enough, need {llm_need_gpus} and {x2i_need_gpus}")
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, devices[llm_need_gpus : llm_need_gpus + x2i_need_gpus]))
-
+    # os.environ["CUDA_VISIBLE_DEVICES"] = 
+    cuda_visible_devices = ",".join(map(str, devices[llm_need_gpus : llm_need_gpus + x2i_need_gpus]))
     logger.info(
-        f"setup devices for x2i server: {os.environ['CUDA_VISIBLE_DEVICES']}, "
+        f"setup devices for x2i server: {cuda_visible_devices}, "
         f"{torch.cuda.device_count()} {torch.cuda.current_device()}"
     )
+    return cuda_visible_devices
 
 
 def start_x2i_process(args, pipe_writer):

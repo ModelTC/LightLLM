@@ -325,7 +325,7 @@ def normal_or_p_d_start(args):
 
     node_world_size = args.tp // args.nnodes
     can_use_ports = alloc_can_use_network_port(
-        num=14 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
+        num=13 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
         used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
@@ -342,10 +342,9 @@ def normal_or_p_d_start(args):
         pd_decode_rpyc_port,
         x2i_port,
         http_server_port_for_x2i,
-        x2i_worker_nccl_port,
         x2i_worker_task_port,
-    ) = can_use_ports[0:14]
-    can_use_ports = can_use_ports[14:]
+    ) = can_use_ports[0:13]
+    can_use_ports = can_use_ports[13:]
 
     if args.visual_nccl_ports is None:
         args.visual_nccl_ports = can_use_ports[: args.visual_dp]
@@ -375,7 +374,6 @@ def normal_or_p_d_start(args):
     args.x2i_port = x2i_port
     args.http_server_port_for_x2i = http_server_port_for_x2i
     args.x2i_worker_task_port = x2i_worker_task_port
-    args.x2i_worker_nccl_port = x2i_worker_nccl_port
     # 申请在 p d 分离模式下，会用的端口
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
@@ -453,9 +451,6 @@ def normal_or_p_d_start(args):
 
     if args.enable_multimodal_x2i:
         from .x2i_server.manager import start_x2i_process, setup_devices
-
-        origin_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        setup_devices(args)
         process_manager.start_submodule_processes(
             start_funcs=[
                 start_x2i_process,
@@ -463,11 +458,10 @@ def normal_or_p_d_start(args):
             start_args=[
                 (args,),
             ],
+            start_envs=[
+                {"CUDA_VISIBLE_DEVICES": setup_devices(args)},
+            ],
         )
-        if origin_devices:
-            os.environ["CUDA_VISIBLE_DEVICES"] = origin_devices
-        else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     if args.enable_cpu_cache:
         from .multi_level_kv_cache.manager import start_multi_level_kv_cache_manager

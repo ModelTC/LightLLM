@@ -7,6 +7,7 @@ import zmq.asyncio
 import setproctitle
 import asyncio
 import os
+import time
 
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_logger
@@ -21,10 +22,11 @@ logger = init_logger(__name__)
 
 
 class LightX2VServer:
-    def __init__(self, args: StartArgs, rank: int, world_size: int):
+    def __init__(self, args: StartArgs, rank: int, world_size: int, nccl_port: int):
         self.args = args
         self.rank = rank
         self.world_size = world_size
+        self.nccl_port = nccl_port
 
         # receive task from manager
         if self.rank == 0:
@@ -37,10 +39,14 @@ class LightX2VServer:
             self.result_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.http_server_port_for_x2i}")
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=False)
-        torch.cuda.set_device(rank)
+
+        logger.info(f"set device for x2v server {rank}/{world_size} {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+        torch.cuda.set_device(self.rank)
+        
         self._init_pipeline()
 
-        self.task_dist_group = dist.new_group(backend="gloo", timeout=datetime.timedelta(days=30))
+        if self.world_size > 1:
+            self.task_dist_group = dist.new_group(backend="gloo", timeout=datetime.timedelta(days=30))
 
         self.enable_cfg = args.x2i_enable_cfg
 
@@ -51,7 +57,7 @@ class LightX2VServer:
 
     def _init_pipeline(self):
         os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(self.args.x2i_worker_nccl_port)
+        os.environ["MASTER_PORT"] = str(self.nccl_port)
         os.environ["RANK"] = str(self.rank)
         os.environ["WORLD_SIZE"] = str(self.world_size)
 
@@ -69,9 +75,11 @@ class LightX2VServer:
         while True:
 
             try:
+                start = time.time()
                 if self.rank == 0:
                     param: X2IParams = await self.task_socket.recv_pyobj()
-                    dist.broadcast_object_list([param], src=0, group=self.task_dist_group)
+                    if self.world_size > 1:
+                        dist.broadcast_object_list([param], src=0, group=self.task_dist_group)
                 else:
                     params = [None]
                     dist.broadcast_object_list(params, src=0, group=self.task_dist_group)
@@ -80,6 +88,7 @@ class LightX2VServer:
                 assert param is not None, "Received None param in x2v worker, this should not happen."
 
                 images = await self._process(param)
+                logger.info(f"[{self.rank}/{self.world_size}/{self.nccl_port}] generate images cost {time.time() - start} seconds")
 
                 if self.rank == 0:
                     await self.result_socket.send_pyobj(X2IResponse(request_id=param.request_id, images=images))
@@ -100,25 +109,27 @@ class LightX2VServer:
             cfg_norm=CfgNormType(param.cfg_norm).as_str(),
             timestep_shift=param.timestep_shift,
         )
+
         past_kv_cache = self.past_kv_cache_client.get_kv_cache_for_x2i(
             param.past_kvcache.get_all(), param.past_kvcache.token_len
         )
+
         past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
             param.past_kvcache_text.get_all(), param.past_kvcache_text.token_len
         ) if self.enable_cfg else None
-        past_kv_cache_img = None
-        if not is_t2i:
-            past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
-                param.past_kvcache_img.get_all(), param.past_kvcache_img.token_len
-            )
 
-        dist.barrier()  # ensure all workers have got the kv cache before generation starts
+        past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(
+                param.past_kvcache_img.get_all(), param.past_kvcache_img.token_len
+        ) if not is_t2i else None
+        
+        if self.world_size > 1:
+            dist.barrier()  # ensure all workers have got the kv cache before generation starts
 
         if self.rank == 0:
             # release
             await self.result_socket.send_pyobj(X2ICacheRelease(request_id=param.request_id))
 
-        logger.info(f"{'t2i' if is_t2i else 'it2i'} generate images with: {param}")
+        logger.info(f"[{self.rank}/{self.world_size}/{self.nccl_port}] {'t2i' if is_t2i else 'it2i'} generate images with: {param}")
 
         if is_t2i:
             self.pipe.runner.set_kvcache(
@@ -158,7 +169,7 @@ class LightX2VServer:
         return [image]
 
 
-def start_x2v_process(args: StartArgs, rank: int, world_size: int, pipe_writer):
+def start_x2v_process(args: StartArgs, rank: int, world_size: int, nccl_port: int, pipe_writer):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
@@ -166,7 +177,7 @@ def start_x2v_process(args: StartArgs, rank: int, world_size: int, pipe_writer):
     start_parent_check_thread()
 
     try:
-        x2v_server = LightX2VServer(args=args, rank=rank, world_size=world_size)
+        x2v_server = LightX2VServer(args=args, rank=rank, world_size=world_size, nccl_port=nccl_port)
     except Exception as e:
         logger.exception(str(e), exc_info=e)
         raise e
