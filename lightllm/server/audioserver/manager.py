@@ -11,11 +11,11 @@ import collections
 from typing import List
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.multimodal_params import AudioItem
 from .model_infer import start_model_process, AudioModelRpcClient
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name

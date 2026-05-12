@@ -11,6 +11,7 @@ import hashlib
 import datetime
 import pickle
 from frozendict import frozendict
+from .control_rpyc_client import ControlRpycClient
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
@@ -142,9 +143,8 @@ class HttpServerManager:
         self.is_pause = False
         self.is_pause_cond = asyncio.Condition()
 
-        # 控制面 rpyc client: master router 的 rpyc service 句柄,懒初始化
-        self._control_rpyc_lock: asyncio.Lock = asyncio.Lock()
-        self._control_rpyc_conn: Optional[rpyc.core.protocol.Connection] = None
+        # 控制面 rpyc client: 到 master router 的 rpyc service, 懒初始化 + 自动重连
+        self._control_rpyc_client = ControlRpycClient(host="127.0.0.1", port=args.control_rpyc_port)
 
         # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
         # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
@@ -999,80 +999,46 @@ class HttpServerManager:
 
     # -------- master router 控制面 rpyc 调用 --------
 
-    async def _get_control_rpyc_conn(self):
-        """懒初始化到 master router 的 rpyc 连接;断连时自动重连。"""
-        async with self._control_rpyc_lock:
-            if self._control_rpyc_conn is not None:
-                try:
-                    self._control_rpyc_conn.ping(timeout=2)
-                    return self._control_rpyc_conn
-                except BaseException:
-                    try:
-                        self._control_rpyc_conn.close()
-                    except BaseException:
-                        pass
-                    self._control_rpyc_conn = None
-
-            self._control_rpyc_conn = await asyncio.to_thread(
-                rpyc.connect,
-                "127.0.0.1",
-                self.args.control_rpyc_port,
-                config={"allow_pickle": True, "sync_request_timeout": 600},
-            )
-            self._control_rpyc_conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            return self._control_rpyc_conn
-
-    async def _call_control_rpyc(self, method_name: str, *args) -> GeneralModelToHttpRpcRsp:
-        try:
-            conn = await self._get_control_rpyc_conn()
-            ret = await asyncio.to_thread(getattr(conn.root, method_name), *args)
-            return obtain(ret)
-        except BaseException as e:
-            logger.exception(f"control rpyc call {method_name} failed: {e}")
-            return GeneralModelToHttpRpcRsp(
-                success=False, msg=f"control rpyc call {method_name} error: {e}", func_name=method_name
-            )
-
     async def flush_cache(self, request: FlushCacheReq):
-        return await self._call_control_rpyc("flush_cache", request)
+        return await self._control_rpyc_client.call("flush_cache", request)
 
     async def release_memory_occupation(self, request: ReleaseMemoryReq):
         assert len(self.req_id_to_out_inf) == 0, "there are still requests running, cannot release memory occupation"
         await self.pause_generation()
-        return await self._call_control_rpyc("release_memory_occupation", request.tags)
+        return await self._control_rpyc_client.call("release_memory_occupation", request.tags)
 
     async def resume_memory_occupation(self, request: ResumeMemoryReq):
-        ret = await self._call_control_rpyc("resume_memory_occupation", request.tags)
+        ret = await self._control_rpyc_client.call("resume_memory_occupation", request.tags)
         if ret.success:
             await self.continue_generation()
         return ret
 
     async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
-        return await self._call_control_rpyc("init_weights_update_group", request)
+        return await self._control_rpyc_client.call("init_weights_update_group", request)
 
     async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
-        return await self._call_control_rpyc("destroy_weights_update_group", request)
+        return await self._control_rpyc_client.call("destroy_weights_update_group", request)
 
     async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
         if request.abort_all_requests:
             await self.abort_request(AbortReq(abort_all=True))
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
-        return await self._call_control_rpyc("update_weights_from_distributed", request)
+        return await self._control_rpyc_client.call("update_weights_from_distributed", request)
 
     async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
         if request.abort_all_requests:
             await self.abort_request(AbortReq(abort_all=True))
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
-        return await self._call_control_rpyc("update_weights_from_tensor", request)
+        return await self._control_rpyc_client.call("update_weights_from_tensor", request)
 
     async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
         if request.abort_all_requests:
             await self.abort_request(AbortReq(abort_all=True))
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
-        return await self._call_control_rpyc("update_weights_from_ipc", request)
+        return await self._control_rpyc_client.call("update_weights_from_ipc", request)
 
 
 class ReqStatus:
