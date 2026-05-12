@@ -216,6 +216,8 @@ def context_attention_fwd_gemma4_mm(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
+    use_sliding_window = sliding_window >= 0
+    sliding_window_size = int(sliding_window) if use_sliding_window else 0
 
     if sliding_window == (-1, -1):
         use_sliding_window = False
