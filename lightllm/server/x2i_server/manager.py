@@ -63,6 +63,8 @@ class X2IManager:
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=True)
 
+        self.enable_cfg = args.x2i_enable_cfg
+
         # Per-chat-session RNG snapshot, so concurrent sessions don't clobber each other's
         # global torch / cuda RNG state between successive image generations.
         self.rng_state_cache = RngStateCache()
@@ -119,7 +121,7 @@ class X2IManager:
 
         self.gen_pipe.runner.set_inference_params(
             index_offset_cond=param.past_kvcache.get_compressed_len(),
-            index_offset_uncond=param.past_kvcache_text.get_compressed_len(),
+            index_offset_uncond=param.past_kvcache_text.get_compressed_len() if self.enable_cfg else None,
             cfg_interval=param.cfg_interval,
             cfg_scale=param.guidance_scale,
             cfg_norm=CfgNormType(param.cfg_norm).as_str(),
@@ -147,7 +149,7 @@ class X2IManager:
 
         self.gen_pipe.runner.set_inference_params(
             index_offset_cond=param.past_kvcache.get_compressed_len(),
-            index_offset_uncond=param.past_kvcache_text.get_compressed_len(),
+            index_offset_uncond=param.past_kvcache_text.get_compressed_len() if self.enable_cfg else None,
             cfg_interval=param.cfg_interval,
             cfg_scale=param.guidance_scale,
             cfg_norm=CfgNormType(param.cfg_norm).as_str(),
@@ -185,7 +187,8 @@ class X2IManager:
 
                     past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
                         x2i_param.past_kvcache_text.get_all(), x2i_param.past_kvcache_text.token_len, self.use_naive_x2i
-                    )
+                    ) if self.enable_cfg else None
+                    
                     is_t2i = x2i_param.past_kvcache_img.is_empty()
 
                     past_kv_cache_img = None
@@ -235,6 +238,15 @@ class X2IManager:
 
     def clean_up(self):
         pass
+
+
+def get_enable_cfg(args: StartArgs) -> bool:
+    if not hasattr(args, "x2v_gen_model_config") or not args.x2v_gen_model_config:
+        return True
+    import json
+    with open(args.x2v_gen_model_config, "r") as f:
+            config_json = json.load(f)
+    return config_json.get("enable_cfg", True)
 
 
 def setup_devices(args: StartArgs):

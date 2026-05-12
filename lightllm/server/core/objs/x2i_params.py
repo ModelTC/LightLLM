@@ -139,7 +139,8 @@ class X2IParams(ctypes.Structure):
 
     def update_t2i(self, meta, meta_uncond):
         self.update(self.past_kvcache, meta)
-        self.update(self.past_kvcache_text, meta_uncond)
+        if meta_uncond is not None:
+            self.update(self.past_kvcache_text, meta_uncond)
 
     def update_it2i(self, meta, meta_text_uncond, meta_img_uncond):
         self.update(self.past_kvcache, meta)

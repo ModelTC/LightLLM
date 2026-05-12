@@ -42,6 +42,8 @@ class LightX2VServer:
 
         self.task_dist_group = dist.new_group(backend="gloo", timeout=datetime.timedelta(days=30))
 
+        self.enable_cfg = args.x2i_enable_cfg
+
         # Per-chat-session RNG snapshot, see lightllm/server/x2i_server/rng_state_cache.py.
         # 各 worker 各自维护一份；由于本进程是单 stream 的串行 _process，且任务通过 broadcast
         # 同步，因此各 rank 之间的 RNG 演进保持一致。
@@ -92,7 +94,7 @@ class LightX2VServer:
 
         self.pipe.runner.set_inference_params(
             index_offset_cond=param.past_kvcache.get_compressed_len(),
-            index_offset_uncond=param.past_kvcache_text.get_compressed_len(),
+            index_offset_uncond=param.past_kvcache_text.get_compressed_len() if self.enable_cfg else None,
             cfg_interval=param.cfg_interval,
             cfg_scale=param.guidance_scale,
             cfg_norm=CfgNormType(param.cfg_norm).as_str(),
@@ -103,7 +105,7 @@ class LightX2VServer:
         )
         past_kv_cache_text = self.past_kv_cache_client.get_kv_cache_for_x2i(
             param.past_kvcache_text.get_all(), param.past_kvcache_text.token_len
-        )
+        ) if self.enable_cfg else None
         past_kv_cache_img = None
         if not is_t2i:
             past_kv_cache_img = self.past_kv_cache_client.get_kv_cache_for_x2i(

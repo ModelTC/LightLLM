@@ -509,6 +509,7 @@ class HttpServerManager:
             # 1. construct 3 or 2 generate based on the multimodel_parmas
             sample_params = SamplingParams()
             sample_params.init(self.tokenizer, **{"img_gen_prefill": True})
+
             sample_params1 = SamplingParams()
             sample_params1.init(self.tokenizer, **{"img_gen_prefill": True})
 
@@ -534,17 +535,25 @@ class HttpServerManager:
                     ]
                 )
                 generation_params.update_it2i(con_gen, text_uncon_gen, img_uncon_gen)
+                
             else:
                 # call t2i
                 prompt_condition, prompt_uncondition = self.tokenizer.get_query_for_t2i(prompt, input_image_num)
                 logger.info(f"generate image with: {prompt_condition}, and {prompt_uncondition}")
-                (con_gen, uncon_gen) = await asyncio.gather(
-                    *[
-                        generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
-                        generation_wrapper(prompt_uncondition, sample_params1, multimodal_params.clone(), request),
-                    ]
-                )
-                generation_params.update_t2i(con_gen, uncon_gen)
+
+                if self.args.x2i_enable_cfg:
+                    (con_gen, uncon_gen) = await asyncio.gather(
+                        *[
+                            generation_wrapper(prompt_condition, sample_params, multimodal_params, request),
+                            generation_wrapper(prompt_uncondition, sample_params1, multimodal_params.clone(), request),
+                        ]
+                    )
+                    generation_params.update_t2i(con_gen, uncon_gen)
+
+                else:
+                    con_gen = await generation_wrapper(prompt_condition, sample_params, multimodal_params, request)
+                    generation_params.update_t2i(con_gen, None)
+
                 if input_image_num > 0:
                     # for it2i, the output image size is the same as the input image size
                     generation_params.update_hw(
