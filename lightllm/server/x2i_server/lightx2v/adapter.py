@@ -75,7 +75,6 @@ class LightX2VServer:
         while True:
 
             try:
-                start = time.time()
                 if self.rank == 0:
                     param: X2IParams = await self.task_socket.recv_pyobj()
                     if self.world_size > 1:
@@ -86,7 +85,8 @@ class LightX2VServer:
                     param: X2IParams = params[0]
 
                 assert param is not None, "Received None param in x2v worker, this should not happen."
-
+                
+                start = time.time()
                 images = await self._process(param)
                 logger.info(f"[{self.rank}/{self.world_size}/{self.nccl_port}] generate images cost {time.time() - start} seconds")
 
