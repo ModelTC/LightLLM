@@ -1,10 +1,11 @@
-ARG CUDA_VERSION=12.8.0
+ARG CUDA_VERSION=12.9.0
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
 ARG VLLM_VERSION=0.16.0
 ARG FLASH_MLA_REF=47c35a7
+ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
@@ -86,6 +87,11 @@ RUN if [ "${ENABLE_DEEPEP}" = "1" ]; then \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so.2 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so; \
       pip install --no-build-isolation .; \
     fi
+
+RUN cd /root && git clone https://github.com/deepseek-ai/DeepGEMM.git && \
+    cd DeepGEMM && git checkout ${DEEPGEMM_REF} && \
+    git submodule update --init --recursive && \
+    pip install --no-build-isolation .
 
 RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
       apt-get update && apt-get install -y cmake automake autotools-dev libtool libz-dev && \

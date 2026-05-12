@@ -11,6 +11,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
+from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
 
@@ -71,18 +72,19 @@ class FusedMoeWeight(BaseWeightTpl):
         if not self.enable_ep_moe:
             return quant_method
 
+        target_method = "deepgemm-fp8fp4-b32" if is_sm100_gpu() else "deepgemm-fp8w8a8-b128"
         if quant_method.method_name == "none":
             from lightllm.common.quantization.registry import QUANTMETHODS
 
             logger.info(
-                "enable_ep_moe requires FP8 MoE expert weights; "
-                "auto-upgrading fused_moe quantization from `none` to `deepgemm-fp8w8a8-b128`."
+                f"enable_ep_moe requires DeepGEMM MoE expert weights; "
+                f"auto-upgrading fused_moe quantization from `none` to `{target_method}`."
             )
-            quant_method = QUANTMETHODS.get("deepgemm-fp8w8a8-b128")
+            quant_method = QUANTMETHODS.get(target_method)
 
-        if quant_method.method_name != "deepgemm-fp8w8a8-b128":
+        if quant_method.method_name != target_method:
             raise ValueError(
-                f"enable_ep_moe currently only supports `deepgemm-fp8w8a8-b128` for fused_moe, "
+                f"enable_ep_moe currently requires `{target_method}` for fused_moe on this GPU, "
                 f"but got `{quant_method.method_name}`."
             )
 
@@ -168,6 +170,9 @@ class FusedMoeWeight(BaseWeightTpl):
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
         )
+
+    def use_sm100_mega_moe(self) -> bool:
+        return bool(getattr(self.fuse_moe_impl, "_use_sm100_fp4_moe", lambda: False)())
 
     def low_latency_dispatch(
         self,

@@ -18,7 +18,8 @@ set -euo pipefail
 #   --no-nixl                 Disable NIXL (default: enabled)
 #   --no-cache                Disable cache (default: enabled)
 #   --lite                    Disable DEEPEP, NIXL and cache in one shot
-#   --cuda-version <ver>      CUDA version (default: 12.8.0)
+#   --cuda-version <ver>      CUDA version (default: 12.9.0)
+#   --deepgemm-ref <ref>      DeepGEMM git ref (default: 891d57b4db1071624b5c8fa0d1e51cb317fa709f)
 #   --image-prefix <name>     Image prefix (default: lightllm)
 #   --image-tag <tag>         Image tag (default: generated from enabled features)
 #   -h / --help               Show help
@@ -27,7 +28,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 IMAGE_PREFIX="${IMAGE_PREFIX:-lightllm}"
-CUDA_VERSION="${CUDA_VERSION:-12.8.0}"
+CUDA_VERSION="${CUDA_VERSION:-12.9.0}"
+DEEPGEMM_REF="${DEEPGEMM_REF:-891d57b4db1071624b5c8fa0d1e51cb317fa709f}"
 IMAGE_TAG="${IMAGE_TAG:-}"
 
 ENABLE_DEEPEP="${ENABLE_DEEPEP:-1}"
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cuda-version)
       CUDA_VERSION="${2:-}"
+      shift
+      ;;
+    --deepgemm-ref)
+      DEEPGEMM_REF="${2:-}"
       shift
       ;;
     --image-prefix)
@@ -97,9 +103,9 @@ fi
 
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \
+  --build-arg DEEPGEMM_REF="${DEEPGEMM_REF}" \
   --build-arg ENABLE_DEEPEP="${ENABLE_DEEPEP}" \
   --build-arg ENABLE_NIXL="${ENABLE_NIXL}" \
   --build-arg ENABLE_CACHE="${ENABLE_CACHE}" \
   --progress=plain \
   -t "${IMAGE_PREFIX}:${IMAGE_TAG}" . 
-

@@ -72,7 +72,7 @@ def fused_experts_impl(
     use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
-    previous_event: Optional[EventOverlap] = None,
+    previous_event: Optional[Any] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -156,7 +156,7 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+            deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
@@ -170,7 +170,7 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
 
-            _deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
+            deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
 
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
@@ -214,7 +214,7 @@ def fused_experts_impl(
     return combined_x
 
 
-def _deepgemm_grouped_fp8_nt_contiguous(
+def deepgemm_grouped_fp8_nt_contiguous(
     input_tuple: Tuple[torch.Tensor, torch.Tensor],
     w_tuple: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
@@ -241,3 +241,22 @@ def _deepgemm_grouped_fp8_nt_masked(
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
             return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
+
+
+def deepgemm_grouped_fp8_fp4_nt_contiguous(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    grouped_layout: torch.Tensor,
+    use_psum_layout: bool = False,
+):
+    if HAS_DEEPGEMM and hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
+        return deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            input_tuple,
+            w_tuple,
+            out,
+            grouped_layout,
+            use_psum_layout=use_psum_layout,
+            recipe=(1, 1, 32),
+        )
+    raise RuntimeError("deep_gemm does not provide grouped fp8-fp4 NT contiguous GEMM kernel")

@@ -133,7 +133,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: LlamaInferStateInfo,
         layer_weight: Qwen3MOETransformerLayerWeight,
     ):
-        if not self.is_moe:
+        if not self.is_moe or layer_weight.experts.use_sm100_mega_moe():
             return super().overlap_tpsp_token_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )
@@ -245,7 +245,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state1: LlamaInferStateInfo,
         layer_weight: Qwen3MOETransformerLayerWeight,
     ):
-        if not self.is_moe:
+        if not self.is_moe or layer_weight.experts.use_sm100_mega_moe():
             return super().overlap_tpsp_context_forward(
                 input_embdings, input_embdings1, infer_state, infer_state1, layer_weight
             )

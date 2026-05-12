@@ -52,6 +52,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
             self.config["n_routed_experts"],
             self.config["hidden_size"],
             self.config.get("num_experts_per_tok", 1),
+            self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
         )
 
     def _verify_params(self):

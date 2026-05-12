@@ -31,4 +31,5 @@ class Qwen3MOEModel(Qwen3TpPartModel):
                 self.config["num_experts"],
                 self.config["hidden_size"],
                 self.config.get("num_experts_per_tok", 1),
+                self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
             )

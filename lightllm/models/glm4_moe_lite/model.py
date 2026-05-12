@@ -29,6 +29,7 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
             self.config["n_routed_experts"],
             self.config["hidden_size"],
             self.config.get("num_experts_per_tok", 1),
+            self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
         )
 
     def _init_to_get_yarn_rotary(self):

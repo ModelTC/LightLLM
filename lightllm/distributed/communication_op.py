@@ -37,7 +37,7 @@ from lightllm.utils.dist_utils import (
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
-from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
@@ -128,13 +128,20 @@ class DistributeGroupManager:
     def get_group(self, group_index: int) -> CustomProcessGroup:
         return self.groups[group_index]
 
-    def new_deepep_group(self, n_routed_experts, hidden_size, num_experts_per_tok: int = 1):
+    def new_deepep_group(
+        self,
+        n_routed_experts,
+        hidden_size,
+        num_experts_per_tok: int = 1,
+        moe_intermediate_size: Optional[int] = None,
+    ):
         enable_ep_moe = get_env_start_args().enable_ep_moe
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
+            self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
@@ -145,9 +152,6 @@ class DistributeGroupManager:
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
-        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-            self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
-        )
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -156,13 +160,33 @@ class DistributeGroupManager:
             use_fp8_dispatch=True,
             allow_multiple_reduction=False,
         )
-        self.ep_low_latency_buffer = deep_ep.Buffer(
-            deepep_group,
-            int(1e9),
-            num_rdma_bytes,
-            low_latency_mode=True,
-            num_qps_per_rank=(self.ll_num_experts // global_world_size),
-        )
+        self.ep_mega_moe_buffer = None
+        self.ep_low_latency_buffer = None
+        if not is_sm100_gpu():
+            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+            )
+            self.ep_low_latency_buffer = deep_ep.Buffer(
+                deepep_group,
+                int(1e9),
+                num_rdma_bytes,
+                low_latency_mode=True,
+                num_qps_per_rank=(self.ll_num_experts // global_world_size),
+            )
+        else:
+            if moe_intermediate_size is None:
+                raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
+
+            import deep_gemm
+
+            self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+                deepep_group,
+                self.ll_num_experts,
+                self.ll_num_tokens,
+                num_experts_per_tok,
+                self.ll_hidden,
+                moe_intermediate_size,
+            )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(theoretical_sms)
 
