@@ -96,9 +96,9 @@ async def build_prompt(request, tools) -> str:
 
     # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
     # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
-    from .api_openai import _get_reasoning_from_request
+    from .api_openai import _is_force_thinking_mode
 
-    thinking = _get_reasoning_from_request(request)
+    thinking = _is_force_thinking_mode(request)
 
     kwargs["thinking"] = thinking
     kwargs["enable_thinking"] = thinking

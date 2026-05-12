@@ -153,8 +153,8 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
     return idx
 
 
-def _get_reasoning_from_request(request: ChatCompletionRequest) -> bool:
-    """Judge whether the request needs reasoning"""
+def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
+    """Whether this request uses forced thinking / reasoning (parser + template)."""
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
@@ -175,7 +175,7 @@ def _process_reasoning_stream(
 ) -> tuple[Optional[str], str]:
     """Process reasoning content in streaming response"""
     if index not in reasoning_parser_dict:
-        request_enable_reasoning = _get_reasoning_from_request(request)
+        request_enable_reasoning = _is_force_thinking_mode(request)
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
@@ -376,7 +376,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             reasoning_text = None
             reasoning_parser = get_env_start_args().reasoning_parser
             if reasoning_parser:
-                request_enable_reasoning = _get_reasoning_from_request(request)
+                request_enable_reasoning = _is_force_thinking_mode(request)
                 try:
                     parser = ReasoningParser(
                         model_type=reasoning_parser,
