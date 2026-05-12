@@ -63,7 +63,8 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    SLIDING_WINDOW: tl.constexpr,
+    USE_SLIDING_WINDOW: tl.constexpr,
+    SLIDING_WINDOW_SIZE: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -112,16 +113,17 @@ def _fwd_kernel(
     block_image_end = tl.minimum(tl.max(q_image_end, axis=0), total_len)
     block_end_loc = tl.maximum(causal_end, block_image_end)
 
-    if SLIDING_WINDOW > 0:
-        win_start = block_start_loc + prompt_cache_len - (SLIDING_WINDOW - 1)
-        win_start = tl.maximum(win_start, 0)
-        win_start = (win_start // BLOCK_N) * BLOCK_N
+    if USE_SLIDING_WINDOW:
+        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE + 1
+        kv_start_index = tl.maximum(kv_start_index, 0)
+        block_kv_len = block_end_loc - kv_start_index
     else:
-        win_start = 0
+        kv_start_index = 0
+        block_kv_len = block_end_loc
 
-    for start_n in range(win_start, block_end_loc, BLOCK_N):
+    for start_n in range(0, block_kv_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
-        k_pos = start_n + offs_n  # [N]
+        k_pos = kv_start_index + start_n + offs_n  # [N]
         k_valid = k_pos < block_end_loc
 
         kv_loc = tl.load(
@@ -135,8 +137,8 @@ def _fwd_kernel(
         qk = tl.dot(q, k)
 
         causal_mask = q_pos[:, None] >= k_pos[None, :]
-        if SLIDING_WINDOW > 0:
-            causal_mask = causal_mask & ((q_pos[:, None] - k_pos[None, :]) < SLIDING_WINDOW)
+        if USE_SLIDING_WINDOW:
+            causal_mask = causal_mask & ((q_pos[:, None] - k_pos[None, :]) < SLIDING_WINDOW_SIZE)
         # Image bidi: a Q in image span [_, e) attends to all K with k_pos < e.
         # For text Q (q_image_end == 0) this is k_pos < 0 = always False, so
         # the union with causal_mask leaves text-attention unchanged.
@@ -183,7 +185,7 @@ def context_attention_fwd_gemma4_mm(
     max_input_len,
     req_to_token_indexs,
     b_image_token_end,
-    sliding_window: int = 0,
+    sliding_window: int = -1,
 ):
     """Prefill attention with image bidirectional masking on sliding layers.
 
@@ -210,6 +212,8 @@ def context_attention_fwd_gemma4_mm(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
+    use_sliding_window = sliding_window >= 0
+    sliding_window_size = int(sliding_window) if use_sliding_window else 0
 
     _fwd_kernel[grid](
         q,
@@ -242,7 +246,8 @@ def context_attention_fwd_gemma4_mm(
         BLOCK_DMODEL=Lk,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        SLIDING_WINDOW=int(sliding_window),
+        USE_SLIDING_WINDOW=use_sliding_window,
+        SLIDING_WINDOW_SIZE=sliding_window_size,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -263,9 +268,12 @@ def reference_attention(
     b_prompt_cache_len,
     req_to_token_indexs,
     b_image_token_end,
-    sliding_window=0,
+    sliding_window=-1,
 ):
-    """Slow torch reference for the gemma4 mm prefill kernel."""
+    """Slow torch reference for the gemma4 mm prefill kernel.
+
+    `sliding_window` is the total window size including self. < 0 disables SWA.
+    """
     device = q.device
     dtype = q.dtype
     sum_q, Hq, D = q.shape
@@ -297,7 +305,7 @@ def reference_attention(
         k_pos = torch.arange(0, total_len, device=device, dtype=torch.int64)
 
         causal = k_pos[None, :] <= q_pos[:, None]
-        if sliding_window > 0:
+        if sliding_window >= 0:
             causal = causal & ((q_pos[:, None] - k_pos[None, :]) < sliding_window)
         image = k_pos[None, :] < q_image_end[:, None]
         allow = causal | image
@@ -325,7 +333,7 @@ def make_test_case(
     D=256,
     seed=0,
     base_index=50000,
-    sliding_window=0,
+    sliding_window=-1,
 ):
     torch.manual_seed(seed)
 
@@ -391,7 +399,7 @@ def make_test_case(
     )
 
 
-def check_once(seed=0, dtype=torch.bfloat16, sliding_window=0, D=256):
+def check_once(seed=0, dtype=torch.bfloat16, sliding_window=-1, D=256):
     case = make_test_case(seed=seed, dtype=dtype, sliding_window=sliding_window, D=D)
     (
         q,
@@ -454,7 +462,7 @@ if __name__ == "__main__":
     else:
         # Vary D, sliding window, and image presence.
         for seed in (0, 1, 2):
-            check_once(seed=seed, D=128, sliding_window=0)
+            check_once(seed=seed, D=128, sliding_window=-1)
             check_once(seed=seed, D=128, sliding_window=4096)
             check_once(seed=seed, D=256, sliding_window=4096)
         print("ok")

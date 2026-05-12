@@ -79,10 +79,12 @@ class Fa3PrefillAttState(BasePrefillAttState):
     ) -> torch.Tensor:
         self.backend: Fa3AttBackend = self.backend  # for typing
 
+        window_size = (-1, -1)
         if att_control.use_sliding_window:
-            window_size = att_control.sliding_window
-        else:
-            window_size = (-1, -1)
+            left, right = att_control.sliding_window
+            left = max(int(left) - 1, 0) if left >= 0 else -1
+            right = max(int(right) - 1, 0) if right >= 0 else -1
+            window_size = (left, right)
 
         if att_control.use_att_sink:
             sink_weight: torch.Tensor = att_control.sink_weight
@@ -209,10 +211,12 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         att_control: AttControl,
         alloc_func=torch.empty,
     ):
+        window_size = (-1, -1)
         if att_control.use_sliding_window:
-            window_size = att_control.sliding_window
-        else:
-            window_size = (-1, -1)
+            left, right = att_control.sliding_window
+            left = max(int(left) - 1, 0) if left >= 0 else -1
+            right = max(int(right) - 1, 0) if right >= 0 else -1
+            window_size = (left, right)
 
         if att_control.use_att_sink:
             sink_weight: torch.Tensor = att_control.sink_weight

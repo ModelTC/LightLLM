@@ -25,7 +25,6 @@ class TritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_att_sink is False
         if att_control.use_alibi:
             assert att_control.use_sliding_window is False, "alibi + sliding_window not supported"
             assert att_control.tp_alibi is not None
@@ -70,13 +69,10 @@ class TritonPrefillAttState(BasePrefillAttState):
     ):
         from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
 
-        # Convert AttControl's (left, right) tuple to a single window length:
-        # we treat the window as `left + 1` (each query attends to itself plus
-        # the previous `left` tokens — same convention FA3 uses with causal=True).
         if att_control.use_sliding_window:
-            sliding_window = int(att_control.sliding_window[0]) + 1
+            sliding_window = int(att_control.sliding_window[0])
         else:
-            sliding_window = 0
+            sliding_window = -1
 
         out = alloc_func(q.shape, q.dtype)
         context_attention_fwd(
@@ -111,7 +107,6 @@ class TritonDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_att_sink is False
         if att_control.use_alibi:
             assert att_control.use_sliding_window is False, "alibi + sliding_window not supported"
             assert att_control.tp_alibi is not None
@@ -120,8 +115,6 @@ class TritonDecodeAttState(BaseDecodeAttState):
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
             if q_head_num == k_head_num:
-                # MHA decode path: SWA not yet wired here (only GQA path used by Gemma-4).
-                assert att_control.use_sliding_window is False, "SWA in MHA triton decode not implemented"
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
                 return self._normal_decode_gqa_flash_decoding_att(
@@ -193,9 +186,9 @@ class TritonDecodeAttState(BaseDecodeAttState):
         )
 
         if att_control.use_sliding_window:
-            sliding_window = int(att_control.sliding_window[0]) + 1
+            sliding_window = int(att_control.sliding_window[0])
         else:
-            sliding_window = 0
+            sliding_window = -1
 
         out = alloc_func(q.shape, q.dtype)
 

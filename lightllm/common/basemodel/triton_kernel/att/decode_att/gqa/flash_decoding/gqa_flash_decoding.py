@@ -8,7 +8,7 @@ def gqa_token_decode_attention_flash_decoding(
     cache_v: torch.Tensor,
     out=None,
     alloc_tensor_func=torch.empty,
-    sliding_window: int = 0,
+    sliding_window: int = -1,
 ):
     batch_size = infer_state.batch_size
     q_head_num, head_dim = q.shape[1], q.shape[2]
@@ -53,5 +53,6 @@ def gqa_token_decode_attention_flash_decoding(
         B_Seqlen=infer_state.b_seq_len,
         out=o_tensor.view(calcu_shape1),
         block_seq=BLOCK_SEQ,
+        sliding_window=sliding_window,
     )
     return o_tensor
