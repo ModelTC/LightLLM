@@ -4,9 +4,10 @@ import os
 import librosa
 import base64
 import numpy as np
-from typing import List
+from typing import List, Tuple
 from io import BytesIO
-from PIL import Image
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image, ImageFile
 from fastapi import Request
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.error_utils import ClientDisconnected
@@ -15,6 +16,27 @@ from lightllm.utils.log_utils import init_logger
 
 
 logger = init_logger(__name__)
+
+# Disable PIL's truncated image loading tolerance to make truncated images raise OSError in load()
+# so that the frontend can intercept it and avoid crashing in the subsequent encode/preprocess stage.
+ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+_IMAGE_VERIFY_POOL = ThreadPoolExecutor(
+    max_workers=int(os.getenv("LIGHTLLM_IMAGE_VERIFY_WORKERS", str((os.cpu_count() or 4) * 2))),
+    thread_name_prefix="img-verify",
+)
+
+
+def _verify_image_bytes(img_data: bytes) -> Tuple[int, int]:
+    """
+    Verify image bytes in a thread pool to find truncated/corrupted images.
+    image.verify() only does header-level verification and cannot find truncated images;
+    image.load() reads the entire pixel data and truncated images will raise OSError.
+    """
+    with Image.open(BytesIO(img_data)) as image:
+        w, h = image.size
+        image.load()
+    return w, h
 
 
 class AudioItem:
@@ -146,9 +168,11 @@ class ImageItem:
             else:
                 raise ValueError(f"cannot read image which type is {self._type}!")
 
-            with Image.open(BytesIO(img_data)) as image:
-                self.image_w, self.image_h = image.size
-                image.verify()  # verify后会失效
+            # Do pixel-level decoding verification in a thread pool to avoid blocking the event loop;
+            # Decoding is mainly done in the C libraries (libjpeg/libpng/libwebp), which releases the GIL,
+            # and multiple threads can achieve true parallelism.
+            loop = asyncio.get_running_loop()
+            self.image_w, self.image_h = await loop.run_in_executor(_IMAGE_VERIFY_POOL, _verify_image_bytes, img_data)
 
             self._preload_data = img_data
             return
