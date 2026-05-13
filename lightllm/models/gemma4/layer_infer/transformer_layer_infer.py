@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
 from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
     context_attention_fwd_gemma4_mm,
@@ -24,7 +25,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
-        self.eps_ = 1e-6
+        self.eps_ = network_config.get("rms_norm_eps", 1e-6)
         self.embed_dim_ = network_config["hidden_size"]
         self.is_moe = bool(network_config.get("enable_moe_block", False))
         self.num_experts_per_tok = network_config.get("num_experts_per_tok", network_config.get("top_k_experts", 0))
@@ -83,8 +84,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         self.kv_share_target_layer_ = None
         if self.is_kv_shared_:
             cutoff = total_layers - kv_shared_count
-            for j in range(layer_num - 1, -1, -1):
-                if j < cutoff and network_config["layer_types"][j] == layer_type:
+            for j in range(cutoff - 1, -1, -1):
+                if network_config["layer_types"][j] == layer_type:
                     self.kv_share_target_layer_ = j
                     break
             assert self.kv_share_target_layer_ is not None, (
@@ -96,8 +97,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
         # head_dim. Don't change to 0.25 — that double-counts with the table.
         self.partial_rotary_factor_ = 1.0
-
-    # ----- QKV + attention ---------------------------------------------
 
     def _rope_cos_sin(self, infer_state):
         # Tables are built in the model dtype (Gemma4TpPartModel._init_to_get_rotary_gemma4),
@@ -113,10 +112,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_heads = self.tp_q_head_num_
         kv_heads = self.tp_k_head_num_
 
-        # Q is always computed (even on KV-shared layers). RMSNormWeight's
-        # Triton kernel accepts 3D input (it views to 2D internally) and
-        # promotes to fp32 for the variance reduction, so feed bf16 (N, heads,
-        # head_dim) straight in — no Python-side reshape or dtype round-trip.
         q = layer_weight.q_proj.mm(input).view(-1, q_heads, head_dim)
         q = layer_weight.q_norm_weight_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
 
@@ -124,10 +119,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if self.is_kv_shared_:
             # K/V come from target layer's already-rotated, already-normed cache.
-            # Only rotate Q here. rotary_emb_fwd writes to k in place, so pass
-            # a 1-head throwaway tensor we can discard.
-            dummy_k = torch.empty((q.shape[0], 1, head_dim), dtype=q.dtype, device=q.device)
-            rotary_emb_fwd(q, dummy_k, cos, sin, partial_rotary_factor=self.partial_rotary_factor_)
+            rotary_emb_fwd(q, None, cos, sin, partial_rotary_factor=self.partial_rotary_factor_)
             q = q * math.sqrt(head_dim)
             if infer_state.need_dp_prefill_balance:
                 q = infer_state._all_to_all_unbalance_get(data=q)
@@ -137,16 +129,19 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         k = layer_weight.k_proj.mm(input).view(-1, kv_heads, head_dim)
         if self.k_eq_v:
             # Full-attn k_eq_v variant (e.g. 31B): K weights serve as V.
-            v = k.clone()
+            v = k
         else:
             v = layer_weight.v_proj.mm(input).view(-1, kv_heads, head_dim)
 
         k = layer_weight.k_norm_weight_(input=k, eps=self.eps_, alloc_func=self.alloc_tensor)
 
         # V-norm: unweighted RMSNorm over head_dim (matches vllm's Gemma4 has_weight=False).
-        v_fp = v.float()
-        v_fp = v_fp * torch.rsqrt(v_fp.pow(2).mean(dim=-1, keepdim=True) + self.eps_)
-        v = v_fp.to(input.dtype)
+        v = rmsnorm_forward(
+            x=v,
+            weight=None,
+            eps=self.eps_,
+            out=self.alloc_tensor(v.shape, dtype=v.dtype, device=v.device),
+        )
 
         rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=self.partial_rotary_factor_)
 
@@ -299,9 +294,10 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         router_input = residual.view(-1, self.embed_dim_).float()
         router_input = router_input * torch.rsqrt(router_input.pow(2).mean(dim=-1, keepdim=True) + self.eps_)
         router_input = router_input * self.router_root_scale
-        # bf16 weight auto-promotes against fp32 router_input; cast back to
-        # bf16 to feed moe_gate.mm.
-        router_input = (router_input * layer_weight.router_input_scale_.weight).to(torch.bfloat16)
+        # Match the gate weight dtype before matmul, consistent with the other
+        # MoE paths and compatible with fp16 / bf16 / fp32 runs.
+        moe_gate_dtype = layer_weight.moe_gate.data_type_
+        router_input = (router_input * layer_weight.router_input_scale_.weight).to(moe_gate_dtype)
         # gate logits stay fp32 for top-k / softmax precision.
         return layer_weight.moe_gate.mm(router_input, use_custom_tensor_mananger=False).float()
 

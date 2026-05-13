@@ -23,6 +23,7 @@ def _rotary_kernel(
     max_total_len,
     HEAD_Q,
     HEAD_K,  # N_CTX 代表要计算的上下文长度
+    HAS_K: tl.constexpr,
     BLOCK_HEAD: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -73,55 +74,59 @@ def _rotary_kernel(
         Q + off_q1, out1, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q)
     )
 
-    off_k0 = (
-        cur_seq_range[:, None, None] * stride_kbs
-        + cur_head_range[None, :, None] * stride_kh
-        + dim_range0[None, None, :] * stride_kd
-    )
-    off_k1 = (
-        cur_seq_range[:, None, None] * stride_kbs
-        + cur_head_range[None, :, None] * stride_kh
-        + dim_range1[None, None, :] * stride_kd
-    )
+    if HAS_K:
+        off_k0 = (
+            cur_seq_range[:, None, None] * stride_kbs
+            + cur_head_range[None, :, None] * stride_kh
+            + dim_range0[None, None, :] * stride_kd
+        )
+        off_k1 = (
+            cur_seq_range[:, None, None] * stride_kbs
+            + cur_head_range[None, :, None] * stride_kh
+            + dim_range1[None, None, :] * stride_kd
+        )
 
-    off_dimcos_sin = cur_seq_range[:, None, None] * stride_cosbs + dim_range0[None, None, :] * stride_cosd
+        off_dimcos_sin = cur_seq_range[:, None, None] * stride_cosbs + dim_range0[None, None, :] * stride_cosd
 
-    k0 = tl.load(
-        K + off_k0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
-        other=0.0,
-    )
-    k1 = tl.load(
-        K + off_k1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
-        other=0.0,
-    )
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+        k0 = tl.load(
+            K + off_k0,
+            mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+            other=0.0,
+        )
+        k1 = tl.load(
+            K + off_k1,
+            mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+            other=0.0,
+        )
+        cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+        sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
 
-    out_k0 = k0 * cos - k1 * sin
-    out_k1 = k0 * sin + k1 * cos
+        out_k0 = k0 * cos - k1 * sin
+        out_k1 = k0 * sin + k1 * cos
 
-    tl.store(
-        K + off_k0,
-        out_k0,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
-    )
-    tl.store(
-        K + off_k1,
-        out_k1,
-        mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
-    )
+        tl.store(
+            K + off_k0,
+            out_k0,
+            mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        )
+        tl.store(
+            K + off_k1,
+            out_k1,
+            mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_K),
+        )
     return
 
 
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
+def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
     total_len = q.shape[0]
-    head_num_q, head_num_k = q.shape[1], k.shape[1]
+    has_k = k is not None
+    head_num_q = q.shape[1]
+    head_num_k = k.shape[1] if has_k else 0
     head_dim = int(q.shape[2] * partial_rotary_factor)
     assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
-    assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
+    if has_k:
+        assert k.shape[0] == cos.shape[0] and k.shape[0] == sin.shape[0], f"k shape {k.shape} cos shape {cos.shape}"
 
     BLOCK_SEQ = 16
     BLOCK_HEAD = 4
@@ -139,9 +144,9 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
         q.stride(0),
         q.stride(1),
         q.stride(2),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
+        k.stride(0) if has_k else 0,
+        k.stride(1) if has_k else 0,
+        k.stride(2) if has_k else 0,
         cos.stride(0),
         cos.stride(1),
         sin.stride(0),
@@ -149,6 +154,7 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.):
         total_len,
         head_num_q,
         head_num_k,
+        HAS_K=has_k,
         BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=head_dim,
