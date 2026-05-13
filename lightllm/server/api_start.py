@@ -196,7 +196,7 @@ def normal_or_p_d_start(args):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        allowed_ep_att_backends = {"auto", "fa3", "fa4", "triton"}
         for backend in args.llm_prefill_att_backend:
             assert backend in allowed_ep_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
@@ -207,6 +207,15 @@ def normal_or_p_d_start(args):
                 "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
                 f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
+
+    requested_backends = (
+        list(args.llm_prefill_att_backend) + list(args.llm_decode_att_backend) + list(args.vit_att_backend)
+    )
+    if "fa4" in requested_backends:
+        from lightllm.utils.fa4_utils import ensure_fa4_available, ensure_fa4_supported_gpu
+
+        ensure_fa4_available()
+        ensure_fa4_supported_gpu()
 
     # mtp params check
     if args.mtp_mode is not None:
