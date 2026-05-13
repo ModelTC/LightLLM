@@ -48,20 +48,6 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         self.image_end_tag = IMG_END_TOKEN
         self.image_end_id = tokenizer.convert_tokens_to_ids(self.image_end_tag)
         self.image_tag = IMG_TOKEN
-        self.conversation_module = self.load_conversion_module(tokenizer.name_or_path)
-        self.template = model_cfg.get("template", "neo1_0")
-
-    def load_conversion_module(self, model_dir: str):
-        import importlib
-
-        conversion_path = os.path.join(model_dir, "conversation.py")
-        if not os.path.exists(conversion_path):
-            return None
-
-        spec = importlib.util.spec_from_file_location("conversation", str(conversion_path))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # must run the module
-        return module
 
     def init_imageitem_extral_params(
         self, img: ImageItem, multi_params: MultimodalParams, sampling_params: SamplingParams
@@ -139,10 +125,10 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
     def _build_t2i_query(self, msg, thinking_content=""):
-        template = self.conversation_module.get_conv_template(self.template)
-        template.append_message(template.roles[0], msg)
-        template.append_message(template.roles[1], None)
-        return template.get_prompt() + thinking_content + IMG_START_TOKEN
+        prompt = self.tokenizer.apply_chat_template(
+            conversation=[{"role": "user", "content": msg}], tokenize=False, add_generation_prompt=True)
+        
+        return prompt + thinking_content + IMG_START_TOKEN
 
     def fix_prompt(self, prompt: str, img_len: int):
         prompt_img_len = prompt.count(IMG_TOKEN)
