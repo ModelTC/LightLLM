@@ -45,8 +45,8 @@ WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir
 RUN pip install --no-cache-dir vllm==${VLLM_VERSION}
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir
 RUN git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
     cd /root/FlashMLA && \
     git checkout ${FLASH_MLA_REF} && \
@@ -54,6 +54,8 @@ RUN git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
     FLASH_MLA_DISABLE_SM100=1 pip install --no-cache-dir .
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir "flash-attn-4==4.0.0b13"
 
 ENV CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/

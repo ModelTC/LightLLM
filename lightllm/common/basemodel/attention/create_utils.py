@@ -9,6 +9,7 @@ from .triton.int4kv import Int4kvTritonAttBackend
 from .triton.int8kv import Int8kvTritonAttBackend
 from .triton.mla import MlaTritonAttBackend
 from .fa3.fp import Fa3AttBackend
+from .fa4.fp import Fa4AttBackend
 from .fa3.fp8 import Fp8Fa3AttBackend
 from .fa3.mla import MlaFa3AttBackend
 from .flashinfer.fp8 import Fp8FlashInferAttBackend
@@ -24,6 +25,7 @@ data_type_to_backend = {
     "None": {
         "triton": TritonAttBackend,
         "fa3": Fa3AttBackend,
+        "fa4": Fa4AttBackend,
         "flashinfer": FlashInferAttBackend,
     },
     "int4kv": {
@@ -90,12 +92,25 @@ def _auto_select_backend(
     return backend_map[llm_dtype]["triton"]
 
 
+def _get_explicit_backend_class(
+    backend_map: Dict[str, Dict[str, BaseAttBackend]],
+    llm_dtype: str,
+    backend_str: str,
+) -> BaseAttBackend:
+    if backend_str not in backend_map[llm_dtype]:
+        raise ValueError(
+            f"Backend `{backend_str}` is not supported for llm_kv_type `{llm_dtype}`. "
+            f"Supported backends: {sorted(backend_map[llm_dtype].keys())}"
+        )
+    return backend_map[llm_dtype][backend_str]
+
+
 def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend_class(data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
@@ -105,7 +120,7 @@ def get_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend_class(data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
@@ -115,7 +130,7 @@ def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "fl
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return mla_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend_class(mla_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
@@ -125,7 +140,7 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["flashinfer
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return mla_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend_class(mla_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
@@ -135,7 +150,7 @@ def get_nsa_prefill_att_backend_class(index=0, priority_list: list = ["flashmla_
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return nsa_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend_class(nsa_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
 
@@ -145,6 +160,6 @@ def get_nsa_decode_att_backend_class(index=0, priority_list: list = ["flashmla_s
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return nsa_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend_class(nsa_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
