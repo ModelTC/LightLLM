@@ -22,7 +22,7 @@ logger = init_logger(__name__)
 ImageFile.LOAD_TRUNCATED_IMAGES = False
 
 _IMAGE_VERIFY_POOL = ThreadPoolExecutor(
-    max_workers=int(os.getenv("LIGHTLLM_IMAGE_VERIFY_WORKERS", str((os.cpu_count() or 4) * 2))),
+    max_workers=int(os.getenv("LIGHTLLM_IMAGE_VERIFY_WORKERS", 4)),
     thread_name_prefix="img-verify",
 )
 
