@@ -39,12 +39,10 @@ class Gemma4InferStateInfo(InferStateInfo):
         return
 
     def _build_b_image_token_end(self):
-        # Scatter per-image end markers into a flat (sum_q,) int32 tensor for
-        # consumption by the image-aware prefill attention kernel. Style mirrors
-        # neo_chat_moe.get_neo_position. Chunked-prefill clipping (image span
-        # straddling cache/new boundary) is handled inside the kernel.
+        device = self.position_ids.device
+        self.b_image_token_end = torch.zeros(self.position_ids.shape[0], dtype=torch.int32, device=device)
+
         if not self.multimodal_params:
-            self.b_image_token_end = None
             return
 
         b_image_start_idx = []
@@ -62,11 +60,8 @@ class Gemma4InferStateInfo(InferStateInfo):
                 image_start_num += 1
 
         if image_start_num == 0:
-            self.b_image_token_end = None
             return
 
-        device = self.position_ids.device
-        self.b_image_token_end = torch.zeros(self.position_ids.shape[0], dtype=torch.int32, device=device)
         build_b_image_token_end(
             b_image_start_idx=torch.tensor(b_image_start_idx, dtype=torch.int32).cuda(non_blocking=True),
             b_image_len=torch.tensor(b_image_len, dtype=torch.int32).cuda(non_blocking=True),

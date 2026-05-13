@@ -201,26 +201,28 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         #   - FA3 caps head_dim at 256 -> can't run full-attn layers.
         #   - Flashinfer plans once per infer_state on a single shape -> can't
         #     accommodate heterogeneous layout at all.
-        # Strategy: run full-attn layers on triton (primary backend, this
-        # method) and sliding layers on a separate backend wired in
-        # _init_att_backend1.
+        # Strategy:
+        #   - Prefill: sliding layers go through the gemma4_mm Triton kernel
+        #     directly (handles SWA + image bidi); full-attn layers use the
+        #     primary triton backend below. No FA3 in prefill — its
+        #     image_token_end build asserts incompatible with SWA. Revisit
+        #     when fa3 supports both simultaneously.
+        #   - Decode: full-attn layers on triton (primary); sliding layers on
+        #     fa3 (with SWA) when available — secondary backend set in
+        #     _init_att_backend1.
         fa3_loadable = self._gemma4_fa3_loadable()
 
         # Full-attn layers always go through triton.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 
-        self._gemma4_sliding_prefill_backend_kind = self._resolve_gemma4_sliding_backend(
-            self.args.llm_prefill_att_backend[0], fa3_loadable
-        )
         self._gemma4_sliding_decode_backend_kind = self._resolve_gemma4_sliding_backend(
             self.args.llm_decode_att_backend[0], fa3_loadable
         )
 
     def _init_att_backend1(self):
-        # Sliding layers run on a dedicated backend so the head-dim/SWA
-        # mismatch with full-attn layers doesn't force a single compromise.
-        self.prefill_att_backend1 = self._build_gemma4_sliding_backend(self._gemma4_sliding_prefill_backend_kind)
+        # Only decode needs the sliding-layer backend; prefill sliding goes
+        # through gemma4_mm Triton directly in the layer.
         self.decode_att_backend1 = self._build_gemma4_sliding_backend(self._gemma4_sliding_decode_backend_kind)
 
     @staticmethod

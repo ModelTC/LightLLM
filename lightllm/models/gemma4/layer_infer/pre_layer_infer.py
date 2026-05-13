@@ -43,12 +43,7 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
     def context_forward(self, input_ids, infer_state, layer_weight):
         input_embdings = LlamaMultimodalPreLayerInfer.context_forward(self, input_ids, infer_state, layer_weight)
         if self.has_ple:
-            image_token_end = getattr(infer_state, "b_image_token_end", None)
-            input_ids_for_ple = (
-                input_ids
-                if image_token_end is None
-                else input_ids.masked_fill(image_token_end != 0, self.pad_token_id_)
-            )
+            input_ids_for_ple = input_ids.masked_fill(infer_state.b_image_token_end != 0, self.pad_token_id_)
             self._compute_per_layer_embeds(input_ids_for_ple, input_embdings, infer_state, layer_weight)
         return input_embdings
 

@@ -223,11 +223,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        # Image bidirectional attention only applies on sliding-window layers
-        # (matches HF/vllm `use_bidirectional_attention="vision"`). Full-attn
-        # layers stay on the standard causal triton path. b_image_token_end is
-        # only built for prefills that actually carry images.
-        if self.is_sliding and getattr(infer_state, "b_image_token_end", None) is not None:
+        if self.is_sliding:
+            # Sliding layers always go through the gemma4_mm Triton kernel: it
+            # handles SWA + image bidirectional masking in one pass.
             o_tensor = self.alloc_tensor(_q.shape, q.dtype)
             sw = self.sliding_window_ if self.sliding_window_ > 0 else -1
             context_attention_fwd_gemma4_mm(
@@ -246,11 +244,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             )
             return o_tensor.view(q.shape)
 
-        # Sliding layers go through the secondary backend (FA3 with SWA when
-        # available, else triton-with-SWA from path B). Full-attn layers go
-        # through the primary triton backend (head_dim=512).
-        att_state = infer_state.prefill_att_state1 if self.is_sliding else infer_state.prefill_att_state
-        o_tensor = att_state.prefill_att(
+        # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
+        # triton via the primary backend.
+        o_tensor = infer_state.prefill_att_state.prefill_att(
             q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
