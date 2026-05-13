@@ -1,0 +1,75 @@
+# Profiles Config for Clash Verge
+
+current: RENEKQnwun2g
+items:
+- uid: Merge
+  type: merge
+  name: null
+  file: Merge.yaml
+  updated: 1769998195
+- uid: Script
+  type: script
+  name: null
+  file: Script.js
+  updated: 1769998195
+- uid: mZrwjVkwEC6e
+  type: merge
+  name: null
+  file: mZrwjVkwEC6e.yaml
+  updated: 1777254627
+- uid: sRG9CajqGdmT
+  type: script
+  name: null
+  file: sRG9CajqGdmT.js
+  updated: 1777254627
+- uid: rXs9qrRqt9jw
+  type: rules
+  name: null
+  file: rXs9qrRqt9jw.yaml
+  updated: 1777254627
+- uid: pBxOh1cLHXtt
+  type: proxies
+  name: null
+  file: pBxOh1cLHXtt.yaml
+  updated: 1777254627
+- uid: gi5u9aMbX49R
+  type: groups
+  name: null
+  file: gi5u9aMbX49R.yaml
+  updated: 1777254627
+- uid: RENEKQnwun2g
+  type: remote
+  name: DOGESS.yaml
+  file: RENEKQnwun2g.yaml
+  url: https://dg-ja.sub260871.com/dli/ninja/jicQadvXkb9TasPC
+  selected:
+  - name: 🚀 节点选择
+    now: 🟦 专线节点
+  - name: 💬 Ai平台
+    now: 台湾 03（专线；联通）
+  extra:
+    upload: 7625484294
+    download: 155429491157
+    total: 2552284315648
+    expire: 1804688049
+    crisp:
+      app_name: DOGESS
+      class: VIP2 - 300M - 1/0
+      class_expire: 2027-03-10 22:14:09
+      crisp_id: 1a5d48f4-87ff-4b59-ae68-69221c36d0a7
+      email: ghhghjkl@163.com
+      money: ¥ 0.00
+      name: blueswhen
+      regip: 209.9.115.72
+      regtime: 2023-02-22 13:21:43
+      token_id: 24c24ff7-45b8-3583-a2c4-ade6e55df810
+      traffic: 757.6MB / 2.17TB
+  updated: 1778667194
+  option:
+    update_interval: 14400
+    merge: mZrwjVkwEC6e
+    script: sRG9CajqGdmT
+    rules: rXs9qrRqt9jw
+    proxies: pBxOh1cLHXtt
+    groups: gi5u9aMbX49R
+  home: https://xn--l5xa.net/

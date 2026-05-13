@@ -1,0 +1,81 @@
+# Clash V-Ninja Config
+
+app_log_level: null
+language: zh
+theme_mode: system
+tray_event: main_window
+env_type: bash
+start_page: /home
+startup_script: null
+traffic_graph: true
+enable_memory_usage: true
+enable_group_icon: true
+common_tray_icon: false
+tray_icon: monochrome
+menu_icon: monochrome
+sysproxy_tray_icon: false
+tun_tray_icon: false
+enable_tun_mode: false
+enable_auto_launch: false
+enable_silent_start: false
+enable_system_proxy: true
+enable_proxy_guard: false
+enable_dns_settings: false
+use_default_bypass: true
+system_proxy_bypass: null
+proxy_guard_duration: 30
+proxy_auto_config: false
+pac_file_content: |
+  function FindProxyForURL(url, host) {
+    return "PROXY 127.0.0.1:%mixed-port%; SOCKS5 127.0.0.1:%mixed-port%; DIRECT;";
+  }
+proxy_host: 127.0.0.1
+theme_setting: null
+web_ui_list: null
+clash_core: ninja-mihomo
+hotkeys: null
+enable_global_hotkey: true
+home_cards: null
+auto_close_connection: true
+auto_check_update: false
+default_latency_test: null
+default_latency_timeout: null
+enable_builtin_enhanced: true
+proxy_layout_column: null
+test_list:
+- uid: zhOEAUgDeCGlf2AGULhzU
+  name: Apple
+  icon: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48"><path d="M16.125 1c-1.153.067-2.477.71-3.264 1.527-.71.744-1.272 1.85-1.043 2.918 1.253.033 2.511-.626 3.264-1.459.703-.779 1.236-1.866 1.043-2.986zm.068 4.443c-1.809 0-2.565 1.112-3.818 1.112-1.289 0-2.467-1.041-4.027-1.041C6.226 5.514 3 7.48 3 12.11 3 16.324 6.818 21 8.973 21c1.309.013 1.626-.823 3.402-.832 1.778-.013 2.162.843 3.473.832 1.476-.011 2.628-1.633 3.47-2.918.604-.92.853-1.39 1.32-2.43-3.472-.88-4.163-6.48 0-7.638-.785-1.341-3.08-2.57-4.445-2.57z"/></svg>
+  url: https://www.apple.com
+- uid: WAPVwXyEyRvEWDQHMlH-r
+  name: GitHub
+  icon: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" width="48" height="48"><path d="M15 3C8.373 3 3 8.373 3 15c0 5.623 3.872 10.328 9.092 11.63a1.751 1.751 0 0 1-.092-.583v-2.051h-1.508c-.821 0-1.551-.353-1.905-1.009-.393-.729-.461-1.844-1.435-2.526-.289-.227-.069-.486.264-.451.615.174 1.125.596 1.605 1.222.478.627.703.769 1.596.769.433 0 1.081-.025 1.691-.121.328-.833.895-1.6 1.588-1.962-3.996-.411-5.903-2.399-5.903-5.098 0-1.162.495-2.286 1.336-3.233-.276-.94-.623-2.857.106-3.587 1.798 0 2.885 1.166 3.146 1.481A8.993 8.993 0 0 1 15.495 9c1.036 0 2.024.174 2.922.483C18.675 9.17 19.763 8 21.565 8c.732.731.381 2.656.102 3.594.836.945 1.328 2.066 1.328 3.226 0 2.697-1.904 4.684-5.894 5.097C18.199 20.49 19 22.1 19 23.313v2.734c0 .104-.023.179-.035.268C23.641 24.676 27 20.236 27 15c0-6.627-5.373-12-12-12z"/></svg>
+  url: https://www.github.com
+- uid: P4fgJXMn8HV75hQ0NMoNe
+  name: Google
+  icon: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48"><path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/><path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"/><path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/><path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/></svg>
+  url: https://www.google.com
+- uid: 5hqSGtNMZXJy5V1G2LBRa
+  name: Youtube
+  icon: <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48"><path fill="#FF3D00" d="M43.2 33.9c-.4 2.1-2.1 3.7-4.2 4-3.3.5-8.8 1.1-15 1.1-6.1 0-11.6-.6-15-1.1-2.1-.3-3.8-1.9-4.2-4-.4-2.3-.8-5.7-.8-9.9s.4-7.6.8-9.9c.4-2.1 2.1-3.7 4.2-4C12.3 9.6 17.8 9 24 9c6.2 0 11.6.6 15 1.1 2.1.3 3.8 1.9 4.2 4 .4 2.3.9 5.7.9 9.9-.1 4.2-.5 7.6-.9 9.9z"/><path fill="#FFF" d="M20 31V17l12 7z"/></svg>
+  url: https://www.youtube.com
+auto_log_clean: 3
+enable_random_port: false
+verge_redir_port: 6788
+verge_redir_enabled: false
+verge_mixed_port: 6789
+verge_socks_port: 1080
+verge_socks_enabled: false
+verge_port: 8080
+verge_http_enabled: false
+enable_tray_speed: true
+enable_tray_icon: true
+enable_auto_light_weight_mode: false
+auto_light_weight_minutes: 10
+enable_hover_jump_navigator: true
+service_state:
+  last_install_time: 1769998067
+  install_count: 1
+  last_check_time: 0
+  last_error: Newly installed service not immediately available/connectable
+  prefer_sidecar: true
