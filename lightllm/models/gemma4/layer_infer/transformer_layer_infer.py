@@ -39,12 +39,14 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # HF treats that as "fall back to num_key_value_heads".
         num_global_kv = network_config.get("num_global_key_value_heads") or network_config["num_key_value_heads"]
 
+        # Override parent's head_dim_ (hidden_size/num_heads = 224 on 31B, wrong
+        # for Gemma-4 — actual is 256 sliding / 512 full).
         if self.is_sliding:
-            self.layer_head_dim_ = network_config["head_dim"]
+            self.head_dim_ = network_config["head_dim"]
             total_kv_heads = network_config["num_key_value_heads"]
             self.k_eq_v = False
         else:
-            self.layer_head_dim_ = network_config["global_head_dim"]
+            self.head_dim_ = network_config["global_head_dim"]
             total_kv_heads = num_global_kv
             self.k_eq_v = network_config.get("attention_k_eq_v", True)
 
@@ -108,7 +110,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
 
-        head_dim = self.layer_head_dim_
+        head_dim = self.head_dim_
         q_heads = self.tp_q_head_num_
         kv_heads = self.tp_k_head_num_
 
@@ -179,20 +181,13 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             return
         return super()._post_cache_kv(cache_kv, infer_state, layer_weight)
 
-    def _get_o(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
-        if infer_state.need_dp_prefill_balance:
-            input = infer_state._all_to_all_balance_get(data=input)
-        input = input.view(-1, self.tp_o_head_num_ * self.layer_head_dim_)
-        o_tensor = layer_weight.o_proj.mm(input)
-        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
-        return o_tensor
-
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
     def _att_control(self):
-        # `sliding_window_` is the total window size including self.
-        # `_gemma4_use_swa` is set by Gemma4TpPartModel._init_att_backend.
-        if self.is_sliding and self.sliding_window_ > 0 and self.network_config_.get("_gemma4_use_swa", False):
+        # `sliding_window_` is the total window size including self. Sliding
+        # layers always run on a backend that consumes SWA (FA3 or the patched
+        # triton kernels — see Gemma4TpPartModel._init_att_backend1).
+        if self.is_sliding and self.sliding_window_ > 0:
             w = self.sliding_window_
             return AttControl(use_sliding_window=True, sliding_window=(w, w))
         return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
@@ -201,17 +196,21 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # KV-shared layers read from the target layer's cache slot.
         layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
         _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
-        # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim).
+        # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
+        # (not .reshape) so any non-contiguous layout from a future mem_manager
+        # backend fails loudly instead of silently copying — slice + view is
+        # O(1) on the standard MemoryManager layout (inner (kv_heads, head_dim)
+        # span is contiguous).
         kv_heads = self.tp_k_head_num_
-        head_dim = self.layer_head_dim_
+        head_dim = self.head_dim_
         cache_slot_dim = self.kv_cache_slot_dim_
         used_cache_slots = kv_heads * head_dim // cache_slot_dim
         if used_cache_slots == _k_raw.shape[1]:
             # Layout already matches this layer's natural shape.
-            return _k_raw.reshape(-1, kv_heads, head_dim), _v_raw.reshape(-1, kv_heads, head_dim)
+            return _k_raw.view(-1, kv_heads, head_dim), _v_raw.view(-1, kv_heads, head_dim)
         # Otherwise the K/V live in the first used_cache_slots; the rest is zero pad.
-        _k = _k_raw[:, :used_cache_slots, :].reshape(-1, kv_heads, head_dim)
-        _v = _v_raw[:, :used_cache_slots, :].reshape(-1, kv_heads, head_dim)
+        _k = _k_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
+        _v = _v_raw[:, :used_cache_slots, :].view(-1, kv_heads, head_dim)
         return _k, _v
 
     def _context_attention_kernel(
@@ -223,15 +222,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         out=None,
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
-        _q = q.view(-1, self.tp_q_head_num_, self.layer_head_dim_)
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         # Image bidirectional attention only applies on sliding-window layers
         # (matches HF/vllm `use_bidirectional_attention="vision"`). Full-attn
-        # layers stay on the standard causal triton path.
-        if (
-            self.is_sliding
-            and self.network_config_.get("_gemma4_use_swa", False)
-            and getattr(infer_state, "b_image_token_end", None) is not None
-        ):
+        # layers stay on the standard causal triton path. b_image_token_end is
+        # only built for prefills that actually carry images.
+        if self.is_sliding and getattr(infer_state, "b_image_token_end", None) is not None:
             o_tensor = self.alloc_tensor(_q.shape, q.dtype)
             sw = self.sliding_window_ if self.sliding_window_ > 0 else -1
             context_attention_fwd_gemma4_mm(
@@ -267,7 +263,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         out=None,
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
-        _q = q.view(-1, self.tp_q_head_num_, self.layer_head_dim_)
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         att_state = infer_state.decode_att_state1 if self.is_sliding else infer_state.decode_att_state
         o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)

@@ -216,11 +216,6 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         self._gemma4_sliding_decode_backend_kind = self._resolve_gemma4_sliding_backend(
             self.args.llm_decode_att_backend[0], fa3_loadable
         )
-        # SWA is on regardless of which sliding backend was picked: FA3
-        # honours window_size per call, and the triton kernels in
-        # context_flashattention_nopad.py / gqa_flash_decoding_stage1.py mask
-        # out-of-window positions when SLIDING_WINDOW > 0.
-        self.config["_gemma4_use_swa"] = True
 
     def _init_att_backend1(self):
         # Sliding layers run on a dedicated backend so the head-dim/SWA
