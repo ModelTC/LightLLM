@@ -2,7 +2,6 @@ import math
 import os
 import json
 import torch
-from transformers import AutoConfig
 from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
@@ -15,7 +14,7 @@ from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerI
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -132,12 +131,15 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # under text_config; flatten it so downstream code sees text-model fields
         # at the top level (mirrors the gemma3 approach).
         if "text_config" in self.config:
-            hf_config = AutoConfig.from_pretrained(self.weight_dir_, trust_remote_code=True)
-            self.config = hf_config.text_config.to_dict()
+            self.config = self.config["text_config"].copy()
 
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self._reset_num_key_value_heads()
+
+        if self.finetune_config:
+            self.config["vocab_size"] = self.finetune_config.vocab_size
 
         if self.config.get("enable_moe_block", False):
             # LightLLM's MoE helpers use Qwen/DeepSeek-style field names.
@@ -195,41 +197,25 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _init_att_backend(self):
         # Gemma-4 has per-layer heterogeneous attention: sliding layers use
         # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
-        # kv_heads=4, k_eq_v). No single backend covers both:
+        # kv_heads=4, k_eq_v). No single generic backend setup covers both:
         #   - FA3 caps head_dim at 256 -> can't run full-attn layers.
-        #   - Triton handles head_dim=512 (kernels widened to Lk=512) but
-        #     historically refused sliding_window.
         #   - Flashinfer plans once per infer_state on a single shape -> can't
         #     accommodate heterogeneous layout at all.
         # Strategy: run full-attn layers on triton (primary backend, this
-        # method) and sliding layers on a separate backend wired via
-        # _init_att_backend1 (FA3 when available; triton-with-SWA otherwise).
-        from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-
-        args = get_env_start_args()
-        backends = set(args.llm_prefill_att_backend + args.llm_decode_att_backend)
-        for backend_name in backends:
-            assert backend_name in ("auto", "triton", "fa3"), (
-                "Gemma-4 requires triton or fa3 (per-layer dynamic head_dim / "
-                "num_kv_heads); flashinfer is not wired for the heterogeneous "
-                f"layout. Got --llm_*_att_backend={backend_name!r}."
-            )
-        fa3_loadable = flash_attn_with_kvcache is not None
-        if "fa3" in backends:
-            assert fa3_loadable, (
-                "Requested --llm_*_att_backend=fa3 but flash_attn_with_kvcache "
-                "did not import (sgl_kernel missing or wrong arch)."
-            )
+        # method) and sliding layers on a separate backend wired in
+        # _init_att_backend1.
+        fa3_loadable = self._gemma4_fa3_loadable()
 
         # Full-attn layers always go through triton.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 
-        # Decide sliding-layer backend kind here so _init_att_backend1 can
-        # honour it. User can force triton with --llm_*_att_backend triton;
-        # otherwise prefer FA3 when loadable.
-        user_forced_triton = backends == {"triton"}
-        self._gemma4_sliding_backend_kind = "fa3" if (fa3_loadable and not user_forced_triton) else "triton"
+        self._gemma4_sliding_prefill_backend_kind = self._resolve_gemma4_sliding_backend(
+            self.args.llm_prefill_att_backend[0], fa3_loadable
+        )
+        self._gemma4_sliding_decode_backend_kind = self._resolve_gemma4_sliding_backend(
+            self.args.llm_decode_att_backend[0], fa3_loadable
+        )
         # SWA is on regardless of which sliding backend was picked: FA3
         # honours window_size per call, and the triton kernels in
         # context_flashattention_nopad.py / gqa_flash_decoding_stage1.py mask
@@ -239,14 +225,37 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _init_att_backend1(self):
         # Sliding layers run on a dedicated backend so the head-dim/SWA
         # mismatch with full-attn layers doesn't force a single compromise.
-        if self._gemma4_sliding_backend_kind == "fa3":
+        self.prefill_att_backend1 = self._build_gemma4_sliding_backend(self._gemma4_sliding_prefill_backend_kind)
+        self.decode_att_backend1 = self._build_gemma4_sliding_backend(self._gemma4_sliding_decode_backend_kind)
+
+    @staticmethod
+    def _gemma4_fa3_loadable():
+        from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+
+        return flash_attn_with_kvcache is not None
+
+    @staticmethod
+    def _resolve_gemma4_sliding_backend(backend_name, fa3_loadable):
+        assert backend_name in ("auto", "triton", "fa3"), (
+            "Gemma-4 requires triton or fa3 for sliding layers; flashinfer is "
+            f"not wired for the heterogeneous layout. Got backend={backend_name!r}."
+        )
+        if backend_name == "auto":
+            return "fa3" if fa3_loadable else "triton"
+        if backend_name == "fa3":
+            assert fa3_loadable, (
+                "Requested --llm_*_att_backend=fa3 but flash_attn_with_kvcache "
+                "did not import (sgl_kernel missing or wrong arch)."
+            )
+        return backend_name
+
+    def _build_gemma4_sliding_backend(self, backend_kind):
+        if backend_kind == "fa3":
             from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
 
-            self.prefill_att_backend1 = Fa3AttBackend(model=self)
-            self.decode_att_backend1 = Fa3AttBackend(model=self)
-        else:
-            self.prefill_att_backend1 = TritonAttBackend(model=self)
-            self.decode_att_backend1 = TritonAttBackend(model=self)
+            return Fa3AttBackend(model=self)
+        assert backend_kind == "triton"
+        return TritonAttBackend(model=self)
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()

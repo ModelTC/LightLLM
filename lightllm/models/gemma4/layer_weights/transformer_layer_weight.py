@@ -224,9 +224,8 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
 
     def _init_norm(self):
         hidden_size = self.network_config_["hidden_size"]
-        # Gemma-4 uses *standard* RMSNorm (x * rsqrt(var+eps) * w), NOT the
-        # gemma2/3 (1+w) variant. Using NoTpGEMMANormWeight here produces
-        # nothing but high-frequency-token gibberish ("de la de...").
+        # Gemma-4 uses standard RMSNorm (x * rsqrt(var+eps) * w), NOT the
+        # gemma2/3 (1+w) variant - do not swap in NoTpGEMMANormWeight.
         self.q_norm_weight_ = RMSNormWeight(
             dim=self._layer_head_dim,
             weight_name=self._q_norm_weight_name,
@@ -273,7 +272,6 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
                 weight_name=self._post_feedforward_layernorm_2_name,
                 data_type=self.data_type_,
             )
-        # scalar multiplier applied to the attention output
         self.layer_scalar_ = ParameterWeight(
             weight_name=self._layer_scalar_name,
             data_type=self.data_type_,

@@ -10,8 +10,7 @@ class Gemma4PostLayerInfer(LlamaPostLayerInfer):
 
     def __init__(self, network_config):
         super().__init__(network_config)
-        self.eps_ = 1e-6
-        self.final_logit_softcapping = float(network_config.get("final_logit_softcapping", None))
+        self.final_logit_softcapping = float(network_config.get("final_logit_softcapping"))
 
     def token_forward(self, input_embdings, infer_state, layer_weight):
         logits = super().token_forward(input_embdings, infer_state, layer_weight)
