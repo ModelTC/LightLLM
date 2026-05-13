@@ -3,7 +3,7 @@ import torch
 import torch.distributed as dist
 import numpy as np
 import collections
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_loads
 
 from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
@@ -466,7 +466,7 @@ class InferSamplingParams:
 
         # nixl decode node information
         if self.shm_param.nixl_params.data_len > 0:
-            self.nixl_decode_node: NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
+            self.nixl_decode_node: NIXLDecodeNodeInfo = safe_pickle_loads(self.shm_param.nixl_params.get())
         else:
             self.nixl_decode_node: NIXLDecodeNodeInfo = None
 
