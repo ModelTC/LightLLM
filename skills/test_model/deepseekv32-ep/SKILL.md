@@ -104,6 +104,14 @@ export MODEL_DIR=/mtc/models/DeepSeek-V3.2
 4. **维护 `summary.txt`**：位于**日志目录**；记录**本条使用的完整启动命令**（须能看出 **`--tp 8`、`--dp 8`、EP MoE**）、**端口检测结果**、**`lm_eval` 关键输出**；全部结束后在该文件内写**最终汇总**（是否成功、主要指标或失败原因）。可与用户口头摘要对照，但以日志目录中 **`summary.txt`** 为归档准绳。
 5. **全部完成后**：确认日志目录下的 **`summary.txt`** 已包含完整最终总结；原始 server / eval 日志保留在同目录（或子目录）中备查。
 
+### 服务启动 OK 判定经验（本流程补充）
+
+- **不要只看“主进程在不在”**：`python -m lightllm.server.api_server` 进程存活不代表可用；必须至少满足“`8000` 已 listen”再进入评测。
+- **长时间加载不等于失败**：DeepSeek-V3.2 EP 首次加载可能持续数分钟。若日志持续出现 `Loading model weights ...` 进度推进，视为“仍在启动”，继续按 20 秒间隔观察。
+- **判定“启动 OK”建议三要素**：① `8000` 端口监听；② 服务日志无新的 `OutOfMemoryError`/Traceback；③ 用一条最小请求（如 1 条 completions/chat 请求）拿到 200 或有效响应，再跑 `lm_eval`。
+- **出现 OOM 要先清残留再重试**：一旦日志出现 `torch.OutOfMemoryError`，先结束该轮 `api_server` 及其派生进程（含 `hypercorn`/`lightllm::...` 子进程），确认 `8000` 释放后再重启，避免“旧进程占资源导致假失败”。
+- **重试优先调启动参数而非盲等**：若 OOM 发生在权重加载阶段，优先降低加载/显存压力（例如使用更保守的 `mem_fraction`），并在 `summary.txt` 记录“失败参数 -> 重试参数 -> 结果”。
+
 ## 输出文件
 
 - **`summary.txt`**：仅位于**本轮日志目录**，作为本次 **DeepSeek-V3.2 EP** 评测的**最终总结**文档。
