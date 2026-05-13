@@ -64,6 +64,8 @@ RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cu
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 
+RUN pip install --no-cache-dir "flash-attn-4==4.0.0b13"
+
 ENV CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/
 
