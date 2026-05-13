@@ -4,6 +4,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.backend_validator import _validate
 from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 from lightllm.common.basemodel.attention_vit.fa3.fp import Fa3VitAttBackend
+from lightllm.common.basemodel.attention_vit.fa4.fp import Fa4VitAttBackend
 from lightllm.common.basemodel.attention_vit.triton.fp import TritonVitAttBackend
 from lightllm.common.basemodel.attention_vit.sdpa.fp import SdpaVitAttBackend
 from lightllm.common.basemodel.attention_vit.xformers.fp import XformersVitAttBackend
@@ -15,6 +16,7 @@ vit_att_backend = {
     "triton": TritonVitAttBackend,
     "sdpa": SdpaVitAttBackend,
     "fa3": Fa3VitAttBackend,
+    "fa4": Fa4VitAttBackend,
     "xformers": XformersVitAttBackend,
 }
 

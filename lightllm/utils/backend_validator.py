@@ -59,6 +59,47 @@ def _validate_fa3():
     return True, None
 
 
+def _validate_fa4():
+    """Validate FA4 with ground truth."""
+    from lightllm.utils.fa4_utils import flash_attn_varlen_func, is_fa4_supported_gpu, unwrap_fa4_output
+
+    if not is_fa4_supported_gpu():
+        return False, "FA4 requires Hopper/Blackwell-class GPU"
+    if flash_attn_varlen_func is None:
+        return False, "flash_attn_varlen_func is None"
+
+    batch, heads, seq, dim = 1, 4, 8, 64
+    q = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
+    k = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
+    v = torch.randn(batch, heads, seq, dim, dtype=torch.bfloat16, device="cuda")
+
+    expected = _compute_ground_truth(q, k, v)
+
+    q_flat = q.transpose(1, 2).reshape(batch * seq, heads, dim)
+    k_flat = k.transpose(1, 2).reshape(batch * seq, heads, dim)
+    v_flat = v.transpose(1, 2).reshape(batch * seq, heads, dim)
+    cu_seqlens = torch.arange(0, batch * seq + 1, seq, dtype=torch.int32, device="cuda")
+
+    out = flash_attn_varlen_func(
+        q=q_flat,
+        k=k_flat,
+        v=v_flat,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=seq,
+        max_seqlen_k=seq,
+        softmax_scale=1.0 / (dim ** 0.5),
+        causal=True,
+        return_lse=False,
+    )
+    out = unwrap_fa4_output(out).reshape(batch, seq, heads, dim).transpose(1, 2)
+    torch.cuda.synchronize()
+
+    if not torch.allclose(out, expected, rtol=1e-2, atol=1e-2):
+        return False, f"Output mismatch: max diff {(out - expected).abs().max().item():.6f}"
+    return True, None
+
+
 def _validate_flashinfer():
     """Validate FlashInfer with ground truth."""
     capability = torch.cuda.get_device_capability()
@@ -242,6 +283,8 @@ def _run_in_subprocess(backend_name, pipe):
     try:
         if backend_name == "fa3":
             success, err = _validate_fa3()
+        elif backend_name == "fa4":
+            success, err = _validate_fa4()
         elif backend_name == "xformers":
             success, err = _validate_xformers()
         elif backend_name == "sdpa":

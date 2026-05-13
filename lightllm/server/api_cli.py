@@ -387,7 +387,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
+        choices=["auto", "triton", "fa3", "fa4", "flashinfer"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
@@ -397,7 +397,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--llm_decode_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
+        choices=["auto", "triton", "fa3", "fa4", "flashinfer"],
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
@@ -407,7 +407,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--vit_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "sdpa", "xformers"],
+        choices=["auto", "triton", "fa3", "fa4", "sdpa", "xformers"],
         default=["auto"],
         help="""vit attention kernel used in vlm.
                 auto: automatically select best backend based on GPU and available packages
