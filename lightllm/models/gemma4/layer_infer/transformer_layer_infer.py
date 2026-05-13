@@ -124,10 +124,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_heads = self.tp_q_head_num_
         kv_heads = self.tp_k_head_num_
 
-        # Q is always computed (even on KV-shared layers). RMSNormWeight's
-        # Triton kernel accepts 3D input (it views to 2D internally) and
-        # promotes to fp32 for the variance reduction, so feed bf16 (N, heads,
-        # head_dim) straight in — no Python-side reshape or dtype round-trip.
         q = layer_weight.q_proj.mm(input).view(-1, q_heads, head_dim)
         q = layer_weight.q_norm_weight_(input=q, eps=self.eps_, alloc_func=self.alloc_tensor)
 
