@@ -272,6 +272,12 @@ PD 分离模式参数
 
     多模态资源的缓存服务器容量，默认为 ``200``
 
+.. option:: --max_image_token_count
+
+    单张图片在转换为 token 后允许的最大 token 数量，默认为 ``4096``
+
+    当任意图片超过该阈值时，请求会被拒绝。
+
 .. option:: --visual_infer_batch_size
 
     每次推理批次中处理的图像数量，默认为 ``1``

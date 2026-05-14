@@ -270,6 +270,12 @@ Multimodal Parameters
 
     Cache server capacity for multimodal resources, default is ``200``
 
+.. option:: --max_image_token_count
+
+    Maximum allowed token count for a single image after tokenization, default is ``4096``
+
+    Requests are rejected when any image exceeds this limit.
+
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``

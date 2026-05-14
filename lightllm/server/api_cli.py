@@ -443,6 +443,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
     )
     parser.add_argument(
+        "--max_image_token_count",
+        type=int,
+        default=4096,
+        help="maximum allowed token count for one image after tokenization",
+    )
+    parser.add_argument(
         "--embed_cache_storage_size",
         type=float,
         default=4,
