@@ -9,6 +9,7 @@ from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4
 from lightllm.models.gemma4.triton_kernel.context_attention_fwd_gemma4_mm import (
     context_attention_fwd_gemma4_mm,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
@@ -264,16 +265,18 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 
-    # ----- FFN (Gemma gelu-tanh, separate gate/up/down) ----------------
+    # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------
 
-    def _ffn(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
+    def _ffn_tp(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
+        # Only override the inner core — the outer _ffn (tpsp_allgather +
+        # _ffn_tp + tpsp_reduce) is inherited from LlamaTransformerLayerInfer.
+        # Difference vs llama: gelu(tanh)+mul instead of silu+mul.
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        gate = layer_weight.gate_proj.mm(input)
-        up = layer_weight.up_proj.mm(input)
-        ffn1 = nn.functional.gelu(gate, approximate="tanh") * up
-        gate = None
-        up = None
+        gate_up = layer_weight.gate_up_proj.mm(input)
+        ffn1 = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
+        silu_and_mul_fwd(gate_up, ffn1, use_gelu=True)
+        gate_up = None
         ffn2 = layer_weight.down_proj.mm(ffn1)
         ffn1 = None
         ffn2 = self._tpsp_reduce(input=ffn2, infer_state=infer_state)
@@ -414,6 +417,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
-        input_embdings = self._ffn_block(input_embdings, infer_state, layer_weight)
+        input_embdings = self._ffn(input_embdings, infer_state, layer_weight)
 
         return self._block_epilogue(input_embdings, infer_state, layer_weight)

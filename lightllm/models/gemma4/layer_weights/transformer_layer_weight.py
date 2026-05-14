@@ -162,21 +162,16 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
         )
 
     def _init_ffn(self):
-        self.gate_proj = ROWMMWeight(
+        # Packed gate+up: ROWMMWeight stitches `gate_proj` and `up_proj` weights
+        # along the output dim so the dense FFN runs one matmul + a fused
+        # gelu*mul kernel (mirrors llama's gate_up_proj path).
+        self.gate_up_proj = ROWMMWeight(
             in_dim=self.n_embed,
-            out_dims=[self.n_inter],
-            weight_names=self._gate_weight_name,
+            out_dims=[self.n_inter, self.n_inter],
+            weight_names=[self._gate_weight_name, self._up_weight_name],
             data_type=self.data_type_,
             bias_names=None,
-            quant_method=self.get_quant_method("gate_proj"),
-        )
-        self.up_proj = ROWMMWeight(
-            in_dim=self.n_embed,
-            out_dims=[self.n_inter],
-            weight_names=self._up_weight_name,
-            data_type=self.data_type_,
-            bias_names=None,
-            quant_method=self.get_quant_method("up_proj"),
+            quant_method=self.get_quant_method("gate_up_proj"),
         )
         self.down_proj = COLMMWeight(
             in_dim=self.n_inter,
