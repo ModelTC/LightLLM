@@ -185,11 +185,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     # ----- Attention kernels (sliding window + per-layer KV reshape) ---
 
     def _att_control(self):
-        # `sliding_window_` is the total window size including self. Sliding
-        # layers always run on a backend that consumes SWA (FA3 or the patched
-        # triton kernels — see Gemma4TpPartModel._init_att_backend1).
         if self.is_sliding and self.sliding_window_ > 0:
-            w = self.sliding_window_
+            w = self.sliding_window_ - 1
             return AttControl(use_sliding_window=True, sliding_window=(w, w))
         return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
 
