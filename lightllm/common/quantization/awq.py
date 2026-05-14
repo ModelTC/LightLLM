@@ -58,6 +58,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("AWQ online quantization is not supported yet.")
 
@@ -92,7 +93,9 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "awq quant does not support out_dtype"
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         qzeros = weight_pack.weight_zero_point
@@ -167,7 +170,9 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "awq_marlin quant does not support out_dtype"
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         qzeros = weight_pack.weight_zero_point

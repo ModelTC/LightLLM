@@ -24,6 +24,7 @@ class _BaseQuantizationMethod(QuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("Not implemented")
 
@@ -62,7 +63,9 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "fp8w8a8gxx quant does not support out_dtype"
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
         from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (

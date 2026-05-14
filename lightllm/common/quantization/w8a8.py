@@ -48,6 +48,7 @@ class BaseQuantizationMethod(QuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("Not implemented")
 
@@ -85,7 +86,9 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "w8a8 quant does not support out_dtype"
         input_scale = None
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
@@ -147,7 +150,9 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "fp8w8a8 quant does not support out_dtype"
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
         x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
@@ -214,7 +219,9 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "fp8w8a8-b128 quant does not support out_dtype"
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale.t()
         input_scale = None  # dynamic quantization for input tensor

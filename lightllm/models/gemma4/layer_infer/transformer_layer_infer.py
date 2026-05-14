@@ -267,10 +267,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- FFN (Gemma gelu-tanh, fused gate_up + down) -----------------
 
-    def _ffn_tp(self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
-        # Only override the inner core — the outer _ffn (tpsp_allgather +
-        # _ffn_tp + tpsp_reduce) is inherited from LlamaTransformerLayerInfer.
-        # Difference vs llama: gelu(tanh)+mul instead of silu+mul.
+    def _ffn_dense(
+        self, input, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight
+    ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         gate_up = layer_weight.gate_up_proj.mm(input)
@@ -283,20 +282,14 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         return ffn2
 
     def _router_logits(self, residual, layer_weight: Gemma4TransformerLayerWeight) -> torch.Tensor:
-        # Manual unweighted RMSNorm — lightllm's RMSNormWeight has no
-        # has_weight=False mode, and bf16 variance over hidden_size loses too
-        # much precision. Keep the fp32 accumulation explicit.
-        router_input = residual.view(-1, self.embed_dim_).float()
-        router_input = router_input * torch.rsqrt(router_input.pow(2).mean(dim=-1, keepdim=True) + self.eps_)
-        router_input = router_input * self.router_root_scale
-        # Match the gate weight dtype before matmul, consistent with the other
-        # MoE paths and compatible with fp16 / bf16 / fp32 runs.
-        moe_gate_dtype = layer_weight.moe_gate.data_type_
-        router_input = (router_input * layer_weight.router_input_scale_.weight).to(moe_gate_dtype)
-        # gate logits stay fp32 for top-k / softmax precision.
-        return layer_weight.moe_gate.mm(router_input, use_custom_tensor_mananger=False).float()
+        # Mirrors vllm Gemma4Router: unweighted RMSNorm -> 1/sqrt(hidden) ->
+        # per-channel scale -> bf16xbf16 -> fp32 gate matmul for stable top-k.
+        x = residual.view(-1, self.embed_dim_)
+        x = rmsnorm_forward(x=x, weight=None, eps=self.eps_, out=self.alloc_tensor(x.shape, dtype=x.dtype))
+        x = x * self.router_root_scale * layer_weight.router_input_scale_.weight
+        return layer_weight.moe_gate.mm(x, out_dtype=torch.float32)
 
-    def _moe_ffn(self, input, router_logits, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
+    def _ffn_moe(self, input, router_logits, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         moe_out = layer_weight.experts.experts(
@@ -314,12 +307,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         moe_out = self._tpsp_reduce(input=moe_out, infer_state=infer_state)
         return moe_out
 
-    def _ffn_block(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
+    def _ffn(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         residual = input_embdings
         dense_input = layer_weight.pre_feedforward_layernorm_weight_(
             input=residual, eps=self.eps_, alloc_func=self.alloc_tensor
         )
-        dense_out = self._ffn(dense_input, infer_state, layer_weight)
+        dense_out = self._ffn_dense(dense_input, infer_state, layer_weight)
         dense_input = None
 
         if self.is_moe:
@@ -331,7 +324,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             moe_input = layer_weight.pre_feedforward_layernorm_2_weight_(
                 input=residual, eps=self.eps_, alloc_func=self.alloc_tensor
             )
-            moe_out = self._moe_ffn(moe_input, router_logits, infer_state, layer_weight)
+            moe_out = self._ffn_moe(moe_input, router_logits, infer_state, layer_weight)
             moe_input = None
             router_logits = None
             moe_out = layer_weight.post_feedforward_layernorm_2_weight_(
@@ -401,7 +394,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
 
-        input_embdings = self._ffn_block(input_embdings, infer_state, layer_weight)
+        input_embdings = self._ffn(input_embdings, infer_state, layer_weight)
 
         return self._block_epilogue(input_embdings, infer_state, layer_weight)
 
