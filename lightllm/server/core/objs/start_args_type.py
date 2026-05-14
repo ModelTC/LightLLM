@@ -95,7 +95,7 @@ class StartArgs:
     enable_decode_microbatch_overlap: bool = field(default=False)
     enable_prefill_microbatch_overlap: bool = field(default=False)
     cache_capacity: int = field(default=200)
-    max_image_token_count: int = field(default=6128)
+    max_image_token_count: int = field(default=8192)
     max_image_pixels: int = field(default=8294400)
     embed_cache_storage_size: float = field(default=4)
     data_type: Optional[str] = field(
