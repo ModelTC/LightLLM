@@ -436,9 +436,11 @@ class RouterManager:
         new_batch = self.req_queue.generate_new_batch(
             Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
         )
+
+        if new_batch is not None and len(new_batch.reqs) > 0:
+            logger.info(f"generate new batch, {new_batch.simple_log()}")
+
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
-        if self.schedule_new_batch is not None:
-            logger.info(f"gen new batch, {self.schedule_new_batch.simple_log()}")
         return
 
     def _multinode_tp_generate_new_batch(self):
