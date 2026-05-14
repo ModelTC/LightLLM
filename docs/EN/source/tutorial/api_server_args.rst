@@ -276,6 +276,12 @@ Multimodal Parameters
 
     Requests are rejected when any image exceeds this limit.
 
+.. option:: --max_image_pixels
+
+    Maximum allowed pixel count for a single image before preprocessing resize, default is ``8294400`` (about 4K image pixels).
+
+    If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
+
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``

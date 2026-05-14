@@ -449,6 +449,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="maximum allowed token count for one image after tokenization",
     )
     parser.add_argument(
+        "--max_image_pixels",
+        type=int,
+        default=8294400,
+        help="maximum allowed pixel count for one image before resize preprocessing",
+    )
+    parser.add_argument(
         "--embed_cache_storage_size",
         type=float,
         default=4,

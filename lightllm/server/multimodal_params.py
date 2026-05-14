@@ -4,7 +4,7 @@ import os
 import librosa
 import base64
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageFile
@@ -13,6 +13,7 @@ from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.error_utils import ClientDisconnected
 from lightllm.utils.multimodal_utils import fetch_resource
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 logger = init_logger(__name__)
@@ -131,6 +132,9 @@ class ImageItem:
         self.extra_params = {}
 
     async def preload(self, request: Request):
+
+        max_image_pixels = get_env_start_args().max_image_pixels
+
         try:
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
@@ -141,8 +145,14 @@ class ImageItem:
             elif self._type == "image_size":
                 # image_size 代表直接传入图片的 width，height，主要是用于一些场景
                 # 的 token 计数判断, 所以只需要图片长宽信息，不需要具体图片的内容信息
-                self.image_w = self._data[0]
-                self.image_h = self._data[1]
+                src_w = self._data[0]
+                src_h = self._data[1]
+                self.image_w, self.image_h = _resize_image_dimensions_if_needed(src_w, src_h, max_image_pixels)
+                if (self.image_w, self.image_h) != (src_w, src_h):
+                    logger.warning(
+                        f"image_size pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels}, "
+                        f"resized to {self.image_w}x{self.image_h}"
+                    )
                 return
             else:
                 raise ValueError(f"cannot read image which type is {self._type}!")
@@ -151,7 +161,24 @@ class ImageItem:
             # Decoding is mainly done in the C libraries (libjpeg/libpng/libwebp), which releases the GIL,
             # and multiple threads can achieve true parallelism.
             loop = asyncio.get_running_loop()
-            self.image_w, self.image_h = await loop.run_in_executor(_IMAGE_VERIFY_POOL, _verify_image_bytes, img_data)
+            # 1) Verify original input bytes first.
+            src_w, src_h = await loop.run_in_executor(_IMAGE_VERIFY_POOL, _verify_image_bytes, img_data)
+            # 2) Resize (or no-op) after verification.
+            img_data, resized_w, resized_h = await loop.run_in_executor(
+                _IMAGE_VERIFY_POOL,
+                _resize_image_bytes_if_needed,
+                img_data,
+                src_w,
+                src_h,
+                max_image_pixels,
+            )
+            self.image_w, self.image_h = resized_w, resized_h
+
+            if (resized_w, resized_h) != (src_w, src_h):
+                logger.warning(
+                    f"image pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels},"
+                    f" resized to {self.image_w}x{self.image_h}"
+                )
 
             self._preload_data = img_data
             return
@@ -245,3 +272,45 @@ def _verify_image_bytes(img_data: bytes) -> Tuple[int, int]:
         w, h = image.size
         image.load()
     return w, h
+
+
+def _resize_image_bytes_if_needed(
+    img_data: bytes, src_w: int, src_h: int, max_image_pixels: int
+) -> Tuple[bytes, int, int]:
+    """
+    Resize image bytes to satisfy max pixel constraint and return resized bytes with size.
+    """
+    new_w, new_h = _resize_image_dimensions_if_needed(src_w, src_h, max_image_pixels)
+    if (new_w, new_h) == (src_w, src_h):
+        return img_data, src_w, src_h
+
+    with Image.open(BytesIO(img_data)) as image:
+        resampling = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        resized_image = image.resize((new_w, new_h), resampling).convert("RGB")
+
+        buffer = BytesIO()
+        resized_image.save(buffer, format="JPEG", quality=96, optimize=True)
+        return buffer.getvalue(), new_w, new_h
+
+
+def _resize_image_dimensions_if_needed(src_w: int, src_h: int, max_image_pixels: int) -> Tuple[int, int]:
+    """
+    Compute resized (w, h) under a max pixel budget while preserving aspect ratio.
+    """
+    old_pixels = src_w * src_h
+    if old_pixels <= max_image_pixels:
+        return src_w, src_h
+
+    scale = (max_image_pixels / old_pixels) ** 0.5
+    new_w = max(1, int(src_w * scale))
+    new_h = max(1, int(src_h * scale))
+
+    # Avoid overflow from integer rounding.
+    while new_w * new_h > max_image_pixels:
+        if new_w >= new_h:
+            new_w = max(1, new_w - 1)
+        else:
+            new_h = max(1, new_h - 1)
+
+    assert new_w > 0 and new_h > 0, "resized image dimensions must be positive"
+    return new_w, new_h
