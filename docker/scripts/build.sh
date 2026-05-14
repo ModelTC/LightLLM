@@ -18,23 +18,23 @@ set -euo pipefail
 #   --no-nixl                 Disable NIXL (default: enabled)
 #   --no-cache                Disable cache (default: enabled)
 #   --lite                    Disable DEEPEP, NIXL and cache in one shot
-#   --cuda-version <ver>      CUDA version (default: 12.9.0)
-#   --deepgemm-ref <ref>      DeepGEMM git ref (default: 891d57b4db1071624b5c8fa0d1e51cb317fa709f)
+#   --cuda-version <ver>      CUDA version (default: 13.0.0)
 #   --image-prefix <name>     Image prefix (default: lightllm)
 #   --image-tag <tag>         Image tag (default: generated from enabled features)
+#   --enable-sm100            Enable SM100 support (default: disabled)
 #   -h / --help               Show help
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 IMAGE_PREFIX="${IMAGE_PREFIX:-lightllm}"
-CUDA_VERSION="${CUDA_VERSION:-12.9.0}"
-DEEPGEMM_REF="${DEEPGEMM_REF:-891d57b4db1071624b5c8fa0d1e51cb317fa709f}"
+CUDA_VERSION="${CUDA_VERSION:-13.0.0}"
 IMAGE_TAG="${IMAGE_TAG:-}"
 
 ENABLE_DEEPEP="${ENABLE_DEEPEP:-1}"
 ENABLE_NIXL="${ENABLE_NIXL:-1}"
 ENABLE_CACHE="${ENABLE_CACHE:-1}"
+ENABLE_SM100="${ENABLE_SM100:-0}"
 
 print_help() {
   sed -n '1,80p' "$0" | sed 's/^# \{0,1\}//'
@@ -45,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --no-deepep) ENABLE_DEEPEP=0 ;;
     --no-nixl) ENABLE_NIXL=0 ;;
     --no-cache) ENABLE_CACHE=0 ;;
+    --enable-sm100) ENABLE_SM100=1 ;;
     --lite)
       ENABLE_DEEPEP=0
       ENABLE_NIXL=0
@@ -52,10 +53,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cuda-version)
       CUDA_VERSION="${2:-}"
-      shift
-      ;;
-    --deepgemm-ref)
-      DEEPGEMM_REF="${2:-}"
       shift
       ;;
     --image-prefix)
@@ -84,13 +81,16 @@ done
 # - Other combos: composed from enabled feature names
 if [[ -z "${IMAGE_TAG}" ]]; then
   tag_parts=()
+  if [[ "${ENABLE_SM100}" -eq 1 ]]; then
+    tag_parts+=("sm100")
+  fi
   if [[ "${ENABLE_NIXL}" -eq 1 ]]; then
     tag_parts+=("nixl")
   fi
   if [[ "${ENABLE_DEEPEP}" -eq 1 ]]; then
     tag_parts+=("deepep")
   fi
-  if [[ "${ENABLE_NIXL}" -eq 1 && "${ENABLE_DEEPEP}" -eq 1 && "${ENABLE_CACHE}" -eq 1 ]]; then
+  if [[ "${ENABLE_SM100}" -eq 0 && "${ENABLE_NIXL}" -eq 1 && "${ENABLE_DEEPEP}" -eq 1 && "${ENABLE_CACHE}" -eq 1 ]]; then
     IMAGE_TAG="cuda${CUDA_VERSION}"
   else
     prefix=""
@@ -103,9 +103,9 @@ fi
 
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \
-  --build-arg DEEPGEMM_REF="${DEEPGEMM_REF}" \
   --build-arg ENABLE_DEEPEP="${ENABLE_DEEPEP}" \
   --build-arg ENABLE_NIXL="${ENABLE_NIXL}" \
   --build-arg ENABLE_CACHE="${ENABLE_CACHE}" \
+  --build-arg ENABLE_SM100="${ENABLE_SM100}" \
   --progress=plain \
   -t "${IMAGE_PREFIX}:${IMAGE_TAG}" . 

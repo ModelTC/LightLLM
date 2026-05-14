@@ -1,15 +1,17 @@
-ARG CUDA_VERSION=12.9.0
+ARG CUDA_VERSION=13.0.0
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
-ARG VLLM_VERSION=0.16.0
+ARG VLLM_VERSION=0.20.2
+ARG NIXL_REF=v1.1.0
 ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
 ARG ENABLE_CACHE=1
+ARG ENABLE_SM100=0
 
 ENV PATH=/opt/conda/bin:$PATH \
     CONDA_PREFIX=/opt/conda
@@ -45,17 +47,22 @@ WORKDIR /root
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
-RUN pip install --no-cache-dir vllm==${VLLM_VERSION}
-RUN pip install -r /lightllm/requirements.txt --no-cache-dir
-RUN git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
+RUN pip install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cu130 \
+    vllm==${VLLM_VERSION}
+RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cu130
+RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
+    git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
     cd /root/FlashMLA && \
     git checkout ${FLASH_MLA_REF} && \
     git submodule update --init --recursive && \
-    FLASH_MLA_DISABLE_SM100=1 pip install --no-cache-dir .
+    FLASH_MLA_DISABLE_SM100="$(if [ "${ENABLE_SM100}" = "1" ]; then echo 0; else echo 1; fi)" \
+    pip install --no-cache-dir .
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir "flash-attn-4==4.0.0b13"
+RUN pip install --no-cache-dir "flash-attn-4[13]==4.0.0b13"
 
 ENV CUDA_HOME=/usr/local/cuda \
     GDRCOPY_HOME=/usr/src/gdrdrv-2.4.4/
@@ -82,8 +89,8 @@ RUN if [ "${ENABLE_DEEPEP}" = "1" ]; then \
       set -e; \
       ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so; \
       python -m pip install --upgrade --no-deps \
-        "nvidia-nccl-cu12==2.30.4" \
-        "nvidia-nvshmem-cu12==3.5.21"; \
+        "nvidia-nccl-cu13==2.30.4" \
+        "nvidia-nvshmem-cu13==3.6.5"; \
       cd /root && git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout b306af06afd412c88e51e71802951606e40b7358; \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so; \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so.2 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so; \
@@ -122,7 +129,7 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
       apt-get update && apt-get install -y pkg-config tmux net-tools && \
       cd /usr/local/src; \
       pip install --upgrade meson pybind11 patchelf; \
-      git clone https://github.com/ai-dynamo/nixl.git -b main && \
+      git clone https://github.com/ai-dynamo/nixl.git -b ${NIXL_REF} && \
       cd nixl && \
       rm -rf build && \
       mkdir build && \
