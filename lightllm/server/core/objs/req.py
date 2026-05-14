@@ -25,19 +25,20 @@ class FinishStatus(ctypes.Structure):
     NO_FINISH = 0
     FINISHED_STOP = 1
     FINISHED_LENGTH = 2
+    FINISHED_ERROR = 3
 
     def __init__(self, init_state=NO_FINISH):
         self.status = init_state
 
     def set_status(self, new_status):
-        assert 0 <= new_status <= 2
+        assert 0 <= new_status <= 3
         self.status = new_status
 
     def get_status(self):
         return self.status
 
     def is_finished(self):
-        return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
+        return self.FINISHED_STOP <= self.status <= self.FINISHED_ERROR
 
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
@@ -50,6 +51,8 @@ class FinishStatus(ctypes.Structure):
             return "stop"
         elif self.status == self.FINISHED_LENGTH:
             return "length"
+        elif self.status == self.FINISHED_ERROR:
+            return "error"
         return None
 
 

@@ -75,6 +75,19 @@ async def _safe_stream_wrapper(stream_generator):
         return
 
 
+# OpenAI response schemas restrict finish_reason to {"stop","length","tool_calls"} (chat) and
+# {"stop","length"} (completions). The internal FINISHED_ERROR status surfaces as "error" — surface
+# that at the API boundary as a controlled error response rather than letting it leak into the
+# Pydantic models (which would raise ValidationError) or to the client as a silent stop.
+_INTERNAL_ERROR_MESSAGE = "Internal server error during request processing"
+_INTERNAL_ERROR_TYPE = "InternalServerError"
+
+
+def _sse_internal_error_payload() -> str:
+    error = {"error": {"message": _INTERNAL_ERROR_MESSAGE, "type": _INTERNAL_ERROR_TYPE}}
+    return json.dumps(error, ensure_ascii=False)
+
+
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
     """Serialize a streaming chunk, explicitly including specified null fields."""
     d = chunk.model_dump(exclude_none=True)
@@ -360,6 +373,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
                 prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
+        if any(r == "error" for r in finish_reason_dict.values()):
+            logger.error(f"internal pipeline error during chat completion group_id={group_request_id}")
+            return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, _INTERNAL_ERROR_MESSAGE)
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
         for i in range(request.n):
@@ -477,6 +493,15 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
+
+            if current_finish_reason == "error":
+                logger.error(
+                    f"internal pipeline error during chat stream group_id={group_request_id} "
+                    f"sub_req_id={sub_req_id}"
+                )
+                yield f"data: {_sse_internal_error_payload()}\n\n"
+                yield "data: [DONE]\n\n".encode("utf-8")
+                return
 
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".
@@ -887,6 +912,9 @@ async def _process_prompts_completion(
     tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
 
     results = await asyncio.gather(*tasks)
+    if any(r.get("finish_reason") == "error" for r in results):
+        logger.error("internal pipeline error during completion")
+        return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, _INTERNAL_ERROR_MESSAGE)
     return _build_completion_response(results, request, created_time, len(prompts) > 1)
 
 
@@ -920,6 +948,15 @@ async def _handle_streaming_completion(
             current_finish_reason = None
             if finish_status.is_finished():
                 current_finish_reason = finish_status.get_finish_reason()
+
+            if current_finish_reason == "error":
+                logger.error(
+                    f"internal pipeline error during completion stream group_id={group_request_id} "
+                    f"sub_req_id={sub_req_id}"
+                )
+                yield f"data: {_sse_internal_error_payload()}\n\n"
+                yield "data: [DONE]\n\n"
+                return
 
             output_text = request_output
             if request.echo and metadata.get("is_first_token", False):

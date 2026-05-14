@@ -46,26 +46,46 @@ class DeTokenizationManager:
         self.token_id_to_token = {token_id: token for token, token_id in self.tokenizer.get_vocab().items()}
         return
 
-    def _add_new_group_req_index(self, recv_obj: GroupReqIndexes):
+    def _add_new_group_req_index(self, recv_obj: GroupReqIndexes) -> int:
+        from lightllm.server.core.objs import FinishStatus
+
+        failed_count = 0
         for req_index in recv_obj.shm_req_indexes:
             req = self.shm_req_manager.get_req_obj_by_index(req_index)
-            req.link_prompt_ids_shm_array()
-            req.link_logprobs_shm_array()
+            try:
+                req.link_prompt_ids_shm_array()
+                req.link_logprobs_shm_array()
 
-            logger.info(
-                f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
-            )
+                logger.info(
+                    f"detokenization recv req id {req.request_id} " f"cost time {time.time() - recv_obj.time_mark} s"
+                )
 
-            # p d 分离模式，decode节点的解码需要做一些特殊的修复。
-            decode_req = DecodeReq(req, self.is_pd_decode_mode)
-            if self.is_pd_decode_mode:
-                decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
-            # token_healing mode 的特殊初始化
-            if self.args.token_healing_mode:
-                decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
+                # p d 分离模式，decode节点的解码需要做一些特殊的修复。
+                decode_req = DecodeReq(req, self.is_pd_decode_mode)
+                if self.is_pd_decode_mode:
+                    decode_req = decode_mode_fix(decode_req, self.tokenizer, self.eos_id)
+                # token_healing mode 的特殊初始化
+                if self.args.token_healing_mode:
+                    decode_req.init_token_healing_prefix_str(self.token_id_to_token, self.tokenizer)
 
-            self.req_id_to_out[req.request_id] = decode_req
-        return
+                self.req_id_to_out[req.request_id] = decode_req
+            except Exception:
+                # Init failed (shm link, tokenizer, decode-mode fix, …). Mark the req
+                # finished with an error and push a sentinel into out_tokens_queue so the
+                # http loop forwards a terminal status — otherwise the queue stays empty,
+                # the client hangs until disconnect, and the shm slot leaks because
+                # can_released_mark never gets set. Continue with the rest of the group.
+                logger.exception(f"detokenization init failed for req_id {req.request_id}")
+                req.finish_status.set_status(FinishStatus.FINISHED_ERROR)
+                req.finish_token_index = req.input_len
+                try:
+                    if not req.out_tokens_queue.is_full():
+                        req.out_tokens_queue.push("", req.input_len, False, 1)
+                except Exception:
+                    logger.exception(f"failed to push error sentinel for req_id {req.request_id}")
+                req.can_released_mark = True
+                failed_count += 1
+        return failed_count
 
     def handle_loop(self):
         try:
@@ -76,7 +96,14 @@ class DeTokenizationManager:
                     for _ in range(recv_max_count):
                         recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
                         assert isinstance(recv_obj, GroupReqIndexes)
-                        self._add_new_group_req_index(recv_obj=recv_obj)
+                        try:
+                            failed_count = self._add_new_group_req_index(recv_obj=recv_obj)
+                        except Exception:
+                            logger.exception("add new group req index has exception")
+                            failed_count = len(recv_obj.shm_req_indexes)
+                        if failed_count:
+                            # Wake the http loop so it drains the error sentinel(s) we just pushed.
+                            self.pub_to_httpserver.send_pyobj(None, protocol=pickle.HIGHEST_PROTOCOL)
 
                     # 当队列中存在较多的请求时，将一次接受的数量上调
                     recv_max_count = min(int(recv_max_count * 1.3), 256)
