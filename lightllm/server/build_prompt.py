@@ -79,11 +79,31 @@ def _alias_reasoning_to_reasoning_content(messages: list) -> None:
             msg["reasoning_content"] = reasoning
 
 
+def _normalize_multimodal_content_types(messages: list) -> None:
+    # OpenAI requests use content part types like `image_url` and `audio_url`.
+    # Model chat templates generally render modality tokens from `image` and
+    # `audio` parts while the raw media payload is carried separately in
+    # MultimodalParams. Preserve the original fields and normalize only the
+    # template-facing type to keep prompt tags aligned with media counts.
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                part["type"] = "image"
+            elif part.get("type") == "audio_url":
+                part["type"] = "audio"
+
+
 async def build_prompt(request, tools) -> str:
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     _normalize_tool_call_arguments(messages)
     _alias_reasoning_to_reasoning_content(messages)
+    _normalize_multimodal_content_types(messages)
 
     kwargs = {"conversation": messages}
     if request.character_settings:
