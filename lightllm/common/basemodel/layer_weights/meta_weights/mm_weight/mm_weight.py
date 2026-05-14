@@ -54,10 +54,23 @@ class MMWeightTpl(BaseWeightTpl):
         self.gen_weight_quant_param_names()
 
     def mm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
+        self,
+        input_tensor: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        # out_dtype: optional override that asks the quant backend to produce
+        # an output of a specified dtype (e.g. fp32) directly from the GEMM
+        # accumulator. Only NoQuantization currently honors values that differ
+        # from input dtype; other quant impls will assert.
         return self.quant_method.apply(
-            input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
+            input_tensor,
+            self.mm_param,
+            out,
+            use_custom_tensor_mananger=use_custom_tensor_mananger,
+            bias=self.bias,
+            out_dtype=out_dtype,
         )
 
     def gen_weight_quant_param_names(self):
