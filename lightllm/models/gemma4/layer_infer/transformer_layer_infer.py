@@ -342,54 +342,26 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     # ----- block-level forwards (PLE fusion + layer_scalar at the end) ----
 
-    def _apply_per_layer_embed(self, hidden_states, infer_state, layer_weight):
-        """E-series: gate hidden_states through per_layer_embed slice and add
-        the projected contribution back as a residual. Matches HF
-        Gemma4TextDecoderLayer.forward (lines 1401–1408 in transformers 5.5.4)
-        and vllm Gemma4DecoderLayer.forward (gemma4.py:744–752) — bf16 the
-        whole way, RMSNorm Triton kernel handles fp32 promotion internally.
-
-        gate / projection weights are ROWMMWeight(tp_world_size=1) — replicated
-        across TP ranks — so we drive them through `.mm()` and never need an
-        intra-block all-reduce. In TPSP mix mode, per_layer_embeds has already
-        been token-split alongside hidden_states by Gemma4PreLayerInfer's
-        _tpsp_sp_split override, so rows line up element-wise here.
-        """
-        # per_layer_embeds is (N, num_layers, ple_dim); slice this layer.
-        ple_slice = infer_state.per_layer_embeds[..., self.layer_num_, :]
-        flat = hidden_states.view(-1, self.embed_dim_)
-        gate = layer_weight.per_layer_input_gate_.mm(flat)  # (N, ple_dim)
-        gate = nn.functional.gelu(gate, approximate="tanh")
-        gated = gate * ple_slice.view(-1, self.ple_dim_)
-        contrib = layer_weight.per_layer_projection_.mm(gated)  # (N, hidden_size)
-        contrib = layer_weight.post_per_layer_input_norm_weight_(
-            input=contrib, eps=self.eps_, alloc_func=self.alloc_tensor
-        )
-        flat.add_(contrib)
-        return hidden_states
-
-    def _apply_layer_scalar(self, hidden_states, layer_weight):
+    def _block_epilogue(self, hidden_states, infer_state, layer_weight):
+        if self.has_ple_:
+            ple_slice = infer_state.per_layer_embeds[..., self.layer_num_, :]
+            flat = hidden_states.view(-1, self.embed_dim_)
+            gate = layer_weight.per_layer_input_gate_.mm(flat)
+            gated = nn.functional.gelu(gate, approximate="tanh") * ple_slice.view(-1, self.ple_dim_)
+            contrib = layer_weight.per_layer_projection_.mm(gated)
+            contrib = layer_weight.post_per_layer_input_norm_weight_(
+                input=contrib, eps=self.eps_, alloc_func=self.alloc_tensor
+            )
+            flat.add_(contrib)
         hidden_states.mul_(layer_weight.layer_scalar_.weight)
         return hidden_states
 
-    def _block_epilogue(self, hidden_states, infer_state, layer_weight):
-        """Shared tail for prefill/decode: PLE fusion (E-series only) then
-        layer_scalar."""
-        if self.has_ple_:
-            hidden_states = self._apply_per_layer_embed(hidden_states, infer_state, layer_weight)
-        return self._apply_layer_scalar(hidden_states, layer_weight)
-
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
-        # input_embdings is bf16 from the pre-layer / previous block; RMSNorm
-        # (att_norm, ffn_norm) handles fp32 promotion in its Triton kernel,
-        # so the entire residual stream stays in bf16.
         input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_), infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        o = self.context_attention_forward(input1, infer_state, layer_weight)
         input1 = None
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
-        q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        # Gemma sandwich norm: post_attention_layernorm on the attn branch
+        # before the residual add, not on the post-add residual stream.
         o = self._ffn_norm(o, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
@@ -400,12 +372,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         input1 = self._att_norm(input_embdings.view(-1, self.embed_dim_), infer_state, layer_weight)
-        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        o = self.token_attention_forward(input1, infer_state, layer_weight)
         input1 = None
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._token_attention_kernel(q, infer_state, layer_weight)
-        q = None
-        o = self._get_o(o, infer_state, layer_weight)
         o = self._ffn_norm(o, infer_state, layer_weight)
         input_embdings.add_(o.view(-1, self.embed_dim_))
         o = None
