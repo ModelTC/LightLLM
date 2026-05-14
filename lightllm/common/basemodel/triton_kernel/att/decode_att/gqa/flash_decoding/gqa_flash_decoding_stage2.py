@@ -31,7 +31,7 @@ def _fwd_kernel_flash_decode_stage2(
     offs_d = tl.arange(0, BLOCK_DMODEL)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     if USE_SLIDING_WINDOW:
-        kv_start_index = tl.maximum(cur_batch_seq_len - SLIDING_WINDOW_SIZE, 0)
+        kv_start_index = tl.maximum(cur_batch_seq_len - 1 - SLIDING_WINDOW_SIZE, 0)
         cur_batch_seq_len = cur_batch_seq_len - kv_start_index
 
     block_num = tl.minimum(tl.cdiv(cur_batch_seq_len, BLOCK_SEQ), block_num)

@@ -80,7 +80,7 @@ def _fwd_kernel(
     block_end_loc = tl.minimum(block_start_loc + BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
 
     if USE_SLIDING_WINDOW:
-        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE + 1
+        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE
         kv_start_index = tl.maximum(kv_start_index, 0)
         block_kv_len = block_end_loc - kv_start_index
     else:
@@ -103,7 +103,7 @@ def _fwd_kernel(
 
         mask = q_pos[:, None] >= k_pos[None, :]
         if USE_SLIDING_WINDOW:
-            mask = mask & ((q_pos[:, None] - k_pos[None, :]) < SLIDING_WINDOW_SIZE)
+            mask = mask & ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_SIZE)
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]

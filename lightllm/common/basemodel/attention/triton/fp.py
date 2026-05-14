@@ -70,7 +70,7 @@ class TritonPrefillAttState(BasePrefillAttState):
         from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
 
         if att_control.use_sliding_window:
-            sliding_window = int(att_control.sliding_window[0]) + 1
+            sliding_window = int(att_control.sliding_window[0])
         else:
             sliding_window = -1
 
@@ -186,7 +186,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
         )
 
         if att_control.use_sliding_window:
-            sliding_window = int(att_control.sliding_window[0]) + 1
+            sliding_window = int(att_control.sliding_window[0])
         else:
             sliding_window = -1
 

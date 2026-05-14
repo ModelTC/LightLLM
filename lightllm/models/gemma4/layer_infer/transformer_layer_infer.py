@@ -225,7 +225,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             # Sliding layers always go through the gemma4_mm Triton kernel: it
             # handles SWA + image bidirectional masking in one pass.
             o_tensor = self.alloc_tensor(_q.shape, q.dtype)
-            sw = self.sliding_window_ if self.sliding_window_ > 0 else -1
+            sw = self.sliding_window_ - 1 if self.sliding_window_ > 0 else -1
             context_attention_fwd_gemma4_mm(
                 _q,
                 _k,

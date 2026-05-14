@@ -114,7 +114,7 @@ def _fwd_kernel(
     block_end_loc = tl.maximum(causal_end, block_image_end)
 
     if USE_SLIDING_WINDOW:
-        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE + 1
+        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE
         kv_start_index = tl.maximum(kv_start_index, 0)
         block_kv_len = block_end_loc - kv_start_index
     else:
@@ -138,7 +138,8 @@ def _fwd_kernel(
 
         causal_mask = q_pos[:, None] >= k_pos[None, :]
         if USE_SLIDING_WINDOW:
-            causal_mask = causal_mask & ((q_pos[:, None] - k_pos[None, :]) < SLIDING_WINDOW_SIZE)
+            # SLIDING_WINDOW_SIZE is the FA-style offset (window = offset + 1 tokens).
+            causal_mask = causal_mask & ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_SIZE)
         # Image bidi: a Q in image span [_, e) attends to all K with k_pos < e.
         # For text Q (q_image_end == 0) this is k_pos < 0 = always False, so
         # the union with causal_mask leaves text-attention unchanged.
@@ -272,7 +273,8 @@ def reference_attention(
 ):
     """Slow torch reference for the gemma4 mm prefill kernel.
 
-    `sliding_window` is the total window size including self. < 0 disables SWA.
+    `sliding_window` is the FA-style offset (window = sliding_window + 1 tokens).
+    < 0 disables SWA.
     """
     device = q.device
     dtype = q.dtype
@@ -306,7 +308,7 @@ def reference_attention(
 
         causal = k_pos[None, :] <= q_pos[:, None]
         if sliding_window >= 0:
-            causal = causal & ((q_pos[:, None] - k_pos[None, :]) < sliding_window)
+            causal = causal & ((q_pos[:, None] - k_pos[None, :]) <= sliding_window)
         image = k_pos[None, :] < q_image_end[:, None]
         allow = causal | image
 
