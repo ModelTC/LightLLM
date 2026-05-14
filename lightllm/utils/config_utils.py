@@ -104,12 +104,28 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
 
     eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
     if isinstance(eos_token_id, int):
-        return [eos_token_id]
-    if isinstance(eos_token_id, list):
-        return eos_token_id
+        eos_token_ids = [eos_token_id]
+    elif isinstance(eos_token_id, list):
+        eos_token_ids = list(eos_token_id)
+    else:
+        raise ValueError("error eos_token_id format in config.json")
 
-    assert False, "error eos_token_id format in config.json"
-    return
+    generation_config_path = os.path.join(model_path, "generation_config.json")
+    if os.path.exists(generation_config_path):
+        try:
+            with open(generation_config_path, "r") as file:
+                generation_eos = json.load(file).get("eos_token_id")
+        except Exception as exc:
+            logger.warning(f"failed to load eos_token_id from generation_config.json: {exc}")
+            generation_eos = None
+        if isinstance(generation_eos, int):
+            generation_eos = [generation_eos]
+        if isinstance(generation_eos, list):
+            for token_id in generation_eos:
+                if isinstance(token_id, int) and token_id not in eos_token_ids:
+                    eos_token_ids.append(token_id)
+
+    return eos_token_ids
 
 
 def get_model_architectures(model_path: str):
