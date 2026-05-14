@@ -27,7 +27,6 @@ APIServer 参数详解
         - ``running_max_req_size`` 为 3
         - ``batch_max_tokens`` 为 2048 (2k)
         - ``chunked_prefill_size`` 为 1024 (1k)
-        - ``mem_fraction`` 为 0.85
 
 .. option:: --host
 
@@ -133,7 +132,10 @@ PD 分离模式参数
 
 .. option:: --max_req_total_len
 
-    请求输入长度 + 请求输出长度的最大值，默认为 ``16384``
+    请求输入长度 + 请求输出长度的最大值。若未显式设置，将从模型配置自动推导，
+    若推导失败则回退到 ``16384``。
+    对于部分 RoPE 类型（如 ``yarn/dynamic/su/llama3``），推导不会直接用 ``rope_scaling.factor``
+    去乘以 ``max_position_embeddings``，以避免过度估算最大长度。
 
 .. option:: --eos_id
 
@@ -304,13 +306,13 @@ PD 分离模式参数
 性能优化参数
 ------------
 
-.. option:: --disable_custom_allreduce
+.. option:: --disable_symm_mem_allreduce
 
-    是否禁用自定义 allreduce
+    禁用默认开启的 SymmMem all-reduce 快路径，并回退到 NCCL
 
-.. option:: --enable_custom_allgather
+.. option:: --disable_flashinfer_allreduce
 
-    是否启用自定义 allgather
+    禁用默认开启的 FlashInfer all-reduce 快路径，并回退到 SymmMem / NCCL
 
 .. option:: --enable_tpsp_mix_mode
 
@@ -471,14 +473,6 @@ PD 分离模式参数
 .. option:: --use_reward_model
 
     使用奖励模型
-
-.. option:: --long_truncation_mode
-
-    当 input_token_len + max_new_tokens > max_req_total_len 时的处理方式，可选值：
-    
-    * ``None``: 抛出异常（默认）
-    * ``head``: 移除一些头部 token 使 input_token_len + max_new_tokens <= max_req_total_len
-    * ``center``: 移除中心位置的一些 token 使 input_token_len + max_new_tokens <= max_req_total_len
 
 .. option:: --use_tgi_api
 

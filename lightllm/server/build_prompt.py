@@ -2,6 +2,7 @@ import os
 import json
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
+from functools import lru_cache
 
 logger = init_logger(__name__)
 
@@ -43,6 +44,32 @@ def init_tokenizer(args):
         except Exception as e:
             logger.warning(f"Failed to load chat_template.json from {default_chat_template_path}: {e}")
     return
+
+
+@lru_cache(maxsize=1)
+def tokenizer_supports_force_thinking() -> bool:
+    """Whether this tokenizer supports thinking / reasoning."""
+
+    assert tokenizer is not None
+
+    try:
+        ans = "thinking" in tokenizer.chat_template or "enable_thinking" in tokenizer.chat_template
+        logger.debug(f"chat_template: {tokenizer.chat_template}")
+        logger.info(f"tokenizer_supports_force_thinking : {ans}")
+        return ans
+    except:
+        pass
+
+    try:
+        ans = "thinking" in tokenizer.tokenizer.chat_template or "enable_thinking" in tokenizer.tokenizer.chat_template
+        logger.debug(f"tokenizer.tokenizer.chat_template: {tokenizer.tokenizer.chat_template}")
+        logger.info(f"tokenizer_supports_force_thinking : {ans}")
+        return ans
+    except:
+        pass
+
+    logger.info("tokenizer_supports_force_thinking : False")
+    return False
 
 
 def _normalize_tool_call_arguments(messages: list) -> None:
@@ -113,6 +140,19 @@ async def build_prompt(request, tools) -> str:
 
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
+
+    # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
+    # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
+    from .api_openai import _is_force_thinking_mode
+
+    thinking = _is_force_thinking_mode(request)
+
+    kwargs["thinking"] = thinking
+    kwargs["enable_thinking"] = thinking
+
+    # TODO thinking 模式应该是3种，一种是强制思考，一种是强制不思考，一种是模型自己决定的自适应
+    # 的思考模式。当前的代码只是实现了强制思考和强制不思考两种模式。后续要根据模型的情况，从tokenizer
+    # 上判断能支持的思考模式种类，再进行设置，才能具备更完备的处理。
 
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)

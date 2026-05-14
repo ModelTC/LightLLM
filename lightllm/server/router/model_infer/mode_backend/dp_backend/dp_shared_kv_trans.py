@@ -18,12 +18,11 @@ class DPKVSharedMoudle:
     _KV_LEN_INDEX = 0
     _REQ_IDX_INDEX = 1
 
-    def __init__(self, max_req_num: int, max_req_seq_len: int, dp_size_in_node: int, backend):
+    def __init__(self, max_req_num: int, dp_size_in_node: int, backend):
         from .impl import DPChunkedPrefillBackend
 
         self.backend: DPChunkedPrefillBackend = backend
         self.max_req_num = max_req_num
-        self.max_req_seq_len = max_req_seq_len
 
         # 0 代表 kv_len, 1 代表 radix_cache_len
         self.shared_req_infos = ShmArray(

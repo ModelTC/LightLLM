@@ -275,12 +275,19 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
                 raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
             handle.task_count += 1
 
-        device_ptr = ctypes.c_void_p()
-        host_ptr = ctypes.c_void_p(shm_ptr)
-        res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
-        if res != 0:
-            raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-        assert host_ptr.value == device_ptr.value
+            if handle.device_ptr is None:
+                # 提前获取对应的指针对象，避免在wait后再获取，照成过长的阻塞等待。
+                device_ptr = ctypes.c_void_p()
+                host_ptr = ctypes.c_void_p(shm_ptr)
+                res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+                if res != 0:
+                    raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+
+                logger.info(
+                    f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}"
+                )
+                handle.device_ptr = device_ptr.value
+
         handle.tasks_finished.set()
 
     th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
@@ -300,6 +307,7 @@ class AsyncRegistrationHandle:
         self.task_count = 0
         self.thread: Optional[threading.Thread] = None
         self.tasks_finished = threading.Event()
+        self.device_ptr: Optional[int] = None
 
     def wait(self):
         """Block until the async registration completes. Only here we print tqdm progress."""

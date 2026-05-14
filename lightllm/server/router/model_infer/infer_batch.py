@@ -280,8 +280,8 @@ class InferenceContext:
                 f"free a batch state:\n"
                 f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
                 f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
-                f"mem manager can alloc token num {self.req_manager.mem_manager.can_use_mem_size}\n"
-                f"mem manager total size {self.req_manager.mem_manager.size}"
+                f"mem manager can alloc token num {self.req_manager.mem_manager.allocator.can_use_mem_size}\n"
+                f"mem manager total size {self.req_manager.mem_manager.allocator.size}\n"
             )
 
         return
@@ -348,7 +348,7 @@ class InferenceContext:
             radix_cache_unref_token_num = (
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
             )
-        return self.req_manager.mem_manager.can_use_mem_size + radix_cache_unref_token_num
+        return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """
@@ -444,6 +444,9 @@ class InferSamplingParams:
         if len(self.allowed_token_ids) == 0:
             self.allowed_token_ids = None
 
+        # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
+        self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
+
         # p d mode use params
         if self.shm_param.move_kv_to_decode_node.exists:
             self.move_kv_to_decode_node = self.shm_param.move_kv_to_decode_node.to_dict()
@@ -455,6 +458,11 @@ class InferSamplingParams:
             if not all(e < vocab_size for e in self.allowed_token_ids):
                 logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
                 self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
+
+        if len(self.invalid_token_ids) > 0:
+            if not all(e < vocab_size for e in self.invalid_token_ids):
+                logger.error("invalid_token_ids contain tokenid >= vobsize, we remove these token ids")
+                self.invalid_token_ids = [e for e in self.invalid_token_ids if e < vocab_size]
 
         # nixl decode node information
         if self.shm_param.nixl_params.data_len > 0:

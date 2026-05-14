@@ -34,7 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -122,6 +122,12 @@ class HttpServerManager:
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
+        # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
+        # 会触发整个系统崩溃，所以httpserver需要知道真实的 max_total_token_num的数据，用于提前拦截非法请求等参数。
+        # router 进程会在启动后向这个共享内存写入正确的max_total_token_num 参数，用于后续的请求控制。
+        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
@@ -445,8 +451,12 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except Exception as e:
+        except (ClientDisconnected, Exception) as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+
+            if isinstance(e, ClientDisconnected):
+                logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
@@ -519,7 +529,7 @@ class HttpServerManager:
 
             if self.args.detail_log:
                 logger.debug(
-                    f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
+                    f"req_id: {sampling_params.group_request_id} prompt: {prompt}\n"
                     f"samplingparmas: {sampling_params.to_dict()}\n"
                     f"token_ids: {prompt_ids}"
                 )
@@ -538,37 +548,34 @@ class HttpServerManager:
             raise ValueError(f"prompt format error, get type{type(prompt)}")
         return
 
+    def get_real_supported_max_req_total_len(self):
+        # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
+        return min(self.shm_max_total_token_num.get_value() - 36, self.max_req_total_len)
+
     async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
-        if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
-            # use long_truncation_mode to truncate long input len req.
-            if self.args.long_truncation_mode is None:
-                # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
-                # 修改 max_new_tokens 的值，使其满足合法约束。
-                new_max_new_tokens = self.max_req_total_len - prompt_tokens
-                if new_max_new_tokens > 0:
-                    logger.debug(
-                        f"the input prompt token len {prompt_tokens} + max_new_tokens"
-                        f"{sampling_params.max_new_tokens} > {self.max_req_total_len},"
-                        f"so change max_new_tokens to {new_max_new_tokens}"
-                    )
-                    sampling_params.max_new_tokens = new_max_new_tokens
-                else:
-                    raise ValueError(
-                        f"the input prompt token len {prompt_tokens} + max_new_tokens \
-                            {sampling_params.max_new_tokens} > {self.max_req_total_len}"
-                    )
-            elif self.args.long_truncation_mode == "head":
-                prompt_ids = prompt_ids[-(self.max_req_total_len - sampling_params.max_new_tokens) :]
-            elif self.args.long_truncation_mode == "center":
-                req_input_len = self.max_req_total_len - sampling_params.max_new_tokens
-                prompt_ids = prompt_ids[0 : req_input_len // 2] + prompt_ids[-(req_input_len - req_input_len // 2) :]
-                prompt_tokens = len(prompt_ids)
-                assert prompt_tokens == req_input_len
+        # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
+        real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
+
+        if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:
+
+            # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
+            # 修改 max_new_tokens 的值，使其满足合法约束。
+            new_max_new_tokens = real_supported_max_req_total_len - prompt_tokens
+            if new_max_new_tokens > 0:
+                logger.debug(
+                    f"the input prompt token len {prompt_tokens} + max_new_tokens"
+                    f"{sampling_params.max_new_tokens} > {real_supported_max_req_total_len},"
+                    f"so change max_new_tokens to {new_max_new_tokens}"
+                )
+                sampling_params.max_new_tokens = new_max_new_tokens
             else:
-                assert False, "error args"
+                raise ValueError(
+                    f"the input prompt token len {prompt_tokens} + max_new_tokens \
+                        {sampling_params.max_new_tokens} > {real_supported_max_req_total_len}"
+                )
 
         # last repaired
         req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
@@ -664,7 +671,9 @@ class HttpServerManager:
 
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                )
 
             async with req_status.lock:
                 event.clear()

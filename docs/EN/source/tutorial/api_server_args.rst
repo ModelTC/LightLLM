@@ -27,7 +27,6 @@ Basic Configuration Parameters
         - ``running_max_req_size`` to 3
         - ``batch_max_tokens`` to 2048 (2k)
         - ``chunked_prefill_size`` to 1024 (1k)
-        - ``mem_fraction`` to 0.85
 
 .. option:: --host
 
@@ -133,7 +132,10 @@ Memory and Batch Processing Parameters
 
 .. option:: --max_req_total_len
 
-    Maximum value of request input length + request output length, default is ``16384``
+    Maximum value of request input length + request output length. If not set, it will be
+    automatically derived from model config.json and fall back to ``16384`` if derivation fails.
+    For some RoPE types (like ``yarn/dynamic/su/llama3``), the derivation does not multiply
+    ``rope_scaling.factor`` by ``max_position_embeddings`` to avoid over-estimating the max length.
 
 .. option:: --eos_id
 
@@ -302,13 +304,13 @@ Multimodal Parameters
 Performance Optimization Parameters
 -----------------------------------
 
-.. option:: --disable_custom_allreduce
+.. option:: --disable_symm_mem_allreduce
 
-    Whether to disable custom allreduce
+    Disable the default SymmMem all-reduce fast path and fall back to NCCL
 
-.. option:: --enable_custom_allgather
+.. option:: --disable_flashinfer_allreduce
 
-    Whether to enable custom allgather
+    Disable the default FlashInfer all-reduce fast path and fall back to SymmMem / NCCL
 
 .. option:: --enable_tpsp_mix_mode
 
@@ -471,14 +473,6 @@ Sampling and Generation Parameters
 .. option:: --use_reward_model
 
     Use reward model
-
-.. option:: --long_truncation_mode
-
-    How to handle when input_token_len + max_new_tokens > max_req_total_len, optional values:
-    
-    * ``None``: Throw exception (default)
-    * ``head``: Remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
-    * ``center``: Remove some tokens at the center position to make input_token_len + max_new_tokens <= max_req_total_len
 
 .. option:: --use_tgi_api
 

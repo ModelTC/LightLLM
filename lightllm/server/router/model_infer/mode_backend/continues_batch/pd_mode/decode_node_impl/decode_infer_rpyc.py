@@ -80,8 +80,8 @@ class PDDecodeInferRpcServer(rpyc.Service):
                 logger.debug(
                     f"radix refed token num {self.backend.radix_cache.get_refed_tokens_num()}\n"
                     f"radix hold token num {self.backend.radix_cache.get_tree_total_tokens_num()}\n"
-                    f"mem manager can alloc token num {self.backend.model.mem_manager.can_use_mem_size}\n"
-                    f"mem manager total size {self.backend.model.mem_manager.size}"
+                    f"mem manager can alloc token num {self.backend.model.mem_manager.allocator.can_use_mem_size}\n"
+                    f"mem manager total size {self.backend.model.mem_manager.allocator.size}\n"
                     f"frozened token num {frozen_token_num}\n"
                     f"estimated peak token num {estimated_peak_token_num}\n"
                 )

@@ -145,7 +145,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mem_fraction",
         type=float,
-        default=0.9,
+        default=0.8,
         help="""Memory usage ratio, default is 0.9, you can specify a smaller value if OOM occurs at runtime.
         If max_total_token_num is not specified, it will be calculated automatically based on this value.""",
     )
@@ -246,8 +246,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_req_total_len",
         type=int,
-        default=16384,
+        default=None,
         help="Maximum allowed length for a request (input tokens + output tokens). "
+        "If None, it will be automatically derived from the model config.json, "
+        "and fall back to 16384 if derivation fails. "
         "In PD (Prefill-Decode) mode, this value must be synchronized across the "
         "PD master, prefill, and decode nodes.",
     )
@@ -349,8 +351,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
-    parser.add_argument("--disable_custom_allreduce", action="store_true", help="Whether to disable cutom allreduce.")
-    parser.add_argument("--enable_custom_allgather", action="store_true", help="Whether to enable cutom allgather.")
+    parser.add_argument(
+        "--disable_symm_mem_allreduce",
+        action="store_true",
+        help="Disable the default SymmMem all-reduce fast path and fall back to NCCL.",
+    )
+    parser.add_argument(
+        "--disable_flashinfer_allreduce",
+        action="store_true",
+        help="Disable the default FlashInfer all-reduce fast path and fall back to SymmMem / NCCL.",
+    )
     parser.add_argument(
         "--enable_tpsp_mix_mode",
         action="store_true",
@@ -392,7 +402,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority: fa3 > flashinfer > triton)""",
+                (priority: flashinfer > fa3 > triton)""",
     )
     parser.add_argument(
         "--vit_att_backend",
@@ -449,16 +459,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
 
-    parser.add_argument(
-        "--long_truncation_mode",
-        type=str,
-        choices=[None, "head", "center"],
-        default=None,
-        help="""use to select the handle way when input_token_len + max_new_tokens > max_req_total_len.
-        None : raise Exception
-        head : remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
-        center : remove some tokens in center loc to make input_token_len + max_new_tokens <= max_req_total_len""",
-    )
     parser.add_argument("--use_tgi_api", action="store_true", help="use tgi input and ouput format")
     parser.add_argument(
         "--health_monitor", action="store_true", help="check the health of service and restart when error"
@@ -787,7 +787,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
     )
     parser.add_argument(
-        "-linear_att_ssm_data_type",
+        "--linear_att_ssm_data_type",
         type=str,
         choices=["bfloat16", "float32"],
         default="float32",

@@ -55,7 +55,7 @@ def _fwd_kernel_flash_decode_stage2(
 @torch.no_grad()
 def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq):
     Lk = mid_out.shape[-1]
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
     batch, head_num = mid_out.shape[0], mid_out.shape[1]
     grid = (batch, head_num)
 

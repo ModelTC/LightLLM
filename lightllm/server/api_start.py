@@ -17,7 +17,13 @@ from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.utils.config_utils import has_audio_module, has_vision_module, is_linear_att_mixed_model
+from lightllm.utils.config_utils import (
+    has_audio_module,
+    has_vision_module,
+    is_linear_att_mixed_model,
+    auto_set_max_req_total_len,
+)
+from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
 
@@ -68,6 +74,7 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
+    auto_set_max_req_total_len(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -120,13 +127,15 @@ def normal_or_p_d_start(args):
 
     # performance_mode 参数处理
     if args.performance_mode == "personal":
-        args.running_max_req_size = 3
+        args.running_max_req_size = 6
         args.batch_max_tokens = 2048
         args.chunked_prefill_size = 1024
-        args.mem_fraction = 0.85
+        args.embed_cache_storage_size = 0.8
+        args.graph_max_batch_size = 6
         logger.info(
             f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.85"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
+            f"graph_max_batch_size to 32"
         )
 
     if not args.disable_shm_warning:
@@ -181,6 +190,19 @@ def normal_or_p_d_start(args):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    if args.enable_ep_moe:
+        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        for backend in args.llm_prefill_att_backend:
+            assert backend in allowed_ep_att_backends, (
+                "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
+                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+            )
+        for backend in args.llm_decode_att_backend:
+            assert backend in allowed_ep_att_backends, (
+                "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
+                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+            )
 
     # mtp params check
     if args.mtp_mode is not None:
@@ -284,6 +306,22 @@ def normal_or_p_d_start(args):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
+    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
+    if args.tool_call_parser is None:
+        from lightllm.utils.config_utils import get_tool_call_parser_for_model
+
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
+    if args.reasoning_parser is None:
+        from lightllm.utils.config_utils import get_reasoning_parser_for_model
+
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
@@ -370,6 +408,8 @@ def normal_or_p_d_start(args):
             """dp <= 1 does not support dp_prompt_cache_fetch;
             overriding enable_dp_prompt_cache_fetch to False"""
         )
+
+    auto_configure_allreduce_flags_from_args(args)
 
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
@@ -485,6 +525,8 @@ def pd_master_start(args):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    auto_set_max_req_total_len(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.

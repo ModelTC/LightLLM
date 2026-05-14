@@ -67,7 +67,7 @@ def flash_diverse_decode_stage3(
     block_seq: int,
 ):
     Lk = mid_out.shape[-1]
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
     batch, head_num = mid_out.shape[0], mid_out.shape[1]
     grid = (batch, head_num)
 

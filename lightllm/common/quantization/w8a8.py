@@ -8,19 +8,12 @@ from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_ke
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
-from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
 
 
 from .quantize_method import WeightPack
 
-if HAS_LIGHTLLM_KERNEL:
-
-    def scaled_fp8_quant(tensor, *args, **kwargs):
-        return light_ops.per_token_quant_bf16_fp8(tensor)
-
-else:
-    if HAS_VLLM:
-        scaled_fp8_quant = vllm_ops.scaled_fp8_quant
+if HAS_VLLM:
+    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
 
 LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM", "False").upper() in [
     "ON",

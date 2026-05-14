@@ -47,7 +47,7 @@ from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
@@ -244,6 +244,9 @@ async def generate(request: Request) -> Response:
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
@@ -263,6 +266,9 @@ async def generate_stream(request: Request) -> Response:
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
@@ -277,6 +283,9 @@ async def get_score(request: Request) -> Response:
 
     try:
         return await lightllm_get_score(request, g_objs.httpserver_manager)
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
@@ -307,6 +316,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         resp = await chat_completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
     return resp
 
 
@@ -321,6 +333,9 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         resp = await completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
     return resp
 
 
@@ -332,13 +347,18 @@ async def anthropic_messages(raw_request: Request) -> Response:
         )
     from .api_anthropic import anthropic_messages_impl
 
-    return await anthropic_messages_impl(raw_request)
+    try:
+        return await anthropic_messages_impl(raw_request)
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
 
 
 @app.get("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
-    max_model_len = g_objs.args.max_req_total_len
+    max_model_len = g_objs.httpserver_manager.get_real_supported_max_req_total_len()
+
     if model_name == "default_model_name" and g_objs.args.model_dir:
         model_name = os.path.basename(g_objs.args.model_dir.rstrip("/"))
 
@@ -377,6 +397,9 @@ async def tokens(request: Request):
             },
             status_code=200,
         )
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 

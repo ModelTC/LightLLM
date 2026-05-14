@@ -30,6 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
+from lightllm.utils.error_utils import ClientDisconnected
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -68,6 +69,10 @@ async def _safe_stream_wrapper(stream_generator):
     except ValueError as e:
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
+        return
 
 
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
@@ -148,8 +153,13 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
     return idx
 
 
-def _get_reasoning_from_request(request: ChatCompletionRequest) -> bool:
-    """Judge whether the request needs reasoning"""
+def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
+    """Whether this request uses forced thinking / reasoning (parser + template)."""
+    from .build_prompt import tokenizer_supports_force_thinking
+
+    if not tokenizer_supports_force_thinking():
+        return False
+
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
@@ -170,7 +180,7 @@ def _process_reasoning_stream(
 ) -> tuple[Optional[str], str]:
     """Process reasoning content in streaming response"""
     if index not in reasoning_parser_dict:
-        request_enable_reasoning = _get_reasoning_from_request(request)
+        request_enable_reasoning = _is_force_thinking_mode(request)
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
@@ -371,7 +381,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             reasoning_text = None
             reasoning_parser = get_env_start_args().reasoning_parser
             if reasoning_parser:
-                request_enable_reasoning = _get_reasoning_from_request(request)
+                request_enable_reasoning = _is_force_thinking_mode(request)
                 try:
                     parser = ReasoningParser(
                         model_type=reasoning_parser,
