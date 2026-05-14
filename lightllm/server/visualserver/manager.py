@@ -176,7 +176,7 @@ class VisualManager:
             while True:
                 recv_req: GroupReqIndexes = await asyncio.to_thread(self.zmq_recv_socket.recv_pyobj)
                 if isinstance(recv_req, GroupReqIndexes):
-                    logger.info(
+                    logger.debug(
                         f"visual recv req id {recv_req.group_req_id} "
                         f"img count {len(recv_req.multimodal_params.images)}"
                     )

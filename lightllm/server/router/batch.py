@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 from lightllm.server.core.objs import ShmReqManager, Req
 from lightllm.utils.log_utils import init_logger
-from .stats import RouterStatics
 
 logger = init_logger(__name__)
 
@@ -50,14 +49,11 @@ class Batch:
             all_dp_req_num[req.sample_params.suggested_dp_index] += 1
         return all_dp_req_num
 
-    def filter_out_finished_req(self, shm_req_manager: ShmReqManager, router_statics: RouterStatics):
+    def filter_out_finished_req(self, shm_req_manager: ShmReqManager):
         unfinished_req_ids = []
         for req in self.reqs:
             if req.shm_infer_released:
-                logger.info(f"router release req id {req.request_id}")
-                if not req.is_aborted:
-                    router_statics.update(req.candetoken_out_len)
-
+                logger.debug(f"router release req id {req.request_id}")
                 shm_req_manager.put_back_req_obj(req)
                 req = None
             else:

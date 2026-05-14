@@ -304,6 +304,17 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        group_request_id = None
+        if isinstance(prompt, str):
+            # Guard against extremely long string prompts that might stall the tokenizer
+            # or cause excessive memory usage before tokenization.
+            # 8 characters per token is a conservative heuristic (avg is ~4).
+            max_prompt_chars = self.max_req_total_len * 8
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
+                    f"the request is rejected before tokenization."
+                )
 
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -451,6 +462,12 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
+        except ValueError as e:
+            logger.warning(f"group_request_id: {group_request_id} request invalid: {str(e)}")
+            if group_request_id not in self.req_id_to_out_inf:
+                await self._release_multimodal_resources(multimodal_params)
+            await self.abort(group_request_id)
+            raise e
         except (ClientDisconnected, Exception) as e:
             logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
 
@@ -487,7 +504,7 @@ class HttpServerManager:
         x_session_id = request_headers.get("X-Session-Id", "")
 
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
+        logger.debug(
             f"received req X-Request-Id:{x_request_id} "
             f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
             f"lightllm_req_id:{group_request_id} "
@@ -722,7 +739,7 @@ class HttpServerManager:
                             (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
+                        logger.debug(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
@@ -815,8 +832,8 @@ class HttpServerManager:
                     if req_status is None:
                         continue
 
-                    logger.info(
-                        f"left req id {req_status.group_req_objs.group_req_id}"
+                    logger.debug(
+                        f"left req id {req_status.group_req_objs.group_req_id} "
                         f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
                         f"refcount {req_status.group_req_objs.shm_req_objs[0].ref_count}"
                     )
