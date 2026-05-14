@@ -82,11 +82,14 @@ class HttpServerManagerForPDMaster:
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
             token_num = self.tokenizer.get_image_token_length(img)
-            assert token_num <= self.args.max_image_token_count, (
-                f"single image token count {token_num} exceeds max_image_token_count {self.args.max_image_token_count}."
-                f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
-                f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
-            )
+            if token_num > self.args.max_image_token_count:
+                err_msg = (
+                    f"the image token count {token_num} > max_image_token_count {self.args.max_image_token_count}. "
+                    f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
+                    f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
+                )
+                logger.warning(err_msg)
+                raise ValueError(err_msg)
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1

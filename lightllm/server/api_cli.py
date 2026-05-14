@@ -445,7 +445,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_image_token_count",
         type=int,
-        default=4096,
+        default=6128,
         help="maximum allowed token count for one image after tokenization",
     )
     parser.add_argument(

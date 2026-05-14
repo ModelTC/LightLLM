@@ -272,7 +272,7 @@ Multimodal Parameters
 
 .. option:: --max_image_token_count
 
-    Maximum allowed token count for a single image after tokenization, default is ``4096``
+    Maximum allowed token count for a single image after tokenization, default is ``6128``
 
     Requests are rejected when any image exceeds this limit.
 

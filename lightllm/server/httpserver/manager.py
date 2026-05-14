@@ -182,11 +182,14 @@ class HttpServerManager:
         return
 
     def _assert_image_token_count(self, token_num: int):
-        assert token_num <= self.args.max_image_token_count, (
-            f"single image token count {token_num} exceeds max_image_token_count {self.args.max_image_token_count}. "
-            f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
-            f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
-        )
+        if token_num > self.args.max_image_token_count:
+            err_msg = (
+                f"single image token count {token_num} exceeds max_image_token_count {self.args.max_image_token_count}."
+                f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
+                f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
+            )
+            logger.warning(err_msg)
+            raise ValueError(err_msg)
         return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
