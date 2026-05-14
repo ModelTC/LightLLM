@@ -17,27 +17,6 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
-# Disable PIL's truncated image loading tolerance to make truncated images raise OSError in load()
-# so that the frontend can intercept it and avoid crashing in the subsequent encode/preprocess stage.
-ImageFile.LOAD_TRUNCATED_IMAGES = False
-
-_IMAGE_VERIFY_POOL = ThreadPoolExecutor(
-    max_workers=int(os.getenv("LIGHTLLM_IMAGE_VERIFY_WORKERS", 4)),
-    thread_name_prefix="img-verify",
-)
-
-
-def _verify_image_bytes(img_data: bytes) -> Tuple[int, int]:
-    """
-    Verify image bytes in a thread pool to find truncated/corrupted images.
-    image.verify() only does header-level verification and cannot find truncated images;
-    image.load() reads the entire pixel data and truncated images will raise OSError.
-    """
-    with Image.open(BytesIO(img_data)) as image:
-        w, h = image.size
-        image.load()
-    return w, h
-
 
 class AudioItem:
     def __init__(self, **kwargs):
@@ -244,3 +223,25 @@ class MultimodalParams:
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
         return ret
+
+
+_IMAGE_VERIFY_POOL = ThreadPoolExecutor(
+    max_workers=int(os.getenv("LIGHTLLM_IMAGE_VERIFY_WORKERS", 4)),
+    thread_name_prefix="img-verify",
+)
+
+
+def _verify_image_bytes(img_data: bytes) -> Tuple[int, int]:
+    """
+    Verify image bytes in a thread pool to find truncated/corrupted images.
+    image.verify() only does header-level verification and cannot find truncated images;
+    image.load() reads the entire pixel data and truncated images will raise OSError.
+    """
+    # Disable PIL's truncated image loading tolerance to make truncated images raise OSError in load()
+    # so that the frontend can intercept it and avoid crashing in the subsequent encode/preprocess stage.
+    ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+    with Image.open(BytesIO(img_data)) as image:
+        w, h = image.size
+        image.load()
+    return w, h
