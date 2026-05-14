@@ -223,6 +223,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _init_att_backend1(self):
         # Only decode needs the sliding-layer backend; prefill sliding goes
         # through gemma4_mm Triton directly in the layer.
+        self.prefill_att_backend1 = None
         self.decode_att_backend1 = self._build_gemma4_sliding_backend(self._gemma4_sliding_decode_backend_kind)
 
     @staticmethod
