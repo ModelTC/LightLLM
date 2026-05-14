@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import List, Tuple
+from typing import List, Optional, Sequence, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
@@ -94,7 +94,17 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     return model_input, run_reqs
 
 
-def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[InferReq]]:
+def prepare_decode_inputs(
+    req_objs: List[InferReq],
+    mtp_decode_steps: Optional[Sequence[int]] = None,
+    mtp_decode_indexes: Optional[Sequence[Sequence[int]]] = None,
+) -> Tuple[ModelInput, List[InferReq]]:
+    if mtp_decode_steps is not None:
+        assert len(mtp_decode_steps) == len(req_objs)
+    if mtp_decode_indexes is not None:
+        assert mtp_decode_steps is None
+        assert len(mtp_decode_indexes) == len(req_objs)
+
     run_reqs: List[InferReq] = []
     total_token_num = 0
     b_req_idx = []
@@ -102,7 +112,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_seq_len = []
     b_q_seq_len = []
     multimodal_params = []
-    for req in req_objs:
+    for req_index, req in enumerate(req_objs):
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
         seq_len = req.get_cur_total_len()
@@ -113,15 +123,25 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        # 动态 MTP 模式：使用动态 current_mtp_step 构建 batch
-        # 非动态 MTP 模式：current_mtp_step 为固定的 mtp_step
-        for step in range(req.current_mtp_step):
+        # 动态 MTP planner 可以提前给出本轮要填充进验证槽位的 draft index。
+        # 当前 planner 使用连续 prefix index；后续非连续选择可在该接口后接 compact kernel。
+        if mtp_decode_indexes is not None:
+            decode_indexes = [int(index) for index in mtp_decode_indexes[req_index]]
+            assert decode_indexes == list(range(1, len(decode_indexes) + 1)), (
+                "Current MTP verify path requires contiguous prefix draft indexes. "
+                "Non-prefix indexes need a compact/remap kernel before decode."
+            )
+        else:
+            decode_step = req.current_mtp_step if mtp_decode_steps is None else int(mtp_decode_steps[req_index])
+            decode_indexes = range(1, decode_step + 1)
+
+        for mtp_index in decode_indexes:
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
-            seq_len += 1
-            b_seq_len.append(seq_len)
-            total_token_num += seq_len
-            b_mtp_index.append(step + 1)
+            mtp_seq_len = seq_len + int(mtp_index)
+            b_seq_len.append(mtp_seq_len)
+            total_token_num += mtp_seq_len
+            b_mtp_index.append(int(mtp_index))
             multimodal_params.append(req.multimodal_params)
             b_q_seq_len.append(1)
 
