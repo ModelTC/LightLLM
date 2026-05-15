@@ -165,8 +165,8 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
         return False
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
-    if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1"]:
-        # qwen3, glm45, nano_v3, and interns1 are reasoning by default
+    if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
+        # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
         return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
     return True  # default
 
@@ -314,6 +314,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "add_special_tokens": False,
         "seed": request.seed,
     }
+
+    # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
+    # special tokens. The default skip_special_tokens=True would drop them
+    # from the decoded stream and the Gemma4Detector would be unable to
+    # find the reasoning boundary. Mirrors vllm's
+    # Gemma4ReasoningParser.adjust_request behaviour. Only applied when no
+    # explicit value is supplied so callers can still opt back into the
+    # default if they want.
+    if get_env_start_args().reasoning_parser == "gemma4" and "skip_special_tokens" not in sampling_params_dict:
+        sampling_params_dict["skip_special_tokens"] = False
 
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens

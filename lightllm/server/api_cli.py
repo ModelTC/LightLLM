@@ -193,6 +193,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "step3",
             "nano_v3",
             "interns1",
+            "gemma4",
         ],
         default=None,
         help="reasoning parser type",

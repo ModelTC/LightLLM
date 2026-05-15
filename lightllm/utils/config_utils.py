@@ -469,4 +469,8 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     if model_type == "deepseek_r1":
         return "deepseek-r1"
 
+    # Gemma-4 (all variants share the same Harmony-like <|channel>...<channel|> format)
+    if model_type == "gemma4":
+        return "gemma4"
+
     return None
