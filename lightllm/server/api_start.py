@@ -11,7 +11,7 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive, get_page_size
+from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive, get_page_size, set_page_size
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -27,6 +27,20 @@ from lightllm.utils.config_utils import (
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
+
+
+def _auto_set_fa4_page_size(args, requested_backends):
+    if "fa4" not in requested_backends or "PAGE_SIZE" in os.environ:
+        return
+
+    from lightllm.utils.fa4_utils import infer_fa4_page_size
+
+    page_size = infer_fa4_page_size(args.model_dir)
+    if page_size is None:
+        return
+
+    set_page_size(page_size)
+    logger.info(f"auto set PAGE_SIZE={page_size} for FA4 backend")
 
 
 def setup_signal_handlers(http_server_process, process_manager):
@@ -204,6 +218,11 @@ def normal_or_p_d_start(args):
                 "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
                 f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
+
+    llm_requested_backends = list(args.llm_prefill_att_backend) + list(args.llm_decode_att_backend)
+    requested_backends = llm_requested_backends + list(args.vit_att_backend)
+    if "fa4" in requested_backends:
+        _auto_set_fa4_page_size(args, llm_requested_backends)
 
     # mtp params check
     if args.mtp_mode is not None:

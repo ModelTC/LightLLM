@@ -42,5 +42,41 @@ def ensure_fa4_supported_gpu() -> None:
         )
 
 
+def sm90_fa4_paged_kv_tile_n(head_dim: int, head_dim_v: int, window_size: tuple[int, int] = (-1, -1)) -> int | None:
+    major, _minor = torch.cuda.get_device_capability()
+    if major != 9:
+        return None
+
+    is_local = window_size != (-1, -1)
+    if head_dim <= 64:
+        return 128
+    if head_dim <= 96:
+        return 128 if is_local else 144
+    if head_dim <= 128:
+        return 128
+    if head_dim <= 192:
+        return 96 if is_local else (128 if head_dim_v <= 128 else 112)
+    return 64 if is_local else 80
+
+
+def infer_fa4_page_size(model_dir: str) -> int | None:
+    from transformers.configuration_utils import PretrainedConfig
+
+    model_cfg, _ = PretrainedConfig.get_config_dict(model_dir)
+    llm_config = model_cfg.get("text_config", model_cfg)
+
+    head_dim = llm_config.get("head_dim")
+    if head_dim is None:
+        head_dim = llm_config["hidden_size"] // llm_config["num_attention_heads"]
+    head_dim_v = llm_config.get("v_head_dim", head_dim)
+
+    window_size = (-1, -1)
+    sliding_window = llm_config.get("sliding_window", None)
+    if sliding_window is not None and not llm_config.get("full_attention_interval", None):
+        window_size = (sliding_window - 1, sliding_window - 1)
+
+    return sm90_fa4_paged_kv_tile_n(head_dim=head_dim, head_dim_v=head_dim_v, window_size=window_size)
+
+
 def unwrap_fa4_output(output):
     return output[0] if isinstance(output, tuple) else output
