@@ -101,6 +101,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         # head_dim. Don't change to 0.25 — that double-counts with the table.
         self.partial_rotary_factor_ = 1.0
 
+        self.ple_static_buffer = None
+
     def _rope_cos_sin(self, infer_state):
         # Tables are built in the model dtype (Gemma4TpPartModel._init_to_get_rotary_gemma4),
         # so they already match q/k dtype — no cast needed.
@@ -341,10 +343,11 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _block_epilogue(self, hidden_states, infer_state, layer_weight):
         if self.has_ple_:
-            ple_slice = infer_state.per_layer_embeds[..., self.layer_num_, :]
             flat = hidden_states.view(-1, self.embed_dim_)
+            N = flat.shape[0]
+            ple_slice = self.ple_static_buffer[:N, self.layer_num_, :]
             gate = layer_weight.per_layer_input_gate_.mm(flat)
-            gated = nn.functional.gelu(gate, approximate="tanh") * ple_slice.view(-1, self.ple_dim_)
+            gated = nn.functional.gelu(gate, approximate="tanh") * ple_slice
             contrib = layer_weight.per_layer_projection_.mm(gated)
             contrib = layer_weight.post_per_layer_input_norm_weight_(
                 input=contrib, eps=self.eps_, alloc_func=self.alloc_tensor

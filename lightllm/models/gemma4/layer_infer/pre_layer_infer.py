@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.distributed as dist
-from lightllm.common.basemodel.triton_kernel.sp_pad_copy import sp_pad_copy
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
@@ -23,6 +22,7 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
             self.ple_proj_scale_ = float(network_config["hidden_size"]) ** -0.5
             self.ple_combine_scale_ = 2.0 ** -0.5
             self.rms_norm_eps_ = network_config.get("rms_norm_eps", 1e-6)
+        self.ple_static_buffer = None
 
     def _compute_per_layer_embeds(self, input_ids_for_ple, input_embdings, infer_state, layer_weight):
         ple_embeds = layer_weight.embed_tokens_per_layer_weight_(input_ids_for_ple)
@@ -38,7 +38,11 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
         )
 
         ple_embeds = ple_embeds.reshape(*ple_embeds.shape[:-1], self.num_layers_, self.ple_dim_)
-        infer_state.per_layer_embeds = (ple_proj + ple_embeds) * self.ple_combine_scale_
+        buf = self.ple_static_buffer
+        N = input_embdings.shape[0]
+        out = buf[:N]
+        torch.add(ple_proj, ple_embeds, out=out)
+        out.mul_(self.ple_combine_scale_)
 
     def context_forward(self, input_ids, infer_state, layer_weight):
         input_embdings = LlamaMultimodalPreLayerInfer.context_forward(self, input_ids, infer_state, layer_weight)
@@ -56,18 +60,10 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
 
     def _tpsp_sp_split(self, input: torch.Tensor, infer_state):
         if self.tp_world_size_ > 1 and get_env_start_args().enable_tpsp_mix_mode:
-            input = super()._tpsp_sp_split(input=input, infer_state=infer_state)
-            if self.has_ple and infer_state.per_layer_embeds is not None:
-                ple_shape = infer_state.per_layer_embeds.shape
-                per_layer_embeds = infer_state.per_layer_embeds.reshape(ple_shape[0], -1)
-                per_layer_embeds = sp_pad_copy(
-                    in_tensor=per_layer_embeds,
-                    sp_rank_id=self.tp_rank_,
-                    sp_world_size=self.tp_world_size_,
-                    alloc_func=self.alloc_tensor,
-                )
-                infer_state.per_layer_embeds = per_layer_embeds.reshape(
-                    per_layer_embeds.shape[0], ple_shape[1], ple_shape[2]
-                )
-            return input
+            # SP would need a per-rank slice (N/world_size tokens), but the
+            # PLE static buffer is sized/written for the full N tokens. If you
+            # ever need SP + PLE, refactor _compute_per_layer_embeds to do an
+            # sp_pad_copy into a per-rank buffer.
+            assert not self.has_ple, "gemma4 PLE + enable_tpsp_mix_mode not implemented"
+            return super()._tpsp_sp_split(input=input, infer_state=infer_state)
         return input

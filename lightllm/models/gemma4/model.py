@@ -14,7 +14,7 @@ from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerI
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -259,6 +259,28 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         self._init_to_get_rotary_gemma4()
         if self.config.get("enable_moe_block", False):
             dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
+        self._init_ple_static_buffer()
+
+    def _init_ple_static_buffer(self):
+        ple_dim = self.config.get("hidden_size_per_layer_input") or 0
+        if ple_dim <= 0:
+            return
+        args = get_env_start_args()
+        max_tokens = max(
+            int(self.batch_max_tokens or 0),
+            int(self.graph_max_batch_size or 0),
+            int(getattr(args, "prefill_cudagraph_max_handle_token", 0) or 0),
+        )
+        assert max_tokens > 0, "PLE static buffer needs a positive max-token bound"
+        num_layers = self.config["num_hidden_layers"]
+        buf = torch.zeros((max_tokens, num_layers, ple_dim), dtype=self.data_type, device="cuda")
+        self.pre_infer.ple_static_buffer = buf
+        for layer_infer in self.layers_infer:
+            layer_infer.ple_static_buffer = buf
+        logger.info(
+            f"Allocated PLE static buffer: tokens={max_tokens}, layers={num_layers}, "
+            f"ple_dim={ple_dim}, dtype={self.data_type}"
+        )
 
     def _init_to_get_rotary_gemma4(self):
         rope_params = self.config["rope_parameters"]

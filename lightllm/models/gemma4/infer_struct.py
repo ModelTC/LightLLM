@@ -13,9 +13,6 @@ class Gemma4InferStateInfo(InferStateInfo):
         self.position_sin_sliding = None
         self.position_cos_full = None
         self.position_sin_full = None
-        # E-series only: per-layer embeddings (PLE), shape (N, num_layers, hidden_size_per_layer_input).
-        # Computed once in Gemma4PreLayerInfer; sliced per layer in the transformer block.
-        self.per_layer_embeds = None
         self.b_image_token_end = None
 
     def init_some_extra_state(self, model):
