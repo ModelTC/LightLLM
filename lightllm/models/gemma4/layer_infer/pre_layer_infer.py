@@ -69,7 +69,11 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
         )
 
         ple_embeds = ple_embeds.reshape(*ple_embeds.shape[:-1], self.num_layers_, self.ple_dim_)
-        infer_state.per_layer_embeds = (ple_proj + ple_embeds) * self.ple_combine_scale_
+        buf = self.ple_static_buffer
+        N = input_embdings.shape[0]
+        out = buf[:N]
+        torch.add(ple_proj, ple_embeds, out=out)
+        out.mul_(self.ple_combine_scale_)
 
     def context_forward(self, input_ids, infer_state, layer_weight):
         input_embdings = LlamaMultimodalPreLayerInfer.context_forward(self, input_ids, infer_state, layer_weight)
