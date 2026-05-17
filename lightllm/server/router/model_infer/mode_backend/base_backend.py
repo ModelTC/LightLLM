@@ -775,14 +775,19 @@ class ModeBackend:
 
         return
 
-    def _update_mtp_verify_token_num(self, decode_reqs: List[InferReq]):
+    def _update_mtp_verify_token_num(
+        self,
+        decode_reqs: List[InferReq],
+        verify_token_nums: Optional[List[int]] = None,
+    ):
         if self.is_master_in_dp:
-            for req in decode_reqs:
-                # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
-                # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的 current_mtp_step
-                # current_mtp_step 在静态 MTP 模式下为 mtp_step，在动态 MTP 模式下会在推理过程中动态设置。
-                assert req.current_mtp_step >= 0
-                req.update_mtp_verify_token_num(verify_token_num=1 + req.current_mtp_step)
+            if verify_token_nums is None:
+                verify_token_nums = [1 + req.current_mtp_step for req in decode_reqs]
+            assert len(decode_reqs) == len(verify_token_nums)
+            for req, verify_token_num in zip(decode_reqs, verify_token_nums):
+                # 统计发送给主模型验证的 token 数量，动态 MTP 模式由 planner 传入实际裁剪后的行数。
+                assert verify_token_num >= 1
+                req.update_mtp_verify_token_num(verify_token_num=verify_token_num)
         return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
