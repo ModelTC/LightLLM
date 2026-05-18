@@ -1,5 +1,6 @@
 import pickle
 import copy
+import ujson as json
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Dict, List, Any, Optional, Tuple
@@ -125,7 +126,7 @@ class NixlKVTransporter:
         new_trans_task.mem_indexes = None
         self.nixl_agent.send_notif(
             remote_agent.agent_name,
-            pickle.dumps(new_trans_task),
+            json.dumps(new_trans_task).encode(),
         )
         return
 
@@ -165,7 +166,7 @@ class NixlKVTransporter:
             [trans_task.nixl_dst_page_index],
             src_handle,
             [trans_task.nixl_src_page_index],
-            pickle.dumps(notify_obj),
+            json.dumps(notify_obj).encode(),
         )
         if not handle:
             raise RuntimeError(f"make_prepped_xfer failed for task: {trans_task.to_str()}")

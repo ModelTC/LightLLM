@@ -5,7 +5,7 @@ import threading
 import torch.multiprocessing as mp
 import collections
 import queue
-import pickle
+import ujson as json
 from typing import List, Dict, Union, Deque, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
@@ -193,7 +193,7 @@ class _DecodeTransModule:
             up_status = NixlUpKVStatus(
                 group_request_id=task.request_id,
                 pd_master_node_id=task.pd_master_node_id,
-                nixl_params=pickle.dumps(decode_node_info),
+                nixl_params=json.dumps(decode_node_info).encode(),
             )
 
             self.up_status_in_queue.put(up_status)
@@ -220,7 +220,7 @@ class _DecodeTransModule:
                 for remote_agent_name, _notify_list in notifies_dict.items():
                     for notify in _notify_list:
                         try:
-                            notify_obj = pickle.loads(notify)
+                            notify_obj = json.loads(notify.decode())
                         except:
                             notify_obj = None
 
@@ -236,7 +236,7 @@ class _DecodeTransModule:
                                 try:
                                     self.transporter.send_notify_to_prefill_node(
                                         prefill_agent_name=remote_agent_name,
-                                        notify=pickle.dumps(remote_trans_task.createRetObj()),
+                                        notify=json.dumps(remote_trans_task.createRetObj()).encode(),
                                     )
                                 except BaseException as e:
                                     logger.error(f"send notify to prefill node failed: {str(e)}")
