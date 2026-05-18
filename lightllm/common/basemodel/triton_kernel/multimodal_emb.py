@@ -23,6 +23,8 @@ def _fwd_kernel(
     tp_text_end_token_id,
     hidden_size,
     tp_world_size,
+    APPLY_TEXT_EMBED_SCALE: tl.constexpr,
+    TEXT_EMBED_SCALE: tl.constexpr,
     BLOCK_HIDDEN_DIM: tl.constexpr,
 ):
 
@@ -43,6 +45,8 @@ def _fwd_kernel(
             mask=off_d < hidden_size,
             other=0,
         )
+        if APPLY_TEXT_EMBED_SCALE:
+            load_emb *= TEXT_EMBED_SCALE
         tl.store(Out + stride_out_s * seq_index + stride_out_d * off_d, load_emb, mask=off_d < hidden_size)
 
     img_start_token_id = tl.load(Img_start_token_ids + img_handle_id - 1, mask=img_handle_id >= 1, other=0)
@@ -84,9 +88,12 @@ def multimodal_emb(
     tp_text_start_token_id: int,
     tp_text_end_token_id: int,
     tp_world_size: int,
+    text_embed_scale: float = 1.0,
 ):
     total_len = prompt_ids.shape[0]
     BLOCK = triton.next_power_of_2(out.shape[1])
+    text_embed_scale = float(text_embed_scale)
+    apply_text_embed_scale = text_embed_scale != 1.0
     # print(len(img_token_lens))
     grid = (total_len, len(img_token_lens) + 1)
     num_warps = 1
@@ -109,6 +116,8 @@ def multimodal_emb(
         tp_text_end_token_id=tp_text_end_token_id,
         hidden_size=out.shape[1],
         tp_world_size=float(tp_world_size),
+        APPLY_TEXT_EMBED_SCALE=apply_text_embed_scale,
+        TEXT_EMBED_SCALE=text_embed_scale,
         BLOCK_HIDDEN_DIM=BLOCK,
         num_warps=num_warps,
         num_stages=1,

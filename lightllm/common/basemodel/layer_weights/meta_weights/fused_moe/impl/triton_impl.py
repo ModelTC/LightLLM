@@ -42,6 +42,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_group: int,
         num_expert_group: int,
         scoring_func: str,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -59,6 +60,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         )
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = (
                 torch.arange(
@@ -91,6 +94,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
+        use_gelu: bool = False,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -108,6 +112,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            use_gelu=use_gelu,
         )
         return input_tensor
 
@@ -125,6 +130,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        per_expert_scale: Optional[torch.Tensor] = None,
+        use_gelu: bool = False,
     ):
         topk_weights, topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -136,6 +143,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
+            per_expert_scale=per_expert_scale,
         )
         output = self._fused_experts(
             input_tensor=input_tensor,
@@ -145,5 +153,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_ids=topk_ids,
             router_logits=router_logits,
             is_prefill=is_prefill,
+            use_gelu=use_gelu,
         )
         return output

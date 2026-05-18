@@ -35,6 +35,7 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         raise NotImplementedError("Not implemented")
 
@@ -75,7 +76,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        assert out_dtype is None, "deepgemm-fp8w8a8-b128 quant does not support out_dtype"
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         input_scale = None

@@ -31,6 +31,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_group: int,
         num_expert_group: int,
         scoring_func: str,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -48,6 +49,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         )
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,
@@ -68,8 +71,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        use_gelu: bool = False,
     ):
-
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = self.quant_method.method_name != "none"
@@ -88,6 +91,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             previous_event=None,  # for overlap
+            use_gelu=use_gelu,
         )
         return output
 
@@ -210,11 +214,20 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         masked_m: torch.Tensor,
         dtype: torch.dtype,
         expected_m: int,
+        use_gelu: bool = False,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         return masked_group_gemm(
-            recv_x, masked_m, dtype, w13_weight, w13_scale, w2_weight, w2_scale, expected_m=expected_m
+            recv_x,
+            masked_m,
+            dtype,
+            w13_weight,
+            w13_scale,
+            w2_weight,
+            w2_scale,
+            expected_m=expected_m,
+            use_gelu=use_gelu,
         )
 
     def prefilled_group_gemm(
@@ -226,6 +239,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13: WeightPack,
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
+        use_gelu: bool = False,
     ):
         device = recv_x[0].device
         w13_weight, w13_scale = w13.weight, w13.weight_scale
@@ -278,7 +292,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             # TODO fused kernel
             silu_out = torch.empty((all_tokens, N // 2), device=device, dtype=hidden_dtype)
 
-            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
+            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out, use_gelu=use_gelu)
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                 silu_out, block_size, dtype=w13_weight.dtype, column_major_scales=True, scale_tma_aligned=True
             )
@@ -298,7 +312,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             if Autotuner.is_autotune_warmup():
                 _gemm_out_a = torch.zeros((1, N), device=device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, use_gelu=use_gelu)
                 _gemm_out_a, _silu_out = None, None
 
         return gather_out
