@@ -38,7 +38,7 @@ class RoutingCaptureManager:
         self.num_experts = num_experts
         self.kv_cache_size = kv_cache_size
 
-        self.dtype = torch.uint8 if num_experts <= 255 else torch.int16
+        self.dtype = torch.uint8 if num_experts <= 256 else torch.int16
         dtype_bytes = 1 if self.dtype == torch.uint8 else 2
 
         # Shape: (kv_cache_size, num_moe_layers, topk) — on CPU to save GPU memory.
