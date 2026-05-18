@@ -353,11 +353,12 @@ class ChunkedPrefillBackend(ModeBackend):
         sync_event.synchronize()
 
         if self.enable_dynamic_mtp:
-            # TODO: 更新动态 mtp step 步的相关信息到 planer中，进行相关的信息统计。便于分析。
-            # self._update_dynamic_mtp_size_cpu_part(
-            #     run_reqs=run_reqs, dynamic_sizes_cpu=dynamic_sizes_cpu, accepted_index_cpu=accepted_index_cpu
-            # )
-            pass
+            self._update_dynamic_mtp_size_cpu_part(
+                decode_reqs=decode_reqs,
+                run_reqs=run_reqs,
+                dynamic_sizes_cpu=dynamic_sizes_cpu,
+                accepted_index_cpu=accepted_index_cpu,
+            )
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
@@ -395,15 +396,19 @@ class ChunkedPrefillBackend(ModeBackend):
 
     def _update_dynamic_mtp_size_cpu_part(
         self,
+        decode_reqs: List[InferReq],
         run_reqs: List[InferReq],
         dynamic_sizes_cpu: torch.Tensor,
         accepted_index_cpu: torch.Tensor,
     ):
+        id_to_current_mtp_step = {}
         assert len(run_reqs) == dynamic_sizes_cpu.shape[0] == accepted_index_cpu.shape[0]
         for req, new_size, accepted in zip(run_reqs, dynamic_sizes_cpu.numpy(), accepted_index_cpu.numpy()):
             if int(accepted) == 1:
-                req.current_mtp_step = int(new_size)
-                assert req.current_mtp_step <= req.mtp_step
+                assert int(new_size) <= req.mtp_step
+                id_to_current_mtp_step[req.req_idx] = int(new_size)
+        # TODO 将 id_to_current_mtp_step 的信息更新到 planner 中去
+        pass
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
