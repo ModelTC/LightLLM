@@ -107,6 +107,10 @@ class CustomProcessGroup:
 class DistributeGroupManager:
     def __init__(self):
         self.groups = []
+        self.ep_buffer = None
+        self.ep_low_latency_buffer = None
+        self.ep_mega_moe_buffer = None
+        self.ep_num_sms = None
 
     def __len__(self):
         return len(self.groups)
