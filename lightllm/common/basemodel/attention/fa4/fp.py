@@ -24,12 +24,6 @@ class Fa4AttBackend(Fa3AttBackend):
         return Fa4DecodeAttState(backend=self, infer_state=infer_state)
 
 
-def _normalize_sink_weight(sink_weight: torch.Tensor | None) -> torch.Tensor | None:
-    if sink_weight is None or sink_weight.dtype == torch.bfloat16:
-        return sink_weight
-    return sink_weight.to(dtype=torch.bfloat16)
-
-
 def _sm90_fa4_paged_kv_tile_n(
     head_dim: int,
     head_dim_v: int,
@@ -83,7 +77,7 @@ class Fa4PrefillAttState(Fa3PrefillAttState):
             window_size = (-1, -1)
 
         if att_control.use_att_sink:
-            sink_weight = _normalize_sink_weight(att_control.sink_weight)
+            sink_weight = att_control.sink_weight
         else:
             sink_weight = None
 
@@ -127,7 +121,7 @@ class Fa4DecodeAttState(Fa3DecodeAttState):
             window_size = (-1, -1)
 
         if att_control.use_att_sink:
-            sink_weight = _normalize_sink_weight(att_control.sink_weight)
+            sink_weight = att_control.sink_weight
         else:
             sink_weight = None
 

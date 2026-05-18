@@ -6,10 +6,12 @@ logger = init_logger(__name__)
 
 try:
     from flash_attn.cute import flash_attn_varlen_func
+    from flash_attn.cute.interface import _flash_attn_fwd
 
     HAS_FA4 = True
 except Exception:
     flash_attn_varlen_func = None
+    _flash_attn_fwd = None
     HAS_FA4 = False
     logger.warning("flash-attn-4 is not installed")
 
@@ -22,7 +24,7 @@ def is_fa4_supported_gpu() -> bool:
 
 
 def ensure_fa4_available() -> None:
-    if not HAS_FA4 or flash_attn_varlen_func is None:
+    if not HAS_FA4:
         raise ImportError(
             "flash-attn-4 is unavailable. Install it first, e.g. `pip install flash-attn-4`, "
             "or install from the local flash-attention repo."

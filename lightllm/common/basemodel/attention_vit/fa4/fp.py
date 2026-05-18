@@ -4,8 +4,7 @@ from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 from lightllm.utils.fa4_utils import (
     ensure_fa4_available,
     ensure_fa4_supported_gpu,
-    flash_attn_varlen_func,
-    unwrap_fa4_output,
+    _flash_attn_fwd,
 )
 
 
@@ -24,7 +23,8 @@ class Fa4VitAttBackend(BaseVitAttBackend):
         max_seqlen: int,
     ) -> None:
         head_dim = q.shape[-1]
-        out = flash_attn_varlen_func(
+        return _flash_attn_fwd(
+            out=o,
             q=q,
             k=k,
             v=v,
@@ -36,5 +36,3 @@ class Fa4VitAttBackend(BaseVitAttBackend):
             causal=False,
             return_lse=False,
         )
-        o.copy_(unwrap_fa4_output(out))
-        return o
