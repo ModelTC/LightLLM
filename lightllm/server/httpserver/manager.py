@@ -102,7 +102,12 @@ class HttpServerManager:
         self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
-        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.tokenizer = get_tokenizer(
+            tokenizer_name=args.model_dir,
+            tokenizer_dir=args.tokenizer_dir,
+            tokenizer_mode=args.tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        )
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
@@ -116,7 +121,10 @@ class HttpServerManager:
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
-        self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
+        self.vocab_size = max(
+            get_vocab_size(config_path=args.config_path, model_dir=args.model_dir),
+            self.tokenizer.vocab_size,
+        )
 
         # The timemark of the latest inference(prefill/decode) which is used to check the health status of the system.
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.

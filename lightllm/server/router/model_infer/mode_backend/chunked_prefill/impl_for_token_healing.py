@@ -21,7 +21,10 @@ class TokenHealingBackend(ChunkedPrefillBackend):
         初始化tokenizer 词表相关的的操作
         """
         self.tokenizer = get_tokenizer(
-            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+            self.args.model_dir,
+            self.args.tokenizer_dir,
+            self.args.tokenizer_mode,
+            trust_remote_code=self.args.trust_remote_code,
         )
         vob_dict = self.tokenizer.get_vocab()
         self.token_to_token_id = vob_dict

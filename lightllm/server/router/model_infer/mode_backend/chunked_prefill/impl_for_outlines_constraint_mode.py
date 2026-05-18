@@ -35,7 +35,12 @@ class OutlinesConstraintBackend(ChunkedPrefillBackend):
         from outlines.models.transformers import TransformerTokenizer
 
         self.tokenizer = TransformerTokenizer(
-            get_tokenizer(self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code)
+            get_tokenizer(
+                self.args.model_dir,
+                self.args.tokenizer_dir,
+                self.args.tokenizer_mode,
+                trust_remote_code=self.args.trust_remote_code,
+            )
         )
         eos_token_ids = []
         eos_token_ids.append(self.tokenizer.eos_token_id)

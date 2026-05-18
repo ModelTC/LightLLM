@@ -42,7 +42,12 @@ class HttpServerManagerForPDMaster:
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
 
-        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.tokenizer = get_tokenizer(
+            args.model_dir,
+            args.tokenizer_dir,
+            args.tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        )
 
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()

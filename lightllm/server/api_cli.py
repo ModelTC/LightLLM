@@ -122,6 +122,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="the model weight dir path, the app will load config, weights and tokenizer from this dir",
     )
     parser.add_argument(
+        "--config_path",
+        type=str,
+        default=None,
+        help="the config path (JSON). If not set, use model_dir/config.json when present; "
+        "otherwise derive config from GGUF metadata when model_dir is a .gguf file or contains one",
+    )
+    parser.add_argument(
+        "--tokenizer_dir",
+        type=str,
+        default=None,
+        help="tokenizer directory; required for GGUF models, otherwise defaults to model_dir",
+    )
+    parser.add_argument(
         "--tokenizer_mode",
         type=str,
         default="fast",
@@ -589,9 +602,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin |
-                        | triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
+        help="""Quantization method: none | gguf (requires .gguf weights under model_dir) |
+                        vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128 | deepgemm-fp8w8a8-b128 |
+                        triton-fp8w8a8-block128 | awq | awq_marlin |
+                        triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
                         triton-fp8w8a8g64 (weight perchannel quantization with group size 64)""",
     )
     parser.add_argument(

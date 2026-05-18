@@ -49,7 +49,13 @@ class BaseQuantizationMethod(QuantizationMethod):
         return "w8a8-base"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         raise NotImplementedError("Not implemented")
 
@@ -99,7 +105,13 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         return "vllm-w8a8"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
@@ -163,7 +175,13 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         return "vllm-fp8w8a8"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
@@ -241,7 +259,13 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return "vllm-fp8w8a8-b128"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()

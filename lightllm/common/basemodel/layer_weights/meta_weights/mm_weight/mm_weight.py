@@ -100,7 +100,11 @@ class MMWeightTpl(BaseWeightTpl):
         self.mm_param: WeightPack = None
         self.mm_param_list: List[WeightPack] = None
         self.mm_param, self.mm_param_list = self.quant_method.create_weight(
-            in_dim=self.in_dim, out_dims=self.out_dims, dtype=self.data_type_, device_id=get_current_device_id()
+            in_dim=self.in_dim,
+            out_dims=self.out_dims,
+            dtype=self.data_type_,
+            device_id=get_current_device_id(),
+            weight_names=self.weight_names,
         )
         return
 

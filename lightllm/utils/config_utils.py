@@ -1,17 +1,218 @@
 import json
 import os
-from typing import Optional, List
 from functools import lru_cache
+from typing import List, Optional
+
 from .envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
-def get_config_json(model_path: str):
-    with open(os.path.join(model_path, "config.json"), "r") as file:
-        json_obj = json.load(file)
-    return json_obj
+def find_gguf_path(model_dir: Optional[str]) -> Optional[str]:
+    if not model_dir:
+        return None
+    if model_dir.endswith(".gguf") and os.path.isfile(model_dir):
+        return model_dir
+    if os.path.isdir(model_dir):
+        gguf_files = sorted(
+            os.path.join(model_dir, name) for name in os.listdir(model_dir) if name.endswith(".gguf")
+        )
+        if not gguf_files:
+            return None
+        if len(gguf_files) > 1:
+            raise ValueError(
+                f"multiple GGUF files found in {model_dir} is not supported, please specify the target gguf file."
+            )
+        return gguf_files[0]
+    return None
+
+
+def is_gguf_model_path(model_dir: Optional[str]) -> bool:
+    return find_gguf_path(model_dir) is not None
+
+
+def check_gguf_tokenizer_dir(model_dir: Optional[str], tokenizer_dir: Optional[str]) -> None:
+    if not is_gguf_model_path(model_dir):
+        return
+    if not tokenizer_dir:
+        raise ValueError(
+            f"GGUF model requires --tokenizer_dir (model_dir={model_dir!r}). "
+            "Provide a HuggingFace tokenizer directory separate from the .gguf weights."
+        )
+    if not os.path.isdir(tokenizer_dir):
+        raise FileNotFoundError(f"tokenizer_dir is not a directory: {tokenizer_dir!r}")
+    for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json"):
+        if os.path.isfile(os.path.join(tokenizer_dir, name)):
+            return
+    raise FileNotFoundError(
+        f"tokenizer_dir missing tokenizer files (tokenizer.json / tokenizer_config.json / vocab.json): "
+        f"{tokenizer_dir!r}"
+    )
+
+
+def resolve_tokenizer_dir(model_dir: Optional[str], tokenizer_dir: Optional[str]) -> str:
+    check_gguf_tokenizer_dir(model_dir, tokenizer_dir)
+    if is_gguf_model_path(model_dir):
+        return tokenizer_dir
+    return tokenizer_dir or model_dir
+
+
+def uses_gguf_quant_type(quant_type: str, quant_cfg_path: Optional[str] = None) -> bool:
+    if quant_type == "gguf":
+        return True
+    if quant_cfg_path is None:
+        return False
+    import yaml
+
+    with open(quant_cfg_path, "r") as file:
+        data = yaml.safe_load(file) or {}
+    if data.get("quant_type") == "gguf":
+        return True
+    for layer_quant_cfg in data.get("mix_bits", []) or []:
+        if layer_quant_cfg.get("quant_type") == "gguf":
+            return True
+    return False
+
+
+def get_gguf_quant_conflicts(quant_type: str, quant_cfg_path: Optional[str] = None) -> List[str]:
+    """Non-gguf quant types that cannot be auto-overridden on GGUF weights ('none' is allowed)."""
+    conflicts = []
+    if quant_type not in ("gguf", "none"):
+        conflicts.append(quant_type)
+    if quant_cfg_path is None:
+        return sorted(set(conflicts))
+    import yaml
+
+    with open(quant_cfg_path, "r") as file:
+        data = yaml.safe_load(file) or {}
+    cfg_quant_type = data.get("quant_type")
+    if cfg_quant_type is not None and cfg_quant_type not in ("gguf", "none"):
+        conflicts.append(cfg_quant_type)
+    for layer_quant_cfg in data.get("mix_bits", []) or []:
+        layer_quant_type = layer_quant_cfg.get("quant_type")
+        if layer_quant_type is not None and layer_quant_type != "gguf":
+            conflicts.append(layer_quant_type)
+    return sorted(set(conflicts))
+
+
+def align_quant_type_for_gguf_model(
+    model_dir: Optional[str],
+    quant_type: str,
+    quant_cfg_path: Optional[str] = None,
+) -> str:
+    """GGUF weights only support gguf quantization; auto-align CLI default 'none' to 'gguf'."""
+    if find_gguf_path(model_dir) is None:
+        return quant_type
+    conflicts = get_gguf_quant_conflicts(quant_type, quant_cfg_path)
+    if conflicts:
+        raise ValueError(
+            f"model_dir contains GGUF weights but quantization is configured as {conflicts!r}. "
+            "GGUF checkpoints only support --quant_type gguf. "
+            "Use a HuggingFace safetensors directory for awq/fp8/none, or remove non-gguf entries from --quant_cfg mix_bits."
+        )
+    if quant_type == "gguf":
+        return quant_type
+    return "gguf"
+
+
+def check_gguf_quant_model_dir(
+    model_dir: Optional[str],
+    quant_type: str,
+    quant_cfg_path: Optional[str] = None,
+) -> None:
+    if not uses_gguf_quant_type(quant_type, quant_cfg_path):
+        return
+    if find_gguf_path(model_dir) is not None:
+        return
+    raise ValueError(
+        f"--quant_type gguf requires a .gguf weights file, but none found under model_dir={model_dir!r}. "
+        "Point model_dir to a .gguf file or a directory with exactly one .gguf file. "
+        "For HuggingFace safetensors checkpoints, use --quant_type none (or awq / fp8, etc.), not gguf."
+    )
+
+
+def load_model_config(config_path: Optional[str] = None, model_dir: Optional[str] = None) -> dict:
+    # load config from config_path
+    if config_path is not None:
+        if not os.path.isfile(config_path):
+            raise FileNotFoundError(f"config file not found: {config_path}")
+        with open(config_path, "r") as file:
+            return json.load(file)
+
+    # load config from model_dir/config.json
+    if model_dir and not model_dir.endswith(".gguf"):
+        default_json = os.path.join(model_dir, "config.json")
+        if os.path.isfile(default_json):
+            with open(default_json, "r") as file:
+                return json.load(file)
+
+    # load config from GGUF metadata
+    gguf_path = find_gguf_path(model_dir)
+    if gguf_path is not None:
+        try:
+            from transformers.modeling_gguf_pytorch_utils import load_gguf_checkpoint
+        except ImportError as e:
+            raise ImportError(
+                "Loading config from GGUF requires transformers with GGUF support and the gguf package."
+            ) from e
+        config = load_gguf_checkpoint(gguf_path, return_tensors=False)["config"]
+        logger.info(f"loaded model config from GGUF metadata: {gguf_path}")
+
+        return config
+
+    raise FileNotFoundError(
+        f"no model config found (config_path={config_path!r}, model_dir={model_dir!r}). "
+        "Provide --config_path, place config.json under model_dir, or use a .gguf model path."
+    )
+
+
+def normalize_model_config(config: dict) -> dict:
+    from lightllm.common.build_utils import repair_config
+
+    repair_config(config, same_names=["num_attention_heads", "n_head"])
+    repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
+    repair_config(config, same_names=["num_hidden_layers", "n_layer"])
+    if config.get("head_dim") is None:
+        hidden_size = config.get("hidden_size") or config.get("n_embd") or config.get("n_embed")
+        num_heads = config.get("num_attention_heads") or config.get("n_head")
+        if hidden_size and num_heads:
+            config["head_dim"] = hidden_size // num_heads
+    return config
+
+
+@lru_cache(maxsize=None)
+def get_model_config_dict(config_path: Optional[str] = None, model_dir: Optional[str] = None) -> dict:
+    return normalize_model_config(load_model_config(config_path=config_path, model_dir=model_dir))
+
+
+def _get_config_from_model_path(model_path: str) -> dict:
+    if os.path.isfile(model_path) and not model_path.endswith(".gguf"):
+        return get_model_config_dict(config_path=model_path, model_dir=None)
+    return get_model_config_dict(model_dir=model_path)
+
+
+def resolve_model_config(
+    config_path: Optional[str] = None,
+    model_dir: Optional[str] = None,
+) -> dict:
+    if config_path is not None or model_dir is not None:
+        return get_model_config_dict(config_path=config_path, model_dir=model_dir)
+    raise ValueError("resolve_model_config requires config_path or model_dir")
+
+
+@lru_cache(maxsize=1)
+def get_start_args_model_config() -> dict:
+    start_args = get_env_start_args()
+    return get_model_config_dict(config_path=start_args.config_path, model_dir=start_args.model_dir)
+
+
+def get_config_json(model_path: str) -> dict:
+    logger.warning(
+        "get_config_json(model_path) is deprecated; "
+        "use get_model_config_dict(config_path=..., model_dir=...) instead."
+    )
+    return _get_config_from_model_path(model_path)
 
 
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
@@ -254,9 +455,9 @@ def get_model_architectures(model_path: str):
         return "unknown_architecture"
 
 
-def get_vocab_size(model_path: str):
+def get_vocab_size(config_path: Optional[str] = None, model_dir: Optional[str] = None) -> int:
     try:
-        config_json = get_config_json(model_path)
+        config_json = resolve_model_config(config_path=config_path, model_dir=model_dir)
         # qwen3-omini special
         if "thinker_config" in config_json:
             config_json = config_json["thinker_config"]
@@ -286,8 +487,7 @@ def get_dtype(model_path: str):
 
 @lru_cache(maxsize=None)
 def get_fixed_kv_len():
-    start_args = get_env_start_args()
-    model_cfg = get_config_json(start_args.model_dir)
+    model_cfg = get_start_args_model_config()
     if "prompt_cache_token_ids" in model_cfg:
         return len(model_cfg["prompt_cache_token_ids"])
     else:
@@ -297,9 +497,7 @@ def get_fixed_kv_len():
 @lru_cache(maxsize=None)
 def has_vision_module(model_path: str) -> bool:
     try:
-        from transformers.configuration_utils import PretrainedConfig
-
-        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_cfg = get_model_config_dict(model_dir=model_path)
         model_type = model_cfg["model_type"]
         if model_type == "qwen":
             # QWenVisionTransformer
@@ -345,9 +543,7 @@ def has_vision_module(model_path: str) -> bool:
 @lru_cache(maxsize=None)
 def has_audio_module(model_path: str) -> bool:
     try:
-        from transformers.configuration_utils import PretrainedConfig
-
-        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_cfg = get_model_config_dict(model_dir=model_path)
         if model_cfg.get("thinker_config") is not None:
             model_cfg = model_cfg["thinker_config"]
         audio_config = model_cfg["audio_config"]
@@ -368,9 +564,7 @@ def has_audio_module(model_path: str) -> bool:
 @lru_cache(maxsize=None)
 def is_linear_att_mixed_model(model_path: str) -> bool:
     try:
-        from transformers.configuration_utils import PretrainedConfig
-
-        model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
+        model_cfg = get_model_config_dict(model_dir=model_path)
         model_type = model_cfg["model_type"]
         if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
             return True
@@ -381,20 +575,26 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         return False
 
 
-def get_model_type(model_path: str) -> Optional[str]:
-    """Get model type from config.json"""
+def get_model_type(
+    config_path: Optional[str] = None,
+    model_dir: Optional[str] = None,
+) -> Optional[str]:
+    """Get model type from model config."""
     try:
-        config_json = get_config_json(model_path)
+        config_json = resolve_model_config(config_path=config_path, model_dir=model_dir)
         model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
         return model_type
     except Exception as e:
-        logger.error(f"Failed to get model_type from {model_path}: {e}")
+        logger.error(f"Failed to get model_type (config_path={config_path!r}, model_dir={model_dir!r}): {e}")
         return None
 
 
-def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
+def get_tool_call_parser_for_model(
+    config_path: Optional[str] = None,
+    model_dir: Optional[str] = None,
+) -> Optional[str]:
     """Auto-detect tool_call_parser based on model type"""
-    model_type = get_model_type(model_path)
+    model_type = get_model_type(config_path=config_path, model_dir=model_dir)
     if model_type is None:
         return None
 
@@ -421,9 +621,12 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     return None
 
 
-def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
+def get_reasoning_parser_for_model(
+    config_path: Optional[str] = None,
+    model_dir: Optional[str] = None,
+) -> Optional[str]:
     """Auto-detect reasoning_parser based on model type"""
-    model_type = get_model_type(model_path)
+    model_type = get_model_type(config_path=config_path, model_dir=model_dir)
     if model_type is None:
         return None
 

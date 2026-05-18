@@ -11,7 +11,12 @@ tokenizer = None
 def init_tokenizer(args):
     global tokenizer
 
-    tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        tokenizer_name=args.model_dir,
+        tokenizer_dir=args.tokenizer_dir,
+        tokenizer_mode=args.tokenizer_mode,
+        trust_remote_code=args.trust_remote_code,
+    )
     chat_path = args.chat_template
     if chat_path is not None:
         with open(chat_path, "r", encoding="utf-8") as f:

@@ -1,8 +1,21 @@
+import numpy as np
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from gguf import GGMLQuantizationType
 from lightllm.utils.dist_utils import get_current_device_id
-from typing import Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple
+
+
+@dataclass(frozen=True)
+class GGUFWeightMeta:
+    shape: Tuple[int, ...]
+    dtype: torch.dtype
+    quant_type: GGMLQuantizationType
+
+
+def numpy_dtype_to_torch(np_dtype: np.dtype) -> torch.dtype:
+    return torch.from_numpy(np.zeros((), dtype=np_dtype)).dtype
 
 
 @dataclass
@@ -10,6 +23,7 @@ class WeightPack:
     weight: Optional[torch.Tensor] = None
     weight_scale: Optional[torch.Tensor] = None
     weight_zero_point: Optional[torch.Tensor] = None
+    gguf_quant_type: Optional[GGMLQuantizationType] = None
 
     def __post_init__(self):
         self.load_ok = [False, self.weight_scale is None, self.weight_zero_point is None]
@@ -19,7 +33,12 @@ class WeightPack:
         weight = self.weight[expert_idx]
         weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
         weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+        return WeightPack(
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_zero_point=weight_zero_point,
+            gguf_quant_type=self.gguf_quant_type,
+        )
 
 
 class QuantizationMethod(ABC):
@@ -37,6 +56,8 @@ class QuantizationMethod(ABC):
 
         # 一些量化模式需要用到的额外量化参数，如awq量化
         self.hf_quantization_config = None
+        # GGUF hf_name -> gguf storage meta info
+        self.gguf_quant_meta_map: Optional[Dict[str, GGUFWeightMeta]] = None
 
     @abstractmethod
     def quantize(
@@ -64,17 +85,30 @@ class QuantizationMethod(ABC):
         pass
 
     def create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         return self._create_weight(
             out_dims=out_dims,
             in_dim=in_dim,
             dtype=dtype,
             device_id=device_id,
+            num_experts=1,
+            weight_names=weight_names,
         )
 
     def create_moe_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         return self._create_weight(
             out_dims=out_dims,
@@ -82,6 +116,7 @@ class QuantizationMethod(ABC):
             dtype=dtype,
             device_id=device_id,
             num_experts=num_experts,
+            weight_names=weight_names,
         )
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
@@ -112,7 +147,13 @@ class QuantizationMethod(ABC):
         return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[str] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         pass
 
@@ -144,6 +185,11 @@ class QuantizationMethod(ABC):
         )
         for weight, weight_scale, weight_zero_point in zip(weight, weight_scale, weight_zero_point):
             mm_param_list.append(
-                WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+                WeightPack(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    weight_zero_point=weight_zero_point,
+                    gguf_quant_type=weight_pack.gguf_quant_type,
+                )
             )
         return mm_param_list

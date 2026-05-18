@@ -18,6 +18,9 @@ from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.utils.config_utils import (
+    align_quant_type_for_gguf_model,
+    check_gguf_quant_model_dir,
+    check_gguf_tokenizer_dir,
     has_audio_module,
     has_vision_module,
     is_linear_att_mixed_model,
@@ -141,6 +144,15 @@ def normal_or_p_d_start(args):
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
+
+    check_gguf_tokenizer_dir(args.model_dir, args.tokenizer_dir)
+    aligned_quant_type = align_quant_type_for_gguf_model(args.model_dir, args.quant_type, args.quant_cfg)
+    if aligned_quant_type != args.quant_type:
+        logger.warning(
+            f"model_dir contains GGUF weights; overriding --quant_type {args.quant_type!r} -> {aligned_quant_type!r}"
+        )
+        args.quant_type = aligned_quant_type
+    check_gguf_quant_model_dir(args.model_dir, args.quant_type, args.quant_cfg)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
@@ -311,7 +323,9 @@ def normal_or_p_d_start(args):
     if args.tool_call_parser is None:
         from lightllm.utils.config_utils import get_tool_call_parser_for_model
 
-        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        args.tool_call_parser = get_tool_call_parser_for_model(
+            config_path=args.config_path, model_dir=args.model_dir
+        )
         if args.tool_call_parser:
             logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
 
@@ -319,7 +333,9 @@ def normal_or_p_d_start(args):
     if args.reasoning_parser is None:
         from lightllm.utils.config_utils import get_reasoning_parser_for_model
 
-        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        args.reasoning_parser = get_reasoning_parser_for_model(
+            config_path=args.config_path, model_dir=args.model_dir
+        )
         if args.reasoning_parser:
             logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
 
@@ -551,6 +567,22 @@ def pd_master_start(args):
     args.metric_port = metric_port
 
     set_env_start_args(args)
+
+    check_gguf_tokenizer_dir(args.model_dir, args.tokenizer_dir)
+    aligned_quant_type = align_quant_type_for_gguf_model(args.model_dir, args.quant_type, args.quant_cfg)
+    if aligned_quant_type != args.quant_type:
+        logger.warning(
+            f"model_dir contains GGUF weights; overriding --quant_type {args.quant_type!r} -> {aligned_quant_type!r}"
+        )
+        args.quant_type = aligned_quant_type
+    check_gguf_quant_model_dir(args.model_dir, args.quant_type, args.quant_cfg)
+    aligned_quant_type = align_quant_type_for_gguf_model(args.model_dir, args.quant_type, args.quant_cfg)
+    if aligned_quant_type != args.quant_type:
+        logger.warning(
+            f"model_dir contains GGUF weights; overriding --quant_type {args.quant_type!r} -> {aligned_quant_type!r}"
+        )
+        args.quant_type = aligned_quant_type
+    check_gguf_quant_model_dir(args.model_dir, args.quant_type, args.quant_cfg)
 
     process_manager.start_submodule_processes(
         start_funcs=[

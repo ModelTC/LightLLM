@@ -23,7 +23,10 @@ class XgrammarBackend(ChunkedPrefillBackend):
         import xgrammar as xgr
 
         self.tokenizer = get_tokenizer(
-            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+            self.args.model_dir,
+            self.args.tokenizer_dir,
+            self.args.tokenizer_mode,
+            trust_remote_code=self.args.trust_remote_code,
         )
 
         self.tokenizer_info = xgr.TokenizerInfo.from_huggingface(self.tokenizer)

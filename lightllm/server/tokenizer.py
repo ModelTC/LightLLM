@@ -21,6 +21,7 @@ from typing import List, Tuple, Union
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from transformers.convert_slow_tokenizer import convert_slow_tokenizer
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.utils.config_utils import resolve_tokenizer_dir
 from lightllm.utils.log_utils import init_logger
 from ..models.tarsier2.model import Tarsier2Tokenizer
 
@@ -39,12 +40,14 @@ _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 def get_tokenizer(
     tokenizer_name: str,
+    tokenizer_dir: str = None,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    tokenizer_name = resolve_tokenizer_dir(tokenizer_name, tokenizer_dir)
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")

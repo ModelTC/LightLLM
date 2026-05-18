@@ -109,7 +109,13 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return out
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims)
         group_size = self.hf_quantization_config["group_size"]
@@ -206,7 +212,13 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return out
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
+        weight_names: Optional[List[str]] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims)
         self.n = out_dim

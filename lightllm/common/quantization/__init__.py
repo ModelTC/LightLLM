@@ -6,6 +6,7 @@ from .w8a8gx import *
 from .deepgemm import *
 from .awq import *
 from .no_quant import *
+from .gguf import *
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -16,6 +17,7 @@ class Quantcfg:
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
         self.network_config_ = network_config
+        self.gguf_quant_meta_map = None
         self._parse_custom_cfg(custom_cfg_path)
         self._parse_network_config(network_config)
 
@@ -80,4 +82,5 @@ class Quantcfg:
         quant_type = self.get_quant_type(layer_num, name)
         quant_method = QUANTMETHODS.get(quant_type)
         quant_method.hf_quantization_config = self.hf_quantization_config
+        quant_method.gguf_quant_meta_map = self.gguf_quant_meta_map
         return quant_method
