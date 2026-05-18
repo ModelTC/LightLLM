@@ -236,17 +236,27 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            b_mtp_index_cpu = model_input.b_mtp_index
+
+            if self.enable_dynamic_mtp:
+                # 根据当前的 batch size 和 dynamic_batch_size 计算出需要裁剪的 batch size 的model_input
+                dynamic_batch_size = 10  # TODO: 需要根据实际情况计算出 dynamic_batch_size
+                trans_to_dynamic_model_input = None  # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
+                model_input, selected_run_reqs = trans_to_dynamic_model_input(model_input, dynamic_batch_size)
+                # selected_run_reqs 是一个 gpu tensor, 类型为 int, 0, 表示没有选中， 1 表示选中。
+
+                selected_run_reqs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                    key="selected_run_reqs",
+                    gpu_tensor=selected_run_reqs,
+                )
+                trans_dynamic_model_input_event = torch.cuda.Event()
+                trans_dynamic_model_input_event.record()
+
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
-            b_req_mtp_start_loc = [index for index, mtp_index in enumerate(b_mtp_index_cpu) if mtp_index == 0]
-            b_req_mtp_start_loc = g_pin_mem_manager.gen_from_list(
-                key="b_req_mtp_start_loc",
-                data=b_req_mtp_start_loc,
-                dtype=torch.int32,
-            ).cuda(non_blocking=True)
-
+            get_b_req_mtp_start_loc = None  # TODO: 需要根据实际情况实现 get_b_req_mtp_start_loc
+            b_req_mtp_start_loc = get_b_req_mtp_start_loc(model_input.b_mtp_index, req_num=len(decode_reqs))
+            # b_req_mtp_start_loc 是一个 gpu tensor, 类型为 int, 表示每个请求的 mtp_start_loc, shape 为 len(decode_reqs)
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,
                 b_req_idx=model_input.b_req_idx,
@@ -277,15 +287,20 @@ class ChunkedPrefillBackend(ModeBackend):
 
             # dynamic_sizes_gpu 用于第二阶段更新 req 的 mtp_size
             if self.enable_dynamic_mtp:
-                draft_probs_tensor = torch.cat(draft_probs_list, dim=-1).view(self.mtp_step, b_mtp_index_cpu.shape[0])
+                draft_probs_tensor = torch.cat(draft_probs_list, dim=-1).view(
+                    self.mtp_step, model_input.b_mtp_index.shape[0]
+                )
                 dynamic_sizes_gpu = self._compute_dynamic_mtp_size_gpu_part(draft_probs_tensor=draft_probs_tensor)
                 # 异步拷贝回 CPU Pin Memory
                 dynamic_sizes_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="dynamic_mtp_sizes", gpu_tensor=dynamic_sizes_gpu
                 )
-
-                dynamic_mtp_event = torch.cuda.Event()
-                dynamic_mtp_event.record()
+                dynamic_sizes_cpu  # TODO, use to update statcis.
+                draft_probs_list = [e.view(-1, 1) for e in draft_probs_list]
+                draft_probs_list = [torch.ones_like(draft_probs_list[-1])] + draft_probs_list
+                all_next_token_probs = torch.cat(draft_probs_list, dim=-1)  # [batch_size, mtp_step + 1]
+            else:
+                all_next_token_probs = None
 
             mtp_scatter_next_token_ids(
                 req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -293,6 +308,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 all_next_token_ids=all_next_token_ids,
                 b_req_idx=model_input.b_req_idx,
                 mtp_accept_len=mtp_accept_len,
+                req_to_next_token_probs=self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
+                all_next_token_probs=all_next_token_probs,
             )
 
             next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
@@ -315,21 +332,32 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
-        self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
+
+        if self.enable_dynamic_mtp:
+            trans_dynamic_model_input_event.synchronize()
+            selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
+            run_reqs = [run_reqs[i] for i in range(len(run_reqs)) if selected_run_reqs_cpu_numpy[i] == 1]
+
+        if self.enable_dynamic_mtp:
+            self._update_mtp_verify_token_num(decode_reqs=decode_reqs, dynamic_mtp_run_reqs=run_reqs)
+        else:
+            self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
 
         verify_event.synchronize()
         accepted_index_cpu_numpy = accepted_index_cpu.numpy()
         verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
-        if self.enable_dynamic_mtp:
-            dynamic_mtp_event.synchronize()
-            self._update_dynamic_mtp_size_cpu_part(
-                run_reqs=run_reqs, dynamic_sizes_cpu=dynamic_sizes_cpu, accepted_index_cpu=accepted_index_cpu
-            )
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
+
+        if self.enable_dynamic_mtp:
+            # TODO: 更新动态 mtp step 步的相关信息到 planer中，进行相关的信息统计。便于分析。
+            # self._update_dynamic_mtp_size_cpu_part(
+            #     run_reqs=run_reqs, dynamic_sizes_cpu=dynamic_sizes_cpu, accepted_index_cpu=accepted_index_cpu
+            # )
+            pass
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
