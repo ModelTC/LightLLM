@@ -92,7 +92,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         self, q: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
-            window_size = (self.sliding_window - 1, self.sliding_window - 1)
+            window_size = (self.sliding_window - 1, 0)
             use_sliding_window = True
         else:
             window_size = (-1, -1)
