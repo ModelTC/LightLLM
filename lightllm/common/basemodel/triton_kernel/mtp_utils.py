@@ -1,3 +1,4 @@
+from typing import Optional
 import triton
 import triton.language as tl
 import torch
@@ -93,10 +94,15 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     req_to_next_token_ids_stride,
     all_next_token_ids,
     all_next_token_ids_stride,
+    req_to_next_token_probs,
+    req_to_next_token_probs_stride,
+    all_next_token_probs,
+    all_next_token_probs_stride,
     mtp_accept_len,
     b_req_mtp_start_loc,
     b_req_idx,
     mtp_step,
+    HAS_HAS_NEXT_TOKEN_PROBS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
 
@@ -106,6 +112,17 @@ def _fwd_kernel_mtp_scatter_next_token_ids(
     cur_req_idx = tl.load(b_req_idx + req_start_loc)
     offset = tl.arange(0, BLOCK_SIZE)
 
+    if HAS_HAS_NEXT_TOKEN_PROBS:
+        cur_next_token_probs = tl.load(
+            all_next_token_probs + (req_start_loc + accept_len - 1) * all_next_token_probs_stride + offset,
+            mask=offset < mtp_step,
+            other=0.0,
+        )
+        tl.store(
+            req_to_next_token_probs + cur_req_idx * req_to_next_token_probs_stride + offset,
+            cur_next_token_probs,
+            mask=offset < mtp_step,
+        )
     scatter_next_token_ids = tl.load(
         all_next_token_ids + (req_start_loc + accept_len - 1) * all_next_token_ids_stride + offset,
         mask=offset < mtp_step,
@@ -125,12 +142,20 @@ def mtp_scatter_next_token_ids(
     all_next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     mtp_accept_len: torch.Tensor,
+    req_to_next_token_probs: Optional[torch.Tensor] = None,
+    all_next_token_probs: Optional[torch.Tensor] = None,
 ):
     max_mtp_step = req_to_next_token_ids.shape[1]
     BLOCK_SIZE = 16
     assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
     num_reqs = b_req_mtp_start_loc.shape[0]
     mtp_step = all_next_token_ids.shape[1]
+    if req_to_next_token_probs is not None:
+        assert all_next_token_probs is not None
+        assert all_next_token_probs.shape == all_next_token_ids.shape
+
+    HAS_HAS_NEXT_TOKEN_PROBS = req_to_next_token_probs is not None
+
     grid = (num_reqs,)
     num_warps = 1
     _fwd_kernel_mtp_scatter_next_token_ids[grid](
@@ -138,10 +163,15 @@ def mtp_scatter_next_token_ids(
         req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
         all_next_token_ids=all_next_token_ids,
         all_next_token_ids_stride=all_next_token_ids.stride(0),
+        req_to_next_token_probs=req_to_next_token_probs,
+        req_to_next_token_probs_stride=req_to_next_token_probs.stride(0),
+        all_next_token_probs=all_next_token_probs,
+        all_next_token_probs_stride=all_next_token_probs.stride(0),
         mtp_accept_len=mtp_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
         mtp_step=mtp_step,
+        HAS_HAS_NEXT_TOKEN_PROBS=HAS_HAS_NEXT_TOKEN_PROBS,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=num_warps,
         num_stages=1,
