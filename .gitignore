@@ -1,5 +1,6 @@
 __pycache__/
 .pyc
+.codex
 build
 dist
 *.egg-info
