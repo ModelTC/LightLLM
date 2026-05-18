@@ -69,9 +69,22 @@ def enable_env_vars(args):
 
 
 @lru_cache(maxsize=None)
-def get_deepep_num_max_dispatch_tokens_per_rank():
+def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
+    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大。
+    # 如果未显式配置，则默认至少覆盖当前进程的 `batch_max_tokens`，避免 DeepEP V2 在 autotune
+    # warmup 或大 prefill batch 时因为 buffer 上界过小而报错。
+    configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", None)
+    if configured is not None:
+        return int(configured)
+
+    batch_max_tokens = get_env_start_args().batch_max_tokens or 256
+    return ((int(batch_max_tokens) + 7) // 8) * 8
+
+
+@lru_cache(maxsize=None)
+def get_deepep_num_max_dispatch_tokens_per_rank_decode():
     # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK", 256))
+    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
 
 
 def get_lightllm_gunicorn_keep_alive():
@@ -150,6 +163,16 @@ def get_redundancy_expert_update_max_load_count():
 @lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
+
+
+@lru_cache(maxsize=None)
+def get_page_size():
+    return int(os.getenv("PAGE_SIZE", 1))
+
+
+def set_page_size(page_size: int):
+    os.environ["PAGE_SIZE"] = str(page_size)
+    get_page_size.cache_clear()
 
 
 g_model_init_done = False

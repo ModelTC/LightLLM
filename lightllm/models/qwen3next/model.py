@@ -12,7 +12,6 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -55,12 +54,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def _init_config(self):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-
-    def _init_custom(self):
-        super()._init_custom()
-        # Only initialize DeepEP group for MoE models with num_experts
-        if "num_experts" in self.config and self.config["num_experts"] > 0:
-            dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0

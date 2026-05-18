@@ -135,13 +135,13 @@ class StartArgs:
     vit_quant_type: Optional[str] = field(default=None)
     vit_quant_cfg: Optional[str] = field(default=None)
     llm_prefill_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "fa4", "flashinfer"]}
     )
     llm_decode_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "fa4", "flashinfer"]}
     )
     vit_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
+        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "fa4", "sdpa", "xformers"]}
     )
     llm_kv_type: str = field(
         default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}

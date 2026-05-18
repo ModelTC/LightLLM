@@ -1,10 +1,7 @@
 """Fused MoE kernel."""
-import os
 import torch
 import triton
-import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
-import torch.distributed as dist
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
@@ -15,9 +12,11 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
     tma_align_input_scale,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
-from lightllm.utils.envs_utils import get_deepep_num_max_dispatch_tokens_per_rank
+from lightllm.utils.envs_utils import (
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill,
+    get_deepep_num_max_dispatch_tokens_per_rank_decode,
+)
 from lightllm.common.triton_utils.autotuner import Autotuner
-import numpy as np
 
 logger = init_logger(__name__)
 
@@ -66,14 +65,14 @@ def fused_experts_impl(
     topk_weights: torch.Tensor,  # [M, topk]
     topk_idx: torch.Tensor,  # [M, topk]
     num_experts: int,
-    buffer: "Buffer",
+    buffer: Any,
     is_prefill: bool,
     use_fp8_w8a8: bool = False,
     use_fp8_all2all: bool = False,
     use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
-    previous_event: Optional["EventOverlap"] = None,
+    previous_event: Optional[Any] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -99,39 +98,27 @@ def fused_experts_impl(
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
-
-        # get_dispatch_layout
-        (
-            num_tokens_per_rank,
-            num_tokens_per_rdma_rank,
-            num_tokens_per_expert,
-            is_token_in_rank,
-            previous_event,
-        ) = buffer.get_dispatch_layout(
-            topk_idx, num_experts, previous_event=previous_event, async_finish=False, allocate_on_comm_stream=False
-        )
-
+        allocate_on_comm_stream = previous_event is not None
         # normal dispatch
         # recv_x [recive_num_tokens, hidden] recv_x_scale [recive_num_tokens, hidden // block_size]
         # recv_topk_idx [recive_num_tokens, topk_num]
         # recv_topk_weights [recive_num_tokens, topk_num]
         # num_recv_tokens_per_expert_list list [cur_node_expert_num] padding with expert_alignment=128
-        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, event = buffer.dispatch(
+        recv_x, recv_topk_idx, recv_topk_weights, handle, _ = buffer.dispatch(
             (qinput_tensor, input_scale),
             topk_idx=topk_idx,
             topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=False,
-            allocate_on_comm_stream=False,
+            num_experts=num_experts,
+            num_max_tokens_per_rank=get_deepep_num_max_dispatch_tokens_per_rank_prefill(),
             expert_alignment=128,
+            previous_event=previous_event,
+            allocate_on_comm_stream=allocate_on_comm_stream,
+            do_cpu_sync=True,
+            do_handle_copy=False,
         )
 
         # scatter
-        all_tokens = sum(num_recv_tokens_per_expert_list)  # calcu padding all nums.
+        all_tokens = sum(handle.num_recv_tokens_per_expert_list)  # calcu padding all nums.
         # gather_out shape [recive_num_tokens, hidden]
         gather_out = torch.empty_like(recv_x[0], device=hidden_states.device, dtype=hidden_states.dtype)
         if all_tokens > 0:
@@ -149,7 +136,7 @@ def fused_experts_impl(
             output_index = torch.empty_like(recv_topk_idx)
 
             num_recv_tokens_per_expert = torch.tensor(
-                num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
+                handle.num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
             ).cuda(non_blocking=True)
 
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
@@ -169,7 +156,7 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
-            _deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
+            deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
 
             # silu_and_mul_fwd + qaunt
             # TODO fused kernel
@@ -183,7 +170,7 @@ def fused_experts_impl(
             # groupgemm (contiguous layout)
             gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
 
-            _deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
+            deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
 
             # gather and local reduce
             ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
@@ -202,13 +189,12 @@ def fused_experts_impl(
             gather_out,
             handle,
             topk_weights=None,
-            async_finish=False,
             previous_event=previous_event,
-            allocate_on_comm_stream=False,
+            allocate_on_comm_stream=allocate_on_comm_stream,
         )
     else:
         # low latency dispatch
-        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
+        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         expected_m = triton.cdiv(hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1], num_experts)
         recv_x, masked_m, handle, event, hook = buffer.low_latency_dispatch(
             hidden_states,
@@ -228,7 +214,7 @@ def fused_experts_impl(
     return combined_x
 
 
-def _deepgemm_grouped_fp8_nt_contiguous(
+def deepgemm_grouped_fp8_nt_contiguous(
     input_tuple: Tuple[torch.Tensor, torch.Tensor],
     w_tuple: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
@@ -255,3 +241,22 @@ def _deepgemm_grouped_fp8_nt_masked(
         if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
             return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
+
+
+def deepgemm_grouped_fp8_fp4_nt_contiguous(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    grouped_layout: torch.Tensor,
+    use_psum_layout: bool = False,
+):
+    if HAS_DEEPGEMM and hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
+        return deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            input_tuple,
+            w_tuple,
+            out,
+            grouped_layout,
+            use_psum_layout=use_psum_layout,
+            recipe=(1, 1, 32),
+        )
+    raise RuntimeError("deep_gemm does not provide grouped fp8-fp4 NT contiguous GEMM kernel")
