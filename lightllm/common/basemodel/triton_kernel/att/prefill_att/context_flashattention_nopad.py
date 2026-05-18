@@ -42,7 +42,8 @@ def _fwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
-    SLIDING_WINDOW_SIZE: tl.constexpr,
+    SLIDING_WINDOW_LEFT: tl.constexpr,
+    SLIDING_WINDOW_RIGHT: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -80,8 +81,9 @@ def _fwd_kernel(
     block_end_loc = tl.minimum(block_start_loc + BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
 
     if USE_SLIDING_WINDOW:
-        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE
+        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
         kv_start_index = tl.maximum(kv_start_index, 0)
+        block_end_loc = tl.minimum(block_end_loc + SLIDING_WINDOW_RIGHT, cur_batch_seq_len + prompt_cache_len)
         block_kv_len = block_end_loc - kv_start_index
     else:
         kv_start_index = 0
@@ -101,9 +103,18 @@ def _fwd_kernel(
         k = tl.load(K + off_k, mask=k_pos[None, :] < block_end_loc, other=0.0)
         qk = tl.dot(q, k)
 
-        mask = q_pos[:, None] >= k_pos[None, :]
         if USE_SLIDING_WINDOW:
-            mask = mask & ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_SIZE)
+            mask = (q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT
+            if SLIDING_WINDOW_RIGHT == 0:
+                mask = mask & (q_pos[:, None] >= k_pos[None, :])
+            else:
+                mask = (
+                    mask
+                    & (k_pos[None, :] < block_end_loc)
+                    & ((k_pos[None, :] - q_pos[:, None]) <= SLIDING_WINDOW_RIGHT)
+                )
+        else:
+            mask = q_pos[:, None] >= k_pos[None, :]
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -145,7 +156,7 @@ def context_attention_fwd(
     b_prompt_cache_len,
     max_input_len,
     req_to_token_indexs,
-    sliding_window: int = -1,
+    sliding_window=(-1, -1),
 ):
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
@@ -171,8 +182,10 @@ def context_attention_fwd(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
-    use_sliding_window = sliding_window >= 0
-    sliding_window_size = int(sliding_window) if use_sliding_window else 0
+    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
+    assert sliding_window_left >= -1 and sliding_window_right >= -1
+    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
+    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
 
     _fwd_kernel[grid](
         q,
@@ -205,7 +218,8 @@ def context_attention_fwd(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
-        SLIDING_WINDOW_SIZE=sliding_window_size,
+        SLIDING_WINDOW_LEFT=sliding_window_left,
+        SLIDING_WINDOW_RIGHT=sliding_window_right,
         num_warps=num_warps,
         num_stages=num_stages,
     )

@@ -59,14 +59,14 @@ def _fwd_kernel_flash_decode_stage2(
 
 
 @torch.no_grad()
-def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq, sliding_window: int = -1):
+def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq, sliding_window=(-1, -1)):
     Lk = mid_out.shape[-1]
     assert Lk in {16, 32, 64, 128, 256, 512}
     batch, head_num = mid_out.shape[0], mid_out.shape[1]
     grid = (batch, head_num)
     block_num = mid_out.shape[2]
-    use_sliding_window = sliding_window >= 0
-    sliding_window_size = int(sliding_window) if use_sliding_window else 0
+    sliding_window_left = int(sliding_window[0])
+    use_sliding_window = sliding_window_left >= 0
 
     _fwd_kernel_flash_decode_stage2[grid](
         B_Seqlen,
@@ -87,7 +87,7 @@ def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq, sl
         BLOCK_SEQ=block_seq,
         BLOCK_DMODEL=Lk,
         USE_SLIDING_WINDOW=use_sliding_window,
-        SLIDING_WINDOW_SIZE=sliding_window_size,
+        SLIDING_WINDOW_SIZE=sliding_window_left,
         num_warps=4,
         num_stages=2,
     )

@@ -172,7 +172,7 @@ def flash_decode_stage1(
     mid_out,
     mid_out_logsumexp,
     block_seq,
-    sliding_window: int = -1,
+    sliding_window=(-1, -1),
     run_config: Optional[dict] = None,
 ):
     """ """
@@ -197,8 +197,8 @@ def flash_decode_stage1(
     block_num = mid_out.shape[2]
     grid = (batch, kv_head_num, block_num)
     gqa_group_size = q.shape[1] // k.shape[1]
-    use_sliding_window = sliding_window >= 0
-    sliding_window_size = int(sliding_window) if use_sliding_window else 0
+    sliding_window_left = int(sliding_window[0])
+    use_sliding_window = sliding_window_left >= 0
 
     _fwd_kernel_flash_decode_stage1[grid](
         q,
@@ -234,7 +234,7 @@ def flash_decode_stage1(
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
-        SLIDING_WINDOW_SIZE=sliding_window_size,
+        SLIDING_WINDOW_SIZE=sliding_window_left,
         num_warps=num_warps,
         num_stages=num_stages,
     )

@@ -13,8 +13,8 @@ from `lightllm-neo/.../context_attention_fwd_neo`:
 
 1. Per-Q `b_image_token_end` tensor of shape (sum_q,). For Q tokens inside an
    image span it carries the span's end index; for text tokens it is 0.
-   The attention mask becomes `causal_mask | (k_pos < q_image_end)`.
-2. K/V iteration upper bound is extended to `max(causal_end, block_image_end)`
+   The attention mask becomes `local_or_causal_mask | (k_pos < q_image_end)`.
+2. K/V iteration upper bound is extended to `max(local_end, block_image_end)`
    so a Q tile in the middle of an image span actually loads K/V tiles past
    its causal end. Without this, the bidi mask in the original diff was a
    no-op on every tile but the last one of the image span.
@@ -64,7 +64,8 @@ def _fwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
-    SLIDING_WINDOW_SIZE: tl.constexpr,
+    SLIDING_WINDOW_LEFT: tl.constexpr,
+    SLIDING_WINDOW_RIGHT: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -110,11 +111,14 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     causal_end = tl.minimum(prompt_cache_len + block_start_loc + BLOCK_M, total_len)
+    local_end = causal_end
+    if SLIDING_WINDOW_RIGHT > 0:
+        local_end = tl.minimum(causal_end + SLIDING_WINDOW_RIGHT, total_len)
     block_image_end = tl.minimum(tl.max(q_image_end, axis=0), total_len)
-    block_end_loc = tl.maximum(causal_end, block_image_end)
+    block_end_loc = tl.maximum(local_end, block_image_end)
 
     if USE_SLIDING_WINDOW:
-        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_SIZE
+        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
         kv_start_index = tl.maximum(kv_start_index, 0)
         block_kv_len = block_end_loc - kv_start_index
     else:
@@ -136,15 +140,22 @@ def _fwd_kernel(
         k = tl.load(K + off_k, mask=k_valid[None, :], other=0.0)
         qk = tl.dot(q, k)
 
-        causal_mask = q_pos[:, None] >= k_pos[None, :]
         if USE_SLIDING_WINDOW:
-            # SLIDING_WINDOW_SIZE is the FA-style offset (window = offset + 1 tokens).
-            causal_mask = causal_mask & ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_SIZE)
+            # Sliding window values are FA-style inclusive offsets.
+            local_mask = (q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT
+            if SLIDING_WINDOW_RIGHT == 0:
+                local_mask = local_mask & (q_pos[:, None] >= k_pos[None, :])
+            else:
+                local_mask = local_mask & ((k_pos[None, :] - q_pos[:, None]) <= SLIDING_WINDOW_RIGHT)
+        else:
+            local_mask = q_pos[:, None] >= k_pos[None, :]
         # Image bidi: a Q in image span [_, e) attends to all K with k_pos < e.
         # For text Q (q_image_end == 0) this is k_pos < 0 = always False, so
-        # the union with causal_mask leaves text-attention unchanged.
+        # the union with local_mask leaves text-attention unchanged.
         image_mask = k_pos[None, :] < q_image_end[:, None]
-        mask = (causal_mask | image_mask) & k_valid[None, :]
+        mask = local_mask | image_mask
+        if SLIDING_WINDOW_RIGHT > 0:
+            mask = mask & k_valid[None, :]
 
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
 
@@ -186,7 +197,7 @@ def context_attention_fwd_gemma4_mm(
     max_input_len,
     req_to_token_indexs,
     b_image_token_end,
-    sliding_window: int = -1,
+    sliding_window=(-1, -1),
 ):
     """Prefill attention with image bidirectional masking on sliding layers.
 
@@ -213,8 +224,10 @@ def context_attention_fwd_gemma4_mm(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
-    use_sliding_window = sliding_window >= 0
-    sliding_window_size = int(sliding_window) if use_sliding_window else 0
+    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
+    assert sliding_window_left >= -1 and sliding_window_right >= -1
+    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
+    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
 
     _fwd_kernel[grid](
         q,
@@ -248,7 +261,8 @@ def context_attention_fwd_gemma4_mm(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
-        SLIDING_WINDOW_SIZE=sliding_window_size,
+        SLIDING_WINDOW_LEFT=sliding_window_left,
+        SLIDING_WINDOW_RIGHT=sliding_window_right,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -269,12 +283,12 @@ def reference_attention(
     b_prompt_cache_len,
     req_to_token_indexs,
     b_image_token_end,
-    sliding_window=-1,
+    sliding_window=(-1, -1),
 ):
     """Slow torch reference for the gemma4 mm prefill kernel.
 
-    `sliding_window` is the FA-style offset (window = sliding_window + 1 tokens).
-    < 0 disables SWA.
+    `sliding_window` is (left, right) using FA-style inclusive offsets.
+    (-1, -1) disables SWA.
     """
     device = q.device
     dtype = q.dtype
@@ -284,6 +298,11 @@ def reference_attention(
 
     out = torch.empty_like(q)
     scale = 1.0 / math.sqrt(D)
+
+    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
+    assert sliding_window_left >= -1 and sliding_window_right >= -1
+    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
+    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
 
     batch = b_seq_len.shape[0]
     for b in range(batch):
@@ -307,8 +326,10 @@ def reference_attention(
         k_pos = torch.arange(0, total_len, device=device, dtype=torch.int64)
 
         causal = k_pos[None, :] <= q_pos[:, None]
-        if sliding_window >= 0:
-            causal = causal & ((q_pos[:, None] - k_pos[None, :]) <= sliding_window)
+        if use_sliding_window:
+            causal = ((q_pos[:, None] - k_pos[None, :]) <= sliding_window_left) & (
+                (k_pos[None, :] - q_pos[:, None]) <= sliding_window_right
+            )
         image = k_pos[None, :] < q_image_end[:, None]
         allow = causal | image
 
@@ -335,7 +356,7 @@ def make_test_case(
     D=256,
     seed=0,
     base_index=50000,
-    sliding_window=-1,
+    sliding_window=(-1, -1),
 ):
     torch.manual_seed(seed)
 
@@ -401,7 +422,7 @@ def make_test_case(
     )
 
 
-def check_once(seed=0, dtype=torch.bfloat16, sliding_window=-1, D=256):
+def check_once(seed=0, dtype=torch.bfloat16, sliding_window=(-1, -1), D=256):
     case = make_test_case(seed=seed, dtype=dtype, sliding_window=sliding_window, D=D)
     (
         q,
@@ -464,7 +485,8 @@ if __name__ == "__main__":
     else:
         # Vary D, sliding window, and image presence.
         for seed in (0, 1, 2):
-            check_once(seed=seed, D=128, sliding_window=-1)
-            check_once(seed=seed, D=128, sliding_window=4096)
-            check_once(seed=seed, D=256, sliding_window=4096)
+            check_once(seed=seed, D=128, sliding_window=(-1, -1))
+            check_once(seed=seed, D=128, sliding_window=(4096, 0))
+            check_once(seed=seed, D=128, sliding_window=(4096, 32))
+            check_once(seed=seed, D=256, sliding_window=(4096, 0))
         print("ok")
