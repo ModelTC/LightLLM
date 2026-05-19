@@ -23,7 +23,7 @@ def _fwd_kernel_flash_decode_stage2(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
-    SLIDING_WINDOW_SIZE: tl.constexpr,
+    LEFT_SLIDING_WINDOW_SIZE: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -31,7 +31,7 @@ def _fwd_kernel_flash_decode_stage2(
     offs_d = tl.arange(0, BLOCK_DMODEL)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     if USE_SLIDING_WINDOW:
-        kv_start_index = tl.maximum(cur_batch_seq_len - 1 - SLIDING_WINDOW_SIZE, 0)
+        kv_start_index = tl.maximum(cur_batch_seq_len - 1 - LEFT_SLIDING_WINDOW_SIZE, 0)
         cur_batch_seq_len = cur_batch_seq_len - kv_start_index
 
     block_num = tl.minimum(tl.cdiv(cur_batch_seq_len, BLOCK_SEQ), block_num)
@@ -67,6 +67,9 @@ def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq, sl
     block_num = mid_out.shape[2]
     sliding_window_left = int(sliding_window[0])
     use_sliding_window = sliding_window_left >= 0
+    # 当前 不支持 right sliding window
+    if use_sliding_window:
+        assert sliding_window[1] == 0
 
     _fwd_kernel_flash_decode_stage2[grid](
         B_Seqlen,
@@ -87,7 +90,7 @@ def flash_decode_stage2(mid_out, mid_out_logexpsum, B_Seqlen, out, block_seq, sl
         BLOCK_SEQ=block_seq,
         BLOCK_DMODEL=Lk,
         USE_SLIDING_WINDOW=use_sliding_window,
-        SLIDING_WINDOW_SIZE=sliding_window_left,
+        LEFT_SLIDING_WINDOW_SIZE=sliding_window_left,
         num_warps=4,
         num_stages=2,
     )
