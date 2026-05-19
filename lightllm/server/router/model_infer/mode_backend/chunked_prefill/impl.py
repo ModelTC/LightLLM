@@ -304,7 +304,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 dynamic_sizes_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="dynamic_mtp_sizes", gpu_tensor=dynamic_sizes_gpu
                 )
-                dynamic_sizes_cpu  # TODO, use to update statcis.
+
                 draft_probs_list = [e.view(-1, 1) for e in draft_probs_list]
                 draft_probs_list = [torch.ones_like(draft_probs_list[-1])] + draft_probs_list
                 all_next_token_probs = torch.cat(draft_probs_list, dim=-1)  # [batch_size, mtp_step + 1]
