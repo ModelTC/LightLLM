@@ -251,6 +251,9 @@ class ChunkedPrefillBackend(ModeBackend):
                 trans_dynamic_model_input_event = torch.cuda.Event()
                 trans_dynamic_model_input_event.record()
 
+            start_time_event = torch.cuda.Event(enable_timing=True)
+            start_time_event.record()
+
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
@@ -267,7 +270,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 gpu_tensor=accepted_index,
             )
 
-            verify_event = torch.cuda.Event()
+            verify_event = torch.cuda.Event(enable_timing=True)
             verify_event.record()
 
             if self.enable_dynamic_mtp:
@@ -353,12 +356,18 @@ class ChunkedPrefillBackend(ModeBackend):
         sync_event.synchronize()
 
         if self.enable_dynamic_mtp:
+            # 更新 动态verify token 数据到 planner 中去
             self._update_dynamic_mtp_size_cpu_part(
                 decode_reqs=decode_reqs,
                 run_reqs=run_reqs,
                 dynamic_sizes_cpu=dynamic_sizes_cpu,
                 accepted_index_cpu=accepted_index_cpu,
             )
+            # 更新单token的速度信息到 planner 中去
+            per_token_cost_ms = start_time_event.elapsed_time(verify_event) / (mtp_accept_len_cpu.sum().item())
+            # TODO 将 per_token_cost_ms 更新到 planner 中去
+            per_token_cost_ms = per_token_cost_ms + 0.0
+            pass
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
