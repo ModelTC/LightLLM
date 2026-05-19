@@ -115,6 +115,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]
             if q_head_num == k_head_num:
+                assert att_control.use_sliding_window is False, "sliding_window not supported in non-gqa attention yet"
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
                 return self._normal_decode_gqa_flash_decoding_att(
