@@ -15,9 +15,9 @@ class DynamicMTPPlanner:
         self.mtp_step = mtp_step
         self.ema_decay = ema_decay
 
-        # 记录每个请求的 accept_len 的 ema 值， 用于分布统计
-        self.req_accept_len_ema = _EMAValue(self.ema_decay, init_value=float(self.mtp_step + 1))
-        self.req_accept_len_second_moment_ema = _EMAValue(self.ema_decay, init_value=float((self.mtp_step + 1) ** 2))
+        # 记录每个请求的 verify_len 的 ema 值， 用于分布统计
+        self.req_verify_len_ema = _EMAValue(self.ema_decay, init_value=float(self.mtp_step + 1))
+        self.req_verify_len_second_moment_ema = _EMAValue(self.ema_decay, init_value=float((self.mtp_step + 1) ** 2))
 
         # 每多少个请求采用随机的方式决定 dynamic_batch_size
         self._iter = 0
@@ -29,10 +29,10 @@ class DynamicMTPPlanner:
         self.req_num_to_speed_dict: Dict[int, List[_EMAValue]] = {}
         return
 
-    def update_req_accept_len_statics(self, accept_lens: List[int]) -> None:
-        for accept_len in accept_lens:
-            self.req_accept_len_ema.update(float(accept_len))
-            self.req_accept_len_second_moment_ema.update(float(accept_len ** 2))
+    def update_req_verify_len_statics(self, verify_lens: List[int]) -> None:
+        for verify_len in verify_lens:
+            self.req_verify_len_ema.update(float(verify_len))
+            self.req_verify_len_second_moment_ema.update(float(verify_len ** 2))
         return
 
     def update_req_num_speed_statics(self, req_num: int, dynamic_batch_size: int, per_token_cost_ms: float) -> None:
@@ -47,14 +47,17 @@ class DynamicMTPPlanner:
         self._iter += 1
         # case 1 如果采用随机的方式决定 dynamic_batch_size
         if self._use_random_mode and self._iter % self._iter_threshold == 0:
-            sigma = math.sqrt(self.req_accept_len_second_moment_ema.get() - self.req_accept_len_ema.get() ** 2)
-            max_batch_size = min(req_num * (self.mtp_step + 1), int(self.req_accept_len_ema.get() + 1 * sigma))
+            sigma = self._get_verify_len_sigma()
+            max_batch_size = min(req_num * (self.mtp_step + 1), int(self.req_verify_len_ema.get() + 1 * sigma))
+            max_batch_size = max(req_num, max_batch_size)
             return random.randint(req_num, max_batch_size)
 
         # case 2 如果采用统计的方式决定 dynamic_batch_size, 利用统计的 ema 信息来决定
-        ema_batch_size = max(req_num, int(self.req_accept_len_ema.get()))
-        sigma = math.sqrt(self.req_accept_len_second_moment_ema.get() - self.req_accept_len_ema.get() ** 2)
-        max_batch_size = min(req_num * (self.mtp_step + 1), int(self.req_accept_len_ema.get() + 1 * sigma))
+        ema_batch_size = max(req_num, int(self.req_verify_len_ema.get()))
+        sigma = self._get_verify_len_sigma()
+        max_batch_size = min(req_num * (self.mtp_step + 1), int(self.req_verify_len_ema.get() + 1 * sigma))
+        max_batch_size = max(req_num, max_batch_size)
+
         start = req_num - req_num
         end = max_batch_size - req_num
         ema_index = ema_batch_size - req_num
@@ -73,6 +76,9 @@ class DynamicMTPPlanner:
                 _EMAValue(decay=self.ema_decay, init_value=10000000.0) for _ in range(req_num * (self.mtp_step))
             ]
         return self.req_num_to_speed_dict[req_num]
+
+    def _get_verify_len_sigma(self) -> float:
+        return math.sqrt(max(0.0, self.req_verify_len_second_moment_ema.get() - self.req_verify_len_ema.get() ** 2))
 
 
 class _EMAValue:

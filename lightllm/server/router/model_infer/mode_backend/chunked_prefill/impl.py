@@ -364,7 +364,6 @@ class ChunkedPrefillBackend(ModeBackend):
         if self.enable_dynamic_mtp:
             # 更新 动态verify token 数据到 planner 中去
             self._update_dynamic_mtp_size_statics(
-                decode_reqs=decode_reqs,
                 run_reqs=run_reqs,
                 dynamic_sizes_cpu=dynamic_sizes_cpu,
                 accepted_index_cpu=accepted_index_cpu,
@@ -414,19 +413,19 @@ class ChunkedPrefillBackend(ModeBackend):
 
     def _update_dynamic_mtp_size_statics(
         self,
-        decode_reqs: List[InferReq],
         run_reqs: List[InferReq],
         dynamic_sizes_cpu: torch.Tensor,
         accepted_index_cpu: torch.Tensor,
     ):
-        id_to_current_mtp_step = {}
+        id_to_verify_len = {}
+
         assert len(run_reqs) == dynamic_sizes_cpu.shape[0] == accepted_index_cpu.shape[0]
         for req, new_size, accepted in zip(run_reqs, dynamic_sizes_cpu.numpy(), accepted_index_cpu.numpy()):
             if int(accepted) == 1:
                 assert int(new_size) <= req.mtp_step
-                id_to_current_mtp_step[req.req_idx] = int(new_size)
+                id_to_verify_len[req.req_idx] = int(new_size) + 1
 
-        self.dynamic_mtp_planner.update_req_accept_len_statics(list(id_to_current_mtp_step.values()))
+        self.dynamic_mtp_planner.update_req_verify_len_statics(verify_lens=list(id_to_verify_len.values()))
         return
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
