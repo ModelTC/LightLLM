@@ -26,6 +26,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
 from .control_state import ControlState
+from lightllm.server.router.model_infer.mode_backend.dynamic_mtp_planner import DynamicMTPPlanner
 
 logger = init_logger(__name__)
 
@@ -48,6 +49,9 @@ class ChunkedPrefillBackend(ModeBackend):
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
+
+        if self.enable_dynamic_mtp:
+            self.dynamic_mtp_planner = DynamicMTPPlanner(mtp_step=get_env_start_args().mtp_step)
 
         self.classed_req_strict_prefill = False
         return
@@ -238,8 +242,10 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
             if self.enable_dynamic_mtp:
-                # 根据当前的 batch size 和 dynamic_batch_size 计算出需要裁剪的 batch size 的model_input
-                dynamic_batch_size = 10  # TODO: 需要根据实际情况计算出 dynamic_batch_size
+                dynamic_batch_size = self.dynamic_mtp_planner.get_dynamic_batch_size(
+                    req_num=len(decode_reqs),
+                    original_batch_size=model_input.batch_size,
+                )
                 trans_to_dynamic_model_input = None  # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
                 model_input, selected_run_reqs = trans_to_dynamic_model_input(model_input, dynamic_batch_size)
                 # selected_run_reqs 是一个 gpu tensor, 类型为 int, 0, 表示没有选中， 1 表示选中。
@@ -357,7 +363,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
         if self.enable_dynamic_mtp:
             # 更新 动态verify token 数据到 planner 中去
-            self._update_dynamic_mtp_size_cpu_part(
+            self._update_dynamic_mtp_size_statics(
                 decode_reqs=decode_reqs,
                 run_reqs=run_reqs,
                 dynamic_sizes_cpu=dynamic_sizes_cpu,
@@ -365,9 +371,12 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             # 更新单token的速度信息到 planner 中去
             per_token_cost_ms = start_time_event.elapsed_time(verify_event) / (mtp_accept_len_cpu.sum().item())
-            # TODO 将 per_token_cost_ms 更新到 planner 中去
-            per_token_cost_ms = per_token_cost_ms + 0.0
-            pass
+
+            self.dynamic_mtp_planner.update_req_num_speed_statics(
+                req_num=len(decode_reqs),
+                dynamic_batch_size=dynamic_batch_size,
+                per_token_cost_ms=per_token_cost_ms,
+            )
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
@@ -403,7 +412,7 @@ class ChunkedPrefillBackend(ModeBackend):
         dynamic_mtp_sizes = valid_steps.sum(dim=0)
         return dynamic_mtp_sizes
 
-    def _update_dynamic_mtp_size_cpu_part(
+    def _update_dynamic_mtp_size_statics(
         self,
         decode_reqs: List[InferReq],
         run_reqs: List[InferReq],
@@ -416,8 +425,9 @@ class ChunkedPrefillBackend(ModeBackend):
             if int(accepted) == 1:
                 assert int(new_size) <= req.mtp_step
                 id_to_current_mtp_step[req.req_idx] = int(new_size)
-        # TODO 将 id_to_current_mtp_step 的信息更新到 planner 中去
-        pass
+
+        self.dynamic_mtp_planner.update_req_accept_len_statics(list(id_to_current_mtp_step.values()))
+        return
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
