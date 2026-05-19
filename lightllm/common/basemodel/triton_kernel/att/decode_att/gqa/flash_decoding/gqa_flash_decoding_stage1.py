@@ -200,8 +200,13 @@ def flash_decode_stage1(
     sliding_window_left = int(sliding_window[0])
     use_sliding_window = sliding_window_left >= 0
 
+    # 当前 不支持 right sliding window
     if use_sliding_window:
         assert sliding_window[1] == 0
+
+    _fwd_kernel_flash_decode_stage1[grid](
+        q,
+        k,
         v,
         sm_scale,
         Req_to_tokens,
