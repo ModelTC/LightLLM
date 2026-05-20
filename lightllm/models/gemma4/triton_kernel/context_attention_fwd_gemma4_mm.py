@@ -65,7 +65,6 @@ def _fwd_kernel(
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
     SLIDING_WINDOW_LEFT: tl.constexpr,
-    SLIDING_WINDOW_RIGHT: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -111,11 +110,8 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     causal_end = tl.minimum(prompt_cache_len + block_start_loc + BLOCK_M, total_len)
-    local_end = causal_end
-    if SLIDING_WINDOW_RIGHT > 0:
-        local_end = tl.minimum(causal_end + SLIDING_WINDOW_RIGHT, total_len)
     block_image_end = tl.minimum(tl.max(q_image_end, axis=0), total_len)
-    block_end_loc = tl.maximum(local_end, block_image_end)
+    block_end_loc = tl.maximum(causal_end, block_image_end)
 
     if USE_SLIDING_WINDOW:
         kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
@@ -141,12 +137,8 @@ def _fwd_kernel(
         qk = tl.dot(q, k)
 
         if USE_SLIDING_WINDOW:
-            # Sliding window values are FA-style inclusive offsets.
-            local_mask = (q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT
-            if SLIDING_WINDOW_RIGHT == 0:
-                local_mask = local_mask & (q_pos[:, None] >= k_pos[None, :])
-            else:
-                local_mask = local_mask & ((k_pos[None, :] - q_pos[:, None]) <= SLIDING_WINDOW_RIGHT)
+            # Sliding window: FA-style left inclusive offset + causal (right=0).
+            local_mask = ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT) & (q_pos[:, None] >= k_pos[None, :])
         else:
             local_mask = q_pos[:, None] >= k_pos[None, :]
         # Image bidi: a Q in image span [_, e) attends to all K with k_pos < e.
@@ -154,8 +146,6 @@ def _fwd_kernel(
         # the union with local_mask leaves text-attention unchanged.
         image_mask = k_pos[None, :] < q_image_end[:, None]
         mask = local_mask | image_mask
-        if SLIDING_WINDOW_RIGHT > 0:
-            mask = mask & k_valid[None, :]
 
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
 
@@ -202,6 +192,8 @@ def context_attention_fwd_gemma4_mm(
     """Prefill attention with image bidirectional masking on sliding layers.
 
     Args:
+        sliding_window: ``(-1, -1)`` disables SWA; otherwise ``(left, 0)`` with
+            FA-style inclusive left offset and causal right bound (right must be 0).
         b_image_token_end: int32 tensor of shape (sum_q,). For each Q token
             position (in the flattened new-token layout), value is the image
             span's end index (in absolute request position) if the token is
@@ -224,10 +216,14 @@ def context_attention_fwd_gemma4_mm(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
-    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
-    assert sliding_window_left >= -1 and sliding_window_right >= -1
-    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
-    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
+
+    if sliding_window == (-1, -1):
+        use_sliding_window = False
+        sliding_window_left = -1
+    else:
+        use_sliding_window = True
+        assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
+        sliding_window_left = int(sliding_window[0])
 
     _fwd_kernel[grid](
         q,
@@ -262,7 +258,6 @@ def context_attention_fwd_gemma4_mm(
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
         SLIDING_WINDOW_LEFT=sliding_window_left,
-        SLIDING_WINDOW_RIGHT=sliding_window_right,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -287,8 +282,8 @@ def reference_attention(
 ):
     """Slow torch reference for the gemma4 mm prefill kernel.
 
-    `sliding_window` is (left, right) using FA-style inclusive offsets.
-    (-1, -1) disables SWA.
+    `sliding_window` is (left, 0) using FA-style inclusive left offset with causal
+    right bound. (-1, -1) disables SWA.
     """
     device = q.device
     dtype = q.dtype
@@ -299,10 +294,13 @@ def reference_attention(
     out = torch.empty_like(q)
     scale = 1.0 / math.sqrt(D)
 
-    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
-    assert sliding_window_left >= -1 and sliding_window_right >= -1
-    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
-    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
+    if sliding_window == (-1, -1):
+        use_sliding_window = False
+        sliding_window_left = 0
+    else:
+        use_sliding_window = True
+        sliding_window_left = int(sliding_window[0])
+        assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
 
     batch = b_seq_len.shape[0]
     for b in range(batch):
@@ -325,11 +323,10 @@ def reference_attention(
         q_pos = torch.arange(prompt_len, total_len, device=device, dtype=torch.int64)
         k_pos = torch.arange(0, total_len, device=device, dtype=torch.int64)
 
-        causal = k_pos[None, :] <= q_pos[:, None]
         if use_sliding_window:
-            causal = ((q_pos[:, None] - k_pos[None, :]) <= sliding_window_left) & (
-                (k_pos[None, :] - q_pos[:, None]) <= sliding_window_right
-            )
+            causal = ((q_pos[:, None] - k_pos[None, :]) <= sliding_window_left) & (q_pos[:, None] >= k_pos[None, :])
+        else:
+            causal = k_pos[None, :] <= q_pos[:, None]
         image = k_pos[None, :] < q_image_end[:, None]
         allow = causal | image
 
@@ -487,6 +484,5 @@ if __name__ == "__main__":
         for seed in (0, 1, 2):
             check_once(seed=seed, D=128, sliding_window=(-1, -1))
             check_once(seed=seed, D=128, sliding_window=(4096, 0))
-            check_once(seed=seed, D=128, sliding_window=(4096, 32))
             check_once(seed=seed, D=256, sliding_window=(4096, 0))
         print("ok")
