@@ -245,8 +245,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             return o_tensor.view(q.shape)
 
         # Full-attn layers: head_dim=512, no SWA, no image bidi — standard
-        # triton via the primary backend.
-        o_tensor = infer_state.prefill_att_state.prefill_att(
+        # triton via backend1.
+        o_tensor = infer_state.prefill_att_state1.prefill_att(
             q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor
         )
         return o_tensor.view(q.shape)
@@ -260,7 +260,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         _k, _v = self._get_layer_kv(infer_state)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        att_state = infer_state.decode_att_state1 if self.is_sliding else infer_state.decode_att_state
+        att_state = infer_state.decode_att_state if self.is_sliding else infer_state.decode_att_state1
         o_tensor = att_state.decode_att(q=_q, k=_k, v=_v, att_control=self._att_control(), alloc_func=self.alloc_tensor)
         return o_tensor.view(q.shape)
 

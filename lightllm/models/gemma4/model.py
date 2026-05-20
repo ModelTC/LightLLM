@@ -111,63 +111,21 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _init_att_backend(self):
         # Gemma-4 has per-layer heterogeneous attention: sliding layers use
         # (head_dim=256, kv_heads=16); full-attn layers use (head_dim=512,
-        # kv_heads=4, k_eq_v). No single generic backend setup covers both:
-        #   - FA3 caps head_dim at 256 -> can't run full-attn layers.
-        #   - Flashinfer plans once per infer_state on a single shape -> can't
-        #     accommodate heterogeneous layout at all.
-        # Strategy:
-        #   - Prefill: sliding layers go through the gemma4_mm Triton kernel
-        #     directly (handles SWA + image bidi); full-attn layers use the
-        #     primary triton backend below. No FA3 in prefill — its
-        #     image_token_end build asserts incompatible with SWA. Revisit
-        #     when fa3 supports both simultaneously.
-        #   - Decode: full-attn layers on triton (primary); sliding layers on
-        #     fa3 (with SWA) when available — secondary backend set in
-        #     _init_att_backend1.
-        fa3_loadable = self._gemma4_fa3_loadable()
-
-        # Full-attn layers always go through triton.
+        # kv_heads=4, k_eq_v). FA3 caps head_dim at 256 and flashinfer plans
+        # once per infer_state on a single shape — both unworkable for the
+        # heterogeneous layout. Both layer kinds go through triton.
+        #
+        # Primary backend = sliding layers. Sliding prefill bypasses the
+        # backend and calls gemma4_mm directly (SWA + image bidi in one
+        # pass); the prefill_att_state created here is unused but the
+        # framework requires prefill_att_backend to be non-None.
         self.prefill_att_backend = TritonAttBackend(model=self)
         self.decode_att_backend = TritonAttBackend(model=self)
 
-        self._gemma4_sliding_decode_backend_kind = self._resolve_gemma4_sliding_backend(
-            self.args.llm_decode_att_backend[0], fa3_loadable
-        )
-
     def _init_att_backend1(self):
-        # Only decode needs the sliding-layer backend; prefill sliding goes
-        # through gemma4_mm Triton directly in the layer.
-        self.prefill_att_backend1 = None
-        self.decode_att_backend1 = self._build_gemma4_sliding_backend(self._gemma4_sliding_decode_backend_kind)
-
-    @staticmethod
-    def _gemma4_fa3_loadable():
-        from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-
-        return flash_attn_with_kvcache is not None
-
-    @staticmethod
-    def _resolve_gemma4_sliding_backend(backend_name, fa3_loadable):
-        assert backend_name in ("auto", "triton", "fa3"), (
-            "Gemma-4 requires triton or fa3 for sliding layers; flashinfer is "
-            f"not wired for the heterogeneous layout. Got backend={backend_name!r}."
-        )
-        if backend_name == "auto":
-            return "fa3" if fa3_loadable else "triton"
-        if backend_name == "fa3":
-            assert fa3_loadable, (
-                "Requested --llm_*_att_backend=fa3 but flash_attn_with_kvcache "
-                "did not import (sgl_kernel missing or wrong arch)."
-            )
-        return backend_name
-
-    def _build_gemma4_sliding_backend(self, backend_kind):
-        if backend_kind == "fa3":
-            from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
-
-            return Fa3AttBackend(model=self)
-        assert backend_kind == "triton"
-        return TritonAttBackend(model=self)
+        # Secondary backend = full-attn layers (head_dim=512, plain causal).
+        self.prefill_att_backend1 = TritonAttBackend(model=self)
+        self.decode_att_backend1 = TritonAttBackend(model=self)
 
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()
