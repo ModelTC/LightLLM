@@ -32,11 +32,11 @@ def get_gguf_dequant_fn(
 QK5_0 = 32
 BLOCK_Q5_0_BYTES = 22
 """
-# Each block is represented by 22 consecutive values in the final ndarray.
+# Each block is represented by 22 consecutive values in the final ndarray, will be dequantized into 32 floats.
 typedef struct {
     ggml_half d;           // scale, total 16 bits
-    uint8_t qh[4];         // all 32 high bits of quants, total 8*4=32 bits
-    uint8_t qs[QK5_0 / 2]; // all 32 low bits of quants, total 8*(32/2)=128 bits
+    uint8_t qh[4];         // each 1 bit high bits of quants, total 8*4=32 bits
+    uint8_t qs[QK5_0 / 2]; // each 4 bits low bits of quants, total 4*2*(32/2)=128 bits
 } block_q5_0;              // total 172 bits = 22 bytes
 """
 
@@ -136,10 +136,10 @@ def dequantize_q5_0(
 QK8_0 = 32
 BLOCK_Q8_0_BYTES = 34
 """
-# Each block is represented by 34 consecutive values in the final ndarray.
+# Each block is represented by 34 consecutive values in the final ndarray, will be dequantized into 32 floats.
 typedef struct {
     ggml_half d;       // scale, total 16 bits
-    int8_t  qs[QK8_0]; // all 32 bits of quants, total 8*32=256 bits
+    int8_t qs[QK8_0]; // each 8 bits of quants, total 8*32=256 bits
 } block_q8_0;          // total 272 bits = 34 bytes
 """
 
