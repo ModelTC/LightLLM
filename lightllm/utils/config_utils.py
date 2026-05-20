@@ -484,6 +484,7 @@ def ffn_use_tanh_approximate_gelu() -> bool:
         if model_type in ["gemma4"]:
             logger.info("Gemma4 uses tanh-approximate-gelu for FFN")
             return True
-    except Exception as e:
-        logger.error(f"Failed to get ffn_use_tanh_approximate_gelu: {e}")
-        return False
+    except:
+        pass
+
+    return False
