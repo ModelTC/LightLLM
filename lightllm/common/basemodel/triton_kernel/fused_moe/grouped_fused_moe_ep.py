@@ -40,7 +40,6 @@ def masked_group_gemm(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     expected_m: int,
-    use_gelu: bool = False,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -55,7 +54,7 @@ def masked_group_gemm(
 
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m, use_gelu=use_gelu)
+    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
@@ -75,7 +74,6 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     previous_event: Optional["EventOverlap"] = None,
-    use_gelu: bool = False,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -177,7 +175,7 @@ def fused_experts_impl(
             # TODO fused kernel
             silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
 
-            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out, use_gelu=use_gelu)
+            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                 silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
             )
@@ -196,7 +194,7 @@ def fused_experts_impl(
             if Autotuner.is_autotune_warmup():
                 _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
                 _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, use_gelu=use_gelu)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
                 _gemm_out_a, _silu_out = None, None
 
         # normal combine
@@ -222,9 +220,7 @@ def fused_experts_impl(
             return_recv_hook=False,
         )
         # deepgemm
-        gemm_out_b = masked_group_gemm(
-            recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m, use_gelu=use_gelu
-        )
+        gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
