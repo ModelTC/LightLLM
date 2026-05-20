@@ -273,7 +273,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         gate_up = layer_weight.gate_up_proj.mm(input)
         ffn1 = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(gate_up, ffn1, use_gelu=True)
+        silu_and_mul_fwd(gate_up, ffn1)
         gate_up = None
         ffn2 = layer_weight.down_proj.mm(ffn1)
         ffn1 = None
