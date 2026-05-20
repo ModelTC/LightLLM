@@ -18,27 +18,20 @@ class NoQuantization(QuantizationMethod):
         workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
-        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         weight = weight_pack.weight.t()
-        target_dtype = out_dtype if out_dtype is not None else input_tensor.dtype
         if out is None:
             shape = (input_tensor.shape[0], weight.shape[1])
+            dtype = input_tensor.dtype
             device = input_tensor.device
             if use_custom_tensor_mananger:
-                out = g_cache_manager.alloc_tensor(shape, target_dtype, device=device)
+                out = g_cache_manager.alloc_tensor(shape, dtype, device=device)
             else:
-                out = torch.empty(shape, dtype=target_dtype, device=device)
-        else:
-            assert out.dtype == target_dtype, (
-                f"NoQuantization.apply: pre-allocated out.dtype={out.dtype} does not match "
-                f"requested out_dtype={target_dtype}"
-            )
+                out = torch.empty(shape, dtype=dtype, device=device)
         if bias is None:
-            return torch.mm(input_tensor, weight, out=out, out_dtype=target_dtype)
-        assert out_dtype is None, "NoQuantization.apply: out_dtype not supported when bias is set"
+            return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
 
     def _create_weight(
