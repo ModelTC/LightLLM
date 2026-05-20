@@ -114,6 +114,7 @@ def moe_align1_kernel(
     TOKEN_BLOCK_SIZE: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
+
     expert_id = tl.program_id(axis=0)
 
     off_n = tl.arange(0, TOKEN_BLOCK_SIZE)
@@ -307,6 +308,7 @@ def moe_align2_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_EXPERT: tl.constexpr,
 ):
+
     expert_id = tl.program_id(axis=0)
     off_expert = tl.arange(0, BLOCK_EXPERT)
     expert_to_token_num = tl.load(experts_token_num_ptr + off_expert, mask=off_expert < expert_num, other=0)
@@ -909,7 +911,6 @@ def fused_experts_impl(
     layout="blocked",
     limit=None,
     alpha=None,
-    use_gelu: bool = False,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -989,7 +990,6 @@ def fused_experts_impl(
             limit=limit,
             alpha=alpha,
             layout=layout,
-            use_gelu=use_gelu,
         )
 
         grouped_matmul(
@@ -1035,7 +1035,6 @@ def inplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    use_gelu: bool = False,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1055,7 +1054,6 @@ def inplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
-        use_gelu=use_gelu,
     )
 
 
@@ -1077,7 +1075,6 @@ def inplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    use_gelu: bool = False,
 ) -> None:
     pass
 
@@ -1108,7 +1105,6 @@ def outplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    use_gelu: bool = False,
 ) -> None:
     return fused_experts_impl(
         hidden_states,
@@ -1128,7 +1124,6 @@ def outplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
-        use_gelu=use_gelu,
     )
 
 
@@ -1150,7 +1145,6 @@ def outplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    use_gelu: bool = False,
 ) -> None:
     return torch.empty_like(hidden_states)
 
@@ -1182,7 +1176,6 @@ def fused_experts(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    use_gelu: bool = False,
 ):
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
@@ -1202,7 +1195,6 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
-            use_gelu=use_gelu,
         )
         return hidden_states
     else:
@@ -1223,5 +1215,4 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
-            use_gelu=use_gelu,
         )
