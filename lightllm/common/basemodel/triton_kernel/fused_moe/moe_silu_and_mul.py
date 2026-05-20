@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 @triton.jit
@@ -23,7 +24,7 @@ def _silu_and_mul_kernel_fast(
     NEED_MASK: tl.constexpr,
     layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
-    USE_GELU: tl.constexpr = False,
+    USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
     stride_output_m = tl.cast(stride_output_m, dtype=tl.int64)
@@ -75,7 +76,7 @@ def _silu_and_mul_kernel_fast(
                 mask=mask,
             )
         else:
-            if USE_GELU:
+            if USE_TANH_APPROXIMATE_GELU:
                 # tanh-approx GELU, matching Gemma's gelu_pytorch_tanh MLP.
                 gate_cubed = gate * gate * gate
                 tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
@@ -120,7 +121,6 @@ def silu_and_mul_fwd(
     limit=None,
     alpha=None,
     run_config=None,
-    use_gelu: bool = False,
 ):
     assert input.is_contiguous()
     assert output.is_contiguous()
@@ -171,6 +171,6 @@ def silu_and_mul_fwd(
         num_warps=num_warps,
         layout=layout,
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
-        USE_GELU=use_gelu,
+        USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
     )
     return

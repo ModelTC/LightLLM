@@ -474,3 +474,16 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         return "gemma4"
 
     return None
+
+
+@lru_cache(maxsize=None)
+def ffn_use_tanh_approximate_gelu() -> bool:
+    try:
+        start_args = get_env_start_args()
+        model_type = get_model_type(start_args.model_dir)
+        if model_type in ["gemma4"]:
+            logger.info("Gemma4 uses tanh-approximate-gelu for FFN")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to get ffn_use_tanh_approximate_gelu: {e}")
+        return False
