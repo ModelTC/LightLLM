@@ -5,6 +5,7 @@ from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 
 
 class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
@@ -67,3 +68,31 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
             assert not self.has_ple, "gemma4 PLE + enable_tpsp_mix_mode not implemented"
             return super()._tpsp_sp_split(input=input, infer_state=infer_state)
         return input
+
+    def _multimodal_emb(
+        self,
+        out: torch.Tensor,
+        input_ids: torch.Tensor,
+        layer_weight,
+        embed_cache: torch.Tensor,
+        img_token_lens: torch.Tensor,
+        img_start_token_ids: torch.Tensor,
+        img_start_locs_in_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        修改多模态的 embed 计算的细节实现方式,调用本地的 multimodal_text_embed_scale_ 参数。
+        """
+        multimodal_emb(
+            out=out,
+            prompt_ids=input_ids,
+            text_weight_embs=layer_weight.wte_weight_.weight,
+            embed_cache=embed_cache,
+            img_token_lens=img_token_lens,
+            img_start_token_ids=img_start_token_ids,
+            img_start_locs_in_cache=img_start_locs_in_cache,
+            tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
+            tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
+            tp_world_size=self.tp_world_size_,
+            text_embed_scale=self.multimodal_text_embed_scale_,
+        )
+        return
