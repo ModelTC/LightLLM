@@ -110,11 +110,8 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     causal_end = tl.minimum(prompt_cache_len + block_start_loc + BLOCK_M, total_len)
-    local_end = causal_end
-    if SLIDING_WINDOW_RIGHT > 0:
-        local_end = tl.minimum(causal_end + SLIDING_WINDOW_RIGHT, total_len)
     block_image_end = tl.minimum(tl.max(q_image_end, axis=0), total_len)
-    block_end_loc = tl.maximum(local_end, block_image_end)
+    block_end_loc = tl.maximum(causal_end, block_image_end)
 
     if USE_SLIDING_WINDOW:
         kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
@@ -219,10 +216,14 @@ def context_attention_fwd_gemma4_mm(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
-    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
-    assert sliding_window_left >= -1 and sliding_window_right >= -1
-    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
-    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
+
+    if sliding_window == (-1, -1):
+        use_sliding_window = False
+        sliding_window_left = -1
+    else:
+        use_sliding_window = True
+        assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
+        sliding_window_left = int(sliding_window[0])
 
     if sliding_window == (-1, -1):
         use_sliding_window = False
