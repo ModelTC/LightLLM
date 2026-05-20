@@ -13,6 +13,13 @@ class Gemma4InferStateInfo(InferStateInfo):
         self.position_sin_sliding = None
         self.position_cos_full = None
         self.position_sin_full = None
+        # b_image_token_end 用于标记每个 token 在 att 计算时，可以看到的对应的最大长度位置，用于
+        # 对于文本token 和 image token 是区别对待的，
+        # 文本token 对应的位置一定是 0， image token 对应的位置，是该token能看到的最远image token位置。
+        # 相当于 image token 部分是双向 att，text token 还是 causal att。
+        # 对应一个请求 token list 为 [t, t, i, i, t] 的一个token序列，
+        # 则对应的 b_image_token_end 为 [0, 0, 4, 4, 0],
+        # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
 
     def init_some_extra_state(self, model):
