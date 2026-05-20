@@ -70,19 +70,42 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
         ).cuda(non_blocking=True)
 
+        self._multimodal_emb(
+            out=out,
+            input_ids=input_ids,
+            layer_weight=layer_weight,
+            embed_cache=cpu_embed_cache_tensor,
+            img_token_lens=img_token_lens,
+            img_start_token_ids=img_start_token_ids,
+            img_start_locs_in_cache=img_start_locs_in_cache,
+        )
+        if self.tp_world_size_ > 1:
+            all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
+        return out
+
+    def _multimodal_emb(
+        self,
+        out: torch.Tensor,
+        input_ids: torch.Tensor,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        embed_cache: torch.Tensor,
+        img_token_lens: torch.Tensor,
+        img_start_token_ids: torch.Tensor,
+        img_start_locs_in_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        方便子类继承修改多模态的embed计算的细节实现方式。
+        """
         multimodal_emb(
             out=out,
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_.weight,
-            embed_cache=cpu_embed_cache_tensor,
+            embed_cache=embed_cache,
             img_token_lens=img_token_lens,
             img_start_token_ids=img_start_token_ids,
             img_start_locs_in_cache=img_start_locs_in_cache,
             tp_text_start_token_id=layer_weight.wte_weight_.tp_vocab_start_id,
             tp_text_end_token_id=layer_weight.wte_weight_.tp_vocab_end_id,
             tp_world_size=self.tp_world_size_,
-            text_embed_scale=getattr(self, "multimodal_text_embed_scale_", 1.0),
         )
-        if self.tp_world_size_ > 1:
-            all_reduce(out, group=infer_state.dist_group, op=dist.ReduceOp.SUM, async_op=False)
-        return out
+        return

@@ -31,7 +31,7 @@ from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
-from ..models.gemma4.model import Gemma4Tokenizer
+from ..models.gemma4.tokenizer import Gemma4Tokenizer
 from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
