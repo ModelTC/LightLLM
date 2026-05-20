@@ -286,7 +286,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         x = residual.view(-1, self.embed_dim_)
         x = rmsnorm_forward(x=x, weight=None, eps=self.eps_, out=self.alloc_tensor(x.shape, dtype=x.dtype))
         x = x * self.router_root_scale * layer_weight.router_input_scale_.weight
-        return layer_weight.moe_gate.mm(x, out_dtype=torch.float32)
+        return layer_weight.moe_gate.mm(x.to(torch.float32))
 
     def _ffn_moe(self, input, router_logits, infer_state: InferStateInfo, layer_weight: Gemma4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)

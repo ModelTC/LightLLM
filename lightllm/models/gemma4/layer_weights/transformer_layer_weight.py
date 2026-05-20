@@ -1,3 +1,4 @@
+import torch
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight import ROWMMWeight, COLMMWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import RMSNormWeight, ParameterWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.gemma4_packed_fused_moe_weight import (
@@ -195,7 +196,7 @@ class Gemma4TransformerLayerWeight(LlamaTransformerLayerWeight):
             in_dim=self.n_embed,
             out_dims=[self.network_config_["num_experts"]],
             weight_names=self._router_weight_name,
-            data_type=self.data_type_,
+            data_type=torch.float32,
             bias_names=None,
             quant_method=self.get_quant_method("moe_gate"),
             tp_rank=0,
