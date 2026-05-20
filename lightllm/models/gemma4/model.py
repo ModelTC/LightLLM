@@ -155,6 +155,9 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         )
 
     def _init_to_get_rotary_gemma4(self):
+        # gemma4 当前不支持 dp prefill balance
+        assert self.args.enable_dp_prefill_balance is False, "Gemma-4 does not support dp prefill balance"
+
         rope_params = self.config["rope_parameters"]
 
         # Cap the rotary table at something we can fit in memory — Gemma-4's
