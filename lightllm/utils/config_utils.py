@@ -412,6 +412,12 @@ def get_model_type(model_path: str) -> Optional[str]:
         return None
 
 
+@lru_cache(maxsize=None)
+def get_model_type_v1() -> Optional[str]:
+    start_args = get_env_start_args()
+    return get_model_type(start_args.model_dir)
+
+
 def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     """Auto-detect tool_call_parser based on model type"""
     model_type = get_model_type(model_path)

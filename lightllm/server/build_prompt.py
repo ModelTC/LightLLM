@@ -3,6 +3,7 @@ import json
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 from functools import lru_cache
+from lightllm.utils.config_utils import get_model_type_v1
 
 logger = init_logger(__name__)
 
@@ -130,7 +131,9 @@ async def build_prompt(request, tools) -> str:
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     _normalize_tool_call_arguments(messages)
     _alias_reasoning_to_reasoning_content(messages)
-    _normalize_multimodal_content_types(messages)
+    if get_model_type_v1() == "gemma4":
+        # gemma4 的 tokenizer 不支持 multimodal 内容类型，所以需要手动转换
+        _normalize_multimodal_content_types(messages)
 
     kwargs = {"conversation": messages}
     if request.character_settings:
