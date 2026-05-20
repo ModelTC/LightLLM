@@ -163,6 +163,8 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
+    if reasoning_parser in ["qwen3-thinking", "gpt-oss", "minimax"]:
+        return True
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:

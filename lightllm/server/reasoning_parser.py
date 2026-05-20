@@ -930,9 +930,6 @@ class ReasoningParser:
         if not detector_class:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        # Special cases where we override force_reasoning
-        if model_type.lower() in {"qwen3-thinking", "gpt-oss", "minimax"}:
-            force_reasoning = True
         elif model_type.lower() == "gemma4":
             # Gemma-4's chat template never positions generation inside an open
             # channel — see Gemma4Detector docstring. Pin to False so a
