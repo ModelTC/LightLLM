@@ -181,6 +181,17 @@ class HttpServerManager:
             self.cache_client.root.set_items_data(update_data_ids)
         return
 
+    def _assert_image_token_count(self, token_num: int):
+        if token_num > self.args.max_image_token_count:
+            err_msg = (
+                f"single image token count {token_num} exceeds max_image_token_count {self.args.max_image_token_count}."
+                f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
+                f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
+            )
+            logger.warning(err_msg)
+            raise ValueError(err_msg)
+        return
+
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
         # 只有 P 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
@@ -190,6 +201,7 @@ class HttpServerManager:
                 data = img.read()
                 # must after init_imageitem_extral_params
                 token_num = self.tokenizer.get_image_token_length(img)
+                self._assert_image_token_count(token_num)
                 md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                 md5sums.append(md5sum)
                 img.md5 = md5sum
@@ -245,7 +257,9 @@ class HttpServerManager:
         for img in multimodal_params.images:
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
-            image_tokens += self.tokenizer.get_image_token_length(img)
+            token_num = self.tokenizer.get_image_token_length(img)
+            self._assert_image_token_count(token_num)
+            image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
             self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
