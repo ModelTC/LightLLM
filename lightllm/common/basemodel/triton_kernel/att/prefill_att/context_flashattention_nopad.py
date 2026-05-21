@@ -82,7 +82,6 @@ def _fwd_kernel(
     if USE_SLIDING_WINDOW:
         kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
         kv_start_index = tl.maximum(kv_start_index, 0)
-        block_end_loc = tl.minimum(block_end_loc + SLIDING_WINDOW_RIGHT, cur_batch_seq_len + prompt_cache_len)
         block_kv_len = block_end_loc - kv_start_index
     else:
         kv_start_index = 0
@@ -174,10 +173,14 @@ def context_attention_fwd(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
-    sliding_window_left, sliding_window_right = int(sliding_window[0]), int(sliding_window[1])
-    assert sliding_window_left >= -1 and sliding_window_right >= -1
-    use_sliding_window = sliding_window_left >= 0 and sliding_window_right >= 0
-    assert use_sliding_window or (sliding_window_left == -1 and sliding_window_right == -1)
+
+    if sliding_window == (-1, -1):
+        use_sliding_window = False
+        sliding_window_left = -1
+    else:
+        use_sliding_window = True
+        assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
+        sliding_window_left = int(sliding_window[0])
 
     if sliding_window == (-1, -1):
         use_sliding_window = False
