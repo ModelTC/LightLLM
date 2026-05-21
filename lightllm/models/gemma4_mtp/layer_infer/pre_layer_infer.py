@@ -12,13 +12,8 @@ class Gemma4MTPPreLayerInfer(LlamaPreLayerInfer):
         prev  = mtp_draft_input_hiddens                         # backbone width
         fused = pre_projection(concat[embed, prev])             # -> draft width
 
-    Output projection (_tpsp_allgather override): the base model writes
-    `mtp_main_output_hiddens` as `pre_infer._tpsp_allgather(trunk_output)`. The
-    assistant trunk runs in draft width, but the recurrent hidden must be backbone
-    width - both so it lines up with the target model's hidden state at the first
-    draft step and so every draft invocation sees a single fixed input width
-    (cudagraph-friendly). So post_projection (draft -> backbone) is applied here,
-    which is exactly the op HF runs at the end of each draft step.
+    Output projection is handled by Gemma4MTPPostLayerInfer, which returns
+    post_projection(norm(draft_hidden)) as mtp_main_output_hiddens.
     """
 
     def __init__(self, network_config):
@@ -26,9 +21,6 @@ class Gemma4MTPPreLayerInfer(LlamaPreLayerInfer):
         self.draft_hidden_ = network_config["hidden_size"]
         self.backbone_hidden_ = network_config["backbone_hidden_size"]
         self.embed_scale_ = float(self.backbone_hidden_) ** 0.5
-        # Set by Gemma4MTPModel._init_infer_layer (the post_projection weight lives
-        # in pre_post_weight, which _tpsp_allgather does not otherwise receive).
-        self._post_projection_weight_ = None
 
     def _mtp_fuse(self, input_embdings, infer_state, layer_weight: Gemma4MTPPreAndPostLayerWeight):
         prev = infer_state.mtp_draft_input_hiddens
@@ -47,9 +39,3 @@ class Gemma4MTPPreLayerInfer(LlamaPreLayerInfer):
     def token_forward(self, input_ids, infer_state, layer_weight):
         input_embdings = super().token_forward(input_ids, infer_state, layer_weight)
         return self._mtp_fuse(input_embdings, infer_state, layer_weight)
-
-    def _tpsp_allgather(self, input: torch.Tensor, infer_state):
-        # Called by the base model only to materialize mtp_main_output_hiddens from
-        # the draft trunk output. Lift draft width -> backbone width here.
-        gathered = super()._tpsp_allgather(input=input, infer_state=infer_state)
-        return self._post_projection_weight_.mm(gathered)

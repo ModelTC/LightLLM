@@ -90,9 +90,9 @@ class Gemma4MTPModel(Gemma4TpPartModel):
     def _init_infer_layer(self):
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
-        # post_projection lives in pre_post_weight; the pre_infer needs it in its
-        # _tpsp_allgather override to lift the trunk output to backbone width.
-        self.pre_infer._post_projection_weight_ = self.pre_post_weight.post_projection_weight_
+        # post_projection lifts normed draft hidden to backbone width for the next
+        # recurrent input; token_forward returns it as mtp_main_output_hiddens.
+        self.post_infer._post_projection_weight_ = self.pre_post_weight.post_projection_weight_
 
         # Map each assistant layer to the target model's layer whose KV cache it
         # reads: the target's last non-KV-shared layer of the same attention type.
