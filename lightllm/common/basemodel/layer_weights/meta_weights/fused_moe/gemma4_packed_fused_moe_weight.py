@@ -5,8 +5,6 @@ class Gemma4PackedFusedMoeWeight(FusedMoeWeight):
     def load_hf_weights(self, weights):
         gate_up_name = f"{self.weight_prefix}.gate_up_proj"
         down_name = f"{self.weight_prefix}.down_proj"
-        if gate_up_name not in weights and down_name not in weights and self.per_expert_scale_name not in weights:
-            return super().load_hf_weights(weights)
 
         assert self.quant_method.method_name == "none", "Gemma-4 packed MoE currently supports bf16/no-quant weights."
         assert not self.enable_ep_moe, "Gemma-4 packed MoE currently supports TP mode only."
@@ -32,3 +30,4 @@ class Gemma4PackedFusedMoeWeight(FusedMoeWeight):
                 self.quant_method.load_weight(down_weight_slice, self.w2_list[local_expert_idx])
 
         self._load_per_expert_scale(weights)
+        return
