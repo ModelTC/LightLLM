@@ -46,6 +46,7 @@ from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.gemma4_mtp.model import Gemma4MTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
@@ -316,7 +317,7 @@ class ModeBackend:
 
         if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
             num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att"]:
+        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle_frozen_kv"]:
             num_mtp_modules = 1
         else:
             assert False, f"error mtp mode {self.args.mtp_mode}"
@@ -360,6 +361,9 @@ class ModeBackend:
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif model_type == "gemma4_assistant":
+                assert self.args.mtp_mode == "eagle_frozen_kv"
+                self.draft_models.append(Gemma4MTPModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 

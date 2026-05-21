@@ -96,6 +96,7 @@ class TpPartBaseModel:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
+            "eagle_frozen_kv",
         ]
         self.prefill_graph: PrefillCudaGraph = None
 
@@ -1155,15 +1156,21 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
+        cls_name = str(self.__class__)
         is_mtp_draft_model = (
-            "Deepseek3MTPModel" in str(self.__class__)
-            or "Qwen3MOEMTPModel" in str(self.__class__)
-            or "MistralMTPModel" in str(self.__class__)
-            or "Glm4MoeLiteMTPModel" in str(self.__class__)
+            "Deepseek3MTPModel" in cls_name
+            or "Qwen3MOEMTPModel" in cls_name
+            or "MistralMTPModel" in cls_name
+            or "Glm4MoeLiteMTPModel" in cls_name
+            or "Gemma4MTPModel" in cls_name
         )
         if is_mtp_draft_model:
+            # Gemma-4's drafter consumes the recurrent hidden state in backbone
+            # width (the target's hidden size), not its own draft width; the other
+            # MTP drafters have draft width == backbone width so hidden_size fits.
+            hidden_size = self.config.get("backbone_hidden_size", self.config["hidden_size"])
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
-                token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
+                token_num, hidden_size, dtype=self.data_type, device="cuda"
             )
         else:
             special_model_input["mtp_draft_input_hiddens"] = None

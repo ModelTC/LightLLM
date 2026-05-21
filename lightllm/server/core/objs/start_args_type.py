@@ -162,6 +162,7 @@ class StartArgs:
                 "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
+                "eagle_frozen_kv",
                 "qwen3next_vanilla",
                 "qwen3next_eagle",
                 None,
