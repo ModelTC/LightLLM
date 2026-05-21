@@ -150,7 +150,7 @@ async def stream_one_turn(
                 line = raw.strip()
                 if not line or not line.startswith(b"data:"):
                     continue
-                data_str = line[len(b"data:"):].strip()
+                data_str = line[len(b"data:") :].strip()
                 if data_str == b"[DONE]":
                     break
                 try:
@@ -219,17 +219,13 @@ async def run_session(
     """Run a single multi-turn dialogue session. Returns a list of per-turn
     stat dicts (same schema as stream_one_turn output)."""
     rng = random.Random(base_seed + session_id)
-    prompt, prompt_len = gen_session_initial_prompt(
-        tokenizer, start_input_len, base_seed + session_id
-    )
+    prompt, prompt_len = gen_session_initial_prompt(tokenizer, start_input_len, base_seed + session_id)
 
     per_turn: List[Dict] = []
     turn_idx = 0
     while turn_idx < max_turns and prompt_len < max_input_len:
         turn_output_len = rng.randint(min_output_len, output_len)
-        result = await stream_one_turn(
-            session, url, model_name, prompt, turn_output_len
-        )
+        result = await stream_one_turn(session, url, model_name, prompt, turn_output_len)
         if result is None:
             break
         per_turn.append(result)
@@ -382,8 +378,10 @@ def summarize(
 
 def print_summary(summary: Dict) -> None:
     print("=" * 80)
-    print(f"Concurrency = {summary['concurrency']}  sessions = {summary['num_sessions']}  "
-          f"total_turns = {summary['total_turns']}  wall_time = {summary['wall_time_s']}s")
+    print(
+        f"Concurrency = {summary['concurrency']}  sessions = {summary['num_sessions']}  "
+        f"total_turns = {summary['total_turns']}  wall_time = {summary['wall_time_s']}s"
+    )
     if "error" in summary:
         print(f"  ERROR: {summary['error']}")
         return
@@ -391,19 +389,25 @@ def print_summary(summary: Dict) -> None:
     print(f"  TPM (total)        : {summary['TPM_total']}")
     print(f"  TPM (prompt)       : {summary['TPM_prompt']}")
     print(f"  TPM (completion)   : {summary['TPM_completion']}")
-    print(f"  Cache hit ratio    : {summary['cache_hit_ratio'] * 100:.2f}%  "
-          f"({summary['total_cached_prompt_tokens']} / {summary['total_prompt_tokens']})")
+    print(
+        f"  Cache hit ratio    : {summary['cache_hit_ratio'] * 100:.2f}%  "
+        f"({summary['total_cached_prompt_tokens']} / {summary['total_prompt_tokens']})"
+    )
     print(f"  Avg prompt tokens  : {summary['avg_prompt_tokens_per_turn']}")
     print(f"  Avg output tokens  : {summary['avg_completion_tokens_per_turn']}")
     ttft = summary["TTFT_ms"]
     tpot = summary["TPOT_ms"]
-    print(f"  TTFT ms  mean={ttft['mean']}  P50={ttft.get('P50')}  P90={ttft.get('P90')}  "
-          f"P95={ttft.get('P95')}  P99={ttft.get('P99')}")
+    print(
+        f"  TTFT ms  mean={ttft['mean']}  P50={ttft.get('P50')}  P90={ttft.get('P90')}  "
+        f"P95={ttft.get('P95')}  P99={ttft.get('P99')}"
+    )
     if tpot.get("mean") is None:
         print(f"  TPOT ms  (n/a: {tpot.get('note')})")
     else:
-        print(f"  TPOT ms  mean={tpot['mean']}  P50={tpot.get('P50')}  P90={tpot.get('P90')}  "
-              f"P95={tpot.get('P95')}  P99={tpot.get('P99')}")
+        print(
+            f"  TPOT ms  mean={tpot['mean']}  P50={tpot.get('P50')}  P90={tpot.get('P90')}  "
+            f"P95={tpot.get('P95')}  P99={tpot.get('P99')}"
+        )
 
 
 def main() -> None:
@@ -413,7 +417,7 @@ def main() -> None:
         type=str,
         default="http://127.0.0.1:8088/v1/completions",
         help="Streaming OpenAI completion endpoint. The benchmark relies on "
-             "the final SSE `usage` chunk to obtain cached_tokens.",
+        "the final SSE `usage` chunk to obtain cached_tokens.",
     )
     parser.add_argument("--tokenizer_path", type=str, required=True)
     parser.add_argument(
@@ -428,22 +432,29 @@ def main() -> None:
         default="1,4,8,16,32,64,128,256",
         help="Comma-separated list of concurrency levels to sweep.",
     )
-    parser.add_argument("--start_input_len", type=int, default=32768,
-                        help="Initial prompt length in tokens per session.")
-    parser.add_argument("--max_input_len", type=int, default=163840,
-                        help="Stop a session when its prompt exceeds this length.")
-    parser.add_argument("--turn_input_increment", type=int, default=2048,
-                        help="Maximum new 'user' tokens sampled after each turn, on top "
-                             "of the model's generated text.")
-    parser.add_argument("--min_turn_input_increment", type=int, default=512,
-                        help="Minimum new 'user' tokens sampled after each turn.")
-    parser.add_argument("--output_len", type=int, default=512,
-                        help="Maximum max_new_tokens sampled per turn.")
-    parser.add_argument("--min_output_len", type=int, default=128,
-                        help="Minimum max_new_tokens sampled per turn.")
-    parser.add_argument("--max_turns", type=int, default=64,
-                        help="Hard cap on turns per session. The session also stops once "
-                             "prompt length reaches --max_input_len.")
+    parser.add_argument(
+        "--start_input_len", type=int, default=32768, help="Initial prompt length in tokens per session."
+    )
+    parser.add_argument(
+        "--max_input_len", type=int, default=163840, help="Stop a session when its prompt exceeds this length."
+    )
+    parser.add_argument(
+        "--turn_input_increment",
+        type=int,
+        default=2048,
+        help="Maximum new 'user' tokens sampled after each turn, on top " "of the model's generated text.",
+    )
+    parser.add_argument(
+        "--min_turn_input_increment", type=int, default=512, help="Minimum new 'user' tokens sampled after each turn."
+    )
+    parser.add_argument("--output_len", type=int, default=512, help="Maximum max_new_tokens sampled per turn.")
+    parser.add_argument("--min_output_len", type=int, default=128, help="Minimum max_new_tokens sampled per turn.")
+    parser.add_argument(
+        "--max_turns",
+        type=int,
+        default=64,
+        help="Hard cap on turns per session. The session also stops once " "prompt length reaches --max_input_len.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--request_timeout_s", type=int, default=3600)
     parser.add_argument(
@@ -451,7 +462,7 @@ def main() -> None:
         type=str,
         default="",
         help="If set, append the per-concurrency summary dict to this JSON file. "
-             "If the file already exists and is non-empty, it is read and printed.",
+        "If the file already exists and is non-empty, it is read and printed.",
     )
 
     args = parser.parse_args()
