@@ -1,5 +1,7 @@
 import torch
+import numpy as np
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
+from lightllm.distributed.communication_op import all_gather
 
 
 class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
@@ -9,6 +11,7 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
         self.final_logit_softcapping = float(cap) if cap else None
 
         self.use_ordered_embeddings_ = bool(network_config.get("use_ordered_embeddings"))
+        self._post_projection_weight_ = None
         if self.use_ordered_embeddings_:
             self.num_centroids_ = network_config["num_centroids"]
             self.centroid_top_k_ = network_config["centroid_intermediate_top_k"]
@@ -21,15 +24,34 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
             # token_ordering buffer (weights are not loaded yet at __init__).
             self._centroid_of_token_ = None
 
-    def _centroid_logits(self, input_embdings, infer_state, layer_weight):
+    def _dense_logits(self, last_hidden, token_num, input_embdings_dtype, infer_state, layer_weight):
+        lm_input = last_hidden.permute(1, 0).view(-1, token_num)
+        logic_batch = layer_weight.lm_head_weight_(input=lm_input, alloc_func=self.alloc_tensor)
+        vocab_size = layer_weight.lm_head_weight_.vocab_size
+        if self.tp_world_size_ == 1:
+            gather_data = logic_batch
+        else:
+            gather_data = self.alloc_tensor((vocab_size, token_num), dtype=input_embdings_dtype)
+            split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+            all_gather(
+                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
+                logic_batch,
+                group=infer_state.dist_group,
+                async_op=False,
+            )
+        logic_batch = None
+        ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
+        ans_logics[:, :] = gather_data.permute(1, 0)
+        gather_data = None
+        return ans_logics
+
+    def _centroid_logits(self, last_hidden, token_num, layer_weight):
         """ Gather lm_head rows for the per-token top-K centroid blocks, 
         dot with the post-norm hidden, scatter into a [N, vocab] -inf tensor
         at the original vocab positions. Mathematically equivalent to 
         dense logits + mask but avoids the [N, vocab] bool tensor and matches 
         the reference implementations exactly.
         """
-        last_hidden, token_num = self._slice_get_last_input(input_embdings, infer_state)
-        last_hidden = self._norm(last_hidden, infer_state, layer_weight)  # [N, draft_hidden]
         centroid_scores = layer_weight.centroids_weight_.mm(last_hidden)  # [N, num_centroids]
         topk_centroids = torch.topk(centroid_scores, k=self.centroid_top_k_, dim=-1).indices  # [N, K]
         # token_ordering[i] = original vocab id at reordered position i;
@@ -58,11 +80,14 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
         return output
 
     def token_forward(self, input_embdings, infer_state, layer_weight):
+        last_hidden, token_num = self._slice_get_last_input(input_embdings, infer_state)
+        last_hidden = self._norm(last_hidden, infer_state, layer_weight)
         if self.use_ordered_embeddings_:
-            logits = self._centroid_logits(input_embdings, infer_state, layer_weight)
+            logits = self._centroid_logits(last_hidden, token_num, layer_weight)
         else:
-            logits = super().token_forward(input_embdings, infer_state, layer_weight)
+            logits = self._dense_logits(last_hidden, token_num, input_embdings.dtype, infer_state, layer_weight)
         if self.final_logit_softcapping is not None and self.final_logit_softcapping > 0:
             cap = self.final_logit_softcapping
             logits = torch.tanh(logits / cap) * cap
-        return logits
+        assert self._post_projection_weight_ is not None, "post_projection weight is not initialized"
+        return logits, self._post_projection_weight_.mm(last_hidden)
