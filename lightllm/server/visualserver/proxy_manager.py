@@ -51,14 +51,23 @@ class ProxyVisualManager(VisualManager):
         )
 
     async def handle_group_indexes(self, group_req_indexes: GroupReqIndexes):
-        images_need_infer = self.get_need_infer_images(group_req_indexes)
-
-        # case 1
-        if len(images_need_infer) == 0:
-            self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
-            return
-
+        # Mirror VisualManager.handle_group_indexes hardening (2026-05-09 incident):
+        #   * get_need_infer_images inside try with bounded executor wait
+        #   * set_items_embed wrapped via dedicated cache executor (sync_request_timeout
+        #     on cache_client also fires at the socket layer)
+        #   * any failure marks shm_req aborted before forwarding
+        cache_timeout = max(int(getattr(self.args, "visual_get_items_embed_timeout", 0) or 0), 0) or 10
+        loop = asyncio.get_running_loop()
         try:
+            images_need_infer = await asyncio.wait_for(
+                loop.run_in_executor(self._cache_executor, self.get_need_infer_images, group_req_indexes),
+                timeout=cache_timeout,
+            )
+
+            # case 1
+            if len(images_need_infer) == 0:
+                self.send_to_next_module.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+                return
 
             def _get_not_afs_ready_images():
                 readys = self.afs_handler.check_ready([image.md5 for image in images_need_infer])
@@ -92,9 +101,14 @@ class ProxyVisualManager(VisualManager):
                     end = start + tensor.shape[0]
                     assert end - start == image.token_num
                     self.cpu_embed_cache_client.cpu_embed_cache_tensor[start:end].copy_(tensor)
+                # set_items_embed 也走 cache executor + 受 cache_client 的 sync_request_timeout 兜底
                 self.cache_client.root.set_items_embed([image.uuid for image in images_need_infer])
 
-            await asyncio.to_thread(_load_to_cpu_cache)
+            set_timeout = max(int(getattr(self.args, "visual_set_items_embed_timeout", 0) or 0), 0) or 30
+            await asyncio.wait_for(
+                loop.run_in_executor(self._cache_executor, _load_to_cpu_cache),
+                timeout=set_timeout,
+            )
 
         except Exception as e:
             # mark aborted
@@ -124,11 +138,18 @@ class ProxyVisualManager(VisualManager):
         # 将 bytes 从 shm 中读取出来，放到 image.data_bytes 中，供远端的 vit 进行推理使用。
         for image in images:
             image.data_bytes = read_shm(get_shm_name_data(image.uuid))
+        start = time.time()
         if self.args.detail_log:
-            start = time.time()
             logger.info(f"Start to remote infer images {[image.md5 for image in images]}")
         conn.root.remote_infer_images(images, event)
-        event.wait(timeout=600)
+        # 远端 vit 卡死时, 必须让 caller 走 abort 路径而不是默默等待 600s 后假装完成。
+        wait_timeout = max(int(getattr(self.args, "visual_infer_timeout", 0) or 0), 0) or 120
+        ok = event.wait(timeout=wait_timeout)
+        if not ok:
+            raise TimeoutError(
+                f"remote_infer_images did not signal within {wait_timeout}s "
+                f"for md5s={[image.md5 for image in images]}; treating as failure"
+            )
         if self.args.detail_log:
             logger.info(
                 f"Remote infer images done for images {[image.md5 for image in images]}"
