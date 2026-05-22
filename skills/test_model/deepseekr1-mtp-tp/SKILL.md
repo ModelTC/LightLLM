@@ -26,10 +26,10 @@ description: >-
 
 ### 启动前检查
 
-开跑前先确认资源可用；**不满足则先清理相关进程**。
+开跑前先确认资源可用；**不满足则先清理相关进程，再启动**。
 
-1. **显卡占用**：用 `nvidia-smi`（或与集群一致的占用查看方式）检查目标 GPU 是否被无关任务占满；若有冲突进程，结束后再启动本评测。
-2. **端口**：服务固定 **`8089`**；用 `ss -tlnp`、`lsof -i :8089` 等确认**无进程监听**该端口；若已被占用，查出 PID 并结束占用进程后再启动。
+1. **显卡独占**：用 `nvidia-smi` 检查 **8 张 GPU 均无其它推理任务占用**（显存应基本空闲）；若有冲突进程，结束后再启动。本评测 `--tp 8` 需占满 8 卡，勿与其它 `api_server` 同卡混跑。
+2. **端口独占**：服务固定 **`8089`**；用 `ss -tlnp`、`lsof -i :8089` 等确认 **无进程监听** 该端口；若已被占用，结束占用进程后再启动。
 
 ### 启动服务的命令模板（可变项）
 
@@ -55,11 +55,13 @@ export MTP_DRAFT_DIR='〈MTP 草稿目录，对应 --mtp_draft_model_dir〉'
 
 以下为 **MTP–TP** 固定形态：**`--tp 8`**，**无 `--dp`**。可直接执行的后台形式（已含 `nohup` 与日志重定向）；调试时可去掉 `nohup` 与 `>> … 2>&1 &` 改前台。**`${MODEL_DIR}`、`${MTP_DRAFT_DIR}`、`${LOG_DIR}`** 须已由上文 `export` 赋值。
 
+`--mem_fraction` 使用 **0.65**（较 0.75 更省显存，MTP 加载主模型与草稿时不易 OOM）。
+
 ```bash
 LOADWORKER=18 \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" --tp 8 --port 8089 \
-  --mem_fraction 0.75 --batch_max_tokens 6000 \
+  --mem_fraction 0.65 --batch_max_tokens 6000 \
   --mtp_mode eagle_with_att --mtp_draft_model_dir "${MTP_DRAFT_DIR}" --mtp_step 2 \
   >> "${LOG_DIR}/server_mtp_tp.log" 2>&1 &
 ```
