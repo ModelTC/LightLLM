@@ -20,7 +20,9 @@ from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    gen_b_req_mtp_start_loc,
     mtp_scatter_next_token_ids,
+    trim_dynamic_mtp_model_input,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
@@ -238,6 +240,7 @@ class ChunkedPrefillBackend(ModeBackend):
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        origin_mem_indexes_cpu = model_input.mem_indexes_cpu
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
@@ -245,9 +248,15 @@ class ChunkedPrefillBackend(ModeBackend):
                 dynamic_batch_size = self.dynamic_mtp_planner.get_dynamic_batch_size(
                     req_num=len(decode_reqs),
                     original_batch_size=model_input.batch_size,
+                ) 
+                # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
+                trans_to_dynamic_model_input = trim_dynamic_mtp_model_input
+                model_input, selected_run_reqs = trans_to_dynamic_model_input(
+                    model_input=model_input, 
+                    dynamic_batch_size=dynamic_batch_size,
+                    req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                    req_to_next_token_probs=self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
                 )
-                trans_to_dynamic_model_input = None  # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
-                model_input, selected_run_reqs = trans_to_dynamic_model_input(model_input, dynamic_batch_size)
                 # selected_run_reqs 是一个 gpu tensor, 类型为 int, 0, 表示没有选中， 1 表示选中。
 
                 selected_run_reqs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
@@ -261,10 +270,15 @@ class ChunkedPrefillBackend(ModeBackend):
             start_time_event.record()
 
             model_output = self.model.forward(model_input)
-            next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
+            next_token_ids, next_token_logprobs = sample(
+                model_output.logits,
+                run_reqs,
+                self.eos_id,
+                selected_run_reqs=selected_run_reqs if self.enable_dynamic_mtp else None,
+            )
             # verify the next_token_ids
-            get_b_req_mtp_start_loc = None  # TODO: 需要根据实际情况实现 get_b_req_mtp_start_loc
-            b_req_mtp_start_loc = get_b_req_mtp_start_loc(model_input.b_mtp_index, req_num=len(decode_reqs))
+            # TODO: 需要根据实际情况实现 get_b_req_mtp_start_loc
+            b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=len(decode_reqs))
             # b_req_mtp_start_loc 是一个 gpu tensor, 类型为 int, 表示每个请求的 mtp_start_loc, shape 为 len(decode_reqs)
             mtp_accept_len, accepted_index = self._verify_mtp_v2(
                 new_next_token_ids=next_token_ids,
@@ -379,6 +393,11 @@ class ChunkedPrefillBackend(ModeBackend):
 
         # 处理需要释放的内存索引
         need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
+        if self.enable_dynamic_mtp:
+            selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
+            trim_free_mem_indexes = origin_mem_indexes_cpu[selected_run_reqs_cpu_numpy == 0]
+            if len(trim_free_mem_indexes) > 0:
+                need_free_mem_indexes = torch.cat([need_free_mem_indexes, trim_free_mem_indexes], dim=0)
         if additional_mem_indexes_cpu is not None:
             need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 

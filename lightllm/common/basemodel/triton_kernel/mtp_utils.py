@@ -1,7 +1,9 @@
-from typing import Optional
+from typing import Optional, Tuple
 import triton
 import triton.language as tl
 import torch
+
+from lightllm.common.basemodel.batch_objs import ModelInput
 
 
 @triton.jit
@@ -179,6 +181,214 @@ def mtp_scatter_next_token_ids(
 
 
 @triton.jit
+def _fwd_kernel_sample_dynamic_mtp_steps(
+    req_to_next_token_probs,
+    req_to_next_token_probs_stride,
+    req_indices,
+    sampled_steps,
+    rand_seed,
+    MAX_MTP_STEP: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    cur_index = tl.program_id(0)
+    cur_req_idx = tl.load(req_indices + cur_index)
+
+    sampled_step = 1
+    prefix_ok = 1
+
+    for step in range(1, BLOCK_SIZE):
+        if step < MAX_MTP_STEP:
+            cur_prob = tl.load(req_to_next_token_probs + cur_req_idx * req_to_next_token_probs_stride + step)
+            cur_rand = tl.rand(rand_seed, cur_index * BLOCK_SIZE + step)
+            cur_accept = (cur_prob > cur_rand) & (prefix_ok == 1)
+            sampled_step += tl.where(cur_accept, 1, 0)
+            prefix_ok = tl.where(cur_accept, 1, 0)
+
+    tl.store(sampled_steps + cur_index, sampled_step)
+    return
+
+
+def sample_dynamic_mtp_req_mask(
+    dynamic_batch_size: int,
+    b_req_idx: torch.Tensor,
+    b_mtp_index: torch.Tensor,
+    req_to_next_token_probs: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert b_req_idx.shape == b_mtp_index.shape
+    assert req_to_next_token_probs.is_cuda
+
+    b_req_idx_gpu = b_req_idx.cuda(non_blocking=True) if not b_req_idx.is_cuda else b_req_idx
+    b_mtp_index_gpu = b_mtp_index.cuda(non_blocking=True) if not b_mtp_index.is_cuda else b_mtp_index
+
+    batch_size = b_req_idx_gpu.shape[0]
+    req_start_mask = b_mtp_index_gpu == 0
+    num_reqs = int(req_start_mask.sum().item())
+    assert num_reqs > 0
+    assert dynamic_batch_size >= num_reqs
+    assert dynamic_batch_size <= batch_size
+
+    req_indices_gpu = b_req_idx_gpu[req_start_mask].to(dtype=torch.int32)
+
+    max_mtp_step = req_to_next_token_probs.shape[1]
+    BLOCK_SIZE = 16
+    assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than or equal to {BLOCK_SIZE}"
+
+    sampled_steps = torch.empty((num_reqs,), dtype=torch.int32, device="cuda")
+    rand_seed = int(torch.randint(0, 2**31 - 1, (1,), device="cuda", dtype=torch.int64).item())
+
+    grid = (num_reqs,)
+    _fwd_kernel_sample_dynamic_mtp_steps[grid](
+        req_to_next_token_probs=req_to_next_token_probs,
+        req_to_next_token_probs_stride=req_to_next_token_probs.stride(0),
+        req_indices=req_indices_gpu,
+        sampled_steps=sampled_steps,
+        rand_seed=rand_seed,
+        MAX_MTP_STEP=max_mtp_step,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=1,
+        num_stages=1,
+    )
+
+    req_order = torch.cumsum(req_start_mask.to(torch.int32), dim=0) - 1
+    row_sampled_steps = sampled_steps[req_order.long()]
+    sampled_mask_gpu = (b_mtp_index_gpu < row_sampled_steps).to(torch.int32)
+    final_mask_gpu = select_dynamic_mtp_exec_mask(
+        dynamic_batch_size=dynamic_batch_size,
+        req_start_mask=req_start_mask,
+        sampled_mask_gpu=sampled_mask_gpu,
+    )
+
+    return final_mask_gpu, sampled_steps
+
+
+def select_dynamic_mtp_exec_mask(
+    dynamic_batch_size: int,
+    req_start_mask: torch.Tensor,
+    sampled_mask_gpu: torch.Tensor,
+) -> torch.Tensor:
+    assert req_start_mask.is_cuda
+    assert sampled_mask_gpu.is_cuda
+    assert req_start_mask.shape == sampled_mask_gpu.shape
+
+    num_reqs = int(req_start_mask.sum().item())
+    selected_count = int(sampled_mask_gpu.sum().item())
+    if selected_count <= dynamic_batch_size:
+        return sampled_mask_gpu
+
+    remaining_budget = dynamic_batch_size - num_reqs
+    if remaining_budget <= 0:
+        # 当前 token budget 分配逻辑保持最简单的顺序策略：
+        # 先保证每个请求至少保留 1 个 token（即 mtp_index == 0 的主请求行），
+        # 如果 budget 不足以支持更多 draft token，则该请求本轮不做 MTP 展开。
+        return req_start_mask.to(torch.int32)
+
+    # 当前 token budget 分配逻辑保持最简单的顺序策略：
+    # 在保证每个请求至少保留 1 个 token 之后，
+    # 对剩余的 draft token 按 batch 中从前到后的顺序依次分配 budget。
+    extra_mask_gpu = sampled_mask_gpu & (~req_start_mask)
+    extra_rank = torch.cumsum(extra_mask_gpu.to(torch.int32), dim=0)
+    kept_extra_mask = extra_mask_gpu & (extra_rank <= remaining_budget)
+    return req_start_mask.to(torch.int32) | kept_extra_mask.to(torch.int32)
+
+
+def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(b_mtp_index: torch.Tensor) -> torch.Tensor:
+    assert b_mtp_index.is_cuda
+    batch_size = b_mtp_index.shape[0]
+    if batch_size == 0:
+        return torch.empty((0,), dtype=torch.int32, device=b_mtp_index.device)
+
+    # prepare_decode_inputs 中已经保证了每个请求的 decode rows 是按
+    # b_mtp_index = [0, 1, 2, ...] 的前缀顺序展开的；动态 trim 只会保留
+    # 每个请求的前缀，因此 compact 之后每个请求块的末尾满足：
+    # 1. 是最后一个元素；或
+    # 2. 下一个元素的 b_mtp_index 重新回到 0
+    group_end_mask = torch.ones((batch_size,), dtype=torch.bool, device=b_mtp_index.device)
+    if batch_size > 1:
+        group_end_mask[:-1] = b_mtp_index[1:] == 0
+
+    b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=b_mtp_index.device)
+    b_mark_shared_group[group_end_mask] = (b_mtp_index[group_end_mask] + 1).to(torch.int32)
+    return b_mark_shared_group
+
+
+def _trim_decode_model_input_inplace(model_input: ModelInput, selected_mask_gpu: torch.Tensor) -> ModelInput:
+    assert not model_input.is_prefill
+    assert selected_mask_gpu.is_cuda
+    assert model_input.b_req_idx.is_cuda
+    assert model_input.b_mtp_index.is_cuda
+    assert model_input.b_seq_len.is_cuda
+
+    selected_index = torch.nonzero(selected_mask_gpu, as_tuple=False).flatten()
+    new_batch_size = selected_index.numel()
+    if new_batch_size == model_input.batch_size:
+        return model_input
+    selected_index_cpu = None
+
+    if model_input.input_ids is not None:
+        assert model_input.input_ids.is_cuda
+        model_input.input_ids = torch.index_select(model_input.input_ids, dim=0, index=selected_index)
+    model_input.b_req_idx = torch.index_select(model_input.b_req_idx, dim=0, index=selected_index)
+    model_input.b_mtp_index = torch.index_select(model_input.b_mtp_index, dim=0, index=selected_index)
+    model_input.b_seq_len = torch.index_select(model_input.b_seq_len, dim=0, index=selected_index)
+
+    if model_input.mem_indexes is not None:
+        assert model_input.mem_indexes.is_cuda
+        model_input.mem_indexes = torch.index_select(model_input.mem_indexes, dim=0, index=selected_index)
+    if model_input.mem_indexes_cpu is not None:
+        selected_index_cpu = selected_index.cpu()
+        model_input.mem_indexes_cpu = torch.index_select(model_input.mem_indexes_cpu, dim=0, index=selected_index_cpu)
+    if model_input.b_shared_seq_len is not None:
+        assert model_input.b_shared_seq_len.is_cuda
+        model_input.b_shared_seq_len = torch.index_select(model_input.b_shared_seq_len, dim=0, index=selected_index)
+    if model_input.mtp_draft_input_hiddens is not None:
+        assert model_input.mtp_draft_input_hiddens.is_cuda
+        model_input.mtp_draft_input_hiddens = torch.index_select(
+            model_input.mtp_draft_input_hiddens, dim=0, index=selected_index
+        )
+    if model_input.multimodal_params is not None:
+        if selected_index_cpu is None:
+            selected_index_cpu = selected_index.cpu()
+        model_input.multimodal_params = [model_input.multimodal_params[i] for i in selected_index_cpu.tolist()]
+
+    model_input.b_mark_shared_group = _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(
+        model_input.b_mtp_index
+    )
+    model_input.batch_size = new_batch_size
+    # model_input.total_token_num = int(model_input.b_seq_len.sum().item())
+    # model_input.max_kv_seq_len = int(model_input.b_seq_len.max().item()) if new_batch_size > 0 else 0
+
+    # TODO: if CPU mirrors become a measurable bottleneck, move mem_indexes_cpu/multimodal_params
+    # trimming out of the hot path or rebuild them from later-stage selected indices.
+    return model_input
+
+
+def trim_dynamic_mtp_model_input(
+    model_input: ModelInput,
+    dynamic_batch_size: int,
+    req_to_next_token_ids: torch.Tensor,
+    req_to_next_token_probs: Optional[torch.Tensor] = None,
+):
+    del req_to_next_token_ids
+
+    if req_to_next_token_probs is None:
+        selected_mask = torch.ones((model_input.batch_size,), dtype=torch.int32, device="cuda")
+        return model_input, selected_mask
+
+    assert not model_input.is_prefill, "trim_dynamic_mtp_model_input only supports decode inputs"
+    # Launch the host->device copies as early as possible, then do mask sampling and compaction on GPU.
+    model_input.to_cuda()
+
+    selected_mask_gpu, _ = sample_dynamic_mtp_req_mask(
+        dynamic_batch_size=dynamic_batch_size,
+        b_req_idx=model_input.b_req_idx,
+        b_mtp_index=model_input.b_mtp_index,
+        req_to_next_token_probs=req_to_next_token_probs,
+    )
+    model_input = _trim_decode_model_input_inplace(model_input=model_input, selected_mask_gpu=selected_mask_gpu)
+    return model_input, selected_mask_gpu
+
+
+@triton.jit
 def _fwd_kernel_gen_b_req_mtp_start_loc(
     b_mtp_index,
     b_req_mtp_start_loc,
@@ -238,6 +448,124 @@ def test_gen_b_req_mtp_start_loc():
     print(b_req_mtp_start_loc, gt_output)
 
 
+def test_sample_dynamic_mtp_req_mask():
+    torch.manual_seed(1234)
+
+    req_to_next_token_ids = torch.tensor(
+        [
+            [100, 101, 102, 103, 0, 0],
+            [200, 201, 202, 203, 0, 0],
+            [300, 301, 302, 303, 0, 0],
+        ],
+        dtype=torch.int64,
+        device="cuda",
+    )
+    req_to_next_token_probs = torch.tensor(
+        [
+            [1.0, 0.95, 0.90, 0.10, 0.0, 0.0],
+            [1.0, 0.20, 0.80, 0.80, 0.0, 0.0],
+            [1.0, 0.99, 0.99, 0.99, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+        device="cuda",
+    )
+
+    # 3 个请求，每个请求展开成 4 个 decode row
+    b_req_idx = torch.tensor(
+        [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    b_mtp_index = torch.tensor(
+        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    dynamic_batch_size = 8
+    selected_mask, sampled_steps = sample_dynamic_mtp_req_mask(
+        dynamic_batch_size=dynamic_batch_size,
+        b_req_idx=b_req_idx,
+        b_mtp_index=b_mtp_index,
+        req_to_next_token_probs=req_to_next_token_probs,
+    )
+
+    print("==== test_sample_dynamic_mtp_req_mask ====")
+    print("req_to_next_token_ids:")
+    print(req_to_next_token_ids.cpu())
+    print("req_to_next_token_probs:")
+    print(req_to_next_token_probs.cpu())
+    print("b_req_idx:")
+    print(b_req_idx.cpu())
+    print("b_mtp_index:")
+    print(b_mtp_index.cpu())
+    print("sampled_steps per req:")
+    print(sampled_steps.cpu())
+    print("selected_mask:")
+    print(selected_mask.cpu())
+    print("selected rows [req_idx, mtp_index]:")
+    selected_pos = torch.where(selected_mask == 1)[0]
+    print(torch.stack([b_req_idx[selected_pos], b_mtp_index[selected_pos]], dim=-1).cpu())
+
+
+def test_trim_dynamic_mtp_model_input():
+    torch.manual_seed(1234)
+
+    model_input = ModelInput(
+        batch_size=12,
+        total_token_num=54,
+        max_q_seq_len=1,
+        max_kv_seq_len=6,
+        input_ids=None,
+        b_req_idx=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32, device="cuda"),
+        b_mtp_index=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.int32, device="cuda"),
+        b_seq_len=torch.tensor([3, 4, 5, 6, 3, 4, 5, 6, 3, 4, 5, 6], dtype=torch.int32, device="cuda"),
+        b_shared_seq_len=None,
+        b_mark_shared_group=torch.tensor([0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 4], dtype=torch.int32, device="cuda"),
+        mem_indexes=torch.arange(12, dtype=torch.int32, device="cuda"),
+        mem_indexes_cpu=torch.arange(12, dtype=torch.int32, device="cpu"),
+        is_prefill=False,
+        multimodal_params=[{"images": [], "audios": []} for _ in range(12)],
+    )
+    req_to_next_token_probs = torch.tensor(
+        [
+            [1.0, 0.95, 0.90, 0.10, 0.0, 0.0],
+            [1.0, 0.20, 0.80, 0.80, 0.0, 0.0],
+            [1.0, 0.99, 0.99, 0.99, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+        device="cuda",
+    )
+
+    model_input, selected_mask = trim_dynamic_mtp_model_input(
+        model_input=model_input,
+        dynamic_batch_size=8,
+        req_to_next_token_ids=torch.empty((0,), dtype=torch.int64, device="cuda"),
+        req_to_next_token_probs=req_to_next_token_probs,
+    )
+
+    print("==== test_trim_dynamic_mtp_model_input ====")
+    print("selected_mask:")
+    print(selected_mask.cpu())
+    print("batch_size:", model_input.batch_size)
+    print("total_token_num:", model_input.total_token_num)
+    print("max_kv_seq_len:", model_input.max_kv_seq_len)
+    print("b_req_idx:")
+    print(model_input.b_req_idx.cpu())
+    print("b_mtp_index:")
+    print(model_input.b_mtp_index.cpu())
+    print("b_seq_len:")
+    print(model_input.b_seq_len.cpu())
+    print("b_mark_shared_group:")
+    print(model_input.b_mark_shared_group.cpu())
+    print("mem_indexes:")
+    print(model_input.mem_indexes.cpu())
+    print("mem_indexes_cpu:")
+    print(model_input.mem_indexes_cpu)
+
+
 if __name__ == "__main__":
-    test_mtp_verify()
+    # test_mtp_verify()
     # test_gen_b_req_mtp_start_loc()
+    test_sample_dynamic_mtp_req_mask()
+    # test_trim_dynamic_mtp_model_input()

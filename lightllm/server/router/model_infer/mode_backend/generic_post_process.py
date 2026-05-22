@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
@@ -7,7 +7,35 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+def sample(
+    logits: torch.Tensor,
+    reqs: List[InferReq],
+    eos_id: List[int] = [2],
+    selected_run_reqs: Optional[torch.Tensor] = None,
+):
+    if selected_run_reqs is not None:
+        assert selected_run_reqs.is_cuda
+        assert selected_run_reqs.numel() == len(reqs)
+        selected_index = torch.nonzero(selected_run_reqs.to(torch.bool), as_tuple=False).flatten()
+        assert logits.shape[0] == selected_index.numel(), f"{logits.shape[0]} vs {selected_index.numel()}"
+
+        padded_logits = torch.zeros(
+            (len(reqs), logits.shape[1]),
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        padded_logits.index_copy_(0, selected_index, logits)
+
+        full_next_token_ids, full_next_token_logprobs = sample(
+            padded_logits,
+            reqs,
+            eos_id=eos_id,
+            selected_run_reqs=None,
+        )
+        next_token_ids = torch.index_select(full_next_token_ids, dim=0, index=selected_index)
+        next_token_logprobs = torch.index_select(full_next_token_logprobs, dim=0, index=selected_index)
+        return next_token_ids, next_token_logprobs
+
     (
         b_req_idx,
         b_temperatures,
