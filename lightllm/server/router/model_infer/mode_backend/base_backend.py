@@ -684,7 +684,12 @@ class ModeBackend:
         # 则将 decode 请求合并到 prefill 请求中。
         if self.args.enable_prefill_decode_mixed and len(prefill_reqs) > 0 and len(decode_reqs) > 0:
             if prefill_tokens + len(decode_reqs) <= self.batch_max_tokens:
-                prefill_reqs.extend(decode_reqs)
+                for decode_req in decode_reqs:
+                    # 给 decode req 添加一个属性标签，标识其为混合prefill的请求。
+                    # 在 prefill 阶段，会根据这个属性标签， 对这些请求的处理进行一些
+                    # 特殊化，主要时构建获取input_ids 的方式。
+                    decode_req.is_decode_req_mixed_in_prefill = True
+                    prefill_reqs.append(decode_req)
                 decode_reqs = []
 
         return prefill_reqs, decode_reqs

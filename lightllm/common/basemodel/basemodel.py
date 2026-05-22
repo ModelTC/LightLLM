@@ -22,7 +22,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
-from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
+from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
@@ -498,6 +498,16 @@ class TpPartBaseModel:
         self,
         model_input: ModelInput,
     ):
+        if self.args.enable_prefill_decode_mixed and model_input.b_is_decode_req is not None:
+            gather_token_prefill_decode_mixed(
+                input_ids=model_input.input_ids,
+                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_idx=model_input.b_req_idx,
+                b_mtp_index=model_input.b_mtp_index,
+                b_is_decode_req=model_input.b_is_decode_req,
+                b_prefill_start_loc=model_input.b_prefill_start_loc,
+            )
+
         origin_handle_token_num = model_input.total_token_num - model_input.prefix_total_token_num
         origin_batch_size = model_input.batch_size
 
@@ -696,6 +706,26 @@ class TpPartBaseModel:
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
         model_input0.to_cuda()
         model_input1.to_cuda()
+
+        if self.args.enable_prefill_decode_mixed and model_input0.b_is_decode_req is not None:
+            gather_token_prefill_decode_mixed(
+                input_ids=model_input0.input_ids,
+                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_idx=model_input0.b_req_idx,
+                b_mtp_index=model_input0.b_mtp_index,
+                b_is_decode_req=model_input0.b_is_decode_req,
+                b_prefill_start_loc=model_input0.b_prefill_start_loc,
+            )
+
+        if self.args.enable_prefill_decode_mixed and model_input1.b_is_decode_req is not None:
+            gather_token_prefill_decode_mixed(
+                input_ids=model_input1.input_ids,
+                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+                b_req_idx=model_input1.b_req_idx,
+                b_mtp_index=model_input1.b_mtp_index,
+                b_is_decode_req=model_input1.b_is_decode_req,
+                b_prefill_start_loc=model_input1.b_prefill_start_loc,
+            )
 
         assert model_input0.mem_indexes.is_cuda
         assert model_input1.mem_indexes.is_cuda
