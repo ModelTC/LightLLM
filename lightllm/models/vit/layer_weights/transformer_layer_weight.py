@@ -11,7 +11,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     LayerNormWeight,
     TpRMSNormWeight,
 )
-from lightllm.utils.dist_utils import get_current_device_id
 
 
 class ViTTransformerLayerWeight(TransformerLayerWeight):
@@ -19,9 +18,8 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
-    def _cuda(self, cpu_tensor):
-        device_id = get_current_device_id()
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(device_id)
+    def _to_device(self, cpu_tensor: torch.Tensor) -> torch.Tensor:
+        return cpu_tensor.contiguous().to(device=self.target_device, dtype=self.data_type_)
 
     def _parse_config(self):
         self.padding_hidden_size = self.network_config_["padding_hidden_size"]
@@ -195,11 +193,11 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
 
         if f"vision_model.encoder.layers.{self.layer_num_}.ls1" in weights:
             ls1 = weights[f"vision_model.encoder.layers.{self.layer_num_}.ls1"]
-            self.ls1 = self._cuda(ls1)
+            self.ls1 = self._to_device(ls1)
 
         if f"vision_model.encoder.layers.{self.layer_num_}.ls2" in weights:
             ls2 = weights[f"vision_model.encoder.layers.{self.layer_num_}.ls2"]
-            self.ls2 = self._cuda(ls2)
+            self.ls2 = self._to_device(ls2)
             self.use_ls = True
 
         return super().load_hf_weights(weights)

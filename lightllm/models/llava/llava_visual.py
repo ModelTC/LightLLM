@@ -6,6 +6,7 @@ from PIL import Image
 from typing import List, Union
 from safetensors import safe_open
 from io import BytesIO
+from lightllm.models.visual_utils import VisualDeviceMixin
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.log_utils import init_logger
@@ -14,9 +15,13 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class LlavaVisionModel:
-    def __init__(self):
-        pass
+class LlavaVisionModel(VisualDeviceMixin):
+
+    def _device_module_attrs(self):
+        return ("vision_tower",)
+
+    def _device_tensor_dict_attrs(self):
+        return ("projector_weights",)
 
     def load_model(self, weight_dir):
         config_file = os.path.join(weight_dir, "config.json")
@@ -29,7 +34,6 @@ class LlavaVisionModel:
             self.load_bin_model(config, weight_dir)
 
         self.vision_tower.requires_grad_(False)
-        self.device = torch.device("cpu")
 
         assert "model.mm_projector.0.weight" in self.projector_weights
         assert "model.mm_projector.0.bias" in self.projector_weights
@@ -93,15 +97,9 @@ class LlavaVisionModel:
                     if "model.mm_projector" in k:
                         self.projector_weights[k] = v.half()
 
-    def cuda(self):
-        self.vision_tower = self.vision_tower.cuda()
-        for k, v in self.projector_weights.items():
-            self.projector_weights[k] = v.cuda()
-        return self
-
     # batch images infer
     def forward(self, x):
-        x = x.half().cuda()
+        x = self.move_to_infer_device(x.half())
         x = self.vision_tower(x, output_hidden_states=True)
         x = x.hidden_states[self.select_layer]
         if self.select_feature == "patch" or self.select_feature == "default":

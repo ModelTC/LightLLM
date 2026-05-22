@@ -49,13 +49,13 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         # each tp will fill the img embeds, should divide by world_size
         infer_state.img_start_token_ids = torch.tensor(
             img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
-        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
+        ).to(device=self.target_device, non_blocking=True)
+        infer_state.img_token_lens = torch.tensor(
+            img_token_lens, dtype=torch.long, device="cpu", pin_memory=True
+        ).to(device=self.target_device, non_blocking=True)
         infer_state.img_start_locs_in_cache = torch.tensor(
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
+        ).to(device=self.target_device, non_blocking=True)
         infer_state.input_ids = input_ids
 
         multimodal_emb(

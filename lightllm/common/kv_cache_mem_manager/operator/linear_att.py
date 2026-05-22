@@ -31,7 +31,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert mem_indexes.device == self.mem_manager.target_device
+        assert page_indexes.device == self.mem_manager.target_device
         args = get_env_start_args()
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
@@ -66,7 +67,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             # 将对应的小叶数据拷贝到临时的大页上，再从大页上拷贝到对应的运行态页面上
             big_page_buffer_ids_cpu.append(mem_manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID)
 
-        big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").cuda(
+        big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").to(
+            device=self.mem_manager.target_device,
             non_blocking=True
         )
 
@@ -108,12 +110,14 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         req: "InferReq",
     ):
         if not hasattr(self, "big_page_ids_buffer_store"):
-            self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device="cuda")
+            self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device=self.mem_manager.target_device)
             self.mem_indexes_buffer = torch.empty(
-                (get_env_start_args().max_req_total_len + 1024,), dtype=torch.int32, device="cuda"
+                (get_env_start_args().max_req_total_len + 1024,), dtype=torch.int32, device=self.mem_manager.target_device
             )
 
-        assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
+        assert mem_indexes.device == self.mem_manager.target_device
+        assert page_indexes.device == self.mem_manager.target_device
+        assert page_readies.device == self.mem_manager.target_device
         args = get_env_start_args()
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
@@ -202,6 +206,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
 
         copy_kv_buffer_to_kv_buffer(
-            src_mem_index.cuda(non_blocking=True), dst_mem_index.cuda(non_blocking=True), self.mem_manager.kv_buffer
+            src_mem_index.to(device=self.mem_manager.target_device, non_blocking=True),
+            dst_mem_index.to(device=self.mem_manager.target_device, non_blocking=True),
+            self.mem_manager.kv_buffer,
         )
         return

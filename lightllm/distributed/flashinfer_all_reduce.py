@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -54,7 +55,7 @@ class FlashInferAllReduce:
         self._ws_dtype = None
         self._ws_max_token_num = 0
 
-        if not _FI_OK or not torch.cuda.is_available():
+        if not _FI_OK or not get_backend().runtime.is_available():
             return
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")

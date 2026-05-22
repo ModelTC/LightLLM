@@ -188,10 +188,6 @@ class WhisperFeatureExtractor(SequenceFeatureExtractor):
 
         if return_tensors is not None:
             padded_inputs = padded_inputs.convert_to_tensors(return_tensors)
-        input_features = torch.from_numpy(np.asarray(padded_inputs["input_features"], dtype=np.float32)).to(
-            device="cuda", dtype=torch.bfloat16
-        )
-        attention_mask = torch.from_numpy(np.asarray(padded_inputs["attention_mask"], dtype=np.float32)).to(
-            device="cuda", dtype=torch.int32
-        )
+        input_features = torch.from_numpy(np.asarray(padded_inputs["input_features"], dtype=np.float32))
+        attention_mask = torch.from_numpy(np.asarray(padded_inputs["attention_mask"], dtype=np.float32))
         return input_features, attention_mask

@@ -49,7 +49,7 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
         # per channel quantization for weight, per token group quantization for input activation
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_perchannel_quant_kernel import weight_quant
 
-        qweight, weight_scale = weight_quant(weight.cuda(self.device_id_))
+        qweight, weight_scale = weight_quant(weight.to(device=self.target_device))
         output.weight.copy_(qweight)
         output.weight_scale.copy_(weight_scale.view(-1))
         return
@@ -123,8 +123,12 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
+        weight = torch.empty(
+            expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn
+        ).to(device=self.target_device)
+        weight_scale = torch.empty(
+            expert_prefix + (out_dim,), dtype=torch.float32
+        ).to(device=self.target_device)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
 
         mm_param_list = self._split_weight_pack(

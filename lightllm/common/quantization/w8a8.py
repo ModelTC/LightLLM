@@ -62,7 +62,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-        weight = weight.float().cuda(self.device_id_)
+        weight = weight.float().to(device=self.target_device)
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight / scale.reshape(-1, 1)
         weight = torch.round(weight.clamp(min=-127, max=127)).to(dtype=torch.int8)
@@ -103,8 +103,8 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).to(device=self.target_device)
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).to(device=self.target_device)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,
@@ -126,7 +126,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
 
         qweight, weight_scale = scaled_fp8_quant(
-            weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
+            weight.to(device=self.target_device), scale=None, use_per_token_if_dynamic=True
         )
         output.weight.copy_(qweight)
         output.weight_scale.copy_(weight_scale.view(-1))
@@ -167,8 +167,12 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
+        weight = torch.empty(
+            expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn
+        ).to(device=self.target_device)
+        weight_scale = torch.empty(
+            expert_prefix + (out_dim,), dtype=torch.float32
+        ).to(device=self.target_device)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
 
         mm_param_list = self._split_weight_pack(
@@ -193,8 +197,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
-        device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(weight.to(device=output.weight.device), self.block_size)
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -245,10 +248,11 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight = torch.empty(
+            expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).to(device=self.target_device)
         weight_scale = torch.empty(
             expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
-        ).cuda(device_id)
+        ).to(device=self.target_device)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         weight_scale_out_dims = [_out_dim // self.block_size for _out_dim in out_dims]
         mm_param_list = self._split_weight_pack(

@@ -4,6 +4,8 @@ import rpyc
 import time
 from typing import Dict, List, Tuple, Optional, Union
 from rpyc.utils.classic import obtain
+
+from lightllm.platform import get_backend
 from .decode_impl import DecodeNode
 from lightllm.common.basemodel.infer_lock import acquire_lock_until_ready, release_acquired_lock, g_router_lock
 from .decode_task_cache import g_kv_move_task_cache, g_success_kv_move_task_cache
@@ -23,7 +25,7 @@ class PDDecodeInferRpcServer(rpyc.Service):
         return
 
     def on_connect(self, conn):
-        torch.cuda.set_device(f"cuda:{self.device_id}")
+        get_backend().runtime.set_device(self.device_id)
         return
 
     def judge_token_is_ok(self, key_len, max_new_token):

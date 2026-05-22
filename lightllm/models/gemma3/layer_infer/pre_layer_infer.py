@@ -7,7 +7,10 @@ from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalP
 class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
-        self.embed_scale = torch.tensor(network_config["hidden_size"] ** 0.5, dtype=torch.float32)
+        self.embed_scale = torch.tensor(
+            network_config["hidden_size"] ** 0.5,
+            device=self.target_device,
+            dtype=torch.float32)
         self.boi_token_index: int = 255_999
         self.eoi_token_index: int = 256_000
         return
@@ -56,15 +59,15 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
             f"but image embed dimension is {cpu_embed_cache_tensor.shape[2]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
-        img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
+        img_start_token_ids = torch.tensor(
+            img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True
+        ).to(device=self.target_device, non_blocking=True)
+        img_token_lens = torch.tensor(
+            img_token_lens, dtype=torch.long, device="cpu", pin_memory=True
+        ).to(device=self.target_device, non_blocking=True)
         img_start_locs_in_cache = torch.tensor(
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
+        ).to(device=self.target_device, non_blocking=True)
 
         multimodal_emb(
             out=out,
@@ -86,4 +89,4 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
     def token_forward(self, input_ids, infer_state, layer_weight):
         input_embedding = super().token_forward(input_ids, infer_state, layer_weight)
         input_dtype = input_embedding.dtype
-        return (input_embedding.float() * self.embed_scale.to(input_embedding.device).float()).to(input_dtype)
+        return (input_embedding.float() * self.embed_scale).to(input_dtype)

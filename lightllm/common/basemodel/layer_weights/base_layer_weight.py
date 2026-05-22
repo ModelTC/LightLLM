@@ -2,7 +2,8 @@ import torch
 import numpy as np
 import threading
 from lightllm.common.basemodel.layer_weights.meta_weights import BaseWeight
-from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.device_utils import get_target_device
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 
 
 class BaseLayerWeight:
@@ -10,6 +11,7 @@ class BaseLayerWeight:
         self.tp_rank_ = get_current_rank_in_dp()
         self.tp_world_size_ = get_dp_world_size()
         self.lock = threading.Lock()
+        self.target_device = get_target_device()
 
     def load_hf_weights(self, weights):
         """
@@ -39,5 +41,5 @@ class BaseLayerWeight:
                     layer_num = None
                 assert attr.verify_load(), f"Loading {attr_name} of layers {layer_num} fails."
 
-    def _cuda(self, cpu_tensor):
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())
+    def _to_device(self, cpu_tensor: torch.Tensor) -> torch.Tensor:
+        return cpu_tensor.contiguous().to(device=self.target_device)

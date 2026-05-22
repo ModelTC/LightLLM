@@ -48,5 +48,5 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
         t = torch.arange(max_seq_len, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = torch.cos(freqs).to(self.data_type).to(device=self.target_device)
+        self._sin_cached = torch.sin(freqs).to(self.data_type).to(device=self.target_device)

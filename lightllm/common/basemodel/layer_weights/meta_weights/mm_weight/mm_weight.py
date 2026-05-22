@@ -92,7 +92,7 @@ class MMWeightTpl(BaseWeightTpl):
     def _create_weight(self):
         self.bias = None
         if self.bias_names is not None:
-            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
+            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).to(device=self.target_device)
             # bias_list shares storage with bias for each output shard
             self.bias_list = torch.split(self.bias, self.out_dims, dim=0)
             for sub_bias in self.bias_list:
@@ -200,7 +200,7 @@ class BMMWeightTpl(BaseWeightTpl):
         return
 
     def _create_weight(self):
-        self.weight = torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_).cuda(get_current_device_id())
+        self.weight = torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_).to(device=self.target_device)
         self.weight.load_ok = False
         return
 

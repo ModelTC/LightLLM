@@ -253,7 +253,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
 
             num_recv_tokens_per_expert = torch.tensor(
                 num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
-            ).cuda(non_blocking=True)
+            ).to(device=recv_topk_idx.device, non_blocking=True)
 
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
 

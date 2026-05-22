@@ -14,6 +14,7 @@ from transformers import AutoModel
 from safetensors import safe_open
 
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
+from lightllm.models.visual_utils import VisualDeviceMixin
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
@@ -149,7 +150,7 @@ class LlavaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class TarsierVisionTransformerPretrainedModel(nn.Module):
+class TarsierVisionTransformerPretrainedModel(VisualDeviceMixin, nn.Module):
     def __init__(
         self,
         vision_config=None,
@@ -165,8 +166,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.vision_tower = Qwen2VisionTransformerPretrainedModel(**vision_config)
-
+        self.vision_tower = Qwen2VisionTransformerPretrainedModel(kwargs, **vision_config)
         if projection_head == "Pixel_Shuffle":
             self.multi_modal_projector = PixelShuffleMultiModalProjector(
                 image_newline_idx,
@@ -255,7 +255,6 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
                 image_data = Image.open(BytesIO(image_data))
                 image_data = resize_image(image_data)
                 pixel_values, image_grid_thw = self.processor.preprocess(image=image_data)
-                pixel_values = pixel_values.to(dtype=torch.bfloat16)
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
@@ -273,8 +272,10 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.cuda()
-        image_grid_thw = grid_thw.cuda()
+        infer_dtype = next(self.parameters()).dtype
+        pixel_values, image_grid_thw = self.move_to_infer_device(
+            imgs, grid_thw, dtype=(infer_dtype, None)
+        )
 
         all_img_embeds = self.forward(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
 

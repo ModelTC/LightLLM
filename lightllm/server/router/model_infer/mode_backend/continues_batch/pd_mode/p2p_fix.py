@@ -12,6 +12,8 @@ from torch._namedtensor_internals import check_serializing_named_tensor
 from torch.multiprocessing.reductions import storage_from_cache, shared_cache, StorageWeakRef
 from torch.multiprocessing.reductions import reduce_nested_tensor, reduce_sparse_tensor, rebuild_tensor
 
+from lightllm.platform import get_backend
+
 
 def p2p_fix_rebuild_cuda_tensor(
     tensor_cls,
@@ -35,7 +37,7 @@ def p2p_fix_rebuild_cuda_tensor(
     # 得到的指针可能不是接收进程当前上下文设备可以访问的，所以在这里
     # hack 修改了使用的 storage_device，这样后续tritonkernel同时
     # 访问几张显卡上的数据，进行p2p操作就不会出问题了。
-    storage_device = torch.cuda.current_device()
+    storage_device = get_backend().runtime.current_device()
     # If storage_handle is None, storage points to nullptr.
     if storage_handle is None or storage_size_bytes == 0:
         storage = storage_cls(0, dtype=dtype, device=storage_device, _internal=True)

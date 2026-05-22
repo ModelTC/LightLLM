@@ -373,7 +373,7 @@ class InferenceContext:
 
         assert len(b_req_idx) == len(big_page_buffer_ids)
         big_page_buffer_ids = torch.tensor(big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu")
-        big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
+        big_page_buffer_ids = big_page_buffer_ids.to(device=b_req_idx.device, non_blocking=True)
 
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 

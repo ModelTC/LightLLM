@@ -14,6 +14,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_sin = None
 
     def init_some_extra_state(self, model):
+        self.target_device = model.target_device
         rope_scaling = model.config.get("rope_scaling", {})
         self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
         InferStateInfo.init_some_extra_state(self, model)
@@ -63,11 +64,11 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         # 没有任何图片
         if image_start_num == 0:
             return self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
-        b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").cuda(non_blocking=True)
-        b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
-        b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)
-        b_image_start_num = torch.tensor(b_image_start_num, device="cpu").cuda(non_blocking=True)
-        b_image_len = torch.tensor(b_image_len, device="cpu").cuda(non_blocking=True)
+        b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").to(device=self.target_device, non_blocking=True)
+        b_image_thwd = torch.tensor(b_image_thwd, device="cpu").to(device=self.target_device, non_blocking=True)  # image_num x 4
+        b_image_nums = torch.tensor(b_image_nums, device="cpu").to(device=self.target_device, non_blocking=True)
+        b_image_start_num = torch.tensor(b_image_start_num, device="cpu").to(device=self.target_device, non_blocking=True)
+        b_image_len = torch.tensor(b_image_len, device="cpu").to(device=self.target_device, non_blocking=True)
         position_ids = self.position_ids.unsqueeze(0).expand(3, -1).contiguous()
         get_mrope_position_triton(
             b_image_start_idx=b_image_start_idx,

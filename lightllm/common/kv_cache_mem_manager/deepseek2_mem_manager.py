@@ -60,7 +60,7 @@ class Deepseek2MemoryManager(MemoryManager):
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        mem_indexes_gpu = pin_mem_indexes.to(device=self.target_device, non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         mla_page_io(
             mem_indexes=mem_indexes_gpu,
@@ -81,7 +81,7 @@ class Deepseek2MemoryManager(MemoryManager):
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        mem_indexes_gpu = pin_mem_indexes.to(device=self.target_device, non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for mem in dp_mems:
             mla_page_io(

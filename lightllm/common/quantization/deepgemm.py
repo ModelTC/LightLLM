@@ -61,8 +61,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
-        device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(weight.to(device=output.weight.device), self.block_size)
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -111,10 +110,12 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         weight_scale_out_dim = sum(weight_scale_out_dims)
         weight_scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight = torch.empty(
+            expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn
+        ).to(device=self.target_device, non_blocking=True)
         weight_scale = torch.empty(
             expert_prefix + (weight_scale_out_dim, weight_scale_in_dim), dtype=torch.float32
-        ).cuda(device_id)
+        ).to(device=self.target_device, non_blocking=True)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,

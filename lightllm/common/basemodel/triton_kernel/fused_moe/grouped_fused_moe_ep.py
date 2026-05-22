@@ -150,7 +150,7 @@ def fused_experts_impl(
 
             num_recv_tokens_per_expert = torch.tensor(
                 num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
-            ).cuda(non_blocking=True)
+            ).to(device=hidden_states.device, non_blocking=True)
 
             expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
 

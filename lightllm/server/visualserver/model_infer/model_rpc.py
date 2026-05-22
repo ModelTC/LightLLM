@@ -14,6 +14,7 @@ from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.vit.model import VisionTransformer
+from lightllm.platform import get_backend
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
@@ -72,6 +73,7 @@ class VisualModelRpcServer(rpyc.Service):
                 "quant_type": kvargs["quant_type"],
                 "quant_cfg": kvargs["quant_cfg"],
                 "max_batch_size": kvargs["max_batch_size"],
+                "device_id": self.device_id,
             }
             self.model_type = model_cfg["model_type"]
             if self.model_type == "qwen":
@@ -110,7 +112,7 @@ class VisualModelRpcServer(rpyc.Service):
                 raise Exception(f"can not support {self.model_type} now")
 
             self.model.load_model(weight_dir)
-            self.model = self.model.cuda()
+            self.model.setup_device(device_id=self.device_id)
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -236,7 +238,7 @@ class VisualModelRpcServer(rpyc.Service):
         """
         任务处理循环: 从队列中取出任务, 执行完成后通知调用者
         """
-        torch.cuda.set_device(self.device_id)
+        get_backend().runtime.set_device(self.device_id)
         while True:
             try:
                 # 从队列获取任务, 阻塞等待
@@ -253,7 +255,6 @@ class VisualModelRpcServer(rpyc.Service):
 
                 # 执行任务: 调用父类的forward方法处理图像
                 all_img_embeds, uuids, valid_ids = self._forward(images)
-                all_img_embeds = all_img_embeds.to(torch.device("cuda"))
 
                 if self.is_visual_only_mode:
                     self._store_to_afs(all_img_embeds, valid_ids, images)
@@ -272,7 +273,7 @@ class VisualModelRpcServer(rpyc.Service):
                 self.cpu_embed_cache_client.copy_vision_to_cache(
                     embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
                 )
-            cuda_event = torch.cuda.Event()
+            cuda_event = get_backend().runtime.create_event()
             cuda_event.record()
             image.cuda_event = cuda_event
             self.store_queue.put(image)

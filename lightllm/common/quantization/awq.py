@@ -3,7 +3,7 @@ from typing import Any, Optional, Tuple, List
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
-from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -114,11 +114,15 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         out_dim = sum(out_dims)
         group_size = self.hf_quantization_config["group_size"]
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        weight = torch.empty(
+            expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32
+        ).to(device=self.target_device, non_blocking=True)
+        weight_scale = torch.empty(
+            expert_prefix + (in_dim // group_size, out_dim), dtype=dtype
+        ).to(device=self.target_device, non_blocking=True)
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
-        ).cuda(device_id)
+        ).to(device=self.target_device, non_blocking=True)
         weight_out_dims = [_out_dim // self.pack_factor for _out_dim in out_dims]
         weight_scale_out_dims = out_dims
         weight_zero_point_out_dims = weight_out_dims
@@ -144,9 +148,9 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         self.weight_scale_suffix = "scales"
         self.weight_zero_point_suffix = "qzeros"
         self.weight_suffix = "qweight"
-        self.g_idx = marlin_make_empty_g_idx(torch.device("cuda"))
-        self.g_idx_sort_indices = marlin_make_empty_g_idx(torch.device("cuda"))
-        self.workspace = marlin_make_workspace_new(torch.device("cuda"))
+        self.g_idx = marlin_make_empty_g_idx(self.target_device)
+        self.g_idx_sort_indices = marlin_make_empty_g_idx(self.target_device)
+        self.workspace = marlin_make_workspace_new(self.target_device)
         self.vllm_quant_type = TYPE_MAP[self.nbits]
         self.has_weight_scale = True
         self.has_weight_zero_point = True
@@ -215,11 +219,13 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(
             expert_prefix + (in_dim // self.tile_size, out_dim * self.tile_size // self.pack_factor), dtype=torch.int32
-        ).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
+        ).to(device=self.target_device, non_blocking=True)
+        weight_scale = torch.empty(
+            expert_prefix + (in_dim // group_size, out_dim), dtype=dtype
+        ).to(device=self.target_device, non_blocking=True)
         weight_zero_point = torch.empty(
             expert_prefix + (in_dim // group_size, out_dim // self.pack_factor), dtype=torch.int32
-        ).cuda(device_id)
+        ).to(device=self.target_device, non_blocking=True)
         weight_out_dims = [_out_dim * self.tile_size // self.pack_factor for _out_dim in out_dims]
         weight_scale_out_dims = out_dims
         weight_zero_point_out_dims = [_out_dim // self.pack_factor for _out_dim in out_dims]
@@ -239,9 +245,8 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         assert self.hf_quantization_config is not None, "hf_quantization_config is not set"
         if weight is None:
             return
-        device_id = get_current_device_id()
         repack_weight = vllm_ops.awq_marlin_repack(
-            weight.cuda(device_id),
+            weight.to(device=self.target_device, non_blocking=True),
             size_k=weight.shape[0],
             size_n=weight.shape[1] * self.pack_factor,
             num_bits=self.hf_quantization_config["bits"],
@@ -255,9 +260,8 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         if weight_scale is None:
             return
         group_size = self.hf_quantization_config["group_size"]
-        device_id = get_current_device_id()
         repack_weight_scale = marlin_permute_scales(
-            weight_scale.cuda(device_id),
+            weight_scale.to(device=self.target_device, non_blocking=True),
             size_k=weight_scale.shape[0] * group_size,
             size_n=weight_scale.shape[1],
             group_size=self.hf_quantization_config["group_size"],
@@ -269,9 +273,8 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_zero_point is None:
             return
-        device_id = get_current_device_id()
         repack_weight_zero_point = awq_to_marlin_zero_points(
-            weight_zero_point.cuda(device_id),
+            weight_zero_point.to(device=self.target_device, non_blocking=True),
             size_k=weight_zero_point.shape[0],
             size_n=weight_zero_point.shape[1] * self.pack_factor,
             num_bits=self.hf_quantization_config["bits"],
@@ -290,7 +293,7 @@ def is_awq_marlin_compatible(quantization_config: dict[str, Any]):
     group_size = quantization_config.get("group_size")
     zero_point = quantization_config.get("zero_point")
 
-    if not torch.cuda.is_available():
+    if not get_backend().runtime.is_available():
         return False
 
     if quant_method != "awq":

@@ -104,7 +104,7 @@ class NormalMemOperator(BaseMemManagerOperator):
 
         # 一次性传输所有层
         kv_trans_for_dp(
-            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
+            input_mems=self.mem_ptrs_tensor.to(device=self.mem_manager.target_device, non_blocking=True),
             input_idx=move_token_indexes,
             input_dp_idx=token_dp_indexes,
             output=self.mem_manager.kv_buffer,

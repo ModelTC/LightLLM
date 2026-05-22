@@ -14,6 +14,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.vit.triton_kernel.flashattention_nopad import flash_attention_fwd
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import WhisperFeatureExtractor
+from lightllm.models.visual_utils import VisualDeviceMixin
 
 QWEN3_OMNI_CONV_CHUNKSIZE = int(os.getenv("LIGHTLLM_QWEN3_OMNI_CONV_CHUNKSIZE", 200))
 
@@ -146,7 +147,7 @@ class SinusoidsPositionEmbedding(nn.Module):
         return self.positional_embedding[:seqlen, :]
 
 
-class Qwen3OmniMoeAudioEncoder(nn.Module):
+class Qwen3OmniMoeAudioEncoder(VisualDeviceMixin, nn.Module):
     def __init__(
         self,
         kvargs,
@@ -347,7 +348,14 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             else:
                 raise ValueError(f"cannot read audio which type is {type(item)}!")
 
-            input_features, feature_attention_mask = self.processor._preprocess(audio, return_attention_mask=True)
+            input_features, feature_attention_mask = self.processor._preprocess(
+                audio, return_attention_mask=True
+            )
+            input_features, feature_attention_mask = self.move_to_infer_device(
+                input_features,
+                feature_attention_mask,
+                dtype=(self.data_type, torch.int32),
+            )
             if feature_attention_mask is not None:
                 audio_feature_lengths = torch.sum(feature_attention_mask, dim=1)
                 input_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)

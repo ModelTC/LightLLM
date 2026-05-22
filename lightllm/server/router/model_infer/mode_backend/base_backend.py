@@ -6,6 +6,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.platform import get_backend
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
@@ -81,6 +82,8 @@ class ModeBackend:
         self._radix_tree_merge_counter: int = 0
         self._enable_radix_tree_timer_merge: bool = enable_radix_tree_timer_merge()
         self._radix_tree_merge_update_delta: int = get_radix_tree_merge_update_delta()
+
+        self.platform_backend = get_backend()
         pass
 
     def init_model(self, kvargs):
@@ -279,7 +282,7 @@ class ModeBackend:
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        torch.cuda.set_device(get_current_device_id())
+        self.platform_backend.runtime.set_device(get_current_device_id())
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,
@@ -481,7 +484,7 @@ class ModeBackend:
                                 )
                                 # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
+                                self.platform_backend.runtime.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -807,7 +810,7 @@ class ModeBackend:
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
                 key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
+            ).to(device=logits.device, non_blocking=True)
 
         scatter_token(
             next_token_ids=next_token_ids,

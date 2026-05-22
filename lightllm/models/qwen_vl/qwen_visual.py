@@ -18,6 +18,7 @@ from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
+from lightllm.models.visual_utils import VisualDeviceMixin
 
 
 def get_abs_pos(abs_pos, tgt_size):
@@ -330,7 +331,7 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class QWenVisionTransformer(nn.Module):
+class QWenVisionTransformer(VisualDeviceMixin, nn.Module):
     def __init__(
         self,
         image_size: int,

@@ -16,7 +16,7 @@ from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
-
+from lightllm.models.visual_utils import VisualDeviceMixin
 
 class Qwen2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -135,7 +135,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
         return x
 
 
-class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
+class Qwen2_5_VisionTransformerPretrainedModel(VisualDeviceMixin, nn.Module):
     def __init__(
         self,
         kvargs,
@@ -286,23 +286,22 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
         rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
-        rotary_cos = rotary_cos.to("cuda", non_blocking=True)
-        rotary_sin = rotary_sin.to("cuda", non_blocking=True)
+        rotary_cos, rotary_sin = self.move_to_infer_device(rotary_cos, rotary_sin)
 
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=torch.int32
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0).to("cuda", non_blocking=True)
+        cu_seqlens = self.move_to_infer_device(F.pad(cu_seqlens, (1, 0), value=0))
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
 
         cu_window_seqlens = torch.tensor(
             cu_window_seqlens,
-            device=hidden_states.device,
+            device=self.infer_device,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens).to("cuda", non_blocking=True)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
         max_window_seqlen = (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max().item()
 
         seq_len, _ = hidden_states.size()
@@ -401,8 +400,9 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
-        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
+        pixel_values, image_grid_thw = self.move_to_infer_device(
+            imgs, grid_thw, dtype=(self.data_type, None)
+        )
 
         all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 

@@ -6,7 +6,8 @@ import torch.multiprocessing as mp
 import collections
 import queue
 import pickle
-from typing import List, Dict, Union, Deque, Optional
+from typing import Any, List, Dict, Union, Deque, Optional
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import (
@@ -50,7 +51,7 @@ def _init_env(
     torch.backends.cudnn.enabled = False
 
     try:
-        torch.cuda.set_device(device_id)
+        get_backend().runtime.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
 
         task_out_queue.put("proc_start")
@@ -103,7 +104,8 @@ class _DecodeTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
         )
-        self.copy_cuda_stream = torch.cuda.Stream()
+        self.platform_backend = get_backend()
+        self.copy_cuda_stream = self.platform_backend.runtime.create_stream()
         self.transporter = NixlKVTransporter(
             node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
         )
@@ -202,7 +204,7 @@ class _DecodeTransModule:
     def accept_peer_task_loop(
         self,
     ):
-        torch.cuda.set_device(self.device_id)
+        self.platform_backend.runtime.set_device(self.device_id)
         while True:
             if len(self.waiting_dict) == 0:
                 time.sleep(0.001)
@@ -278,7 +280,7 @@ class _DecodeTransModule:
 
     @log_exception
     def read_peer_kv_loop(self):
-        torch.cuda.set_device(self.device_id)
+        self.platform_backend.runtime.set_device(self.device_id)
         while True:
             page_index = self.page_index_queue.get()
             local_trans_task = self.read_peer_kv_queue.get()
@@ -328,11 +330,11 @@ class _DecodeTransModule:
 
     @log_exception
     def read_page_to_mems_loop(self):
-        torch.cuda.set_device(self.device_id)
+        self.platform_backend.runtime.set_device(self.device_id)
         while True:
             trans_task: NIXLChunckedTransTask = self.ready_page_task_queue.get()
             # 将数据写回 mem manger
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
+            with self.platform_backend.runtime.stream(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
                     mem_indexes=trans_task.mem_indexes,
@@ -341,7 +343,7 @@ class _DecodeTransModule:
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = self.platform_backend.runtime.create_event()
                 sync_event.record()
 
             self.success_queue.put((sync_event, trans_task))
@@ -349,11 +351,11 @@ class _DecodeTransModule:
 
     @log_exception
     def success_loop(self):
-        torch.cuda.set_device(self.device_id)
+        self.platform_backend.runtime.set_device(self.device_id)
         while True:
             sync_event, trans_task = self.success_queue.get()
             trans_task: NIXLChunckedTransTask = trans_task
-            sync_event: Optional[torch.cuda.Event] = sync_event
+            sync_event: Optional[Any] = sync_event
             # 兼容传输kv 数量为0的时候， sync_event 为 None的情况。
             if sync_event is not None:
                 sync_event.synchronize()
@@ -370,7 +372,7 @@ class _DecodeTransModule:
 
     @log_exception
     def fail_loop(self):
-        torch.cuda.set_device(self.device_id)
+        self.platform_backend.runtime.set_device(self.device_id)
         while True:
             trans_task: NIXLChunckedTransTask = self.failed_queue.get()
 

@@ -18,7 +18,7 @@ class FuseMoeMarlin(FuseMoeTriton):
             marlin_make_workspace_new,
         )
 
-        return marlin_make_workspace_new(torch.device("cuda"), 4)
+        return marlin_make_workspace_new(self.quant_method.target_device, 4)
 
     def _fused_experts(
         self,

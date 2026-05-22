@@ -254,25 +254,78 @@ def get_model_architectures(model_path: str):
         return "unknown_architecture"
 
 
+def _get_vocab_size_from_autoconfig(model_path: str) -> Optional[int]:
+    try:
+        from transformers import AutoConfig
+
+        cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        text_cfg = getattr(cfg, "text_config", None)
+        if text_cfg is not None:
+            vocab_size = getattr(text_cfg, "vocab_size", None)
+            if vocab_size is not None:
+                return int(vocab_size)
+        vocab_size = getattr(cfg, "vocab_size", None)
+        if vocab_size is not None:
+            return int(vocab_size)
+    except Exception as e:
+        logger.warning(f"cannot get vocab_size from AutoConfig for {model_path}: {e}")
+    return None
+
+
+def _get_vocab_size_from_tokenizer(model_path: str) -> Optional[int]:
+    try:
+        from lightllm.server.tokenizer import get_tokenizer
+
+        start_args = get_env_start_args()
+        tokenizer = get_tokenizer(
+            model_path,
+            tokenizer_mode=start_args.tokenizer_mode,
+            trust_remote_code=start_args.trust_remote_code,
+        )
+        vocab_size = getattr(tokenizer, "vocab_size", None)
+        if vocab_size is not None:
+            return int(vocab_size)
+        inner = getattr(tokenizer, "tokenizer", None)
+        if inner is not None:
+            vocab_size = getattr(inner, "vocab_size", None)
+            if vocab_size is not None:
+                return int(vocab_size)
+    except Exception as e:
+        logger.warning(f"cannot get vocab_size from tokenizer for {model_path}: {e}")
+    return None
+
+
 def get_vocab_size(model_path: str):
     try:
         config_json = get_config_json(model_path)
         # qwen3-omini special
         if "thinker_config" in config_json:
             config_json = config_json["thinker_config"]
-        if "llm_config" in config_json:
-            vocab_size = int(config_json["llm_config"]["vocab_size"])
+        if "llm_config" in config_json and config_json["llm_config"].get("vocab_size") is not None:
+            return int(config_json["llm_config"]["vocab_size"])
+
+        vocab_size = _get_config_llm_keyvalue(model_path=model_path, key_name=["vocab_size"])
+        if vocab_size is not None:
+            return int(vocab_size)
+
+        if "vocab_size" in config_json and config_json["vocab_size"] is not None:
+            return int(config_json["vocab_size"])
+
+        vocab_size = _get_vocab_size_from_autoconfig(model_path)
+        if vocab_size is not None:
             return vocab_size
-        elif "text_config" in config_json:
-            vocab_size = int(config_json["text_config"]["vocab_size"])
+
+        vocab_size = _get_vocab_size_from_tokenizer(model_path)
+        if vocab_size is not None:
+            logger.warning(
+                f"vocab_size missing in config.json for {model_path}, "
+                f"using tokenizer vocab_size={vocab_size}"
+            )
             return vocab_size
-        vocab_size = config_json["vocab_size"]
-        if not isinstance(vocab_size, int):
-            vocab_size = int(vocab_size)
-        return vocab_size
-    except:
-        logger.error("can not get vocab_size from config.json, return 0")
-        return 0
+    except Exception as e:
+        logger.error(f"can not get vocab_size from {model_path}: {e}")
+    logger.error(f"can not get vocab_size from config.json, return 0 (model_path={model_path})")
+    return 0
 
 
 def get_dtype(model_path: str):

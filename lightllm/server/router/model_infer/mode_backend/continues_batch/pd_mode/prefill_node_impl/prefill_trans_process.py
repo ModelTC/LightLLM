@@ -8,6 +8,7 @@ import torch.multiprocessing as mp
 from torch.distributed import TCPStore
 from datetime import timedelta
 from typing import List, Dict, Union
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import KVMoveTask, PDTransJoinInfo, PDTransLeaveInfo, KVMoveTaskGroup
@@ -42,7 +43,7 @@ def _handle_kvmove_task(
             else:
                 cur_mem.send_to_decode_node(move_tasks, mem_managers, dp_size_in_node, connect_id_to_comm[connect_id])
             logger.info(f"trans finished: {move_tasks[0].to_prefill_log_info()} move len: {total_move_kv_len}")
-        torch.cuda.synchronize()
+        get_backend().runtime.synchronize()
         logger.info(
             f"trans cost time: {(time.time() - start)},"
             f"move_total_kv_len: {total_move_kv_len}, {move_tasks[0].to_prefill_log_info()}"
@@ -67,7 +68,7 @@ def _handle_decode_join(
         result_list = []
 
         def async_connect():
-            torch.cuda.set_device(node_info.prefill_device_id)
+            get_backend().runtime.set_device(node_info.prefill_device_id)
             group = StatelessP2PProcessGroup.create(src_id=src_id, dest_id=dest_id, is_server=True, store=store)
             comm = PyNcclCommunicator(group, node_info.prefill_device_id)
             result_list.append(comm)
@@ -109,7 +110,7 @@ def _init_env(
     )
 
     try:
-        torch.cuda.set_device(device_id)
+        get_backend().runtime.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
         master_store = TCPStore(
             host_name=store_ip, port=store_port, is_master=True, use_libuv=True, timeout=timedelta(seconds=30)

@@ -84,13 +84,13 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         beta_fast = rope_scaling.get("beta_fast", 32.0)
         beta_slow = rope_scaling.get("beta_slow", 1.0)
 
-        pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)
+        pos_freqs = base ** (torch.arange(0, dim, 2).float().to(device=self.target_device) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scale * pos_freqs)
 
         low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings)
         inv_freq_mask = (
-            1 - linear_ramp_mask(low, high, dim // 2).float().cuda()
+            1 - linear_ramp_mask(low, high, dim // 2).float().to(device=self.target_device)
         ) * extrapolation_factor  # Get n-d rotational scaling corrected for extrapolation
         inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
 
@@ -103,7 +103,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         t = torch.arange(max_seq_len_cached, device="cuda", dtype=torch.float32)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        self._cos_cached = (freqs.cos() * _mscale).to(self.data_type).cuda()
-        self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).cuda()
+        self._cos_cached = (freqs.cos() * _mscale).to(self.data_type).to(device=self.target_device)
+        self._sin_cached = (freqs.sin() * _mscale).to(self.data_type).to(device=self.target_device)
 
         return

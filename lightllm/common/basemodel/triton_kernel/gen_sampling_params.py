@@ -123,6 +123,8 @@ def _token_id_counter_update_kernel(
     next_token_ids_ptr,
     mask_ptr,
     batch_size,
+    vocab_size,
+    num_req_rows,
     HAS_MASK: tl.constexpr,
     BLOCK: tl.constexpr,
     OLD_VERSION_TRITON: tl.constexpr,
@@ -134,22 +136,21 @@ def _token_id_counter_update_kernel(
 
     req_idx = tl.load(b_req_idx_ptr + offs, mask=loc_mask, other=0)
     token_ids = tl.load(next_token_ids_ptr + offs, mask=loc_mask, other=0)
+    valid = (token_ids >= 0) & (token_ids < vocab_size) & (req_idx >= 0) & (req_idx < num_req_rows)
 
     if HAS_MASK:
         mask = tl.load(mask_ptr + offs, mask=loc_mask, other=False)
         if OLD_VERSION_TRITON:
             mask = mask != 0
-        tl.atomic_add(
-            req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,
-            1,
-            mask=loc_mask & mask,
-        )
+        update_mask = loc_mask & mask & valid
     else:
-        tl.atomic_add(
-            req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,
-            1,
-            mask=loc_mask,
-        )
+        update_mask = loc_mask & valid
+
+    tl.atomic_add(
+        req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,
+        1,
+        mask=update_mask,
+    )
     return
 
 
@@ -161,6 +162,13 @@ def update_req_to_token_id_counter(
     mask: torch.Tensor = None,
 ):
     batch_size = b_req_idx.shape[0]
+    vocab_size = req_to_out_token_id_counter.shape[1]
+    num_req_rows = req_to_out_token_id_counter.shape[0]
+    if vocab_size <= 0 or num_req_rows <= 0:
+        raise RuntimeError(
+            f"invalid req_to_out_token_id_counter shape {tuple(req_to_out_token_id_counter.shape)}; "
+            "check get_vocab_size(model_dir) for this checkpoint (gemma3 config.json may omit vocab_size)"
+        )
     BLOCK = 256
     has_mask = mask is not None
     _token_id_counter_update_kernel[(triton.cdiv(batch_size, BLOCK),)](
@@ -171,6 +179,8 @@ def update_req_to_token_id_counter(
         next_token_ids_ptr=next_token_ids,
         mask_ptr=mask,
         batch_size=batch_size,
+        vocab_size=vocab_size,
+        num_req_rows=num_req_rows,
         HAS_MASK=has_mask,
         BLOCK=BLOCK,
         OLD_VERSION_TRITON=triton.__version__ < "3.2.0",

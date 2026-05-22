@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
+from lightllm.models.visual_utils import VisualDeviceMixin
 from lightllm.server.multimodal_params import AudioItem
 
 
@@ -79,7 +80,14 @@ class WhisperProcessor(ProcessorMixin):
         return self.tokenizer.get_prompt_ids(text, return_tensors=return_tensors)
 
 
-class WhisperAudioModel:
+class WhisperAudioModel(VisualDeviceMixin):
+
+    def _device_module_attrs(self):
+        return ("audio",)
+
+    def _device_tensor_dict_attrs(self):
+        return ("projector_weights",)
+
     def __init__(self, kvargs):
         self.max_seconds = 30
         self.sampling_rate = 16000
@@ -90,19 +98,11 @@ class WhisperAudioModel:
         else:
             self.data_type = torch.float16
 
-    def cuda(self):
-        self.audio = self.audio.cuda()
-        for k, v in self.projector_weights.items():
-            self.projector_weights[k] = v.cuda()
-        self.device = torch.device("cuda")
-        return self
-
     def load_model(self, weight_dir, config):
         self.audio_processor = WhisperProcessor.from_pretrained(weight_dir)
         from lightllm.models.whisper.modeling_whisper import WhisperEncoder, WhisperConfig
 
         self.audio = WhisperEncoder(WhisperConfig(**config["audio_config"])).to(self.data_type)
-        self.device = torch.device("cpu")
         self.projector_weights = {}
         self.load_weight(weight_dir)
 
@@ -133,9 +133,11 @@ class WhisperAudioModel:
         assert "mlp2.3.weight" in self.projector_weights
 
     def forward(self, audio_values, audio_lens_after_cnn):
-        audio_values = audio_values.to(self.data_type).to(device=self.device)
+        audio_values = self.move_to_infer_device(audio_values.to(self.data_type))
         audio_values = audio_values.squeeze(1)
-        audio_lens_after_cnn = torch.tensor(audio_lens_after_cnn).cuda()
+        audio_lens_after_cnn = torch.tensor(
+            audio_lens_after_cnn, device=self.infer_device, dtype=torch.long
+        )
         max_len_in_batch = torch.max(audio_lens_after_cnn).item()
 
         padding_mask = torch.ones([audio_values.size(0), max_len_in_batch]).to(

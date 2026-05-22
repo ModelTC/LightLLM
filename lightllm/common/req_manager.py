@@ -2,6 +2,8 @@ import torch
 import collections
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
+from lightllm.platform import get_backend
+from lightllm.utils.device_utils import get_target_device
 from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager
 from typing import List, Optional, TYPE_CHECKING
@@ -62,16 +64,17 @@ class _ReqLinkedList:
 
 class ReqManager:
     def __init__(self, max_request_num, max_sequence_length, mem_manager: MemoryManager):
+        self.target_device = get_target_device()
         # 这里对最大请求数量的管理在默认上多申请了一个，主要是 index 为 max_request_num 代表
         # 的这个请求管理 id， 主要是为了兼容 DP 运行模式下，让各个 DP 能 padding 到 DP 中最大
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
         self.req_list = _ReqLinkedList(max_request_num)
         self.req_to_token_indexs = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
+            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device=self.target_device
         )
         self.mem_manager = mem_manager
-        self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
+        self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num, device=self.target_device)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 
@@ -109,25 +112,32 @@ class ReqSamplingParamsManager:
     lightllm/server/router/model_infer/mode_backend/generic_post_process.py 文件中的使用方式。
     """
 
-    def __init__(self, max_request_num):
+    def __init__(self, max_request_num, device: torch.device):
+        self.target_device = device
         # mode ["cpu_counter", "pin_mem_counter", "gpu_counter"]
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
-        self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
-        self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        model_dir = get_env_start_args().model_dir
+        self.vocab_size = get_vocab_size(model_dir)
+        if self.vocab_size <= 0:
+            raise RuntimeError(
+                f"invalid vocab_size={self.vocab_size} from model_dir={model_dir}; "
+                "cannot allocate penalty token counter (check config.json, AutoConfig, or tokenizer)"
+            )
+        self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device=self.target_device)
+        self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device=self.target_device)
+        self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device=self.target_device)
         self.req_to_next_token_ids = torch.zeros(
             (max_request_num + 1, 8),
             dtype=torch.int64,
-            device="cuda",
+            device=self.target_device,
         )
         self.req_to_exponential_decay_length_penalty = torch.zeros(
-            max_request_num + 1, dtype=torch.float32, device="cuda"
+            max_request_num + 1, dtype=torch.float32, device=self.target_device
         )
 
         if self.penalty_counter_mode == "gpu_counter":
             self.req_to_out_token_id_counter = torch.zeros(
-                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cuda"
+                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device=self.target_device
             )
         elif self.penalty_counter_mode == "pin_mem_counter":
             self.req_to_out_token_id_counter = torch.zeros(
@@ -163,11 +173,11 @@ class ReqSamplingParamsManager:
                     key="prompt_ids_for_penalty",
                     data=req.shm_req.get_prompt_ids_numpy(),
                     dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                ).to(device=self.target_device, non_blocking=True)
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
-                torch.cuda.current_stream().synchronize()
+                get_backend().runtime.current_stream().synchronize()
 
         return
 
@@ -223,9 +233,9 @@ class ReqSamplingParamsManager:
         )
 
         return (
-            p_token_ids_tensor.cuda(non_blocking=True),
-            p_token_counts_tensor.cuda(non_blocking=True),
-            p_cumsum_seq_len_tensor.cuda(non_blocking=True),
+            p_token_ids_tensor.to(device=self.target_device, non_blocking=True),
+            p_token_counts_tensor.to(device=self.target_device, non_blocking=True),
+            p_cumsum_seq_len_tensor.to(device=self.target_device, non_blocking=True),
         )
 
 
@@ -246,14 +256,14 @@ class ReqManagerForMamba(ReqManager):
             dtype=self.linear_config.conv_state_dtype,
             shape=self.linear_config.get_conv_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
+            device=self.target_device,
         )
         self.req_to_ssm_state = LayerCache(
             size=(max_request_num + 1) * (self.mtp_step + 1),
             dtype=self.linear_config.ssm_state_dtype,
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
+            device=self.target_device,
         )
         return
 

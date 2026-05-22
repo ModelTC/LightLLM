@@ -1,6 +1,7 @@
 import torch
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple
+from lightllm.utils.device_utils import get_target_device
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp, get_current_device_id
 
 
@@ -29,6 +30,7 @@ class BaseWeightTpl(BaseWeight):
         self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
         self.device_id_ = get_current_device_id()
         self.data_type_ = data_type
+        self.target_device = get_target_device(self.device_id_)
 
     def load_hf_weights(self, weights):
         raise NotImplementedError("load_hf_weights must implement this method")

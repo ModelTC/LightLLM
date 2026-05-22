@@ -1,5 +1,5 @@
 from lightllm.common.basemodel import PreAndPostLayerWeight
-from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, NoTpGEMMANormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights import EmbeddingWeight, LMHeadWeight, NoTpGEMMANormWeight
 
 
 class Gemma3PreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -14,12 +14,17 @@ class Gemma3PreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="language_model.model.embed_tokens.weight",
             data_type=self.data_type_,
         )
-        self.lm_head_weight_ = self.wte_weight_
+        self.lm_head_weight_ = LMHeadWeight(
+            dim=hidden_size,
+            vocab_size=vocab_size,
+            weight_name="language_model.model.embed_tokens.weight",
+            data_type=self.data_type_,
+            embedding_weight=self.wte_weight_,
+        )
 
         self.final_norm_weight_ = NoTpGEMMANormWeight(
             dim=hidden_size,
             weight_name="language_model.model.norm.weight",
             data_type=self.data_type_,
-            bias_name=None,
         )
         return

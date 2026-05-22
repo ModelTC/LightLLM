@@ -9,6 +9,8 @@ import socket
 import threading
 from typing import TYPE_CHECKING, Callable
 
+from lightllm.platform import get_backend
+from lightllm.utils.device_utils import get_target_device
 from lightllm.utils.log_utils import init_logger
 
 if TYPE_CHECKING:
@@ -64,29 +66,29 @@ def _flashinfer_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> N
         import torch
         import torch.distributed as dist
 
-        cuda_device = torch.device(f"cuda:{process_rank}")
-        torch.cuda.set_device(cuda_device)
+        target_device = get_target_device(process_rank)
+        get_backend().runtime.set_device(target_device)
         dist.init_process_group(
             "nccl",
             init_method=f"tcp://127.0.0.1:{init_tcp_port}",
             world_size=2,
             rank=process_rank,
-            device_id=cuda_device,
+            device_id=target_device,
         )
         try:
             gloo_process_group = dist.new_group([0, 1], backend="gloo")
             from lightllm.distributed.flashinfer_all_reduce import FlashInferAllReduce
 
-            flashinfer_all_reduce = FlashInferAllReduce(gloo_process_group, cuda_device)
+            flashinfer_all_reduce = FlashInferAllReduce(gloo_process_group, target_device)
             if flashinfer_all_reduce.disabled:
                 raise RuntimeError("FlashInferAllReduce disabled")
             if process_rank == 0:
-                input_tensor = torch.zeros(2, 64, device=cuda_device, dtype=torch.bfloat16)
+                input_tensor = torch.zeros(2, 64, device=target_device, dtype=torch.bfloat16)
             else:
-                input_tensor = torch.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
+                input_tensor = torch.ones(2, 64, device=target_device, dtype=torch.bfloat16)
             output_tensor = flashinfer_all_reduce.all_reduce(input_tensor)
             dist.barrier()
-            expected_reduced = torch.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
+            expected_reduced = torch.ones(2, 64, device=target_device, dtype=torch.bfloat16)
             if not torch.allclose(output_tensor, expected_reduced):
                 raise RuntimeError("FlashInfer allreduce value mismatch")
         finally:
@@ -102,29 +104,29 @@ def _symm_mem_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> Non
         import torch
         import torch.distributed as dist
 
-        cuda_device = torch.device(f"cuda:{process_rank}")
-        torch.cuda.set_device(cuda_device)
+        target_device = get_target_device(process_rank)
+        get_backend().runtime.set_device(target_device)
         dist.init_process_group(
             "nccl",
             init_method=f"tcp://127.0.0.1:{init_tcp_port}",
             world_size=2,
             rank=process_rank,
-            device_id=cuda_device,
+            device_id=target_device,
         )
         try:
             nccl_process_group = dist.new_group([0, 1], backend="nccl")
             from lightllm.distributed.symm_mem_all_reduce import SymmMemAllreduce
 
-            symm_mem_all_reduce = SymmMemAllreduce(nccl_process_group, cuda_device, dtype=torch.bfloat16)
+            symm_mem_all_reduce = SymmMemAllreduce(nccl_process_group, target_device, dtype=torch.bfloat16)
             if symm_mem_all_reduce.disabled:
                 raise RuntimeError("SymmMemAllreduce disabled")
             if process_rank == 0:
-                activation_tensor = torch.zeros(8, 32, device=cuda_device, dtype=torch.bfloat16)
+                activation_tensor = torch.zeros(8, 32, device=target_device, dtype=torch.bfloat16)
             else:
-                activation_tensor = torch.ones(8, 32, device=cuda_device, dtype=torch.bfloat16)
+                activation_tensor = torch.ones(8, 32, device=target_device, dtype=torch.bfloat16)
             symm_mem_all_reduce.all_reduce(activation_tensor)
             dist.barrier()
-            expected_reduced = torch.ones(8, 32, device=cuda_device, dtype=torch.bfloat16)
+            expected_reduced = torch.ones(8, 32, device=target_device, dtype=torch.bfloat16)
             if not torch.allclose(activation_tensor, expected_reduced):
                 raise RuntimeError("SymmMem allreduce value mismatch")
         finally:

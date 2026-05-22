@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from PIL import Image
 from typing import List
 from torchvision import transforms as T
+from lightllm.models.visual_utils import VisualDeviceMixin
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
 import torch.nn as nn
@@ -175,7 +176,7 @@ class Qwen2VLVisionBlock(nn.Module):
         return hidden_states
 
 
-class Qwen2VisionTransformerPretrainedModel(nn.Module):
+class Qwen2VisionTransformerPretrainedModel(VisualDeviceMixin, nn.Module):
     def __init__(
         self,
         kvargs,
@@ -213,7 +214,7 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         )
 
         head_dim = self.embed_dim // self.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2).cuda()
+        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
 
         self.blocks = nn.ModuleList(
             [
@@ -285,15 +286,14 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
     def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         hidden_states = self.patch_embed(hidden_states)
         rotary_cos, rotary_sin = self.rot_pos_emb(grid_thw)
-        rotary_cos = rotary_cos.to("cuda", non_blocking=True)
-        rotary_sin = rotary_sin.to("cuda", non_blocking=True)
+        rotary_cos, rotary_sin = self.move_to_infer_device(rotary_cos, rotary_sin)
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=torch.int32
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
-        cu_seqlens = cu_seqlens.to("cuda", non_blocking=True)
+        cu_seqlens = self.move_to_infer_device(cu_seqlens)
         for blk in self.blocks:
             hidden_states = blk(
                 hidden_states,
@@ -333,8 +333,9 @@ class Qwen2VisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
-        image_grid_thw = grid_thw.to("cuda", non_blocking=True)
+        pixel_values, image_grid_thw = self.move_to_infer_device(
+            imgs, grid_thw, dtype=(self.data_type, None)
+        )
 
         all_img_embeds = self.forward(pixel_values, grid_thw=image_grid_thw)
 

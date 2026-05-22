@@ -8,6 +8,7 @@ from typing import List, Union
 from torchvision import transforms as T
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, AutoTokenizer
+from lightllm.models.visual_utils import VisualDeviceMixin, default_infer_dtype
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
@@ -18,13 +19,13 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class InternVLVisionModel:
-    def __init__(self):
-        pass
+class InternVLVisionModel(VisualDeviceMixin):
+
+    def _device_module_attrs(self):
+        return ("model",)
 
     def load_model(self, weight_dir):
-        assert torch.cuda.is_available()
-        self.dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+        self.dtype = default_infer_dtype()
         self.config = json.load(open(os.path.join(weight_dir, "config.json")))
         # self.model = AutoModel.from_pretrained(
         #     weight_dir,
@@ -38,11 +39,8 @@ class InternVLVisionModel:
         self.model = InternVLChatModel.from_pretrained(
             weight_dir, config=cfg, torch_dtype=self.dtype, language_model="fake_language_model"
         )
-        self.model.eval().cuda()
+        self.model.eval()
         self.load_image_func = get_load_image_func(weight_dir)
-
-    def cuda(self):
-        return self
 
     def encode(self, images: List[ImageItem]):
         img_tensors = []
@@ -68,7 +66,7 @@ class InternVLVisionModel:
             return None
 
         imgs = torch.cat(img_tensors, dim=0)
-        pixel_values = imgs.cuda().to(dtype=self.dtype)
+        pixel_values = self.move_to_infer_device(imgs, dtype=self.dtype)
         all_img_embeds = self.model.extract_feature(pixel_values)
 
         return all_img_embeds, uuids, valid_ids

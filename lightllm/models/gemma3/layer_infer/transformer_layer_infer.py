@@ -12,10 +12,8 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
-        self.tp_k_head_num_ = network_config["num_key_value_heads"]
-        self.tp_v_head_num_ = network_config["num_key_value_heads"]
         self.eps_ = 1e-6
-        self.head_dim_ = 256
+        self.head_dim_ = network_config.get("head_dim", self.head_dim_)
         self.sliding_window_pattern = 6
         return
 

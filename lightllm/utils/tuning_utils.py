@@ -5,6 +5,7 @@ import multiprocessing as mp
 from multiprocessing.pool import Pool
 from multiprocessing.pool import util, worker
 from typing import Callable, Any, Dict, List
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.watchdog_utils import Watchdog
 
@@ -33,7 +34,7 @@ def run_func(func, args):
 def mp_tuning(func, args: Dict[str, Any]):
     # 修复 pool 中的进程无法启动子进程进行 kernel tuning 的问题
     Pool._repopulate_pool_static = fix_repopulate_pool_static
-    device_count = torch.cuda.device_count()
+    device_count = get_backend().runtime.device_count()
 
     with mp.Pool(processes=device_count) as pool:
         tasks = []

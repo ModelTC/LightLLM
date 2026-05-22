@@ -102,7 +102,7 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
                 scales=weights[self._down_scales_name],
                 dtype=torch.bfloat16,
             )[:, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :]
-            self.w2 = (self._cuda(w2.transpose(1, 2)), None)
+            self.w2 = (self._to_device(w2.transpose(1, 2)), None)
 
         if (
             weights.get(self._gate_up_blocks_name, None) is not None
@@ -113,17 +113,17 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
                 scales=weights[self._gate_up_scales_name],
                 dtype=torch.bfloat16,
             )[:, :, self.split_inter_size * self.tp_rank_ * 2 : self.split_inter_size * (self.tp_rank_ + 1) * 2]
-            self.w1 = (self._cuda(w1.transpose(1, 2)), None)
+            self.w1 = (self._to_device(w1.transpose(1, 2)), None)
 
         if weights.get(self._gate_up_bias_name, None) is not None:
             w1_bias = weights[self._gate_up_bias_name][
                 :, self.split_inter_size * self.tp_rank_ * 2 : self.split_inter_size * (self.tp_rank_ + 1) * 2
             ]
-            self.w1_bias = self._cuda(w1_bias)
+            self.w1_bias = self._to_device(w1_bias)
 
         if weights.get(self._down_bias_name, None) is not None:
             w2_bias = weights[self._down_bias_name]
-            self.w2_bias = self._cuda(w2_bias)
+            self.w2_bias = self._to_device(w2_bias)
 
     def verify_load(self):
         assert self.w1 is not None and self.w2 is not None
@@ -188,9 +188,9 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         import math
 
         # Check if blocks and scales are on CPU, and move to GPU if so
-        if not blocks.is_cuda and torch.cuda.is_available():
-            blocks = blocks.cuda()
-            scales = scales.cuda()
+        if blocks.device != self.target_device:
+            blocks = blocks.to(self.target_device)
+            scales = scales.to(self.target_device)
 
         scales = scales.to(torch.int32) - 127  # that's because 128=2**7
 
@@ -227,5 +227,5 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         del blocks, scales, lut
         return out.transpose(1, 2).contiguous()
 
-    def _cuda(self, cpu_tensor):
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())
+    def _to_device(self, cpu_tensor: torch.Tensor) -> torch.Tensor:
+        return cpu_tensor.contiguous().to(device=self.target_device)

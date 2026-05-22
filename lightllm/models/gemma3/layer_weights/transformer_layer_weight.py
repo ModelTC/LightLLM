@@ -4,6 +4,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import NoTpGEMMANormWe
 
 
 class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
+    _HF_LAYER_PREFIX = "language_model.model.layers."
+
     def __init__(
         self,
         layer_num,
@@ -14,14 +16,31 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
 
+
+
     def _init_weight_names(self):
         super()._init_weight_names()
-        self._att_norm_weight_name = f"model.layers.{self.layer_num_}.input_layernorm.weight"
-        self._k_norm_weight_name = f"model.layers.{self.layer_num_}.self_attn.k_norm.weight"
-        self._q_norm_weight_name = f"model.layers.{self.layer_num_}.self_attn.q_norm.weight"
-        self._ffn_norm_weight_name = f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"
-        self._pre_feedforward_layernorm_name = f"model.layers.{self.layer_num_}.pre_feedforward_layernorm.weight"
-        self._post_feedforward_layernorm_name = f"model.layers.{self.layer_num_}.post_feedforward_layernorm.weight"
+        old = f"model.layers.{self.layer_num_}."
+        new = f"{self._HF_LAYER_PREFIX}{self.layer_num_}."
+        for attr in (
+            "_q_weight_name",
+            "_k_weight_name",
+            "_v_weight_name",
+            "_kv_weight_name",
+            "_o_weight_name",
+            "_gate_weight_name",
+            "_up_weight_name",
+            "_gate_up_weight_name",
+            "_down_weight_name",
+            "_att_norm_weight_name",
+            "_ffn_norm_weight_name",
+        ):
+            setattr(self, attr, getattr(self, attr).replace(old, new))
+        p = new
+        self._k_norm_weight_name = f"{p}self_attn.k_norm.weight"
+        self._q_norm_weight_name = f"{p}self_attn.q_norm.weight"
+        self._pre_feedforward_layernorm_name = f"{p}pre_feedforward_layernorm.weight"
+        self._post_feedforward_layernorm_name = f"{p}post_feedforward_layernorm.weight"
 
     def _init_ffn(self):
         self.gate_proj = ROWMMWeight(
@@ -66,22 +85,20 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_norm()
 
         self.k_norm_weight_ = NoTpGEMMANormWeight(
-            dim=self.head_dim_, weight_name=self._k_norm_weight_name, data_type=self.data_type_, bias_name=None
+            dim=self.head_dim, weight_name=self._k_norm_weight_name, data_type=self.data_type_
         )
         self.q_norm_weight_ = NoTpGEMMANormWeight(
-            dim=self.head_dim_, weight_name=self._q_norm_weight_name, data_type=self.data_type_, bias_name=None
+            dim=self.head_dim, weight_name=self._q_norm_weight_name, data_type=self.data_type_
         )
         self.pre_feedforward_layernorm_weight_ = NoTpGEMMANormWeight(
             dim=self.n_embed,
             weight_name=self._pre_feedforward_layernorm_name,
             data_type=self.data_type_,
-            bias_name=None,
         )
         self.post_feedforward_layernorm_weight_ = NoTpGEMMANormWeight(
             dim=self.n_embed,
             weight_name=self._post_feedforward_layernorm_name,
             data_type=self.data_type_,
-            bias_name=None,
         )
 
     def load_hf_weights(self, weights):

@@ -85,7 +85,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         return req_ids
 
     def infer_loop(self):
-        torch.cuda.set_device(get_current_device_id())
+        self.platform_backend.runtime.set_device(get_current_device_id())
         try:
             while True:
                 event_pack = self.overlap_event_manager.get_overlap_event_pack()
@@ -116,7 +116,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 if run_way.is_prefill():
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
-                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    g_infer_context.get_overlap_stream().wait_stream(self.platform_backend.runtime.current_stream())
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
@@ -125,7 +125,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 elif run_way.is_decode():
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
-                    g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    g_infer_context.get_overlap_stream().wait_stream(self.platform_backend.runtime.current_stream())
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
@@ -149,7 +149,7 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         run_reqs_num = len(run_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             if run_reqs_num > 0:
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
@@ -165,7 +165,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx[:run_reqs_num],
                     reqs=run_reqs,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = self.platform_backend.runtime.create_event()
                 sync_event.record()
 
         if run_reqs_num > 0:
@@ -175,7 +175,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
             # 第三阶段
             event_pack.notify_forward_and_wait_post_handle()
-            sync_event.synchronize()
+            self.platform_backend.runtime.synchronize()
             self._post_handle(
                 run_reqs=run_reqs,
                 next_token_ids=next_token_ids_cpu,
@@ -196,7 +196,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs, padded_req_num = padded_prepare_decode_inputs(req_objs=decode_reqs)
         model_input: ModelInput = model_input
         run_reqs_num = len(run_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             if run_reqs_num > 0:
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
@@ -207,7 +207,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=False,
                     mask_func=None,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = self.platform_backend.runtime.create_event()
                 sync_event.record()
 
         if run_reqs_num > 0:
@@ -244,7 +244,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             _,
         ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
@@ -277,7 +277,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 if g_infer_context.is_linear_att_mixed_model:
                     g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
 
-                sync_event = torch.cuda.Event()
+                sync_event = self.platform_backend.runtime.create_event()
                 sync_event.record()
 
         if (req_num0 + req_num1) > 0:
@@ -317,7 +317,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         model_input0: ModelInput = model_input0
         model_input1: ModelInput = model_input1
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
@@ -340,7 +340,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=False,
                     mask_func=None,
                 )
-                sync_event = torch.cuda.Event()
+                sync_event = self.platform_backend.runtime.create_event()
                 sync_event.record()
 
         if (req_num0 + req_num1) > 0:
@@ -371,7 +371,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         # main model prefill
         model_input, run_reqs, _ = padded_prepare_prefill_inputs(prefill_reqs)
         req_num = len(run_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
             b_has_out_cpu = model_input.b_prefill_has_output_cpu[0:req_num]
             logits = model_output.logits[0:req_num, :]
@@ -401,7 +401,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             if req_num > 0:
                 g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=b_req_idx, reqs=run_reqs)
 
-            sync_event = torch.cuda.Event()
+            sync_event = self.platform_backend.runtime.create_event()
             sync_event.record()
 
         if req_num > 0:
@@ -436,7 +436,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         b_mtp_index_cpu = model_input.b_mtp_index
         req_num = len(run_reqs)
 
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             mtp_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None
             if req_num > 0:
@@ -455,7 +455,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     key="b_req_mtp_start_loc",
                     data=b_req_mtp_start_loc,
                     dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                ).to(device=self.platform_backend.runtime.target_device(), non_blocking=True)
 
                 mtp_accept_len, accepted_index = self._verify_mtp_v2(
                     new_next_token_ids=next_token_ids,
@@ -471,7 +471,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     gpu_tensor=mtp_accept_len,
                 )
 
-            verify_event = torch.cuda.Event()
+            verify_event = self.platform_backend.runtime.create_event()
             verify_event.record()
 
             eagle_mem_indexes_cpu = self._draft_decode_func(
@@ -489,7 +489,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     mask=accepted_index == 1,
                 )
 
-            sync_event = torch.cuda.Event()
+            sync_event = self.platform_backend.runtime.create_event()
             sync_event.record()
 
         if req_num > 0:
@@ -596,7 +596,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
         g_infer_state_lock.release()
-        eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
+        eagle_mem_indexes = eagle_mem_indexes_cpu.to(device=next_token_ids.device, non_blocking=True)
 
         # process the draft model output
         for _step in range(self.mtp_step):
@@ -644,7 +644,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             run_reqs1,
             _,
         ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
@@ -708,7 +708,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 _b_req_idx = torch.cat((model_input0.b_req_idx[0:req_num0], model_input1.b_req_idx[0:req_num1]), dim=0)
                 g_infer_context.copy_linear_att_state_to_cache_buffer(b_req_idx=_b_req_idx, reqs=run_reqs)
 
-            sync_event = torch.cuda.Event()
+            sync_event = self.platform_backend.runtime.create_event()
             sync_event.record()
 
         if req_num0 + req_num1 > 0:
@@ -746,7 +746,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         all_next_token_ids = []
         b_mtp_index_cpu0 = model_input0.b_mtp_index
         b_mtp_index_cpu1 = model_input1.b_mtp_index
-        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+        with self.platform_backend.runtime.stream(g_infer_context.get_overlap_stream()):
 
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             logits0 = model_output0.logits
@@ -771,7 +771,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     key="b_req_mtp_start_loc",
                     data=b_req_mtp_start_loc,
                     dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                ).to(device=self.platform_backend.runtime.target_device(), non_blocking=True)
 
                 mtp_accept_len, accepted_index = self._verify_mtp_v2(
                     new_next_token_ids=next_token_ids,
@@ -788,7 +788,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
                 all_next_token_ids.append(next_token_ids)
 
-            verify_event = torch.cuda.Event()
+            verify_event = self.platform_backend.runtime.create_event()
             verify_event.record()
 
             eagle_mem_indexes_cpu = self._draft_decode_overlap_func(
@@ -810,7 +810,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     mask=accepted_index == 1,
                 )
-            sync_event = torch.cuda.Event()
+            sync_event = self.platform_backend.runtime.create_event()
             sync_event.record()
 
         if req_num0 + req_num1 > 0:
@@ -958,7 +958,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
         g_infer_state_lock.release()
-        eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
+        eagle_mem_indexes = eagle_mem_indexes_cpu.to(device=next_token_ids.device, non_blocking=True)
         eagle_mem_indexes0 = eagle_mem_indexes[0 : real_req_num0 * self.mtp_step]
         eagle_mem_indexes1 = eagle_mem_indexes[real_req_num0 * self.mtp_step : real_req_num * self.mtp_step]
 

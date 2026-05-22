@@ -1,6 +1,7 @@
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from lightllm.utils.device_utils import get_target_device
 from lightllm.utils.dist_utils import get_current_device_id
 from typing import Optional, List, Tuple
 
@@ -37,6 +38,7 @@ class QuantizationMethod(ABC):
 
         # 一些量化模式需要用到的额外量化参数，如awq量化
         self.hf_quantization_config = None
+        self.target_device = get_target_device(self.device_id_)
 
     @abstractmethod
     def quantize(
@@ -63,9 +65,14 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
+    def _ensure_target_device(self, device_id: int) -> None:
+        if device_id != self.device_id_:
+            raise ValueError(f"Device {device_id} is not the target device {self.device_id_}")
+
     def create_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int
     ) -> Tuple[WeightPack, List[WeightPack]]:
+        self._ensure_target_device(device_id)
         return self._create_weight(
             out_dims=out_dims,
             in_dim=in_dim,
@@ -76,6 +83,7 @@ class QuantizationMethod(ABC):
     def create_moe_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int
     ) -> Tuple[WeightPack, List[WeightPack]]:
+        self._ensure_target_device(device_id)
         return self._create_weight(
             out_dims=out_dims,
             in_dim=in_dim,

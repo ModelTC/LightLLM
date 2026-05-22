@@ -1,6 +1,6 @@
 import torch
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 from typing import List
 from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
@@ -47,28 +47,36 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
-    def to_cuda(self):
+    def to_device(self, device: torch.device):
+        """ from TpPartBaseModel.target_device """
+
+        def _to_device(t: torch.Tensor) -> torch.Tensor:
+            return t.to(device, non_blocking=True)
+
         if self.input_ids is not None:
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
+            self.input_ids = _to_device(self.input_ids)
         if self.mem_indexes is None:
-            self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
-        self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
-        self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
-        self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
+            self.mem_indexes = _to_device(self.mem_indexes_cpu)
+
+        self.b_req_idx = _to_device(self.b_req_idx)
+        self.b_seq_len = _to_device(self.b_seq_len)
+        self.b_mtp_index = _to_device(self.b_mtp_index)
+
         if self.b_ready_cache_len is not None:
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+            self.b_ready_cache_len = _to_device(self.b_ready_cache_len)
         if self.b_prefill_start_loc is not None:
-            self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
+            self.b_prefill_start_loc = _to_device(self.b_prefill_start_loc)
+
         if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():
             batch_size = len(self.b_req_idx)
             if self.b_mark_shared_group is None:
-                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
+                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device=device)
             else:
-                self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
+                self.b_mark_shared_group = _to_device(self.b_mark_shared_group)
             if self.b_shared_seq_len is None:
-                self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
+                self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device=device)
             else:
-                self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+                self.b_shared_seq_len = _to_device(self.b_shared_seq_len)
 
     def __post_init__(self):
         self.check_input()
@@ -82,7 +90,7 @@ class ModelOutput:
     # 通用变量
     logits: torch.Tensor
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
-    prefill_mem_indexes_ready_event: torch.Event = None
+    prefill_mem_indexes_ready_event: Any = None
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输出变量。只在特殊的模型模式下才会具体使用和生效。

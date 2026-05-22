@@ -2,6 +2,7 @@ import torch.distributed as dist
 import os
 import torch
 import requests
+from lightllm.platform import get_backend
 
 # 规范 rank 的含义，在 llm 推理的相关代码中下述的 rank 的含义如下：
 # global_rank 全局 rank 序列id， 如两节点 8卡，会存在 0 - 15 16个global_rank
@@ -79,16 +80,17 @@ def init_vision_distributed_env(kvargs):
     set_current_rank_in_dp(tp_rank_id)
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    target_device = get_backend().runtime.target_device(device_id)
+    get_backend().runtime.set_device(target_device)
     dist.init_process_group(
         "nccl",
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
         rank=kvargs["tp_rank_id"],
         world_size=tp_world_size,
-        device_id=torch.device(f"cuda:{device_id}"),
+        device_id=target_device,
     )
     # warmup nccl communicator
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
+    _a = torch.zeros([1]).to(target_device)
     dist.all_reduce(_a)
     del _a
 
@@ -111,15 +113,16 @@ def init_audio_distributed_env(kvargs):
     set_current_rank_in_dp(tp_rank_id)
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    target_device = get_target_device(device_id)
+    get_backend().runtime.set_device(target_device)
     dist.init_process_group(
         "nccl",
         init_method=f'tcp://127.0.0.1:{kvargs["audio_nccl_port"]}',
         rank=tp_rank_id,
         world_size=tp_world_size,
-        device_id=torch.device(f"cuda:{device_id}"),
+        device_id=target_device,
     )
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
+    _a = torch.zeros([1]).to(target_device)
     dist.all_reduce(_a)
     del _a
 
@@ -144,16 +147,17 @@ def init_distributed_env(kvargs):
     _init_nccl_env()
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    target_device = get_backend().runtime.target_device(device_id)
+    get_backend().runtime.set_device(target_device)
     dist.init_process_group(
         "nccl",
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
-        device_id=torch.device(f"cuda:{device_id}"),
+        device_id=target_device,
     )
     # warmup nccl communicator
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
+    _a = torch.zeros([1]).to(target_device)
     dist.all_reduce(_a)
     del _a
 

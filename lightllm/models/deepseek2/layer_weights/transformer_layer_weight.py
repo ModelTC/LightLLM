@@ -102,8 +102,8 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
             # for deepseek_v3, the bmm operator is not quantized
             if self.quant_cfg.quantized_weight:
                 kv_b_proj_ = weight_dequant(
-                    kv_b_proj_.cuda(),
-                    weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),
+                    kv_b_proj_.to(device=self.target_device),
+                    weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].to(device=self.target_device),
                 ).cpu()
             k_b_proj_, v_b_proj_ = self._split_kv_b_proj(kv_b_proj_)
             weights[f"model.layers.{self.layer_num_}.self_attn.k_b_proj.weight"] = k_b_proj_

@@ -404,7 +404,7 @@ class RadixCache:
     def assert_leafs_is_right(self):
         for node in self.evict_tree_set:
             if node.is_leaf() and node.ref_counter == 0:
-                a = node.token_mem_index_value.cuda()
+                a = node.token_mem_index_value.to(device=self.mem_manager.target_device)
                 assert (self.mem_manager.mem_state[a] == 1).sum().item() == len(a)
 
     def clear_tree_nodes(self):

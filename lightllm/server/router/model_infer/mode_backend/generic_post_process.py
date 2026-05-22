@@ -5,6 +5,7 @@ from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cach
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+from lightllm.utils.device_utils import get_target_device
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -24,7 +25,8 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         skip_top_p,
         exist_req_use_random_seed,
     ) = _get_post_sample_tensors(reqs)
-    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
+    target_device = get_target_device()
+    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).to(device=target_device, non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
 
@@ -214,15 +216,16 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             key="cu_invalid_token_num", data=cu_invalid_token_num, dtype=torch.int32
         )
 
+    target_device = get_target_device()
     return (
-        req_idxes_cpu.cuda(non_blocking=True),
-        temperatures_cpu.cuda(non_blocking=True),
-        top_ps_cpu.cuda(non_blocking=True),
-        top_ks_cpu.cuda(non_blocking=True),
-        length_penalty_param_cpu.cuda(non_blocking=True),
-        mask_eos_reqs_cpu.cuda(non_blocking=True),
-        invalid_token_ids_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
-        cu_invalid_token_num_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
+        req_idxes_cpu.to(device=target_device, non_blocking=True),
+        temperatures_cpu.to(device=target_device, non_blocking=True),
+        top_ps_cpu.to(device=target_device, non_blocking=True),
+        top_ks_cpu.to(device=target_device, non_blocking=True),
+        length_penalty_param_cpu.to(device=target_device, non_blocking=True),
+        mask_eos_reqs_cpu.to(device=target_device, non_blocking=True),
+        invalid_token_ids_cpu.to(device=target_device, non_blocking=True) if has_invalid_token_ids else None,
+        cu_invalid_token_num_cpu.to(device=target_device, non_blocking=True) if has_invalid_token_ids else None,
         is_all_greedy,
         has_invalid_token_ids,
         skip_top_k,

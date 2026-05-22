@@ -3,6 +3,8 @@ import triton
 import triton.language as tl
 from typing import List
 
+from lightllm.platform import get_backend
+
 
 def custom_cat(tensors):
     """
@@ -21,7 +23,7 @@ def custom_cat(tensors):
     for t, size in zip(tensors, sizes):
         out_tensor[start_loc : (start_loc + size)].copy_(t, non_blocking=True)
         start_loc += size
-    torch.cuda.current_stream().synchronize()
+    get_backend().runtime.current_stream().synchronize()
 
     return out_tensor
 
