@@ -214,6 +214,16 @@ PD 分离模式参数
     
     激进调度可能导致解码期间频繁的预填充中断。禁用它可以让 router_max_wait_tokens 参数更有效地工作。
 
+.. option:: --enable_prefill_decode_mixed
+
+    在同一次推理调度步骤中混合执行 prefill 与 decode。
+
+    仅支持 ``--run_mode`` 为 ``normal`` 时开启。当同时存在 prefill 与 decode 请求时，调度器会在同一步内
+    先执行 prefill、再执行 decode，而不是在激进调度下只执行 prefill、阻塞 decode，从而在有新 prefill
+    请求时也能推进 decode，提升整体吞吐。
+
+    不能与 ``--enable_prefill_microbatch_overlap`` 或 ``--enable_decode_microbatch_overlap`` 同时使用。
+
 .. option:: --disable_dynamic_prompt_cache
 
     禁用kv cache 缓存

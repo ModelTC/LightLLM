@@ -188,6 +188,9 @@ def normal_or_p_d_start(args):
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True
 
+    if args.enable_prefill_decode_mixed:
+        assert args.run_mode == "normal", "--enable_prefill_decode_mixed only supports run_mode normal"
+
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 

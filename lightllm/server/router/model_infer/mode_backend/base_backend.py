@@ -679,6 +679,14 @@ class ModeBackend:
                 paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp, can_alloc_token_num=can_alloc_token_num
             )
 
+        # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，
+        # 并且 prefill 请求需要的 token 数量 + decode 请求需要的 token 数量小于等于 batch_max_tokens，
+        # 则将 decode 请求合并到 prefill 请求中。
+        if self.args.enable_prefill_decode_mixed and len(prefill_reqs) > 0 and len(decode_reqs) > 0:
+            if prefill_tokens + len(decode_reqs) <= self.batch_max_tokens:
+                prefill_reqs.extend(decode_reqs)
+                decode_reqs = []
+
         return prefill_reqs, decode_reqs
 
     def _pre_handle_finished_reqs(self, finished_reqs: List[InferReq]):
