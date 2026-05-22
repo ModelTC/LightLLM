@@ -503,7 +503,7 @@ def grouped_matmul_kernel(
             else:
                 a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num)[:, None]
 
-            a_scale = tl.load(a_scale_ptrs, eviction_policy="evict_last")
+            a_scale = tl.load(a_scale_ptrs, mask=token_mask[:, None], other=0.0, eviction_policy="evict_last")
             b_scale = tl.load(
                 weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bn[None, :] * weight_scale_stride1,
                 eviction_policy="evict_last",
