@@ -9,18 +9,21 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL, light_ops
+from lightllm.utils.sgl_utils import sgl_scaled_fp8_quant_per_token
 
 
 from .quantize_method import WeightPack
 
 if HAS_LIGHTLLM_KERNEL:
 
-    def scaled_fp8_quant(tensor, *args, **kwargs):
+    def scaled_fp8_quant(tensor):
         return light_ops.per_token_quant_bf16_fp8(tensor)
 
 else:
-    if HAS_VLLM:
-        scaled_fp8_quant = vllm_ops.scaled_fp8_quant
+
+    def scaled_fp8_quant(tensor):
+        return sgl_scaled_fp8_quant_per_token(tensor)
+
 
 LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM", "False").upper() in [
     "ON",
@@ -132,9 +135,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
 
-        qweight, weight_scale = scaled_fp8_quant(
-            weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
-        )
+        qweight, weight_scale = scaled_fp8_quant(weight.cuda(self.device_id_))
         output.weight.copy_(qweight)
         output.weight_scale.copy_(weight_scale.view(-1))
         return
@@ -150,7 +151,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     ) -> torch.Tensor:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
-        x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
+        x_q, x_scale = scaled_fp8_quant(input_tensor)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
         if out is None:

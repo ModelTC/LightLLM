@@ -5,14 +5,9 @@ from typing import Optional, TYPE_CHECKING
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_fp8_quant
-from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+from lightllm.utils.sgl_utils import sgl_scaled_fp8_quant_per_token
 from typing import Union
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
-
-if HAS_VLLM:
-    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
-else:
-    scaled_fp8_quant = None
 
 
 class Fp8Fa3AttBackend(Fa3AttBackend):
@@ -45,9 +40,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             torch.arange(batch_size, device=device), self.infer_state.b_q_seq_len
         )
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
     def prefill_att(
         self,
@@ -120,7 +118,6 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
         assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
 
-        device = self.infer_state.input_ids.device
         batch_size = att_batch_size
         mem_manager = self.backend.model.mem_manager
 
@@ -128,8 +125,12 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         head_num = mem_manager.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
         return
 
@@ -172,9 +173,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
 
         q_head_num = q.shape[1]
-        if scaled_fp8_quant is None:
-            raise ImportError("scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention.")
-        q, q_scale = scaled_fp8_quant(q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
+        q, q_scale = sgl_scaled_fp8_quant_per_token(q.reshape(q.shape[0] * k_head_num, -1))
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,

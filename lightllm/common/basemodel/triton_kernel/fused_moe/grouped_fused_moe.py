@@ -23,7 +23,7 @@ import triton
 import triton.language as tl
 from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.vllm_utils import vllm_ops
+from lightllm.utils.sgl_utils import sgl_scaled_fp8_quant_per_token
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
@@ -765,9 +765,7 @@ def grouped_matmul(
         # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
         if block_size_k == 0:
             # input 使用 per token 量化
-            token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(
-                token_inputs, token_input_scale, use_per_token_if_dynamic=True
-            )
+            token_inputs, token_input_scale = sgl_scaled_fp8_quant_per_token(token_inputs)
         else:
             # input 使用 per group quant 量化
             _m, _k = token_inputs.shape
