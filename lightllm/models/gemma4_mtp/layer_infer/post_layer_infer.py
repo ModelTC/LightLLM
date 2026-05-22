@@ -64,7 +64,7 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
         # Gather lm_head rows for the selected vocab ids.
         lm_head_w = layer_weight.lm_head_weight_.weight  # [vocab, draft_hidden]
         H = lm_head_w.shape[1]
-        selected_embeddings = lm_head_w.index_select(0, selected_vocab.view(-1)).view(token_num, num_selected, H)
+        selected_embeddings = lm_head_w[selected_vocab]   # [N, num_selected, H]
         # Sparse logits: dot product per token vs its selected rows.
         selected_logits = torch.einsum("nh,nsh->ns", last_hidden, selected_embeddings)
         # Scatter to [N, vocab] with -inf elsewhere.
