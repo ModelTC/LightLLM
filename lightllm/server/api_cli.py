@@ -313,6 +313,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""aggressive schedule can lead to frequent prefill interruptions during decode.
                 disabling it allows the router_max_wait_tokens parameter to work more effectively.""",
     )
+    parser.add_argument(
+        "--enable_prefill_decode_mixed",
+        action="store_true",
+        help="""when run_mode is normal, allow prefill and decode requests to run in the same
+        scheduling step when both exist, improving throughput under aggressive schedule.""",
+    )
 
     parser.add_argument(
         "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."

@@ -213,6 +213,17 @@ Scheduling Parameters
     
     Aggressive scheduling may cause frequent prefill interruptions during decoding. Disabling it can make the router_max_wait_tokens parameter work more effectively.
 
+.. option:: --enable_prefill_decode_mixed
+
+    Enable mixed prefill and decode scheduling in the same inference step.
+
+    Only supported when ``--run_mode`` is ``normal``. When both prefill and decode requests are pending,
+    the scheduler runs prefill first and then decode in one scheduling step, instead of running only
+    prefill under aggressive scheduling. This improves decode throughput when new prefill requests arrive.
+
+    Cannot be used together with ``--enable_prefill_microbatch_overlap`` or
+    ``--enable_decode_microbatch_overlap``.
+
 .. option:: --disable_dynamic_prompt_cache
 
     Disable kv cache caching

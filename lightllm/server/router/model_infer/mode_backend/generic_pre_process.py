@@ -22,6 +22,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_ready_cache_len = []
     b_mtp_index = []
     b_prefill_has_output = []
+    b_is_decode_req = []
 
     for req in req_objs:
         run_reqs.append(req)
@@ -47,6 +48,11 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         prefix_total_token_num += req.cur_kv_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
+        if hasattr(req, "is_decode_req_mixed_in_prefill"):
+            b_is_decode_req.append(True)
+            del req.is_decode_req_mixed_in_prefill
+        else:
+            b_is_decode_req.append(False)
 
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
@@ -56,6 +62,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_is_decode_req = torch.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
     b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
@@ -79,6 +86,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_is_decode_req=b_is_decode_req,
         b_ready_cache_len=b_ready_cache_len,
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,

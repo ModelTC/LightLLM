@@ -20,6 +20,12 @@ class ModelInput:
     b_req_idx: torch.Tensor = None
     b_mtp_index: torch.Tensor = None
     b_seq_len: torch.Tensor = None
+    # 在 prefill 阶段，用于在 enable_prefill_decode_mixed 开启下，
+    # 用于标识请求是否为 decode 请求混合在 prefill 请求中。
+    # 其对应的 input_ids 需要特殊处理, 从 req_to_next_token_ids 中获取。
+
+    b_is_decode_req: torch.Tensor = None
+
     # 只会在 diverse_mode 下的 decode 阶段真正被使用的参数, 用于记录共享的radix cache中的长度
     b_shared_seq_len: torch.Tensor = None
     # 只会在 diverse_mode 下的 decode 阶段真正被使用的参数, 用于记录请求间的共享关系。
@@ -52,6 +58,11 @@ class ModelInput:
             self.input_ids = self.input_ids.cuda(non_blocking=True)
         if self.mem_indexes is None:
             self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
+
+        if self.b_is_decode_req is not None:
+            self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
+            assert self.is_prefill
+
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)

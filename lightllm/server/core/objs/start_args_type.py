@@ -77,6 +77,7 @@ class StartArgs:
     router_token_ratio: float = field(default=0.0)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
+    enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
