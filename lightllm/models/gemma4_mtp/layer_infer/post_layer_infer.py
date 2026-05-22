@@ -16,9 +16,9 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
             self.num_centroids_ = network_config["num_centroids"]
             self.centroid_top_k_ = network_config["centroid_intermediate_top_k"]
             self.vocab_size_ = network_config["vocab_size"]
-            assert self.vocab_size_ % self.num_centroids_ == 0, (
-                f"vocab_size={self.vocab_size_} must be divisible by num_centroids={self.num_centroids_}"
-            )
+            assert (
+                self.vocab_size_ % self.num_centroids_ == 0
+            ), f"vocab_size={self.vocab_size_} must be divisible by num_centroids={self.num_centroids_}"
             self._vocab_per_centroid_ = self.vocab_size_ // self.num_centroids_
             # token -> centroid mapping is derived lazily from the loaded
             # token_ordering buffer (weights are not loaded yet at __init__).
@@ -46,10 +46,10 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
         return ans_logics
 
     def _centroid_logits(self, last_hidden, token_num, layer_weight):
-        """ Gather lm_head rows for the per-token top-K centroid blocks, 
+        """Gather lm_head rows for the per-token top-K centroid blocks,
         dot with the post-norm hidden, scatter into a [N, vocab] -inf tensor
-        at the original vocab positions. Mathematically equivalent to 
-        dense logits + mask but avoids the [N, vocab] bool tensor and matches 
+        at the original vocab positions. Mathematically equivalent to
+        dense logits + mask but avoids the [N, vocab] bool tensor and matches
         the reference implementations exactly.
         """
         centroid_scores = layer_weight.centroids_weight_.mm(last_hidden)  # [N, num_centroids]
@@ -64,9 +64,7 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
         # Gather lm_head rows for the selected vocab ids.
         lm_head_w = layer_weight.lm_head_weight_.weight  # [vocab, draft_hidden]
         H = lm_head_w.shape[1]
-        selected_embeddings = lm_head_w.index_select(0, selected_vocab.view(-1)).view(
-            token_num, num_selected, H
-        )
+        selected_embeddings = lm_head_w.index_select(0, selected_vocab.view(-1)).view(token_num, num_selected, H)
         # Sparse logits: dot product per token vs its selected rows.
         selected_logits = torch.einsum("nh,nsh->ns", last_hidden, selected_embeddings)
         # Scatter to [N, vocab] with -inf elsewhere.
