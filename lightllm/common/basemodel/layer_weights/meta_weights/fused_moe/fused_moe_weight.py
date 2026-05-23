@@ -76,7 +76,7 @@ class FusedMoeWeight(BaseWeightTpl):
         if not self.enable_ep_moe:
             return quant_method
 
-        target_method = "deepgemm-fp8fp4-b32" if is_sm100_gpu() else "deepgemm-fp8w8a8-b128"
+        target_method = "deepgemm-fp4fp8-b32" if is_sm100_gpu() else "deepgemm-fp8w8a8-b128"
         if quant_method.method_name == "none":
             from lightllm.common.quantization.registry import QUANTMETHODS
 

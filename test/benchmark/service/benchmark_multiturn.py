@@ -317,20 +317,8 @@ def stream_one_turn(
                 continue
 
             if first_token_time is not None:
-                generated_text = "".join(generated_text_parts)
-                estimated_completion_tokens = len(tokenizer.encode(generated_text, add_special_tokens=False))
-                estimated_completion_tokens = max(estimated_completion_tokens, len(generated_text_parts))
-                print(f"\n[turn warning] {e}; keeping partial turn with estimated usage (attempt={attempt + 1})")
-                return {
-                    "ttft": first_token_time - start_time,
-                    "decode_times": decode_times,
-                    "prompt_tokens": prompt_tokens or prompt_token_len,
-                    "completion_tokens": completion_tokens or estimated_completion_tokens,
-                    "cached_tokens": cached_tokens,
-                    "cached_tokens_reported": cached_tokens_reported,
-                    "usage_estimated": completion_tokens == 0 or prompt_tokens == 0,
-                    "generated_text": generated_text,
-                }
+                print(f"\n[turn warning] {e}; discarding partial turn (attempt={attempt + 1})")
+                return None
 
             print(f"\n[turn exception] {e}")
             return None
@@ -344,6 +332,16 @@ def stream_one_turn(
                 continue
             return None
 
+        generated_text = "".join(generated_text_parts)
+        usage_estimated = False
+        if prompt_tokens == 0:
+            prompt_tokens = prompt_token_len
+            usage_estimated = True
+        if completion_tokens == 0:
+            estimated_completion_tokens = len(tokenizer.encode(generated_text, add_special_tokens=False))
+            completion_tokens = max(estimated_completion_tokens, len(generated_text_parts))
+            usage_estimated = True
+
         return {
             "ttft": first_token_time - start_time,
             "decode_times": decode_times,
@@ -351,8 +349,8 @@ def stream_one_turn(
             "completion_tokens": completion_tokens,
             "cached_tokens": cached_tokens,
             "cached_tokens_reported": cached_tokens_reported,
-            "usage_estimated": False,
-            "generated_text": "".join(generated_text_parts),
+            "usage_estimated": usage_estimated,
+            "generated_text": generated_text,
         }
 
     return None
@@ -402,8 +400,9 @@ def run_session(
                 print(
                     f"\rconc={progress_state['concurrency']} "
                     f"finished_turns={progress_state['finished_turns']} "
-                    f"active_sessions={progress_state['active_sessions']}",
+                    f"active_sessions={progress_state['active_sessions']}\033[K",
                     end="",
+                    flush=True,
                 )
             turn_input_len = rng.randint(min_turn_input_increment, turn_input_increment)
             prompt, prompt_len = append_turn_input(

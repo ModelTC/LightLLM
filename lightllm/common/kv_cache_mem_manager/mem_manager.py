@@ -67,8 +67,7 @@ class MemoryManager:
 
         torch.cuda.empty_cache()
         world_size = dist.get_world_size()
-
-        available_memory = get_available_gpu_memory(world_size) * mem_fraction
+        available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
         if world_size > 1:

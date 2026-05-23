@@ -28,7 +28,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         return getattr(dist_group_manager, "ep_num_sms", None) or 0
 
     def _use_sm100_fp4_moe(self) -> bool:
-        return is_sm100_gpu() and self.quant_method.method_name == "deepgemm-fp8fp4-b32"
+        return is_sm100_gpu() and self.quant_method.method_name == "deepgemm-fp4fp8-b32"
 
     def _get_mega_moe_weights(self, w13: WeightPack, w2: WeightPack):
         cache_key = (

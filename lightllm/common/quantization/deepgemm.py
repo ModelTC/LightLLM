@@ -126,7 +126,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["deepgemm-fp8fp4-b32"], platform="cuda")
+@QUANTMETHODS.register(["deepgemm-fp4fp8-b32"], platform="cuda")
 class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -139,7 +139,7 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return "deepgemm-fp8fp4-b32"
+        return "deepgemm-fp4fp8-b32"
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from deep_gemm.utils import per_token_cast_to_fp4
@@ -174,7 +174,7 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        raise NotImplementedError("deepgemm-fp8fp4-b32 is only implemented for fused MoE expert weights")
+        raise NotImplementedError("deepgemm-fp4fp8-b32 is only implemented for fused MoE expert weights")
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
