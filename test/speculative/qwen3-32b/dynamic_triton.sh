@@ -27,7 +27,8 @@ LOADWORKER=18 /data/nvme0/chenjunyi/miniconda3/envs/lightllm/bin/python -m light
 --graph_grow_step_size 1 \
 --mtp_step ${MTP_STEP}  \
 --llm_decode_att_backend triton \
---mtp_dynamic_verify
+--mtp_dynamic_verify \
+--disable_cudagraph
 # if you want to enable microbatch overlap, you can uncomment the following lines
 #--enable_prefill_microbatch_overlap \
 #--enable_decode_microbatch_overlap \

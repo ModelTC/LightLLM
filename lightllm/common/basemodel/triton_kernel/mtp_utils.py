@@ -215,19 +215,18 @@ def sample_dynamic_mtp_req_mask(
     req_to_next_token_probs: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert b_req_idx.shape == b_mtp_index.shape
+    assert b_req_idx.is_cuda
+    assert b_mtp_index.is_cuda
     assert req_to_next_token_probs.is_cuda
 
-    b_req_idx_gpu = b_req_idx.cuda(non_blocking=True) if not b_req_idx.is_cuda else b_req_idx
-    b_mtp_index_gpu = b_mtp_index.cuda(non_blocking=True) if not b_mtp_index.is_cuda else b_mtp_index
-
-    batch_size = b_req_idx_gpu.shape[0]
-    req_start_mask = b_mtp_index_gpu == 0
+    batch_size = b_req_idx.shape[0]
+    req_start_mask = b_mtp_index == 0
     num_reqs = int(req_start_mask.sum().item())
     assert num_reqs > 0
     assert dynamic_batch_size >= num_reqs
     assert dynamic_batch_size <= batch_size
 
-    req_indices_gpu = b_req_idx_gpu[req_start_mask].to(dtype=torch.int32)
+    req_indices_gpu = b_req_idx[req_start_mask].to(dtype=torch.int32)
 
     max_mtp_step = req_to_next_token_probs.shape[1]
     BLOCK_SIZE = 16
@@ -251,7 +250,7 @@ def sample_dynamic_mtp_req_mask(
 
     req_order = torch.cumsum(req_start_mask.to(torch.int32), dim=0) - 1
     row_sampled_steps = sampled_steps[req_order.long()]
-    sampled_mask_gpu = (b_mtp_index_gpu < row_sampled_steps).to(torch.int32)
+    sampled_mask_gpu = (b_mtp_index < row_sampled_steps).to(torch.int32)
     final_mask_gpu = select_dynamic_mtp_exec_mask(
         dynamic_batch_size=dynamic_batch_size,
         req_start_mask=req_start_mask,
@@ -317,12 +316,12 @@ def _trim_decode_model_input_inplace(model_input: ModelInput, selected_mask_gpu:
     assert model_input.b_req_idx.is_cuda
     assert model_input.b_mtp_index.is_cuda
     assert model_input.b_seq_len.is_cuda
+    assert model_input.mem_indexes is not None and model_input.mem_indexes.is_cuda
 
     selected_index = torch.nonzero(selected_mask_gpu, as_tuple=False).flatten()
     new_batch_size = selected_index.numel()
     if new_batch_size == model_input.batch_size:
         return model_input
-    selected_index_cpu = None
 
     if model_input.input_ids is not None:
         assert model_input.input_ids.is_cuda
@@ -334,9 +333,6 @@ def _trim_decode_model_input_inplace(model_input: ModelInput, selected_mask_gpu:
     if model_input.mem_indexes is not None:
         assert model_input.mem_indexes.is_cuda
         model_input.mem_indexes = torch.index_select(model_input.mem_indexes, dim=0, index=selected_index)
-    if model_input.mem_indexes_cpu is not None:
-        selected_index_cpu = selected_index.cpu()
-        model_input.mem_indexes_cpu = torch.index_select(model_input.mem_indexes_cpu, dim=0, index=selected_index_cpu)
     if model_input.b_shared_seq_len is not None:
         assert model_input.b_shared_seq_len.is_cuda
         model_input.b_shared_seq_len = torch.index_select(model_input.b_shared_seq_len, dim=0, index=selected_index)
@@ -345,20 +341,15 @@ def _trim_decode_model_input_inplace(model_input: ModelInput, selected_mask_gpu:
         model_input.mtp_draft_input_hiddens = torch.index_select(
             model_input.mtp_draft_input_hiddens, dim=0, index=selected_index
         )
+    # ! 目前用不到multimodal_params，但是又会检查它的长度是否正确，因此先简单地 trim 掉，保持和其他参数一致的 batch_size
     if model_input.multimodal_params is not None:
-        if selected_index_cpu is None:
-            selected_index_cpu = selected_index.cpu()
-        model_input.multimodal_params = [model_input.multimodal_params[i] for i in selected_index_cpu.tolist()]
+        model_input.multimodal_params = model_input.multimodal_params[:new_batch_size]
 
     model_input.b_mark_shared_group = _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(
         model_input.b_mtp_index
     )
     model_input.batch_size = new_batch_size
-    # model_input.total_token_num = int(model_input.b_seq_len.sum().item())
-    # model_input.max_kv_seq_len = int(model_input.b_seq_len.max().item()) if new_batch_size > 0 else 0
 
-    # TODO: if CPU mirrors become a measurable bottleneck, move mem_indexes_cpu/multimodal_params
-    # trimming out of the hot path or rebuild them from later-stage selected indices.
     return model_input
 
 
@@ -375,8 +366,10 @@ def trim_dynamic_mtp_model_input(
         return model_input, selected_mask
 
     assert not model_input.is_prefill, "trim_dynamic_mtp_model_input only supports decode inputs"
-    # Launch the host->device copies as early as possible, then do mask sampling and compaction on GPU.
+    # Keep the trim path simple and deterministic: finish model_input.to_cuda() first,
+    # then do both sampling and compaction purely on GPU tensors.
     model_input.to_cuda()
+    torch.cuda.current_stream().synchronize()
 
     selected_mask_gpu, _ = sample_dynamic_mtp_req_mask(
         dynamic_batch_size=dynamic_batch_size,

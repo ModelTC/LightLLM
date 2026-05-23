@@ -258,7 +258,6 @@ class ChunkedPrefillBackend(ModeBackend):
                     req_to_next_token_probs=self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
                 )
                 # selected_run_reqs 是一个 gpu tensor, 类型为 int, 0, 表示没有选中， 1 表示选中。
-
                 selected_run_reqs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="selected_run_reqs",
                     gpu_tensor=selected_run_reqs,
@@ -391,13 +390,20 @@ class ChunkedPrefillBackend(ModeBackend):
                 per_token_cost_ms=per_token_cost_ms,
             )
 
-        # 处理需要释放的内存索引
-        need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
+        # 处理需要释放的内存索引。动态 MTP trim 只裁了 GPU 侧 model_input，
+        # 因此这里统一基于原始的 origin_mem_indexes_cpu 计算：
+        # 1. 被选中但 verify 未通过的 index
+        # 2. 未被选中的 index
         if self.enable_dynamic_mtp:
-            selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
-            trim_free_mem_indexes = origin_mem_indexes_cpu[selected_run_reqs_cpu_numpy == 0]
+            selected_run_reqs_cpu_mask = selected_run_reqs_cpu.to(dtype=torch.bool)
+            selected_mem_indexes_cpu = origin_mem_indexes_cpu[selected_run_reqs_cpu_mask]
+            need_free_mem_indexes = selected_mem_indexes_cpu[accepted_index_cpu == 0]
+
+            trim_free_mem_indexes = origin_mem_indexes_cpu[~selected_run_reqs_cpu_mask]
             if len(trim_free_mem_indexes) > 0:
                 need_free_mem_indexes = torch.cat([need_free_mem_indexes, trim_free_mem_indexes], dim=0)
+        else:
+            need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
         if additional_mem_indexes_cpu is not None:
             need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 
