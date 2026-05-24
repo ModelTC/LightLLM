@@ -34,15 +34,16 @@ Example:
 """
 
 import argparse
-import asyncio
 import json
 import os
 import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Union
 
-import aiohttp
 import numpy as np
+import requests
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
@@ -102,12 +103,12 @@ def append_turn_input(
     return new_prompt, new_len
 
 
-async def stream_one_turn(
-    session: aiohttp.ClientSession,
+def stream_one_turn(
     url: str,
     model_name: str,
     prompt: str,
     max_new_tokens: int,
+    request_timeout_s: int,
 ) -> Optional[Dict]:
     """Send one streaming completion request, return per-turn stats:
       {
@@ -139,16 +140,24 @@ async def stream_one_turn(
     completion_tokens = 0
     cached_tokens = 0
 
-    try:
-        async with session.post(url, headers=headers, json=payload) as response:
-            if response.status != 200:
-                err = await response.text()
-                print(f"\n[turn failed] status={response.status} body={err[:200]}")
-                return None
+    with requests.Session() as req_session:
+        req_session.trust_env = False
+        with req_session.post(
+            url,
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=(10, request_timeout_s),
+        ) as response:
+            if response.status_code != 200:
+                err = response.text
+                raise RuntimeError(f"stream_one_turn failed: status={response.status_code}, body={err[:200]}")
 
-            async for raw in response.content:
+            for raw in response.iter_lines():
+                if not raw:
+                    continue
                 line = raw.strip()
-                if not line or not line.startswith(b"data:"):
+                if not line.startswith(b"data:"):
                     continue
                 data_str = line[len(b"data:") :].strip()
                 if data_str == b"[DONE]":
@@ -183,12 +192,9 @@ async def stream_one_turn(
                 last_token_time = now
                 if text_piece:
                     generated_text_parts.append(text_piece)
-    except Exception as e:
-        print(f"\n[turn exception] {e}")
-        return None
 
     if first_token_time is None:
-        return None
+        raise RuntimeError("stream_one_turn failed: no token received from stream")
 
     return {
         "ttft": first_token_time - start_time,
@@ -200,10 +206,9 @@ async def stream_one_turn(
     }
 
 
-async def run_session(
+def run_session(
     session_id: int,
     tokenizer,
-    session: aiohttp.ClientSession,
     url: str,
     model_name: str,
     start_input_len: int,
@@ -214,7 +219,9 @@ async def run_session(
     output_len: int,
     max_turns: int,
     base_seed: int,
+    request_timeout_s: int,
     progress_state: Dict,
+    progress_lock: threading.Lock,
 ) -> List[Dict]:
     """Run a single multi-turn dialogue session. Returns a list of per-turn
     stat dicts (same schema as stream_one_turn output)."""
@@ -223,34 +230,43 @@ async def run_session(
 
     per_turn: List[Dict] = []
     turn_idx = 0
-    while turn_idx < max_turns and prompt_len < max_input_len:
-        turn_output_len = rng.randint(min_output_len, output_len)
-        result = await stream_one_turn(session, url, model_name, prompt, turn_output_len)
-        if result is None:
-            break
-        per_turn.append(result)
-        progress_state["finished_turns"] += 1
-        print(
-            f"\rconc={progress_state['concurrency']} "
-            f"finished_turns={progress_state['finished_turns']} "
-            f"active_sessions={progress_state['active_sessions']}",
-            end="",
-        )
-        turn_input_len = rng.randint(min_turn_input_increment, turn_input_increment)
-        prompt, prompt_len = append_turn_input(
-            tokenizer,
-            prompt,
-            result["generated_text"],
-            turn_input_len,
-            rng,
-        )
-        turn_idx += 1
-
-    progress_state["active_sessions"] -= 1
+    try:
+        while turn_idx < max_turns and prompt_len < max_input_len:
+            turn_output_len = rng.randint(min_output_len, output_len)
+            result = stream_one_turn(
+                url=url,
+                model_name=model_name,
+                prompt=prompt,
+                max_new_tokens=turn_output_len,
+                request_timeout_s=request_timeout_s,
+            )
+            if result is None:
+                break
+            per_turn.append(result)
+            with progress_lock:
+                progress_state["finished_turns"] += 1
+                print(
+                    f"\rconc={progress_state['concurrency']} "
+                    f"finished_turns={progress_state['finished_turns']} "
+                    f"active_sessions={progress_state['active_sessions']}",
+                    end="",
+                )
+            turn_input_len = rng.randint(min_turn_input_increment, turn_input_increment)
+            prompt, prompt_len = append_turn_input(
+                tokenizer,
+                prompt,
+                result["generated_text"],
+                turn_input_len,
+                rng,
+            )
+            turn_idx += 1
+    finally:
+        with progress_lock:
+            progress_state["active_sessions"] -= 1
     return per_turn
 
 
-async def run_concurrency_level(
+def run_concurrency_level(
     concurrency: int,
     tokenizer,
     url: str,
@@ -266,38 +282,39 @@ async def run_concurrency_level(
     request_timeout_s: int,
 ) -> Dict:
     """Run one concurrency level. Returns the aggregated stats dict."""
-    timeout = aiohttp.ClientTimeout(total=request_timeout_s)
-    connector = aiohttp.TCPConnector(limit=max(concurrency * 2, 32))
     progress_state = {
         "concurrency": concurrency,
         "finished_turns": 0,
         "active_sessions": concurrency,
     }
+    progress_lock = threading.Lock()
 
     wall_start = time.time()
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        tasks = [
-            asyncio.create_task(
-                run_session(
-                    sid,
-                    tokenizer,
-                    session,
-                    url,
-                    model_name,
-                    start_input_len,
-                    max_input_len,
-                    min_turn_input_increment,
-                    turn_input_increment,
-                    min_output_len,
-                    output_len,
-                    max_turns,
-                    base_seed,
-                    progress_state,
-                )
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = [
+            executor.submit(
+                run_session,
+                sid,
+                tokenizer,
+                url,
+                model_name,
+                start_input_len,
+                max_input_len,
+                min_turn_input_increment,
+                turn_input_increment,
+                min_output_len,
+                output_len,
+                max_turns,
+                base_seed,
+                request_timeout_s,
+                progress_state,
+                progress_lock,
             )
             for sid in range(concurrency)
         ]
-        session_results = await asyncio.gather(*tasks)
+        session_results: List[List[Dict]] = []
+        for fut in as_completed(futures):
+            session_results.append(fut.result())
     wall_end = time.time()
     wall_time = max(wall_end - wall_start, 1e-9)
     print()  # newline after progress bar
@@ -498,31 +515,24 @@ def main() -> None:
     print(f"max_turns          : {args.max_turns}")
 
     all_summaries: List[Dict] = []
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        for concurrency in concurrency_levels:
-            summary = loop.run_until_complete(
-                run_concurrency_level(
-                    concurrency=concurrency,
-                    tokenizer=tokenizer,
-                    url=args.url,
-                    model_name=model_name,
-                    start_input_len=args.start_input_len,
-                    max_input_len=args.max_input_len,
-                    min_turn_input_increment=args.min_turn_input_increment,
-                    turn_input_increment=args.turn_input_increment,
-                    min_output_len=args.min_output_len,
-                    output_len=args.output_len,
-                    max_turns=args.max_turns,
-                    base_seed=args.seed,
-                    request_timeout_s=args.request_timeout_s,
-                )
-            )
-            print_summary(summary)
-            all_summaries.append(summary)
-    finally:
-        loop.close()
+    for concurrency in concurrency_levels:
+        summary = run_concurrency_level(
+            concurrency=concurrency,
+            tokenizer=tokenizer,
+            url=args.url,
+            model_name=model_name,
+            start_input_len=args.start_input_len,
+            max_input_len=args.max_input_len,
+            min_turn_input_increment=args.min_turn_input_increment,
+            turn_input_increment=args.turn_input_increment,
+            min_output_len=args.min_output_len,
+            output_len=args.output_len,
+            max_turns=args.max_turns,
+            base_seed=args.seed,
+            request_timeout_s=args.request_timeout_s,
+        )
+        print_summary(summary)
+        all_summaries.append(summary)
 
     dump = {
         "config": {
