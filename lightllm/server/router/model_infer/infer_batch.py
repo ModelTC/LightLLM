@@ -9,6 +9,7 @@ from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.platform import get_backend
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -38,8 +39,8 @@ class InferenceContext:
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
 
-    overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
-    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
+    overlap_stream: Any = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
+    cpu_kv_cache_stream: Any = None  # 用 cpu kv cache 操作的 stream
     is_linear_att_mixed_model: bool = False  # 标记模型是否是full att 混合 linear att 的混合模型。
 
     def register(
@@ -66,20 +67,22 @@ class InferenceContext:
 
         self.is_linear_att_mixed_model = isinstance(self.req_manager, ReqManagerForMamba)
 
+        self.platform_backend = get_backend()
+
         return
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         return
 
-    def get_overlap_stream(self) -> torch.cuda.Stream:
+    def get_overlap_stream(self) -> Any:
         if self.overlap_stream is None:
-            self.overlap_stream = torch.cuda.Stream()
+            self.overlap_stream = self.platform_backend.runtime.create_stream()
         return self.overlap_stream
 
-    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
+    def get_cpu_kv_cache_stream(self) -> Any:
         if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
+            self.cpu_kv_cache_stream = self.platform_backend.runtime.create_stream()
         return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
