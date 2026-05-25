@@ -12,7 +12,7 @@ import setproctitle
 from queue import Queue
 from typing import List
 from lightllm.server.core.objs import ShmReqManager, Req, StartArgs
-from lightllm.server.core.objs.io_objs.group_req import GroupReqIndexes
+from lightllm.server.core.objs.io_objs import GroupReqIndexes
 from lightllm.utils.graceful_utils import graceful_registry
 from .cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.log_utils import init_logger
@@ -219,7 +219,7 @@ class MultiLevelKVCacheManager:
                     # 一次最多从 zmq 中取 recv_max_count 个请求，防止 zmq 队列中请求数量过多导致阻塞了主循环。
                     for _ in range(recv_max_count):
                         recv_obj: GroupReqIndexes = self.zmq_recv_socket.recv_pyobj(zmq.NOBLOCK)
-                        assert isinstance(recv_obj, GroupReqIndexes), f"unexpected req type: {type(recv_obj)}"
+                        assert isinstance(recv_obj, GroupReqIndexes)
                         recv_objs.append(recv_obj)
 
                         start_time = recv_obj.time_mark
