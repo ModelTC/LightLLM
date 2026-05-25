@@ -37,10 +37,9 @@ class CpuKvCacheClient(object):
                 size_bytes=self.kv_cache_tensor_meta.calcu_size(),
             )
             tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
-            self.cpu_kv_cache_tensor, self.attach_shm_handle = tensor_creator.create_or_attach(
+            self.cpu_kv_cache_tensor = tensor_creator.create_or_attach(
                 init_shm_data=init_shm_data,
                 pin=not init_shm_data,
-                pin_no_blocking=True,
             )
         return
 
