@@ -59,7 +59,7 @@ def get_llm_data_type() -> torch.dtype:
     elif data_type in ["fp32", "float32"]:
         data_type = torch.float32
     else:
-        raise ValueError(f"Unsupport datatype {data_type}!")
+        raise ValueError(f"Unsupported datatype {data_type}!")
     return data_type
 
 

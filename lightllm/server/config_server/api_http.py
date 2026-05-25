@@ -81,7 +81,7 @@ async def visual_websocket_endpoint(websocket: WebSocket):
     client_ip, client_port = websocket.client
     logger.info(f"ws connected from IP: {client_ip}, Port: {client_port}")
     registered_visual_server_obj: VIT_Obj = pickle.loads(await websocket.receive_bytes())
-    logger.info(f"recieved registered_visual_server_obj {registered_visual_server_obj}")
+    logger.info(f"received registered_visual_server_obj {registered_visual_server_obj}")
     with registered_visual_server_obj_lock:
         registered_visual_server_objs[registered_visual_server_obj.node_id] = registered_visual_server_obj
 

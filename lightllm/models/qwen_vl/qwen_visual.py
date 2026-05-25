@@ -427,7 +427,7 @@ class QWenVisionTransformer(nn.Module):
                 t = self.image_transform(image_data)
                 img_tensors.append(t)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(item), item))
+                raise Exception("Unsupported input types: {} for {}".format(type(item), item))
 
             valid_ids.append([valid_id, valid_id + 1])
             valid_id += 1

@@ -217,7 +217,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         elif self.data_type in ["fp32", "float32"]:
             self.data_type = torch.float32
         else:
-            raise ValueError(f"Unsupport datatype {self.data_type}!")
+            raise ValueError(f"Unsupported datatype {self.data_type}!")
         return
 
     def _freeze_parameters(self):

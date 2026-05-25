@@ -155,7 +155,7 @@ class VisionTransformer:
         elif self.data_type in ["fp32", "float32"]:
             self.data_type = torch.float32
         else:
-            raise ValueError(f"Unsupport datatype {self.data_type}!")
+            raise ValueError(f"Unsupported datatype {self.data_type}!")
 
     @torch.no_grad()
     def forward(self, pixel_values):
@@ -181,7 +181,7 @@ class VisionTransformer:
                 t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                 img_tensors.append(t)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+                raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             cur_num = img.token_num
             valid_ids.append([valid_id, valid_id + cur_num])
