@@ -22,7 +22,7 @@ from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_toke
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     gen_b_req_mtp_start_loc,
     mtp_scatter_next_token_ids,
-    trim_dynamic_mtp_model_input,
+    prepare_dynamic_mtp_model_input,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
@@ -250,9 +250,9 @@ class ChunkedPrefillBackend(ModeBackend):
                     original_batch_size=model_input.batch_size,
                 ) 
                 # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
-                trans_to_dynamic_model_input = trim_dynamic_mtp_model_input
-                model_input, selected_run_reqs = trans_to_dynamic_model_input(
+                model_input, selected_run_reqs = prepare_dynamic_mtp_model_input(
                     model_input=model_input, 
+                    req_num=len(decode_reqs),
                     dynamic_batch_size=dynamic_batch_size,
                     req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                     req_to_next_token_probs=self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
@@ -273,6 +273,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 model_output.logits,
                 run_reqs,
                 self.eos_id,
+                dynamic_batch_size=dynamic_batch_size if self.enable_dynamic_mtp else None,
                 selected_run_reqs=selected_run_reqs if self.enable_dynamic_mtp else None,
             )
             # verify the next_token_ids
@@ -408,7 +409,7 @@ class ChunkedPrefillBackend(ModeBackend):
             need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 
         self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
-        select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
+        select_mask = accepted_index_cpu.to(dtype=torch.bool)
         self._post_handle(
             run_reqs=verify_ok_reqs,
             next_token_ids=next_token_ids_cpu[select_mask],

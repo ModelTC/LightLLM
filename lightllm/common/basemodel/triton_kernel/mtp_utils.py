@@ -1,3 +1,4 @@
+import random
 from typing import Optional, Tuple
 import triton
 import triton.language as tl
@@ -157,6 +158,15 @@ def mtp_scatter_next_token_ids(
         assert all_next_token_probs.shape == all_next_token_ids.shape
 
     HAS_HAS_NEXT_TOKEN_PROBS = req_to_next_token_probs is not None
+    # Triton launch 参数阶段不能直接传 None；不开动态 MTP 时这里传一个不会被实际使用的 dummy tensor 即可。
+    req_to_next_token_probs_arg = req_to_next_token_probs if req_to_next_token_probs is not None else req_to_next_token_ids
+    req_to_next_token_probs_stride = (
+        req_to_next_token_probs.stride(0) if req_to_next_token_probs is not None else req_to_next_token_ids.stride(0)
+    )
+    all_next_token_probs_arg = all_next_token_probs if all_next_token_probs is not None else all_next_token_ids
+    all_next_token_probs_stride = (
+        all_next_token_probs.stride(0) if all_next_token_probs is not None else all_next_token_ids.stride(0)
+    )
 
     grid = (num_reqs,)
     num_warps = 1
@@ -165,10 +175,10 @@ def mtp_scatter_next_token_ids(
         req_to_next_token_ids_stride=req_to_next_token_ids.stride(0),
         all_next_token_ids=all_next_token_ids,
         all_next_token_ids_stride=all_next_token_ids.stride(0),
-        req_to_next_token_probs=req_to_next_token_probs,
-        req_to_next_token_probs_stride=req_to_next_token_probs.stride(0),
-        all_next_token_probs=all_next_token_probs,
-        all_next_token_probs_stride=all_next_token_probs.stride(0),
+        req_to_next_token_probs=req_to_next_token_probs_arg,
+        req_to_next_token_probs_stride=req_to_next_token_probs_stride,
+        all_next_token_probs=all_next_token_probs_arg,
+        all_next_token_probs_stride=all_next_token_probs_stride,
         mtp_accept_len=mtp_accept_len,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
         b_req_idx=b_req_idx,
@@ -213,6 +223,7 @@ def sample_dynamic_mtp_req_mask(
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
     req_to_next_token_probs: torch.Tensor,
+    req_num: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert b_req_idx.shape == b_mtp_index.shape
     assert b_req_idx.is_cuda
@@ -221,21 +232,21 @@ def sample_dynamic_mtp_req_mask(
 
     batch_size = b_req_idx.shape[0]
     req_start_mask = b_mtp_index == 0
-    num_reqs = int(req_start_mask.sum().item())
-    assert num_reqs > 0
-    assert dynamic_batch_size >= num_reqs
+    assert dynamic_batch_size >= req_num
     assert dynamic_batch_size <= batch_size
 
-    req_indices_gpu = b_req_idx[req_start_mask].to(dtype=torch.int32)
+    # 这里 req_start_mask 恰好有 req_num 个 1，直接做固定容量 pack，避免布尔索引带来的动态 shape 开销。
+    req_indices_gpu = _pack_selected_rows_1d(b_req_idx.to(dtype=torch.int32), req_start_mask.to(torch.int32), req_num)
 
     max_mtp_step = req_to_next_token_probs.shape[1]
     BLOCK_SIZE = 16
     assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than or equal to {BLOCK_SIZE}"
 
-    sampled_steps = torch.empty((num_reqs,), dtype=torch.int32, device="cuda")
-    rand_seed = int(torch.randint(0, 2**31 - 1, (1,), device="cuda", dtype=torch.int64).item())
-
-    grid = (num_reqs,)
+    # 首先调用算子对每个请求进行动态采样，得到每一步需要参与verify的请求个数
+    sampled_steps = torch.empty((req_num,), dtype=torch.int32, device="cuda")
+    rand_seed = random.randint(0, 2**31 - 1)
+    
+    grid = (req_num,)
     _fwd_kernel_sample_dynamic_mtp_steps[grid](
         req_to_next_token_probs=req_to_next_token_probs,
         req_to_next_token_probs_stride=req_to_next_token_probs.stride(0),
@@ -248,46 +259,32 @@ def sample_dynamic_mtp_req_mask(
         num_stages=1,
     )
 
+    # * dynamic_batch_size 必定大于等于 req_num，因此每个请求至少保留一个主行(mtp_index == 0)
+    # * 随机采样命中的位置如果过多，就截断到 dynamic_batch_size，但必须保留所有主行
+    # * 随机采样命中的位置如果不足，就从未命中的位置里按 batch 顺序补齐，直到恰好填满 dynamic_batch_size
     req_order = torch.cumsum(req_start_mask.to(torch.int32), dim=0) - 1
     row_sampled_steps = sampled_steps[req_order.long()]
     sampled_mask_gpu = (b_mtp_index < row_sampled_steps).to(torch.int32)
-    final_mask_gpu = select_dynamic_mtp_exec_mask(
-        dynamic_batch_size=dynamic_batch_size,
-        req_start_mask=req_start_mask,
-        sampled_mask_gpu=sampled_mask_gpu,
-    )
+
+    req_start_mask_i32 = req_start_mask.to(torch.int32)
+    sampled_extra_mask = sampled_mask_gpu & (1 - req_start_mask_i32)
+    extra_budget = dynamic_batch_size - req_num
+    extra_budget_tensor = torch.full((), extra_budget, dtype=torch.int32, device=sampled_mask_gpu.device)
+
+    # 先在所有采样命中的 draft rows 中按顺序保留前 extra_budget 个。
+    sampled_extra_rank = torch.cumsum(sampled_extra_mask, dim=0)
+    kept_sampled_extra_mask = sampled_extra_mask & (sampled_extra_rank <= extra_budget_tensor)
+
+    # 如果采样命中的 draft rows 不够，再从剩余未选中的 rows 中按顺序补齐。
+    kept_sampled_extra_total = sampled_extra_rank[-1].clamp_max(extra_budget)
+    remaining_extra_budget = extra_budget_tensor - kept_sampled_extra_total
+    fill_candidates = (1 - req_start_mask_i32) & (1 - kept_sampled_extra_mask)
+    fill_rank = torch.cumsum(fill_candidates, dim=0)
+    fill_mask = fill_candidates & (fill_rank <= remaining_extra_budget)
+
+    final_mask_gpu = req_start_mask_i32 | kept_sampled_extra_mask | fill_mask
 
     return final_mask_gpu, sampled_steps
-
-
-def select_dynamic_mtp_exec_mask(
-    dynamic_batch_size: int,
-    req_start_mask: torch.Tensor,
-    sampled_mask_gpu: torch.Tensor,
-) -> torch.Tensor:
-    assert req_start_mask.is_cuda
-    assert sampled_mask_gpu.is_cuda
-    assert req_start_mask.shape == sampled_mask_gpu.shape
-
-    num_reqs = int(req_start_mask.sum().item())
-    selected_count = int(sampled_mask_gpu.sum().item())
-    if selected_count <= dynamic_batch_size:
-        return sampled_mask_gpu
-
-    remaining_budget = dynamic_batch_size - num_reqs
-    if remaining_budget <= 0:
-        # 当前 token budget 分配逻辑保持最简单的顺序策略：
-        # 先保证每个请求至少保留 1 个 token（即 mtp_index == 0 的主请求行），
-        # 如果 budget 不足以支持更多 draft token，则该请求本轮不做 MTP 展开。
-        return req_start_mask.to(torch.int32)
-
-    # 当前 token budget 分配逻辑保持最简单的顺序策略：
-    # 在保证每个请求至少保留 1 个 token 之后，
-    # 对剩余的 draft token 按 batch 中从前到后的顺序依次分配 budget。
-    extra_mask_gpu = sampled_mask_gpu & (~req_start_mask)
-    extra_rank = torch.cumsum(extra_mask_gpu.to(torch.int32), dim=0)
-    kept_extra_mask = extra_mask_gpu & (extra_rank <= remaining_budget)
-    return req_start_mask.to(torch.int32) | kept_extra_mask.to(torch.int32)
 
 
 def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(b_mtp_index: torch.Tensor) -> torch.Tensor:
@@ -310,7 +307,118 @@ def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(b_mtp_index: torch
     return b_mark_shared_group
 
 
-def _trim_decode_model_input_inplace(model_input: ModelInput, selected_mask_gpu: torch.Tensor) -> ModelInput:
+@triton.jit
+def _fwd_kernel_pack_selected_rows_1d(
+    src,
+    dst,
+    selected_mask,
+    selected_dst_pos,
+    batch_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+
+    src_vals = tl.load(src + offsets, mask=mask, other=0)
+    selected_vals = tl.load(selected_mask + offsets, mask=mask, other=0)
+    dst_pos_vals = tl.load(selected_dst_pos + offsets, mask=mask, other=0)
+    write_mask = mask & (selected_vals != 0)
+    tl.store(dst + dst_pos_vals, src_vals, mask=write_mask)
+
+
+@triton.jit
+def _fwd_kernel_pack_selected_rows_2d(
+    src,
+    src_stride_0,
+    src_stride_1,
+    dst,
+    dst_stride_0,
+    dst_stride_1,
+    selected_mask,
+    selected_dst_pos,
+    batch_size,
+    hidden_size,
+    BLOCK_N: tl.constexpr,
+):
+    row_id = tl.program_id(0)
+    col_block_id = tl.program_id(1)
+    col_offsets = col_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    row_mask = row_id < batch_size
+
+    selected_val = tl.load(selected_mask + row_id, mask=row_mask, other=0)
+    dst_row = tl.load(selected_dst_pos + row_id, mask=row_mask, other=0)
+    write_row = row_mask & (selected_val != 0)
+    col_mask = col_offsets < hidden_size
+    src_ptrs = src + row_id * src_stride_0 + col_offsets * src_stride_1
+    dst_ptrs = dst + dst_row * dst_stride_0 + col_offsets * dst_stride_1
+    vals = tl.load(src_ptrs, mask=write_row & col_mask, other=0)
+    tl.store(dst_ptrs, vals, mask=write_row & col_mask)
+
+
+def _pack_selected_rows_1d(src: Optional[torch.Tensor], selected_mask_gpu: torch.Tensor, dynamic_batch_size: int):
+    if src is None:
+        return None
+
+    assert src.is_cuda
+    assert src.ndim == 1
+    assert selected_mask_gpu.is_cuda
+    assert src.shape[0] == selected_mask_gpu.shape[0]
+
+    selected_mask_gpu = selected_mask_gpu.to(torch.int32)
+    selected_dst_pos = torch.cumsum(selected_mask_gpu, dim=0, dtype=torch.int32) - 1
+    dst = torch.empty((dynamic_batch_size,), dtype=src.dtype, device=src.device)
+    grid = (triton.cdiv(src.shape[0], 256),)
+    _fwd_kernel_pack_selected_rows_1d[grid](
+        src=src,
+        dst=dst,
+        selected_mask=selected_mask_gpu,
+        selected_dst_pos=selected_dst_pos,
+        batch_size=src.shape[0],
+        BLOCK_SIZE=256,
+        num_warps=4,
+        num_stages=1,
+    )
+    return dst
+
+
+def _pack_selected_rows_2d(src: Optional[torch.Tensor], selected_mask_gpu: torch.Tensor, dynamic_batch_size: int):
+    if src is None:
+        return None
+
+    assert src.is_cuda
+    assert src.ndim == 2
+    assert selected_mask_gpu.is_cuda
+    assert src.shape[0] == selected_mask_gpu.shape[0]
+
+    selected_mask_gpu = selected_mask_gpu.to(torch.int32)
+    selected_dst_pos = torch.cumsum(selected_mask_gpu, dim=0, dtype=torch.int32) - 1
+    hidden_size = src.shape[1]
+    dst = torch.empty((dynamic_batch_size, hidden_size), dtype=src.dtype, device=src.device)
+    grid = (src.shape[0], triton.cdiv(hidden_size, 128))
+    _fwd_kernel_pack_selected_rows_2d[grid](
+        src=src,
+        src_stride_0=src.stride(0),
+        src_stride_1=src.stride(1),
+        dst=dst,
+        dst_stride_0=dst.stride(0),
+        dst_stride_1=dst.stride(1),
+        selected_mask=selected_mask_gpu,
+        selected_dst_pos=selected_dst_pos,
+        batch_size=src.shape[0],
+        hidden_size=hidden_size,
+        BLOCK_N=128,
+        num_warps=4,
+        num_stages=1,
+    )
+    return dst
+
+
+def _trim_decode_model_input_inplace(
+    model_input: ModelInput,
+    selected_mask_gpu: torch.Tensor,
+    dynamic_batch_size: int,
+) -> ModelInput:
     assert not model_input.is_prefill
     assert selected_mask_gpu.is_cuda
     assert model_input.b_req_idx.is_cuda
@@ -318,66 +426,70 @@ def _trim_decode_model_input_inplace(model_input: ModelInput, selected_mask_gpu:
     assert model_input.b_seq_len.is_cuda
     assert model_input.mem_indexes is not None and model_input.mem_indexes.is_cuda
 
-    selected_index = torch.nonzero(selected_mask_gpu, as_tuple=False).flatten()
-    new_batch_size = selected_index.numel()
-    if new_batch_size == model_input.batch_size:
-        return model_input
-
+    # 动态 MTP 采样阶段已经保证 selected_mask_gpu 恰好选出 dynamic_batch_size 个位置，
+    # 因此这里可以直接做固定容量 pack，不再需要 nonzero / numel 之类的动态 compact 同步。
     if model_input.input_ids is not None:
         assert model_input.input_ids.is_cuda
-        model_input.input_ids = torch.index_select(model_input.input_ids, dim=0, index=selected_index)
-    model_input.b_req_idx = torch.index_select(model_input.b_req_idx, dim=0, index=selected_index)
-    model_input.b_mtp_index = torch.index_select(model_input.b_mtp_index, dim=0, index=selected_index)
-    model_input.b_seq_len = torch.index_select(model_input.b_seq_len, dim=0, index=selected_index)
+        model_input.input_ids = _pack_selected_rows_1d(model_input.input_ids, selected_mask_gpu, dynamic_batch_size)
+    model_input.b_req_idx = _pack_selected_rows_1d(model_input.b_req_idx, selected_mask_gpu, dynamic_batch_size)
+    model_input.b_mtp_index = _pack_selected_rows_1d(model_input.b_mtp_index, selected_mask_gpu, dynamic_batch_size)
+    model_input.b_seq_len = _pack_selected_rows_1d(model_input.b_seq_len, selected_mask_gpu, dynamic_batch_size)
 
     if model_input.mem_indexes is not None:
         assert model_input.mem_indexes.is_cuda
-        model_input.mem_indexes = torch.index_select(model_input.mem_indexes, dim=0, index=selected_index)
+        model_input.mem_indexes = _pack_selected_rows_1d(model_input.mem_indexes, selected_mask_gpu, dynamic_batch_size)
     if model_input.b_shared_seq_len is not None:
         assert model_input.b_shared_seq_len.is_cuda
-        model_input.b_shared_seq_len = torch.index_select(model_input.b_shared_seq_len, dim=0, index=selected_index)
+        model_input.b_shared_seq_len = _pack_selected_rows_1d(
+            model_input.b_shared_seq_len, selected_mask_gpu, dynamic_batch_size
+        )
     if model_input.mtp_draft_input_hiddens is not None:
         assert model_input.mtp_draft_input_hiddens.is_cuda
-        model_input.mtp_draft_input_hiddens = torch.index_select(
-            model_input.mtp_draft_input_hiddens, dim=0, index=selected_index
+        model_input.mtp_draft_input_hiddens = _pack_selected_rows_2d(
+            model_input.mtp_draft_input_hiddens, selected_mask_gpu, dynamic_batch_size
         )
-    # ! 目前用不到multimodal_params，但是又会检查它的长度是否正确，因此先简单地 trim 掉，保持和其他参数一致的 batch_size
+    # ! multimodal_params 是 Python list，而且在语言模型测试中用不到，这里直接硬截取前dynamic_batch_size个元素
     if model_input.multimodal_params is not None:
-        model_input.multimodal_params = model_input.multimodal_params[:new_batch_size]
+        model_input.multimodal_params = model_input.multimodal_params[:dynamic_batch_size]
 
     model_input.b_mark_shared_group = _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(
         model_input.b_mtp_index
     )
-    model_input.batch_size = new_batch_size
+    model_input.batch_size = dynamic_batch_size
 
     return model_input
 
 
-def trim_dynamic_mtp_model_input(
+def prepare_dynamic_mtp_model_input(
     model_input: ModelInput,
+    req_num: int,
     dynamic_batch_size: int,
     req_to_next_token_ids: torch.Tensor,
     req_to_next_token_probs: Optional[torch.Tensor] = None,
 ):
-    del req_to_next_token_ids
-
     if req_to_next_token_probs is None:
         selected_mask = torch.ones((model_input.batch_size,), dtype=torch.int32, device="cuda")
         return model_input, selected_mask
 
     assert not model_input.is_prefill, "trim_dynamic_mtp_model_input only supports decode inputs"
-    # Keep the trim path simple and deterministic: finish model_input.to_cuda() first,
-    # then do both sampling and compaction purely on GPU tensors.
+    
+    # ! 在一个CUDA流上面的GPU操作会自动串行化，因此不需要额外同步
+    # ! model_input必须在GPU上，才能高效进行trim操作
     model_input.to_cuda()
-    torch.cuda.current_stream().synchronize()
+    # torch.cuda.current_stream().synchronize()
 
     selected_mask_gpu, _ = sample_dynamic_mtp_req_mask(
+        req_num=req_num,
         dynamic_batch_size=dynamic_batch_size,
         b_req_idx=model_input.b_req_idx,
         b_mtp_index=model_input.b_mtp_index,
         req_to_next_token_probs=req_to_next_token_probs,
     )
-    model_input = _trim_decode_model_input_inplace(model_input=model_input, selected_mask_gpu=selected_mask_gpu)
+    model_input = _trim_decode_model_input_inplace(
+        model_input=model_input, 
+        selected_mask_gpu=selected_mask_gpu,
+        dynamic_batch_size=dynamic_batch_size,
+    )
     return model_input, selected_mask_gpu
 
 
@@ -481,6 +593,7 @@ def test_sample_dynamic_mtp_req_mask():
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         req_to_next_token_probs=req_to_next_token_probs,
+        req_num=3,
     )
 
     print("==== test_sample_dynamic_mtp_req_mask ====")
