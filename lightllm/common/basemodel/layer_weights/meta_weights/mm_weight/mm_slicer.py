@@ -28,6 +28,10 @@ class SliceMixinBase(ABC):
         end = start + tp_size
         return start, end
 
+    def _assert_weight_ndim(self, tensor: torch.Tensor) -> None:
+        # 2D: 普通 linear (out, in); 3D: MoE 合并权重 (num_experts, out, in)。
+        assert tensor.dim() in (2, 3), f"expect weight ndim in (2, 3), got shape {tuple(tensor.shape)}"
+
 
 class SliceMixinTpl(SliceMixinBase):
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1):
@@ -46,13 +50,15 @@ class SliceMixinTpl(SliceMixinBase):
         raise NotImplementedError("slice_weight_zero_point must implement this method")
 
 
-# 默认weight 的shape是 outxin，这也是目前最通用的约定。
-# 这里约定row-wise沿着倒数第二维切分，col-wise沿着第一维切分。
+# 默认 weight 的 shape 末两维是 (out, in)，普通 linear 是 2D (out, in)，
+# MoE 合并权重则是 3D (num_experts, out, in)，统一通过 `...` 处理任意前导维。
+# 约定 row-wise 沿着 out 维（倒数第二维）切分，col-wise 沿着 in 维（最后一维）切分。
 class RowSliceMixin(SliceMixinTpl):
     def __init__(self, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1):
         super().__init__(tp_rank, tp_world_size, repeat_times)
 
     def _slice_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        self._assert_weight_ndim(weight)
         assert (
             weight.shape[-2] * self.repeat_times_ % self.tp_world_size_ == 0
         ), f"tp slice error {weight.shape[-2] * self.repeat_times_} % {self.tp_world_size_}"
@@ -74,6 +80,7 @@ class QuantizedRowSliceMixin(RowSliceMixin):
         super().__init__(tp_rank, tp_world_size, repeat_times)
 
     def _slice_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
+        self._assert_weight_ndim(weight_scale)
         assert (
             weight_scale.shape[-2] % self.tp_world_size_ == 0
         ), f"tp slice error {weight_scale.shape[-2]} % {self.tp_world_size_}"
@@ -81,6 +88,7 @@ class QuantizedRowSliceMixin(RowSliceMixin):
         return weight_scale[..., start:end, :]
 
     def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
+        self._assert_weight_ndim(weight_zero_point)
         assert (
             weight_zero_point.shape[-2] % self.tp_world_size_ == 0
         ), f"tp slice error {weight_zero_point.shape[-2]} % {self.tp_world_size_}"
@@ -93,6 +101,7 @@ class ColSliceMixin(SliceMixinTpl):
         super().__init__(tp_rank, tp_world_size, repeat_times)
 
     def _slice_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        self._assert_weight_ndim(weight)
         assert (
             weight.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
         ), f"tp slice error {weight.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
@@ -108,13 +117,15 @@ class QuantizedColSliceMixin(ColSliceMixin):
         super().__init__(tp_rank, tp_world_size, repeat_times)
 
     def _slice_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
+        self._assert_weight_ndim(weight_scale)
         assert (
-            weight_scale.shape[1] * self.repeat_times_ % self.tp_world_size_ == 0
+            weight_scale.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
         ), f"tp slice error {weight_scale.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
         start, end = self._get_slice_start_end(weight_scale.shape[-1])
         return weight_scale[..., start:end]
 
     def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
+        self._assert_weight_ndim(weight_zero_point)
         assert (
             weight_zero_point.shape[-1] * self.repeat_times_ % self.tp_world_size_ == 0
         ), f"tp slice error {weight_zero_point.shape[-1] * self.repeat_times_ } % {self.tp_world_size_}"
