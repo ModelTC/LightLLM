@@ -281,7 +281,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if torch.cuda.is_current_stream_capturing():
+        if self.platform_backend.graph.is_capturing():
             mixed_qkvzba = mixed_qkvzba.contiguous()
             _mixed_qkvzba = tensor_to_no_ref_tensor(mixed_qkvzba)
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()

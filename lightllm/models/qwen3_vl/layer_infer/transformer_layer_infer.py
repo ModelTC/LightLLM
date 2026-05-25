@@ -79,7 +79,7 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         infer_state: InferStateInfo,
         layer_num: int,
     ):
-        if torch.cuda.is_current_stream_capturing():
+        if self.platform_backend.graph.is_capturing():
             input_embeddings = input_embeddings.contiguous()
             _input_embeddings = tensor_to_no_ref_tensor(input_embeddings)
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()

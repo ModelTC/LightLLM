@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Type
+from lightllm.platform.base.graph import BackendGraph
 from lightllm.platform.base.runtime import BackendRuntime
 
 class Backend(ABC):
@@ -12,7 +13,12 @@ class Backend(ABC):
     @property
     @abstractmethod
     def runtime(self) -> BackendRuntime:
-        raise NotImplementedError
+        pass
+
+    @property
+    @abstractmethod
+    def graph(self) -> BackendGraph:
+        pass
 
 
 class BackendRegistry:

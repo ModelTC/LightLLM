@@ -9,6 +9,7 @@ import collections
 from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
+from lightllm.platform import get_backend
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
 from typing import Callable, Optional, Union, List
@@ -130,6 +131,7 @@ class Autotuner:
         ]
         self._run_key_func_param_names = [name for name, _ in inspect.signature(self.run_key_func).parameters.items()]
         self.mutates_args = mutates_args
+        self._platform_backend = None
 
         assert get_triton_autotune_level() in [
             AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG,
@@ -138,6 +140,12 @@ class Autotuner:
             AutotuneLevel.CLOSE_AUTOTUNE,
         ]
         return
+
+    @property
+    def platform_backend(self):
+        if self._platform_backend is None:
+            self._platform_backend = get_backend()
+        return self._platform_backend
 
     @torch.no_grad()
     def __call__(self, *args, **kwargs):
@@ -253,19 +261,19 @@ class Autotuner:
             # warmup
             kernel_call()
 
-            torch.cuda.current_stream().synchronize()
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, stream=torch.cuda.Stream()):
+            self.platform_backend.runtime.current_stream().synchronize()
+            g = self.platform_backend.graph.create_graph()
+            with self.platform_backend.graph.graph(g, stream=self.platform_backend.runtime.create_stream()):
                 for _ in range(n_repeat):
                     kernel_call()
-            torch.cuda.current_stream().synchronize()
+            self.platform_backend.runtime.current_stream().synchronize()
 
             state = _BenchmarkState()
             for i in range(n_retries):
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = self.platform_backend.runtime.create_event(enable_timing=True)
+                end_event = self.platform_backend.runtime.create_event(enable_timing=True)
                 start_event.record()
-                g.replay()
+                self.platform_backend.graph.replay_graph(g)
                 end_event.record()
                 end_event.synchronize()
                 state.update(start_event.elapsed_time(end_event) / n_repeat)

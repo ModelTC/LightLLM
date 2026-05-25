@@ -4,6 +4,7 @@ import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 from typing import List
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from .gqa_flash_decoding_config import MlaDecodeAttentionKernelConfig
 from lightllm.utils.device_utils import get_device_sm_count
@@ -25,7 +26,7 @@ def gqa_token_decode_attention_flash_decoding(
     calcu_shape2 = (batch_size, q_head_num, q_rope_dim)
 
     if not run_config:
-        if torch.cuda.is_current_stream_capturing():
+        if get_backend().graph.is_capturing():
             avg_seq_len_in_batch = max_kv_seq_len
         else:
             avg_seq_len_in_batch = infer_state.total_token_num // batch_size

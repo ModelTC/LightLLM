@@ -5,6 +5,7 @@ import bisect
 import triton
 from typing import List, Tuple
 from typing import Optional
+from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
@@ -21,11 +22,13 @@ class PrefillCudaGraph:
 
     def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int):
         self.graph = {}
+        self.platform_backend = get_backend()
         self.tp_world_size = tp_world_size
         if decode_cuda_graph is not None:
             self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
         else:
-            self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+            self.mempool = self.platform_backend.graph.graph_pool_handle() \
+                if self.platform_backend.runtime.is_available() else None
 
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
@@ -206,7 +209,7 @@ class PrefillCudaGraph:
             for var_name, var_value in list(locals().items()):
                 if isinstance(var_value, torch.Tensor):
                     del locals()[var_name]
-            torch.cuda.empty_cache()
+            self.platform_backend.runtime.empty_cache()
 
         logger.info(
             f"Capture repfill cudagraph success, token_num <={self.max_handle_token_num} " f"will infer with cudagraph."
@@ -260,7 +263,7 @@ class PrefillCudaGraph:
                 for var_name, var_value in list(locals().items()):
                     if isinstance(var_value, torch.Tensor):
                         del locals()[var_name]
-                torch.cuda.empty_cache()
+                self.platform_backend.runtime.empty_cache()
 
             _, _ = model.microbatch_overlap_prefill(prefill_batches[0], prefill_batches[1])
 
@@ -273,7 +276,7 @@ class PrefillCudaGraph:
             for var_name, var_value in list(locals().items()):
                 if isinstance(var_value, torch.Tensor):
                     del locals()[var_name]
-            torch.cuda.empty_cache()
+            self.platform_backend.runtime.empty_cache()
 
         logger.info(
             f"Capture overlap cudagraph success, handle_token_num <={self.max_handle_token_num} "

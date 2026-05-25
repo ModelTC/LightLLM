@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from lightllm.common.kernel_config import KernelConfigs
+from lightllm.platform import get_backend
 from lightllm.utils.device_utils import calcu_kernel_best_vsm_count
 from frozendict import frozendict
 from functools import lru_cache
@@ -423,7 +424,7 @@ def gqa_token_decode_attention_flash_decoding_vsm(
     sm_scale = 1.0 / (q_head_dim ** 0.5)
 
     if not run_config:
-        if torch.cuda.is_current_stream_capturing():
+        if get_backend().graph.is_capturing():
             avg_seq_len_in_batch = infer_state.max_kv_seq_len
         else:
             avg_seq_len_in_batch = infer_state.total_token_num // batch_size

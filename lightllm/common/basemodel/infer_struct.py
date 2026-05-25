@@ -5,6 +5,8 @@ from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
+
+from lightllm.platform import get_backend
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
@@ -348,19 +350,19 @@ class InferStateInfo:
     def prefill_cuda_graph_create_graph_obj(self):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []
-        graph_obj = torch.cuda.CUDAGraph()
-        capture_graph = torch.cuda.graph(graph_obj, pool=self.mem_pool)
+        graph_obj = get_backend().graph.create_graph()
+        capture_graph = get_backend().graph.graph(graph_obj, pool=self.mem_pool)
         self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
         return
 
-    def prefill_cuda_graph_get_current_capture_graph(self) -> torch.cuda.graph:
+    def prefill_cuda_graph_get_current_capture_graph(self) -> Any:
         assert len(self.prefill_cuda_graph_exe_list) > 0, "no cuda graph exe obj found"
         if isinstance(self.prefill_cuda_graph_exe_list[-1], tuple):
             return self.prefill_cuda_graph_exe_list[-1][1]
         else:
             return self.prefill_cuda_graph_exe_list[-2][1]
 
-    def prefill_cuda_graph_add_cpu_runnning_func(self, func, after_graph: torch.cuda.graph):
+    def prefill_cuda_graph_add_cpu_runnning_func(self, func, after_graph: Any):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []
         if after_graph is None:
@@ -377,7 +379,7 @@ class InferStateInfo:
         for func in self.prefill_cuda_graph_exe_list:
             if isinstance(func, tuple):
                 graph_obj, _ = func
-                graph_obj.replay()
+                get_backend().graph.replay_graph(graph_obj)
             else:
                 func(new_infer_state)
         return
