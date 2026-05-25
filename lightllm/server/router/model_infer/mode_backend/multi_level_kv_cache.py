@@ -4,7 +4,7 @@ import torch
 import dataclasses
 import bisect
 from functools import lru_cache
-from typing import Optional, List, Deque
+from typing import Optional, List, Deque, Union
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.config_utils import is_linear_att_mixed_model
@@ -219,7 +219,7 @@ class MultiLevelKvCacheModule(object):
 
             if self.need_sync_compute_stream():
                 # TODO fa3 现在必须使用同步模式, 未来需要移除, 必须等待 overlap stream 上的计算任务完成，不然会崩溃
-                g_infer_context.get_overlap_stream().synchronize()
+                offload_stream.wait_stream(g_infer_context.get_overlap_stream())
 
             # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
             trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=offload_stream)
@@ -345,15 +345,15 @@ class MultiLevelKvCacheModule(object):
                     return move_block_size - 1
         return move_block_size
 
-    def update_cpu_cache_offload_task_states(self):
+    def _get_trans_ok_tasks_from_queue(self, task_queue: Deque) -> List[Union["OffloadTransTask", "LoadTransTask"]]:
         if self.backend.is_master_in_dp:
             trans_ok_tasks = []
-            while len(self.cpu_cache_offload_task_handle_queue) != 0:
-                task: OffloadTransTask = self.cpu_cache_offload_task_handle_queue.popleft()
+            while len(task_queue) != 0:
+                task: Union[OffloadTransTask, LoadTransTask] = task_queue.popleft()
                 if task.sync_event.query():
                     trans_ok_tasks.append(task)
                 else:
-                    self.cpu_cache_offload_task_handle_queue.appendleft(task)
+                    task_queue.appendleft(task)
                     break
             item_size = len(trans_ok_tasks)
             dist.broadcast_object_list([item_size], group=self.filter_group, group_src=0)
@@ -361,11 +361,14 @@ class MultiLevelKvCacheModule(object):
             recv_list = [None]
             dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)
             item_size = recv_list[0]
-            trans_ok_tasks: List[OffloadTransTask] = [
-                self.cpu_cache_offload_task_handle_queue.popleft() for _ in range(item_size)
+            trans_ok_tasks: List[Union[OffloadTransTask, LoadTransTask]] = [
+                task_queue.popleft() for _ in range(item_size)
             ]
+        return trans_ok_tasks
 
-        if item_size > 0:
+    def update_cpu_cache_offload_task_states(self):
+        trans_ok_tasks = self._get_trans_ok_tasks_from_queue(self.cpu_cache_offload_task_handle_queue)
+        if len(trans_ok_tasks) > 0:
             page_array_list = [task.page_indexes.tolist() for task in trans_ok_tasks]
             move_token_nums = [task.move_token_num for task in trans_ok_tasks]
             if self.backend.is_master_in_dp:
@@ -384,26 +387,8 @@ class MultiLevelKvCacheModule(object):
         return
 
     def update_cpu_cache_load_task_states(self):
-        if self.backend.is_master_in_dp:
-            trans_ok_tasks = []
-            while len(self.cpu_cache_load_task_handle_queue) != 0:
-                task: LoadTransTask = self.cpu_cache_load_task_handle_queue.popleft()
-                if task.sync_event.query():
-                    trans_ok_tasks.append(task)
-                else:
-                    self.cpu_cache_load_task_handle_queue.appendleft(task)
-                    break
-            item_size = len(trans_ok_tasks)
-            dist.broadcast_object_list([item_size], group=self.filter_group, group_src=0)
-        else:
-            recv_list = [None]
-            dist.broadcast_object_list(recv_list, group=self.filter_group, group_src=0)
-            item_size = recv_list[0]
-            trans_ok_tasks: List[LoadTransTask] = [
-                self.cpu_cache_load_task_handle_queue.popleft() for _ in range(item_size)
-            ]
-
-        if item_size > 0:
+        trans_ok_tasks = self._get_trans_ok_tasks_from_queue(self.cpu_cache_load_task_handle_queue)
+        if len(trans_ok_tasks) > 0:
             need_free_page_list = []
             for task in trans_ok_tasks:
                 need_free_page_list.extend(task.page_list)
@@ -421,10 +406,10 @@ class MultiLevelKvCacheModule(object):
 
                 task.req_obj.cpu_cache_load_task_status = InferReq._CpuCacheLoadTaskStatus.FINISHED
 
-        if self.backend.is_master_in_dp and need_free_page_list:
-            self.cpu_cache_client.lock.acquire_sleep1ms()
-            self.cpu_cache_client.deref_pages(page_list=need_free_page_list)
-            self.cpu_cache_client.lock.release()
+            if self.backend.is_master_in_dp and need_free_page_list:
+                self.cpu_cache_client.lock.acquire_sleep1ms()
+                self.cpu_cache_client.deref_pages(page_list=need_free_page_list)
+                self.cpu_cache_client.lock.release()
         return
 
 
