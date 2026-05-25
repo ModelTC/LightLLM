@@ -153,8 +153,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--mem_fraction",
         type=float,
-        default=0.9,
-        help="""Memory usage ratio, default is 0.9, you can specify a smaller value if OOM occurs at runtime.
+        default=0.8,
+        help="""Memory usage ratio, default is 0.8, you can specify a smaller value if OOM occurs at runtime.
         If max_total_token_num is not specified, it will be calculated automatically based on this value.""",
     )
     parser.add_argument(
@@ -201,6 +201,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "step3",
             "nano_v3",
             "interns1",
+            "gemma4",
         ],
         default=None,
         help="reasoning parser type",
@@ -325,6 +326,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help="""aggressive schedule can lead to frequent prefill interruptions during decode.
                 disabling it allows the router_max_wait_tokens parameter to work more effectively.""",
+    )
+    parser.add_argument(
+        "--enable_prefill_decode_mixed",
+        action="store_true",
+        help="""when run_mode is normal, allow prefill and decode requests to run in the same
+        scheduling step when both exist, improving throughput under aggressive schedule.""",
     )
 
     parser.add_argument(
@@ -455,6 +462,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
+    )
+    parser.add_argument(
+        "--max_image_token_count",
+        type=int,
+        default=8192,
+        help="maximum allowed token count for one image after tokenization",
+    )
+    parser.add_argument(
+        "--max_image_pixels",
+        type=int,
+        default=8294400,
+        help="maximum allowed pixel count for one image before resize preprocessing",
     )
     parser.add_argument(
         "--embed_cache_storage_size",

@@ -42,7 +42,7 @@ def _copy_kv_buffer_to_cpu_cache(
     head_scale_size,
     BLOCK: tl.constexpr,
 ):
-    block_index_start = tl.program_id(0)
+    split_index_start = tl.program_id(0)
     grid_num = tl.num_programs(0)
     # 将 所有stride 切成 tl.int64
     cpu_cache_full_att_stride_p = tl.cast(cpu_cache_full_att_stride_p, tl.int64)
@@ -62,7 +62,7 @@ def _copy_kv_buffer_to_cpu_cache(
     cpu_kv_ssm_stride_s = tl.cast(cpu_kv_ssm_stride_s, tl.int64)
     cpu_kv_ssm_stride_d = tl.cast(cpu_kv_ssm_stride_d, tl.int64)
 
-    for block_index in range(block_index_start, page_num, grid_num):
+    for block_index in range(page_num):
         cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
         run_flag = 1
         if cpu_page_index == -1:
@@ -76,7 +76,7 @@ def _copy_kv_buffer_to_cpu_cache(
             head_flag = 0
 
         mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
-        for i in range(tl.cdiv(gpu_full_att_tail_dim, BLOCK) * run_flag * head_flag):
+        for i in range(split_index_start, tl.cdiv(gpu_full_att_tail_dim, BLOCK) * run_flag * head_flag, grid_num):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
             mask = gpu_start_i < gpu_full_att_tail_dim
             per_token_size = gpu_full_att_tail_dim // big_page_token_num
@@ -103,7 +103,7 @@ def _copy_kv_buffer_to_cpu_cache(
 
         big_page_idx = tl.load(big_page_buffer_ids + block_index)
 
-        for i in range(tl.cdiv(cpu_kv_conv_tail_dim, BLOCK) * run_flag):
+        for i in range(split_index_start, tl.cdiv(cpu_kv_conv_tail_dim, BLOCK) * run_flag, grid_num):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
             mask = gpu_start_i < cpu_kv_conv_tail_dim
             cpu_kv_conv_data = tl.load(
@@ -119,7 +119,7 @@ def _copy_kv_buffer_to_cpu_cache(
             )
             tl.store(dest_cpu_cache_conv_ptr, cpu_kv_conv_data, mask=mask)
 
-        for i in range(tl.cdiv(cpu_kv_ssm_tail_dim, BLOCK) * run_flag):
+        for i in range(split_index_start, tl.cdiv(cpu_kv_ssm_tail_dim, BLOCK) * run_flag, grid_num):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
             mask = gpu_start_i < cpu_kv_ssm_tail_dim
 
@@ -149,7 +149,7 @@ def copy_kv_buffer_to_cpu_cache(
     tp_world_size: int,
     big_page_token_num: int,
     linear_config: LinearAttCacheConfig,
-    grid_num: int = 16,
+    grid_num: int = 12,
 ):
     assert len(page_indexes) == len(page_readies) == len(big_page_buffer_ids)
     assert len(mem_indexes) % len(page_indexes) == 0
@@ -172,15 +172,21 @@ def copy_kv_buffer_to_cpu_cache(
     else:
         cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, linear_config.full_att_all_num_kv_heads, -1)
 
-    cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1)
-    cpu_cache_ssm = cpu_cache_tensor[:, (a + b) : (a + b + c)].view(cpu_page_num, tp_world_size, -1)
+    cpu_cache_full_att = cpu_cache_full_att.view(dtype=torch.uint64)
+
+    cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
+    cpu_cache_ssm = (
+        cpu_cache_tensor[:, (a + b) : (a + b + c)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
+    )
 
     gpu_kv_full_att_state = gpu_kv_full_att_state.view(
         gpu_kv_full_att_state.shape[0], gpu_kv_full_att_state.shape[1], -1
-    ).view(dtype=torch.uint8)
+    ).view(dtype=torch.uint64)
+
     gpu_kv_full_att_state = gpu_kv_full_att_state.permute(1, 0, 2)  # [s, layer_num, xxdim]
-    cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], -1).view(dtype=torch.uint8)
-    cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint8)
+
+    cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], -1).view(dtype=torch.uint64)
+    cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint64)
 
     gpu_full_att_tail_dim = gpu_kv_full_att_state.shape[-1] * gpu_kv_full_att_state.shape[-2] * big_page_token_num
     cpu_kv_conv_tail_dim = cpu_kv_conv_state.shape[-1]
@@ -195,6 +201,7 @@ def copy_kv_buffer_to_cpu_cache(
     assert gpu_full_att_tail_dim == cpu_cache_full_att.shape[-1]
     assert cpu_cache_conv.shape[-1] == cpu_kv_conv_state.shape[-1]
     assert cpu_cache_ssm.shape[-1] == cpu_kv_ssm_state.shape[-1]
+    assert gpu_kv_full_att_state.stride(2) == 1
     assert (
         gpu_full_att_tail_dim % big_page_token_num == 0
         and (gpu_full_att_tail_dim // big_page_token_num) % full_att_layer_num == 0
@@ -278,7 +285,7 @@ def _copy_cpu_cache_to_kv_buffer(
     head_scale_size,
     BLOCK: tl.constexpr,
 ):
-    block_index_start = tl.program_id(0)
+    split_index_start = tl.program_id(0)
     grid_num = tl.num_programs(0)
     # 将 所有stride 切成 tl.int64
     cpu_cache_full_att_stride_p = tl.cast(cpu_cache_full_att_stride_p, tl.int64)
@@ -298,11 +305,11 @@ def _copy_cpu_cache_to_kv_buffer(
     cpu_kv_ssm_stride_s = tl.cast(cpu_kv_ssm_stride_s, tl.int64)
     cpu_kv_ssm_stride_d = tl.cast(cpu_kv_ssm_stride_d, tl.int64)
 
-    for block_index in range(block_index_start, page_num, grid_num):
+    for block_index in range(page_num):
         cpu_page_index = tl.load(page_indexes_ptr + block_index).to(tl.int64)
 
         mem_start_ptr = mem_indexes_ptr + big_page_token_num * block_index
-        for i in range(tl.cdiv(gpu_full_att_tail_dim, BLOCK)):
+        for i in range(split_index_start, tl.cdiv(gpu_full_att_tail_dim, BLOCK), grid_num):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
             mask = gpu_start_i < gpu_full_att_tail_dim
             per_token_size = gpu_full_att_tail_dim // big_page_token_num
@@ -331,7 +338,7 @@ def _copy_cpu_cache_to_kv_buffer(
 
         big_page_idx = tl.load(big_page_buffer_ids + block_index)
 
-        for i in range(tl.cdiv(cpu_kv_conv_tail_dim, BLOCK)):
+        for i in range(split_index_start, tl.cdiv(cpu_kv_conv_tail_dim, BLOCK), grid_num):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
             mask = gpu_start_i < cpu_kv_conv_tail_dim
 
@@ -349,7 +356,7 @@ def _copy_cpu_cache_to_kv_buffer(
                 mask=mask,
             )
 
-        for i in range(tl.cdiv(cpu_kv_ssm_tail_dim, BLOCK)):
+        for i in range(split_index_start, tl.cdiv(cpu_kv_ssm_tail_dim, BLOCK), grid_num):
             gpu_start_i = i * BLOCK + tl.arange(0, BLOCK)
             mask = gpu_start_i < cpu_kv_ssm_tail_dim
 
@@ -379,8 +386,9 @@ def copy_cpu_cache_to_kv_buffer(
     tp_world_size: int,
     big_page_token_num: int,
     linear_config: LinearAttCacheConfig,
-    grid_num: int = 16,
+    grid_num: int = 12,
 ):
+
     assert len(mem_indexes) % len(page_indexes) == 0
 
     BLOCK = 4096
@@ -400,15 +408,20 @@ def copy_cpu_cache_to_kv_buffer(
     else:
         cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, linear_config.full_att_all_num_kv_heads, -1)
 
-    cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1)
-    cpu_cache_ssm = cpu_cache_tensor[:, (a + b) : (a + b + c)].view(cpu_page_num, tp_world_size, -1)
+    cpu_cache_full_att = cpu_cache_full_att.view(dtype=torch.uint64)
+
+    cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
+    cpu_cache_ssm = (
+        cpu_cache_tensor[:, (a + b) : (a + b + c)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
+    )
 
     gpu_full_att_kv_state = gpu_full_att_kv_state.view(
         gpu_full_att_kv_state.shape[0], gpu_full_att_kv_state.shape[1], -1
-    ).view(dtype=torch.uint8)
+    ).view(dtype=torch.uint64)
     gpu_full_att_kv_state = gpu_full_att_kv_state.permute(1, 0, 2)  # [s, layer_num, xxdim]
-    cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], -1).view(dtype=torch.uint8)
-    cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint8)
+
+    cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], -1).view(dtype=torch.uint64)
+    cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint64)
 
     gpu_full_att_tail_dim = gpu_full_att_kv_state.shape[-1] * gpu_full_att_kv_state.shape[-2] * big_page_token_num
     cpu_kv_conv_tail_dim = cpu_kv_conv_state.shape[-1]
@@ -418,6 +431,7 @@ def copy_cpu_cache_to_kv_buffer(
     assert gpu_full_att_tail_dim == cpu_cache_full_att.shape[-1]
     assert cpu_cache_conv.shape[-1] == cpu_kv_conv_state.shape[-1]
     assert cpu_cache_ssm.shape[-1] == cpu_kv_ssm_state.shape[-1]
+    assert gpu_full_att_kv_state.stride(2) == 1
 
     assert (tp_rank // head_scale_size) < linear_config.full_att_all_num_kv_heads
 

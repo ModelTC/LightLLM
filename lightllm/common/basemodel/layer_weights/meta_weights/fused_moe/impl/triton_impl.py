@@ -43,6 +43,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_group: int,
         num_expert_group: int,
         scoring_func: str,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -60,6 +61,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         )
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = (
                 torch.arange(
@@ -128,6 +131,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         is_prefill: Optional[bool] = None,
         moe_layer_index: Optional[int] = None,
         microbatch_index: int = 0,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ):
         topk_weights, topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -139,6 +143,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
+            per_expert_scale=per_expert_scale,
         )
 
         if _routing_mgr.g_routing_capture_manager is not None and moe_layer_index is not None:

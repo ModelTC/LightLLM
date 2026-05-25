@@ -18,6 +18,7 @@ def _rms_norm_fwd_fused(
     y_stride1,
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
+    HAS_WEIGHT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
@@ -32,14 +33,17 @@ def _rms_norm_fwd_fused(
         _var += x * x
     var = tl.sum(_var, axis=0) / N
     rstd = 1 / tl.sqrt(var + eps)
-    # Normalize and apply linear transformation
+    # Normalize and optionally apply linear transformation
     for off in range(0, N, BLOCK_SIZE):
         cols = off + tl.arange(0, BLOCK_SIZE)
         mask = cols < N
-        w = tl.load(W + cols, mask=mask).to(tl.float32)
+        if HAS_WEIGHT:
+            w = tl.load(W + cols, mask=mask).to(tl.float32)
         x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
         x_hat = x * rstd
-        y = x_hat * w
+        y = x_hat
+        if HAS_WEIGHT:
+            y = x_hat * w
         # Write output
         tl.store(Y + cols * y_stride1, y.to(Y.dtype.element_ty), mask=mask)
 
@@ -50,7 +54,9 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
     # reshape input data into 2D tensor
     x_arg = x.view(-1, x.shape[-1])
     y_arg = y.view(-1, x.shape[-1])
-    assert x_arg.shape[-1] == weight.shape[0] and x_arg.shape == y_arg.shape
+    assert x_arg.shape == y_arg.shape
+    if weight is not None:
+        assert x_arg.shape[-1] == weight.shape[0]
     assert y.data_ptr() == y_arg.data_ptr()
     M, N = x_arg.shape
     # Less than 64KB per feature: enqueue fused kernel
@@ -73,6 +79,7 @@ def rmsnorm_forward(x: torch.Tensor, weight: torch.Tensor, eps: float, out=None)
         y_arg.stride(1),
         N,
         eps,
+        HAS_WEIGHT=weight is not None,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=rmsnorm_num_warps,
     )

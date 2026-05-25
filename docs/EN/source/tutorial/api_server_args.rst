@@ -27,7 +27,6 @@ Basic Configuration Parameters
         - ``running_max_req_size`` to 3
         - ``batch_max_tokens`` to 2048 (2k)
         - ``chunked_prefill_size`` to 1024 (1k)
-        - ``mem_fraction`` to 0.85
 
 .. option:: --host
 
@@ -214,6 +213,17 @@ Scheduling Parameters
     
     Aggressive scheduling may cause frequent prefill interruptions during decoding. Disabling it can make the router_max_wait_tokens parameter work more effectively.
 
+.. option:: --enable_prefill_decode_mixed
+
+    Enable mixed prefill and decode scheduling in the same inference step.
+
+    Only supported when ``--run_mode`` is ``normal``. When both prefill and decode requests are pending,
+    the scheduler runs prefill first and then decode in one scheduling step, instead of running only
+    prefill under aggressive scheduling. This improves decode throughput when new prefill requests arrive.
+
+    Cannot be used together with ``--enable_prefill_microbatch_overlap`` or
+    ``--enable_decode_microbatch_overlap``.
+
 .. option:: --disable_dynamic_prompt_cache
 
     Disable kv cache caching
@@ -270,6 +280,18 @@ Multimodal Parameters
 .. option:: --cache_capacity
 
     Cache server capacity for multimodal resources, default is ``200``
+
+.. option:: --max_image_token_count
+
+    Maximum allowed token count for a single image after tokenization, default is ``6128``
+
+    Requests are rejected when any image exceeds this limit.
+
+.. option:: --max_image_pixels
+
+    Maximum allowed pixel count for a single image before preprocessing resize, default is ``8294400`` (about 4K image pixels).
+
+    If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
 
 .. option:: --visual_infer_batch_size
 

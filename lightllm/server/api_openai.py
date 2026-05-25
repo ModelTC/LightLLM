@@ -153,15 +153,22 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
     return idx
 
 
-def _get_reasoning_from_request(request: ChatCompletionRequest) -> bool:
-    """Judge whether the request needs reasoning"""
+def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
+    """Whether this request uses forced thinking / reasoning (parser + template)."""
+    from .build_prompt import tokenizer_supports_force_thinking
+
+    if not tokenizer_supports_force_thinking():
+        return False
+
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
+    if reasoning_parser in ["qwen3-thinking", "gpt-oss", "minimax"]:
+        return True
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
-    if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1"]:
-        # qwen3, glm45, nano_v3, and interns1 are reasoning by default
+    if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
+        # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
         return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
     return True  # default
 
@@ -175,7 +182,7 @@ def _process_reasoning_stream(
 ) -> tuple[Optional[str], str]:
     """Process reasoning content in streaming response"""
     if index not in reasoning_parser_dict:
-        request_enable_reasoning = _get_reasoning_from_request(request)
+        request_enable_reasoning = _is_force_thinking_mode(request)
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
@@ -310,6 +317,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "seed": request.seed,
     }
 
+    # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
+    # special tokens. The default skip_special_tokens=True would drop them
+    # from the decoded stream and the Gemma4Detector would be unable to
+    # find the reasoning boundary. Mirrors vllm's
+    # Gemma4ReasoningParser.adjust_request behaviour. Only applied when no
+    # explicit value is supplied so callers can still opt back into the
+    # default if they want.
+    if get_env_start_args().reasoning_parser == "gemma4" and "skip_special_tokens" not in sampling_params_dict:
+        sampling_params_dict["skip_special_tokens"] = False
+
     if request.max_completion_tokens is not None:
         sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
     elif request.max_tokens is not None:
@@ -376,7 +393,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             reasoning_text = None
             reasoning_parser = get_env_start_args().reasoning_parser
             if reasoning_parser:
-                request_enable_reasoning = _get_reasoning_from_request(request)
+                request_enable_reasoning = _is_force_thinking_mode(request)
                 try:
                     parser = ReasoningParser(
                         model_type=reasoning_parser,

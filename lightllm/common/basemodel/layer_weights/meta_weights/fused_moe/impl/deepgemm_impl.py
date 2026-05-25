@@ -31,6 +31,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_group: int,
         num_expert_group: int,
         scoring_func: str,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -48,6 +49,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         )
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
+        if per_expert_scale is not None:
+            topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,
@@ -69,7 +72,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = self.quant_method.method_name != "none"
@@ -214,7 +216,14 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         return masked_group_gemm(
-            recv_x, masked_m, dtype, w13_weight, w13_scale, w2_weight, w2_scale, expected_m=expected_m
+            recv_x,
+            masked_m,
+            dtype,
+            w13_weight,
+            w13_scale,
+            w2_weight,
+            w2_scale,
+            expected_m=expected_m,
         )
 
     def prefilled_group_gemm(

@@ -7,6 +7,7 @@ from lightllm.common.quantization.awq import (
     AWQMARLINW4A16QuantizationMethod,
 )
 from typing import Optional
+from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
@@ -38,6 +39,8 @@ class FuseMoeMarlin(FuseMoeTriton):
 
         self.quant_method: AWQMARLINW4A16QuantizationMethod = self.quant_method
 
+        activation = "silu" if not ffn_use_tanh_approximate_gelu() else "gelu"
+
         fused_marlin_moe(
             input_tensor,
             w1_weight,
@@ -52,6 +55,7 @@ class FuseMoeMarlin(FuseMoeTriton):
             quant_type_id=self.quant_method.vllm_quant_type.id,
             apply_router_weight_on_input=False,
             global_num_experts=-1,
+            activation=activation,
             expert_map=None,
             w1_zeros=w1_zero_point,
             w2_zeros=w2_zero_point,

@@ -211,6 +211,23 @@ def get_layer_num(model_path: str) -> int:
 
 
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
+    # gemma4 special eos_token_id
+    try:
+        model_type = get_model_type(model_path)
+        assert model_type == "gemma4"
+
+        generation_config_path = os.path.join(model_path, "generation_config.json")
+        with open(generation_config_path, "r") as file:
+            eos_token_id = json.load(file).get("eos_token_id")
+
+        assert eos_token_id is not None
+        if isinstance(eos_token_id, int):
+            return [eos_token_id]
+        elif isinstance(eos_token_id, list):
+            return list(eos_token_id)
+    except:
+        pass
+
     try:
         # qwen3-omini special eos_token_id
         config_json = get_config_json(model_path)
@@ -327,6 +344,9 @@ def has_vision_module(model_path: str) -> bool:
             return True
         elif model_type == "gemma3":
             return True
+        elif model_type == "gemma4":
+            model_cfg["vision_config"]
+            return model_cfg["vision_config"] is not None
         elif (
             model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
             == "qwen3_omni_moe_vision_encoder"
@@ -392,6 +412,12 @@ def get_model_type(model_path: str) -> Optional[str]:
         return None
 
 
+@lru_cache(maxsize=None)
+def get_model_type_v1() -> Optional[str]:
+    start_args = get_env_start_args()
+    return get_model_type(start_args.model_dir)
+
+
 def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     """Auto-detect tool_call_parser based on model type"""
     model_type = get_model_type(model_path)
@@ -450,4 +476,22 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     if model_type == "deepseek_r1":
         return "deepseek-r1"
 
+    # Gemma-4 (all variants share the same Harmony-like <|channel>...<channel|> format)
+    if model_type == "gemma4":
+        return "gemma4"
+
     return None
+
+
+@lru_cache(maxsize=None)
+def ffn_use_tanh_approximate_gelu() -> bool:
+    try:
+        start_args = get_env_start_args()
+        model_type = get_model_type(start_args.model_dir)
+        if model_type in ["gemma4"]:
+            logger.info("Gemma4 uses tanh-approximate-gelu for FFN")
+            return True
+    except:
+        pass
+
+    return False

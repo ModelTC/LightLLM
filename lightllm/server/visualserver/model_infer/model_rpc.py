@@ -13,6 +13,7 @@ from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
+from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
@@ -97,6 +98,8 @@ class VisualModelRpcServer(rpyc.Service):
                 # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
                 self.model = Gemma3VisionModel()
+            elif self.model_type == "gemma4":
+                self.model = Gemma4VisionModel(data_type=kvargs["data_type"])
             elif (
                 model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
                 == "qwen3_omni_moe_vision_encoder"

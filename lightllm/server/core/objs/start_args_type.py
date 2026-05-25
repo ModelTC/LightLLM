@@ -47,7 +47,7 @@ class StartArgs:
     tokenizer_mode: str = field(default="fast")
     load_way: str = field(default="HF")
     max_total_token_num: Optional[int] = field(default=None)
-    mem_fraction: float = field(default=0.9)
+    mem_fraction: float = field(default=0.8)
     batch_max_tokens: Optional[int] = field(default=None)
     eos_id: Optional[List[int]] = field(default=None)
     tool_call_parser: Optional[str] = field(
@@ -106,6 +106,7 @@ class StartArgs:
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
+    enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
@@ -124,6 +125,8 @@ class StartArgs:
     enable_decode_microbatch_overlap: bool = field(default=False)
     enable_prefill_microbatch_overlap: bool = field(default=False)
     cache_capacity: int = field(default=200)
+    max_image_token_count: int = field(default=8192)
+    max_image_pixels: int = field(default=8294400)
     embed_cache_storage_size: float = field(default=4)
     data_type: Optional[str] = field(
         default=None, metadata={"choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]}

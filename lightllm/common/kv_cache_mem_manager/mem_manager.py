@@ -3,10 +3,11 @@ import os
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from typing import List, Union, Tuple, Any
+from typing import List, Tuple, Any, Union
 from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from .allocator import KvCacheAllocator
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
@@ -38,27 +39,8 @@ class MemoryManager:
         # profile the max total token num if the size is None
         self.profile_size(mem_fraction)
 
-        self.mem_state = torch.arange(
-            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self._mem_state_return = torch.arange(
-            0, self.size * 3, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self._return_start = 0
-        self.mark_start = 0
-        self.mark_end = self.size
+        self.allocator = KvCacheAllocator(self.size)
 
-        self.can_use_mem_size = self.size
-
-        # 用共享内存进行共享，router 模块读取进行精确的调度估计, nccl port 作为一个单机中单实列的标记。防止冲突。
-        from lightllm.utils.envs_utils import get_unique_server_name
-
-        rank_in_node = get_current_rank_in_node()
-        self.shared_can_use_token_num = SharedInt(
-            f"{get_unique_server_name()}_mem_manger_can_use_token_num_{rank_in_node}"
-        )
-
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
         self._init_buffers(
             self.size,
             dtype,
@@ -83,9 +65,10 @@ class MemoryManager:
         if self.size is not None:
             return
 
+        torch.cuda.empty_cache()
         world_size = dist.get_world_size()
-        total_memory = get_total_gpu_memory()
-        available_memory = get_available_gpu_memory(world_size) - total_memory * (1 - mem_fraction)
+
+        available_memory = get_available_gpu_memory(world_size) * mem_fraction
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
         if world_size > 1:
@@ -338,57 +321,13 @@ class MemoryManager:
         self.kv_buffer = None
 
     def alloc(self, need_size) -> torch.Tensor:
-        if need_size > self.mark_end - self.mark_start:
-            logger.error(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
-            assert False, "error alloc state"
+        return self.allocator.alloc(need_size)
 
-        start = self.mark_start
-        end = self.mark_start + need_size
-        self.mark_start += need_size
-
-        self.can_use_mem_size -= need_size
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-
-        # 利用缓冲区返回，避免异步情况下的内存竞争
-        if self._return_start + need_size > self._mem_state_return.shape[0]:
-            self._return_start = 0
-        ans = self._mem_state_return[self._return_start : self._return_start + need_size]
-        ans.copy_(self.mem_state[start:end])
-        self._return_start += need_size
-        return ans
-
-    def free(self, free_index: Union[torch.Tensor, List[int]]):
-        """_summary_
-
-        Args:
-            free_index (torch.Tensor): _description_
-        """
-
-        end = self.mark_start
-        start = self.mark_start - len(free_index)
-        assert start >= 0, f"error free state start: {self.mark_start} free len {len(free_index)}"
-
-        if isinstance(free_index, list):
-            self.mem_state.numpy()[start:end] = free_index
-        else:
-            # 从 gpu 到 cpu 的拷贝操作是流内阻塞操作
-            self.mem_state[start:end] = free_index
-
-        self.mark_start -= len(free_index)
-
-        self.can_use_mem_size += len(free_index)
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-
-        if self.can_use_mem_size == len(self.mem_state):
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
-        return
+    def free(self, free_index: Union[torch.Tensor, List[int]]) -> None:
+        self.allocator.free(free_index)
 
     def free_all(self):
-        self.can_use_mem_size = len(self.mem_state)
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
-        self.mem_state.numpy()[:] = list(range(0, len(self.mem_state)))
-        self.mark_start = 0
-        self.mark_end = len(self.mem_state)
+        self.allocator.free_all()
 
     def resize_mem(self, new_size):
         """
@@ -401,13 +340,8 @@ class MemoryManager:
         layer_num = self.layer_num
 
         self.size = new_size
-        self.mem_state = torch.arange(
-            0, self.size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
-        )
-        self.mark_start = 0
-        self.mark_end = self.size
-        self.can_use_mem_size = self.size
-        self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.allocator.resize(new_size)
+        self.HOLD_TOKEN_MEMINDEX = self.size
         self._free_buffers()
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
         return

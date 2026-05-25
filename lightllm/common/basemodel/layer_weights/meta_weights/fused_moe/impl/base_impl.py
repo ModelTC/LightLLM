@@ -64,5 +64,6 @@ class FuseMoeBaseImpl:
         is_prefill: Optional[bool] = None,
         moe_layer_index: Optional[int] = None,
         microbatch_index: int = 0,
+        per_expert_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pass
