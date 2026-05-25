@@ -569,7 +569,8 @@ class ModeBackend:
         self._timer_merge_radix_tree()
 
         if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
-            self.multi_level_cache_module.update_cpu_cache_task_states()
+            self.multi_level_cache_module.update_cpu_cache_offload_task_states()
+            self.multi_level_cache_module.update_cpu_cache_load_task_states()
 
         if req_ids is None:
             req_ids = g_infer_context.infer_req_ids
