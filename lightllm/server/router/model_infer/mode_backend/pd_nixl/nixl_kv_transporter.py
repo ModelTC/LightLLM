@@ -1,4 +1,4 @@
-import pickle
+from lightllm.utils.pickle_utils import safe_pickle_dumps
 import copy
 from dataclasses import dataclass
 from collections import defaultdict
@@ -125,7 +125,7 @@ class NixlKVTransporter:
         new_trans_task.mem_indexes = None
         self.nixl_agent.send_notif(
             remote_agent.agent_name,
-            pickle.dumps(new_trans_task),
+            safe_pickle_dumps(new_trans_task),
         )
         return
 
@@ -165,7 +165,7 @@ class NixlKVTransporter:
             [trans_task.nixl_dst_page_index],
             src_handle,
             [trans_task.nixl_src_page_index],
-            pickle.dumps(notify_obj),
+            safe_pickle_dumps(notify_obj),
         )
         if not handle:
             raise RuntimeError(f"make_prepped_xfer failed for task: {trans_task.to_str()}")
