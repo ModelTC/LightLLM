@@ -98,7 +98,7 @@ class MultiLevelKvCacheModule(object):
                     page_list=page_list,
                     page_len_list=page_len_list,
                     page_len_start_list=page_len_start_list,
-                    cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_stream(),
+                    cpu_kv_cache_stream=g_infer_context.get_cpu_kv_cache_load_stream(),
                 )
                 assert trans_task is not None
                 req.cpu_cache_load_task_status = InferReq._CpuCacheLoadTaskStatus.RUNNING
@@ -180,25 +180,29 @@ class MultiLevelKvCacheModule(object):
         """
         将满足cpu kv cache 卸载条件的请求进行处理, 并返回真的满足退出条件的请求list。
         """
+        # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
+        if g_infer_context.is_linear_att_mixed_model:
+            offload_limit_size = self.args.linear_att_hash_page_size
+        else:
+            offload_limit_size = self.args.cpu_cache_token_page_size
+
         # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
         # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
         true_finished_reqs = []
-        cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
+        offload_stream = g_infer_context.get_cpu_kv_cache_offload_stream()
         for req in finished_reqs:
             # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
             # 这个限制是为了兼容 diverse 模式下的请求处理, 只有主请求才 offload kv 到 cpu
             # cache 中
             if req.shm_req.group_req_id != req.shm_req.request_id:
+                assert req.cpu_cache_offload_task_status.is_not_started()
+                req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
                 true_finished_reqs.append(req)
                 continue
 
-            # 过滤不适合进行 kv 卸载到 cpu cache 的请求。
-            if g_infer_context.is_linear_att_mixed_model:
-                offload_limit_size = self.args.linear_att_hash_page_size
-            else:
-                offload_limit_size = self.args.cpu_cache_token_page_size
-
             if req.cur_kv_len < offload_limit_size or req.shm_req.input_len <= offload_limit_size:
+                assert req.cpu_cache_offload_task_status.is_not_started()
+                req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
                 true_finished_reqs.append(req)
                 continue
 
@@ -218,7 +222,7 @@ class MultiLevelKvCacheModule(object):
                 g_infer_context.get_overlap_stream().synchronize()
 
             # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
-            trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=cpu_stream)
+            trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=offload_stream)
 
             # 根据是否成功创建了卸载任务，决定是否将请求加入到处理队列中
             if trans_task is not None:
@@ -228,7 +232,7 @@ class MultiLevelKvCacheModule(object):
 
         if self.need_sync_compute_stream():
             # TODO fa3 现在必须使用同步模式, 未来需要移除
-            cpu_stream.synchronize()
+            offload_stream.synchronize()
 
         return true_finished_reqs
 
