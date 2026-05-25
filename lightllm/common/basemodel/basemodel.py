@@ -197,6 +197,8 @@ class TpPartBaseModel:
             transformer_layer_list=self.trans_layers_weight,
             weight_dict=weight_dict,
         )
+        self.pre_post_weight.verify_load()
+        [weight.verify_load() for weight in self.trans_layers_weight]
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0

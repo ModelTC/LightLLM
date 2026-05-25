@@ -369,14 +369,6 @@ class HttpServerManager:
                     "verify_and_preload_done",
                 )
 
-            # Debug logging for multimodal requests
-            if multimodal_params and multimodal_params.images:
-                logger.debug(
-                    f"[MULTIMODAL_DEBUG] req_id={group_request_id}, "
-                    f"num_images={len(multimodal_params.images)}, "
-                    f"max_new_tokens={sampling_params.max_new_tokens}"
-                )
-
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
 
@@ -454,6 +446,12 @@ class HttpServerManager:
                 group_request_id,
                 start_time,
                 "shm_req_init_done",
+            )
+
+            logger.debug(
+                f"alloc shm_req for req_id {group_request_id}, "
+                f"shm_req num: {sampling_params.n} details (req_id, index_in_shm_mem):  "
+                f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
             )
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
@@ -581,21 +579,7 @@ class HttpServerManager:
 
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
-            if self.enable_multimodal:
-                assert (
-                    len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
-                ), "too many multimodal items!"
-                if multimodal_params.audios:
-                    assert self.args.enable_multimodal_audio, "audio multimodal not enabled"
-                await self._alloc_multimodal_resources(multimodal_params, sampling_params)
-                prompt_ids = self.tokenizer.encode(
-                    prompt,
-                    multimodal_params,
-                    add_special_tokens=sampling_params.add_special_tokens,
-                    already_tokenized=True,
-                )
-                return prompt_ids
-            elif not self.enable_multimodal and not self.pd_mode.is_D():
+            if not self.enable_multimodal and not self.pd_mode.is_D():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
