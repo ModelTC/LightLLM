@@ -565,8 +565,8 @@ class InferReq:
                 InferReq._CpuCacheOffloadTaskStatus.NOT_STARTED
             )
         else:
-            self.cpu_cache_load_task_status = InferReq._CpuCacheLoadTaskStatus.FINISHED
-            self.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+            self.cpu_cache_load_task_status = None
+            self.cpu_cache_offload_task_status = None
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
