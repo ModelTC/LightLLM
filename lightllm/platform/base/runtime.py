@@ -10,6 +10,11 @@ class BackendRuntime(ABC):
     def device_type(self) -> str:
         pass
 
+    @property
+    @abstractmethod
+    def dist_backend(self) -> str:
+        pass
+
     def target_device(self, device_id: Optional[int] = None) -> torch.device:
         if device_id is None:
             device_id = self.current_device()

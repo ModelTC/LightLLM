@@ -9,6 +9,10 @@ class CudaRuntime(BackendRuntime):
     def device_type(self) -> str:
         return "cuda"
 
+    @property
+    def dist_backend(self) -> str:
+        return "nccl"
+
     def device_count(self) -> int:
         return torch.cuda.device_count()
 

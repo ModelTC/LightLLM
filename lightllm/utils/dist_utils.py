@@ -83,7 +83,7 @@ def init_vision_distributed_env(kvargs):
     target_device = get_backend().runtime.target_device(device_id)
     get_backend().runtime.set_device(target_device)
     dist.init_process_group(
-        "nccl",
+        get_backend().runtime.dist_backend,
         init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
         rank=kvargs["tp_rank_id"],
         world_size=tp_world_size,
@@ -116,7 +116,7 @@ def init_audio_distributed_env(kvargs):
     target_device = get_target_device(device_id)
     get_backend().runtime.set_device(target_device)
     dist.init_process_group(
-        "nccl",
+        get_backend().runtime.dist_backend,
         init_method=f'tcp://127.0.0.1:{kvargs["audio_nccl_port"]}',
         rank=tp_rank_id,
         world_size=tp_world_size,
@@ -150,7 +150,7 @@ def init_distributed_env(kvargs):
     target_device = get_backend().runtime.target_device(device_id)
     get_backend().runtime.set_device(target_device)
     dist.init_process_group(
-        "nccl",
+        get_backend().runtime.dist_backend,
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],

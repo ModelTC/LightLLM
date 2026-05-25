@@ -69,7 +69,7 @@ def _flashinfer_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> N
         target_device = get_target_device(process_rank)
         get_backend().runtime.set_device(target_device)
         dist.init_process_group(
-            "nccl",
+            get_backend().runtime.dist_backend,
             init_method=f"tcp://127.0.0.1:{init_tcp_port}",
             world_size=2,
             rank=process_rank,
@@ -107,14 +107,14 @@ def _symm_mem_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> Non
         target_device = get_target_device(process_rank)
         get_backend().runtime.set_device(target_device)
         dist.init_process_group(
-            "nccl",
+            get_backend().runtime.dist_backend,
             init_method=f"tcp://127.0.0.1:{init_tcp_port}",
             world_size=2,
             rank=process_rank,
             device_id=target_device,
         )
         try:
-            nccl_process_group = dist.new_group([0, 1], backend="nccl")
+            nccl_process_group = dist.new_group([0, 1], backend=get_backend().runtime.dist_backend)
             from lightllm.distributed.symm_mem_all_reduce import SymmMemAllreduce
 
             symm_mem_all_reduce = SymmMemAllreduce(nccl_process_group, target_device, dtype=torch.bfloat16)

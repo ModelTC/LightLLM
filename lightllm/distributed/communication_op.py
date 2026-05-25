@@ -57,9 +57,10 @@ class CustomProcessGroup:
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
-        self.device_group = create_new_group_for_current_dp("nccl")
+        dist_backend = get_backend().runtime.dist_backend
+        self.device_group = create_new_group_for_current_dp(dist_backend)
         if get_env_start_args().enable_dp_prefill_balance:
-            self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
+            self.dp_prefill_balance_group = create_dp_special_inter_group(dist_backend)
         else:
             self.dp_prefill_balance_group = None
 

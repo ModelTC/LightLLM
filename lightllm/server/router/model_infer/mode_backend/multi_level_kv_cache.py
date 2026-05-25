@@ -26,22 +26,21 @@ class MultiLevelKvCacheModule(object):
         from .base_backend import ModeBackend
 
         self.backend: ModeBackend = backend
+        self.target_device = get_target_device()
+        self.platform_backend = get_backend()
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
-        self.init_sync_group = create_new_group_for_current_dp("nccl")
+        self.init_sync_group = create_new_group_for_current_dp(self.platform_backend.runtime.dist_backend)
         dist.barrier(group=self.init_sync_group)
-        self.offload_sync_group = create_new_group_for_current_dp("nccl")
+        self.offload_sync_group = create_new_group_for_current_dp(self.platform_backend.runtime.dist_backend)
         dist.barrier(group=self.offload_sync_group)
-        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
+        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device=self.target_device)
 
-        self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
-        self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
+        self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device=self.target_device)
+        self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device=self.target_device)
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
-
-        self.platform_backend = get_backend()
-        self.target_device = get_target_device()
 
     def wait(self):
         """
