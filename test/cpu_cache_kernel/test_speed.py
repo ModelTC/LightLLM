@@ -247,7 +247,9 @@ conv_bytes = linear_config.get_cpu_cache_conv_bytes()
 ssm_bytes = linear_config.get_cpu_cache_ssm_bytes()
 
 bytes_per_page_per_tp = (
-    full_att_bytes // head_scale_size
+    full_att_bytes
+    * max(1, linear_config.full_att_all_num_kv_heads // linear_config.tp_world_size)
+    / linear_config.full_att_all_num_kv_heads
     + conv_bytes // linear_config.tp_world_size
     + ssm_bytes // linear_config.tp_world_size
 )
