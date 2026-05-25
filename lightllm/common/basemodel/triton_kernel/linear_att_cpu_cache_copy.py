@@ -173,8 +173,6 @@ def copy_kv_buffer_to_cpu_cache(
         cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, linear_config.full_att_all_num_kv_heads, -1)
 
     cpu_cache_full_att = cpu_cache_full_att.view(dtype=torch.uint64)
-    # 保证可以以128bit对齐的方式进行数据的load 和 store。
-    assert cpu_cache_full_att.shape[-1] % 2 == 0
 
     cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
     cpu_cache_ssm = (
@@ -186,8 +184,6 @@ def copy_kv_buffer_to_cpu_cache(
     ).view(dtype=torch.uint64)
 
     gpu_kv_full_att_state = gpu_kv_full_att_state.permute(1, 0, 2)  # [s, layer_num, xxdim]
-    # 保证可以以128bit对齐的方式进行数据的load 和 store。
-    assert gpu_kv_full_att_state.shape[-1] % 2 == 0
 
     cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], -1).view(dtype=torch.uint64)
     cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint64)
@@ -329,21 +325,15 @@ def _copy_cpu_cache_to_kv_buffer(
                 + (tp_rank // head_scale_size) * cpu_cache_full_att_stride_h
                 + gpu_start_i
             )
-            # 标记主要是为了让编译器可以以128bit的方式生成指令进行拉取
-            mem_mask = mem_index != -1
-            mem_mask = tl.max_constancy(mem_mask, [2])
-            dim_index = tl.max_contiguous(dim_index, [2])
-            mem_index = tl.max_constancy(mem_index, [2])
-
-            cpu_full_att_data = tl.load(src_cpu_cache_full_att_ptr, mask=mask & mem_mask, other=0)
+            cpu_full_att_data = tl.load(src_cpu_cache_full_att_ptr, mask=mask & (mem_index != -1), other=0)
 
             tl.store(
                 gpu_kv_full_att_state
                 + mem_index * gpu_kv_full_att_stride_s
                 + layer_index * gpu_kv_full_att_stride_l
-                + dim_index,
+                + dim_index * gpu_kv_full_att_stride_d,
                 cpu_full_att_data,
-                mask=mask & mem_mask,
+                mask=mask & (mem_index != -1),
             )
 
         big_page_idx = tl.load(big_page_buffer_ids + block_index)
@@ -419,8 +409,6 @@ def copy_cpu_cache_to_kv_buffer(
         cpu_cache_full_att = cpu_cache_tensor[:, 0:a].view(cpu_page_num, linear_config.full_att_all_num_kv_heads, -1)
 
     cpu_cache_full_att = cpu_cache_full_att.view(dtype=torch.uint64)
-    # 保证可以以128bit对齐的方式进行数据的load 和 store。
-    assert cpu_cache_full_att.shape[-1] % 2 == 0
 
     cpu_cache_conv = cpu_cache_tensor[:, a : (a + b)].view(cpu_page_num, tp_world_size, -1).view(dtype=torch.uint64)
     cpu_cache_ssm = (
@@ -431,9 +419,6 @@ def copy_cpu_cache_to_kv_buffer(
         gpu_full_att_kv_state.shape[0], gpu_full_att_kv_state.shape[1], -1
     ).view(dtype=torch.uint64)
     gpu_full_att_kv_state = gpu_full_att_kv_state.permute(1, 0, 2)  # [s, layer_num, xxdim]
-
-    # 保证可以以128bit对齐的方式进行数据的load 和 store。
-    assert gpu_full_att_kv_state.shape[-1] % 2 == 0
 
     cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], -1).view(dtype=torch.uint64)
     cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], -1).view(dtype=torch.uint64)
