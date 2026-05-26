@@ -163,11 +163,8 @@ class MultiLevelKvCacheModule(object):
 
             assert len(mem_indexes_cuda) == page_len_list[len(page_list) - 1] - page_len_start_list[ready_page_num]
 
-            # 这里需要先更新 cur_kv_len 再进行 load_cpu_cache_to_gpu 操作，
-            # 因为 load_cpu_cache_to_gpu 操作会使用到 cur_kv_len 的值,主要是linear att 会用到。
-            req.cur_kv_len = req.cur_kv_len + need_token_num
-
             mem_manager.operator.load_cpu_cache_to_gpu(
+                move_token_num=need_token_num,
                 mem_indexes=mem_indexes_cuda,
                 page_indexes=page_indexes_cuda,
                 cpu_cache_client=self.cpu_cache_client,
@@ -413,13 +410,10 @@ class MultiLevelKvCacheModule(object):
                 need_free_page_list.extend(task.page_list)
                 # 更新 req 状态。
                 req = task.req_obj
-                assert (
-                    len(task.mem_indexes) <= req.cur_kv_len
-                ), f"invalid load task mem_indexes length [{len(task.mem_indexes)}] <= cur_kv_len [{req.cur_kv_len}]"
                 g_infer_context.req_manager.req_to_token_indexs[
-                    req.req_idx, (req.cur_kv_len - len(task.mem_indexes)) : req.cur_kv_len
+                    req.req_idx, req.cur_kv_len : (req.cur_kv_len + len(task.mem_indexes))
                 ] = task.mem_indexes
-
+                req.cur_kv_len += len(task.mem_indexes)
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
