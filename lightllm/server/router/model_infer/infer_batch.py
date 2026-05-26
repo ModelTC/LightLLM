@@ -490,7 +490,7 @@ class InferSamplingParams:
 
 
 class InferReq:
-    class _CpuCacheOffloadTaskStatus(enum.Enum):
+    class _CpuCacheTaskStatus(enum.Enum):
         NOT_STARTED = 0
         RUNNING = 1
         FINISHED = 2
@@ -503,9 +503,6 @@ class InferReq:
 
         def is_finished(self):
             return self == self.FINISHED
-
-    class _CpuCacheLoadTaskStatus(_CpuCacheOffloadTaskStatus):
-        pass
 
     def __init__(
         self,
@@ -558,11 +555,9 @@ class InferReq:
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
         if self.args.enable_cpu_cache:
-            self.cpu_cache_load_task_status: "InferReq._CpuCacheLoadTaskStatus" = (
-                InferReq._CpuCacheLoadTaskStatus.NOT_STARTED
-            )
-            self.cpu_cache_offload_task_status: "InferReq._CpuCacheOffloadTaskStatus" = (
-                InferReq._CpuCacheOffloadTaskStatus.NOT_STARTED
+            self.cpu_cache_load_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+            self.cpu_cache_offload_task_status: "InferReq._CpuCacheTaskStatus" = (
+                InferReq._CpuCacheTaskStatus.NOT_STARTED
             )
         else:
             self.cpu_cache_load_task_status = None

@@ -93,7 +93,7 @@ class MultiLevelKvCacheModule(object):
             )
 
             if not ok_to_start_load_task:
-                req.cpu_cache_load_task_status = InferReq._CpuCacheLoadTaskStatus.FINISHED
+                req.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                 need_free_page_list.extend(page_list)
                 continue
             else:
@@ -184,7 +184,7 @@ class MultiLevelKvCacheModule(object):
                 mem_indexes=mem_indexes,
                 sync_event=sync_event,
             )
-            req.cpu_cache_load_task_status = InferReq._CpuCacheLoadTaskStatus.RUNNING
+            req.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             return trans_task
 
     def offload_finished_reqs_to_cpu_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
@@ -212,13 +212,13 @@ class MultiLevelKvCacheModule(object):
             # cache 中
             if req.shm_req.group_req_id != req.shm_req.request_id:
                 assert req.cpu_cache_offload_task_status.is_not_started()
-                req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+                req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                 true_finished_reqs.append(req)
                 continue
 
             if req.cur_kv_len < offload_limit_size or req.shm_req.input_len <= offload_limit_size:
                 assert req.cpu_cache_offload_task_status.is_not_started()
-                req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+                req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                 true_finished_reqs.append(req)
                 continue
 
@@ -273,7 +273,7 @@ class MultiLevelKvCacheModule(object):
 
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
-                    req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+                    req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
 
                 try:
@@ -288,7 +288,7 @@ class MultiLevelKvCacheModule(object):
                 item_size = len(page_list)
                 if item_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
-                    req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+                    req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
 
                 broadcast_data = {"item_size": item_size, "page_list": page_list, "ready_list": ready_list}
@@ -297,7 +297,7 @@ class MultiLevelKvCacheModule(object):
                 recv_list = [None]
                 dist.broadcast_object_list(recv_list, group=self.gloo_group, group_src=0)
                 if isinstance(recv_list[0], int) and recv_list[0] == 0:
-                    req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+                    req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
                     return None
                 broadcast_data = recv_list[0]
                 item_size = broadcast_data["item_size"]
@@ -332,7 +332,7 @@ class MultiLevelKvCacheModule(object):
 
             sync_event = torch.cuda.Event()
             sync_event.record()
-            req.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.RUNNING
+            req.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             trans_task = OffloadTransTask(
                 move_token_num=move_token_num,
                 page_indexes=page_indexes,
@@ -399,7 +399,7 @@ class MultiLevelKvCacheModule(object):
                     )
                 self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:
-                task.req_obj.cpu_cache_offload_task_status = InferReq._CpuCacheOffloadTaskStatus.FINISHED
+                task.req_obj.cpu_cache_offload_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         return
 
     def update_cpu_cache_load_task_states(self):
@@ -417,7 +417,7 @@ class MultiLevelKvCacheModule(object):
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
-                task.req_obj.cpu_cache_load_task_status = InferReq._CpuCacheLoadTaskStatus.FINISHED
+                task.req_obj.cpu_cache_load_task_status = InferReq._CpuCacheTaskStatus.FINISHED
 
             if self.backend.is_master_in_dp and need_free_page_list:
                 self.cpu_cache_client.lock.acquire_sleep1ms()
