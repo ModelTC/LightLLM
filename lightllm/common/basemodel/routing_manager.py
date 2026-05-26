@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from multiprocessing import shared_memory
 from typing import Optional
+from lightllm.common.basemodel.triton_kernel.routing_capture import scatter_routing_capture_to_cpu
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_rank_in_dp
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
@@ -41,13 +42,14 @@ class RoutingCaptureManager:
         self.dtype = torch.uint8 if num_experts <= 256 else torch.int16
         dtype_bytes = 1 if self.dtype == torch.uint8 else 2
 
-        # Shape: (kv_cache_size, num_moe_layers, topk) — on CPU to save GPU memory.
-        # Written after forward() via flush_to_routing_buffer(), read on request finish.
+        # Shape: (kv_cache_size, num_moe_layers, topk). Pinned CPU memory saves GPU memory
+        # while allowing the Triton scatter kernel to write without a synchronous D2H copy.
         routing_buffer_size = num_moe_layers * kv_cache_size * topk * dtype_bytes
         self.routing_buffer = torch.zeros(
             (kv_cache_size, num_moe_layers, topk),
             dtype=self.dtype,
             device="cpu",
+            pin_memory=True,
         )
 
         # Capture buffers: simple contiguous tensors written to during forward().
@@ -55,6 +57,8 @@ class RoutingCaptureManager:
         self._capture_buffer = [
             torch.zeros((max_capture_tokens, num_moe_layers, topk), dtype=self.dtype, device="cuda") for _ in range(2)
         ]
+        self._routing_ready_event = torch.cuda.Event(blocking=False)
+        self._has_pending_flush = False
 
         dtype_name = "uint8" if self.dtype == torch.uint8 else "int16"
         logger.info(
@@ -77,9 +81,21 @@ class RoutingCaptureManager:
 
     def flush_to_routing_buffer(self, mem_indexes: torch.Tensor, num_tokens: int, microbatch_index: int = 0) -> None:
         buf = self._capture_buffer[microbatch_index][:num_tokens]  # (num_tokens, num_moe_layers, topk)
-        self.routing_buffer[mem_indexes[:num_tokens].cpu(), :, :] = buf.cpu()
+        scatter_routing_capture_to_cpu(
+            capture_buffer=buf,
+            mem_indexes=mem_indexes[:num_tokens],
+            routing_buffer=self.routing_buffer,
+            num_tokens=num_tokens,
+            num_moe_layers=self.num_moe_layers,
+            topk=self.topk,
+        )
+        self._routing_ready_event.record(torch.cuda.current_stream())
+        self._has_pending_flush = True
 
     def extract_routing_data(self, mem_indexes: torch.Tensor) -> np.ndarray:
+        if self._has_pending_flush:
+            self._routing_ready_event.synchronize()
+            self._has_pending_flush = False
         cpu_indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
         return self.routing_buffer[cpu_indexes, :, :].numpy()
 

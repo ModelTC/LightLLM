@@ -536,6 +536,7 @@ class RouterManager:
                     aborted_req_mask = torch.zeros(len(req_ids), dtype=torch.bool, device="cpu")
                     dist.broadcast(aborted_req_mask, src=0, group=self.mulitnode_group)
                     select_reqs = []
+                    aborted_reqs = []
                     for req_id, select, is_aborted in zip(
                         req_ids, req_id_select_mark.numpy(), aborted_req_mask.numpy()
                     ):
@@ -546,9 +547,12 @@ class RouterManager:
                                 req.is_aborted = True
                                 self.req_queue.free_aborted_req(req)
                                 self.shm_req_manager.put_back_req_obj(req)
+                                aborted_reqs.append(req)
                                 continue
                             select_reqs.append(req)
                     for req in select_reqs:
+                        self.req_queue.waiting_req_list.remove(req)
+                    for req in aborted_reqs:
                         self.req_queue.waiting_req_list.remove(req)
                     if select_reqs:
                         new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
