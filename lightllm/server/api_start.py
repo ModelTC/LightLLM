@@ -356,7 +356,9 @@ def _launch_subprocesses(args: StartArgs):
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     already_uesd_ports = [args.port]
-    if args.nccl_port is not None:
+    # nccl_port 只在 rank 0 上 bind（TCPStore listener），其他 rank 是 connect，
+    # 不应该把它加入端口锁定列表，否则单机多节点 tp 测试会冲突。
+    if args.nccl_port is not None and args.node_rank == 0:
         already_uesd_ports.append(args.nccl_port)
     if args.pd_decode_rpyc_port is not None:
         already_uesd_ports.append(args.pd_decode_rpyc_port)

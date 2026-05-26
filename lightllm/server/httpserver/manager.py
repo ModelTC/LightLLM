@@ -69,7 +69,6 @@ class HttpServerManager:
         self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 1)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self.node_rank = args.node_rank
-        self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.is_multinode_tp_master = args.dp == 1 and args.nnodes > 1 and args.node_rank == 0
         self.is_multinode_tp_slave = args.dp == 1 and args.nnodes > 1 and args.node_rank > 0
@@ -292,12 +291,11 @@ class HttpServerManager:
     async def loop_for_request(self):
         assert self.args.node_rank > 0
         while True:
-            req_obj = await self.multinode_req_manager.recv_pyobj()
-            if isinstance(req_obj, AbortReq):
-                asyncio.create_task(self.abort_request(req_obj))
-                continue
-            # 兼容 main 的协议: master 用 tuple 转发 generate 请求
-            prompt, sampling_params, multimodal_params = req_obj
+            (
+                prompt,
+                sampling_params,
+                multimodal_params,
+            ) = await self.multinode_req_manager.recv_pyobj()
             results_generator = self.generate(prompt, sampling_params, multimodal_params, None)
 
             async def generate_wrapper(results_generator):
@@ -711,7 +709,7 @@ class HttpServerManager:
             if req_status.aborted:
                 raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
 
-            if not self.disable_abort and request is not None and await request.is_disconnected():
+            if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise ClientDisconnected(
                     group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
@@ -821,10 +819,6 @@ class HttpServerManager:
     async def abort_request(self, request: AbortReq):
         request_id = request.request_id
         abort_all = request.abort_all
-        # 多节点纯 tp 运行模式下,master 需要把 abort 转发给 slave,使 slave 也清掉自己 shm 里的请求。
-        if self.is_multinode_tp_master:
-            for sender in self.multinode_req_manager:
-                sender.send_pyobj(request, protocol=pickle.HIGHEST_PROTOCOL)
         if request_id is not None and not abort_all:
             await self.abort(request_id)
         if abort_all:
