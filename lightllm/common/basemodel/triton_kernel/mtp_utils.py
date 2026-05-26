@@ -5,7 +5,8 @@ import triton.language as tl
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
-
+from lightllm.common.basemodel.infer_lock import g_infer_state_lock
+from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
 @triton.jit
 def _fwd_kernel_mtp_verify(
@@ -287,23 +288,43 @@ def sample_dynamic_mtp_req_mask(
     return final_mask_gpu, sampled_steps
 
 
+@triton.jit
+def _fwd_kernel_rebuild_trimmed_mtp_b_mark_shared_group(
+    b_mtp_index,
+    b_mark_shared_group,
+    batch_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+
+    cur_mtp_index = tl.load(b_mtp_index + offsets, mask=mask, other=0)
+    next_offsets = offsets + 1
+    next_mtp_index = tl.load(b_mtp_index + next_offsets, mask=next_offsets < batch_size, other=0)
+    is_last = offsets == (batch_size - 1)
+    group_end_mask = mask & (is_last | (next_mtp_index == 0))
+    out_vals = tl.where(group_end_mask, cur_mtp_index + 1, 0)
+    tl.store(b_mark_shared_group + offsets, out_vals, mask=mask)
+
+
 def _rebuild_trimmed_mtp_b_mark_shared_group_from_b_mtp_index(b_mtp_index: torch.Tensor) -> torch.Tensor:
     assert b_mtp_index.is_cuda
     batch_size = b_mtp_index.shape[0]
     if batch_size == 0:
         return torch.empty((0,), dtype=torch.int32, device=b_mtp_index.device)
 
-    # prepare_decode_inputs 中已经保证了每个请求的 decode rows 是按
-    # b_mtp_index = [0, 1, 2, ...] 的前缀顺序展开的；动态 trim 只会保留
-    # 每个请求的前缀，因此 compact 之后每个请求块的末尾满足：
-    # 1. 是最后一个元素；或
-    # 2. 下一个元素的 b_mtp_index 重新回到 0
-    group_end_mask = torch.ones((batch_size,), dtype=torch.bool, device=b_mtp_index.device)
-    if batch_size > 1:
-        group_end_mask[:-1] = b_mtp_index[1:] == 0
-
     b_mark_shared_group = torch.zeros((batch_size,), dtype=torch.int32, device=b_mtp_index.device)
-    b_mark_shared_group[group_end_mask] = (b_mtp_index[group_end_mask] + 1).to(torch.int32)
+    BLOCK_SIZE = 256
+    grid = (triton.cdiv(batch_size, BLOCK_SIZE),)
+    _fwd_kernel_rebuild_trimmed_mtp_b_mark_shared_group[grid](
+        b_mtp_index=b_mtp_index,
+        b_mark_shared_group=b_mark_shared_group,
+        batch_size=batch_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+        num_stages=1,
+    )
     return b_mark_shared_group
 
 
@@ -435,9 +456,9 @@ def _trim_decode_model_input_inplace(
     model_input.b_mtp_index = _pack_selected_rows_1d(model_input.b_mtp_index, selected_mask_gpu, dynamic_batch_size)
     model_input.b_seq_len = _pack_selected_rows_1d(model_input.b_seq_len, selected_mask_gpu, dynamic_batch_size)
 
-    if model_input.mem_indexes is not None:
-        assert model_input.mem_indexes.is_cuda
-        model_input.mem_indexes = _pack_selected_rows_1d(model_input.mem_indexes, selected_mask_gpu, dynamic_batch_size)
+    # if model_input.mem_indexes is not None:
+    #     assert model_input.mem_indexes.is_cuda
+    #     model_input.mem_indexes = _pack_selected_rows_1d(model_input.mem_indexes, selected_mask_gpu, dynamic_batch_size)
     if model_input.b_shared_seq_len is not None:
         assert model_input.b_shared_seq_len.is_cuda
         model_input.b_shared_seq_len = _pack_selected_rows_1d(
@@ -473,10 +494,16 @@ def prepare_dynamic_mtp_model_input(
 
     assert not model_input.is_prefill, "trim_dynamic_mtp_model_input only supports decode inputs"
     
+    # * mem_indexes_cpu与实际位置无关，仅存放可用的空间大小，因此先释放之后直接裁剪
+    if len(model_input.mem_indexes_cpu) > 0:
+        g_infer_state_lock.acquire()
+        g_infer_context.req_manager.mem_manager.free(model_input.mem_indexes_cpu[dynamic_batch_size :])
+        g_infer_state_lock.release()
+    model_input.mem_indexes_cpu = model_input.mem_indexes_cpu[:dynamic_batch_size]
+    
     # ! 在一个CUDA流上面的GPU操作会自动串行化，因此不需要额外同步
     # ! model_input必须在GPU上，才能高效进行trim操作
     model_input.to_cuda()
-    # torch.cuda.current_stream().synchronize()
 
     selected_mask_gpu, _ = sample_dynamic_mtp_req_mask(
         req_num=req_num,

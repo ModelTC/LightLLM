@@ -240,7 +240,6 @@ class ChunkedPrefillBackend(ModeBackend):
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        origin_mem_indexes_cpu = model_input.mem_indexes_cpu
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
@@ -262,8 +261,6 @@ class ChunkedPrefillBackend(ModeBackend):
                     key="selected_run_reqs",
                     gpu_tensor=selected_run_reqs,
                 )
-                trans_dynamic_model_input_event = torch.cuda.Event()
-                trans_dynamic_model_input_event.record()
 
             start_time_event = torch.cuda.Event(enable_timing=True)
             start_time_event.record()
@@ -356,17 +353,14 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
+        verify_event.synchronize()
         if self.enable_dynamic_mtp:
-            trans_dynamic_model_input_event.synchronize()
             selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
             run_reqs = [run_reqs[i] for i in range(len(run_reqs)) if selected_run_reqs_cpu_numpy[i] == 1]
-
-        if self.enable_dynamic_mtp:
             self._update_mtp_verify_token_num(decode_reqs=decode_reqs, dynamic_mtp_run_reqs=run_reqs)
         else:
             self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
 
-        verify_event.synchronize()
         accepted_index_cpu_numpy = accepted_index_cpu.numpy()
         verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
@@ -391,20 +385,8 @@ class ChunkedPrefillBackend(ModeBackend):
                 per_token_cost_ms=per_token_cost_ms,
             )
 
-        # 处理需要释放的内存索引。动态 MTP trim 只裁了 GPU 侧 model_input，
-        # 因此这里统一基于原始的 origin_mem_indexes_cpu 计算：
-        # 1. 被选中但 verify 未通过的 index
-        # 2. 未被选中的 index
-        if self.enable_dynamic_mtp:
-            selected_run_reqs_cpu_mask = selected_run_reqs_cpu.to(dtype=torch.bool)
-            selected_mem_indexes_cpu = origin_mem_indexes_cpu[selected_run_reqs_cpu_mask]
-            need_free_mem_indexes = selected_mem_indexes_cpu[accepted_index_cpu == 0]
-
-            trim_free_mem_indexes = origin_mem_indexes_cpu[~selected_run_reqs_cpu_mask]
-            if len(trim_free_mem_indexes) > 0:
-                need_free_mem_indexes = torch.cat([need_free_mem_indexes, trim_free_mem_indexes], dim=0)
-        else:
-            need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
+        # 处理需要释放的内存索引
+        need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
         if additional_mem_indexes_cpu is not None:
             need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
 
