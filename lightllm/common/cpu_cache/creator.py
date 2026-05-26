@@ -26,7 +26,7 @@ class CpuCacheCreator:
 
         if pin:
             device_ptr = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.tensor_spec.size_bytes)
-            cpu_cache_tensor = self._build_tensor_view(device_ptr=device_ptr)
+            cpu_cache_tensor = self._build_tensor_view(shm_ptr=device_ptr)
             assert device_ptr == cpu_cache_tensor.data_ptr()
         else:
             cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
