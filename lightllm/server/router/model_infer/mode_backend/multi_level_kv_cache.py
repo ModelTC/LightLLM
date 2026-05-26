@@ -61,6 +61,10 @@ class MultiLevelKvCacheModule(object):
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         load_stream = g_infer_context.get_cpu_kv_cache_load_stream()
+        # 当前流实际是用于处理req 初始化，radix cache，req manager 信息的流，这里需要等待当前流完成，
+        # 因为当前流中包含很多对 req_manager.req_to_token_indexs 的操作，而后续的操作中，需要从
+        # 中读取相关信息，如果当前流没有完成，则可能导致后续操作中，读取到错误的信息。
+        load_stream.wait_stream(torch.cuda.current_stream())
         idle_token_num = g_infer_context.get_can_alloc_token_num()
         need_free_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
@@ -195,6 +199,11 @@ class MultiLevelKvCacheModule(object):
         # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
         true_finished_reqs = []
         offload_stream = g_infer_context.get_cpu_kv_cache_offload_stream()
+        # 当前流实际是用于处理req 初始化，radix cache，req manager 信息的流，这里需要等待当前流完成，
+        # 因为当前流中包含很多对 req_manager.req_to_token_indexs 的操作，而后续的操作中，需要从
+        # 中读取相关信息，如果当前流没有完成，则可能导致后续操作中，读取到错误的信息。
+        offload_stream.wait_stream(torch.cuda.current_stream())
+
         for req in finished_reqs:
             # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
             # 这个限制是为了兼容 diverse 模式下的请求处理, 只有主请求才 offload kv 到 cpu
