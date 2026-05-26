@@ -22,7 +22,7 @@ def _scatter_routing_capture_to_cpu(
     data = tl.load(capture_buffer + offsets, mask=mask, other=0)
 
     dst_offsets = mem_index * layer_topk_size + inner_offsets
-    tl.store(routing_buffer + dst_offsets, data, mask=mask & (mem_index >= 0))
+    tl.store(routing_buffer + dst_offsets, data, mask=mask)
 
 
 def scatter_routing_capture_to_cpu(
