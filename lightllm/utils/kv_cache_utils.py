@@ -235,16 +235,7 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     def _pre_warm_memory():
         page_size = _get_default_hugepage_size() if use_hugetlb else 4096
         arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
-        worker_num = 1
-        chunk_size = triton.cdiv(size_to_alloc, worker_num * page_size) * page_size
-
-        def _warm_range(worker_id: int):
-            start = worker_id * chunk_size
-            end = min(size_to_alloc, start + chunk_size)
-            return int(arr[start:end:page_size].sum())
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
-            volatile_sum = sum(executor.map(_warm_range, range(worker_num)))
+        volatile_sum = int(arr[::page_size].sum())
         logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
 
     th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
@@ -254,7 +245,7 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
 
 @lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> None:
+def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
     """Synchronously cudaHostRegister the given [shm_ptr, shm_ptr+size)."""
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
@@ -298,8 +289,8 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> None:
     res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
     if res != 0:
         raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-    assert host_ptr.value == device_ptr.value
-    return
+    logger.info(f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
+    return device_ptr.value
 
 
 @lru_cache(maxsize=None)

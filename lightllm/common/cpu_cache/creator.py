@@ -25,10 +25,13 @@ class CpuCacheCreator:
             shm_ptr = attach_shm_kv_cache_ptr(key=self.tensor_spec.shm_key, size=self.tensor_spec.size_bytes)
 
         if pin:
-            register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.tensor_spec.size_bytes)
+            device_ptr = register_shm_ptr_to_pin(shm_ptr=shm_ptr, size=self.tensor_spec.size_bytes)
+            cpu_cache_tensor = self._build_tensor_view(device_ptr=device_ptr)
+            assert device_ptr == cpu_cache_tensor.data_ptr()
+        else:
+            cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
+            assert shm_ptr == cpu_cache_tensor.data_ptr()
 
-        cpu_cache_tensor = self._build_tensor_view(shm_ptr=shm_ptr)
-        assert shm_ptr == cpu_cache_tensor.data_ptr()
         return cpu_cache_tensor
 
     def _build_tensor_view(self, shm_ptr: int) -> torch.Tensor:
