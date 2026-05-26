@@ -7,11 +7,9 @@ from functools import lru_cache
 from typing import Optional, List, Deque, Union
 from collections import deque
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 
@@ -31,6 +29,9 @@ class MultiLevelKvCacheModule(object):
         self.offload_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.offload_sync_group)
         self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
+        self.load_sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.load_sync_group)
+        self.load_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
 
         self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
         self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
@@ -172,6 +173,10 @@ class MultiLevelKvCacheModule(object):
                 cpu_cache_client=self.cpu_cache_client,
                 req=req,
             )
+
+            if self.backend.dp_world_size > 1:
+                # 这里只是为了做一个同步，让sync_event 完成的时候，各个tp都必然已经完成了。
+                dist.all_reduce(self.load_sync_tensor, op=dist.ReduceOp.MAX, group=self.load_sync_group)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
