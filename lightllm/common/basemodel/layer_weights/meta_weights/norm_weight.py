@@ -1,7 +1,6 @@
 import torch
 from typing import Optional, Dict
 
-from lightllm.platform import get_backend
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
@@ -71,7 +70,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        return get_backend().ops.rms_norm(input=input, weight=self.weight, eps=eps, out=out, alloc_func=alloc_func)
+        return self.platform_backend.ops.rms_norm(input=input, weight=self.weight, eps=eps, out=out, alloc_func=alloc_func)
 
 
 class GatedRMSNormWeight(RMSNormWeight):
@@ -120,7 +119,7 @@ class GatedRMSNormWeight(RMSNormWeight):
         out: Optional[torch.Tensor] = None,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        return get_backend().ops.rms_norm(
+        return self.platform_backend.ops.rms_norm(
             input=input,
             weight=self.weight,
             eps=eps,
@@ -194,7 +193,7 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
     def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        return get_backend().ops.layer_norm(input=input, weight=self.weight, bias=self.bias, eps=eps, out=out, alloc_func=alloc_func)
+        return self.platform_backend.ops.layer_norm(input=input, weight=self.weight, bias=self.bias, eps=eps, out=out, alloc_func=alloc_func)
 
 
 class TpRMSNormWeight(RMSNormWeight):
@@ -335,7 +334,7 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         k: torch.Tensor,
         eps: float,
     ) -> tuple:
-        return get_backend().ops.qk_rms_norm(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps)
+        return self.platform_backend.ops.qk_rms_norm(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps)
 
 
 class QKGEMMANormWeight(QKRMSNORMWeight):
@@ -358,7 +357,7 @@ class QKGEMMANormWeight(QKRMSNORMWeight):
         return qk_rmsnorm_fused_forward(q=q, k=k, w_q=self.q_weight, w_k=self.k_weight, eps=eps, fp32_multiply=True)
 
     def __call__(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
-        return get_backend().ops.qk_rms_norm(
+        return self.platform_backend.ops.qk_rms_norm(
             q=q,
             k=k,
             w_q=self.q_weight,

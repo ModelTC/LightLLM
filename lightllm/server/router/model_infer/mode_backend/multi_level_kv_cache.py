@@ -6,10 +6,8 @@ import bisect
 from functools import lru_cache
 from typing import Any, Optional, List, Deque
 from collections import deque
-from lightllm.platform import get_backend
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.config_utils import is_linear_att_mixed_model
-from lightllm.utils.device_utils import get_target_device
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp 
@@ -26,13 +24,16 @@ class MultiLevelKvCacheModule(object):
         from .base_backend import ModeBackend
 
         self.backend: ModeBackend = backend
-        self.target_device = get_target_device()
-        self.platform_backend = get_backend()
+
+        # get backend runtime and target device from backend parameter
+        self.backend_runtime = self.backend.backend_runtime
+        self.target_device = self.backend_runtime.target_device()
+
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
-        self.init_sync_group = create_new_group_for_current_dp(self.platform_backend.runtime.dist_backend)
+        self.init_sync_group = create_new_group_for_current_dp(self.backend_runtime.dist_backend)
         dist.barrier(group=self.init_sync_group)
-        self.offload_sync_group = create_new_group_for_current_dp(self.platform_backend.runtime.dist_backend)
+        self.offload_sync_group = create_new_group_for_current_dp(self.backend_runtime.dist_backend)
         dist.barrier(group=self.offload_sync_group)
         self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device=self.target_device)
 
@@ -115,7 +116,7 @@ class MultiLevelKvCacheModule(object):
                     mem_indexes_cuda = mem_indexes.to(device=self.target_device, non_blocking=True)
                     page_indexes_cuda = torch.tensor(
                         need_pages, dtype=torch.int32, device="cpu"
-                    ).to(device=self.target_device, non_blocking=True)
+                    ).to(device=mem_indexes_cuda.device, non_blocking=True)
                     # 因为在支持 linear att 以后，所有的页面加载必须要按照 page页面的整数倍来做，
                     # 不然可能导致页面数据不完整，导致无法从kv中恢复完整的 linear att状态，所以
                     # 这里需要进行pad操作，使操作的页面是完整的。
@@ -145,7 +146,7 @@ class MultiLevelKvCacheModule(object):
                         req=req,
                     )
 
-                self.platform_backend.runtime.current_stream().synchronize()
+                self.backend_runtime.current_stream().synchronize()
 
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -219,7 +220,7 @@ class MultiLevelKvCacheModule(object):
     def _start_kv_cache_offload_task(
         self, req: InferReq, cpu_kv_cache_stream: Any = None,
     ) -> Optional["TransTask"]:
-        with self.platform_backend.runtime.stream(cpu_kv_cache_stream):
+        with self.backend_runtime.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
@@ -294,7 +295,7 @@ class MultiLevelKvCacheModule(object):
             if self.backend.dp_world_size > 1:
                 dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
-            sync_event = self.platform_backend.runtime.create_event()
+            sync_event = self.backend_runtime.create_event()
             sync_event.record()
             req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
             trans_task = TransTask(

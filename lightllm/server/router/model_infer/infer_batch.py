@@ -9,7 +9,6 @@ from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
-from lightllm.platform import get_backend
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -67,7 +66,7 @@ class InferenceContext:
 
         self.is_linear_att_mixed_model = isinstance(self.req_manager, ReqManagerForMamba)
 
-        self.platform_backend = get_backend()
+        self.backend_runtime = self.backend.backend_runtime
 
         return
 
@@ -77,12 +76,12 @@ class InferenceContext:
 
     def get_overlap_stream(self) -> Any:
         if self.overlap_stream is None:
-            self.overlap_stream = self.platform_backend.runtime.create_stream()
+            self.overlap_stream = self.backend_runtime.create_stream()
         return self.overlap_stream
 
     def get_cpu_kv_cache_stream(self) -> Any:
         if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = self.platform_backend.runtime.create_stream()
+            self.cpu_kv_cache_stream = self.backend_runtime.create_stream()
         return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:

@@ -65,7 +65,7 @@ class CustomProcessGroup:
             self.dp_prefill_balance_group = None
 
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
-        self.platform_backend = get_backend()
+        self.backend_runtime = get_backend().runtime
 
     def _support_custom_allreduce(self) -> bool:
         return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
@@ -76,7 +76,7 @@ class CustomProcessGroup:
         from .symm_mem_all_reduce import SymmMemAllreduce
 
         data_type = get_torch_dtype(get_env_start_args().data_type)
-        symm = SymmMemAllreduce(self.device_group, self.platform_backend.runtime.current_device(), dtype=data_type)
+        symm = SymmMemAllreduce(self.device_group, self.backend_runtime.current_device(), dtype=data_type)
         if not symm.disabled:
             self.symm_mem_reduce = symm
             logger.info("Enable SymmMem ALLReduce.")
@@ -87,7 +87,7 @@ class CustomProcessGroup:
         from .flashinfer_all_reduce import FlashInferAllReduce
 
         fi_cpu_group = create_new_group_for_current_dp("gloo")
-        fi = FlashInferAllReduce(fi_cpu_group, self.platform_backend.runtime.current_device())
+        fi = FlashInferAllReduce(fi_cpu_group, self.backend_runtime.current_device())
         if not fi.disabled:
             self.flashinfer_reduce = fi
             logger.info("Enable FlashInfer ALLReduce.")

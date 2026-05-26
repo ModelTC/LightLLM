@@ -102,6 +102,8 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
+        self.platform_backend = get_backend()
+
     def init_some_extra_state(self, model):
         if self.is_prefill:
             (
@@ -350,8 +352,8 @@ class InferStateInfo:
     def prefill_cuda_graph_create_graph_obj(self):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []
-        graph_obj = get_backend().graph.create_graph()
-        capture_graph = get_backend().graph.graph(graph_obj, pool=self.mem_pool)
+        graph_obj = self.platform_backend.graph.create_graph()
+        capture_graph = self.platform_backend.graph.graph(graph_obj, pool=self.mem_pool)
         self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
         return
 
@@ -379,7 +381,7 @@ class InferStateInfo:
         for func in self.prefill_cuda_graph_exe_list:
             if isinstance(func, tuple):
                 graph_obj, _ = func
-                get_backend().graph.replay_graph(graph_obj)
+                self.platform_backend.graph.replay_graph(graph_obj)
             else:
                 func(new_infer_state)
         return

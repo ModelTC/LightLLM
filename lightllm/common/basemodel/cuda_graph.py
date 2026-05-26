@@ -20,8 +20,10 @@ class CudaGraph:
 
     def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
         self.graph = {}
+
         self.platform_backend = get_backend()
         self.target_device = self.platform_backend.runtime.target_device()
+
         self.tp_world_size = tp_world_size
         self.mempool = self.platform_backend.graph.graph_pool_handle() if self.platform_backend.runtime.is_available() else None
         self.args = get_env_start_args()

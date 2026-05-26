@@ -101,8 +101,10 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+
         self.platform_backend = get_backend()
         self.target_device = get_target_device()
+
         self.size = size
         self.do_resize = do_resize
         self.resample = resample

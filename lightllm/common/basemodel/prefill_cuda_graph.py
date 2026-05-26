@@ -3,8 +3,7 @@ import torch
 import copy
 import bisect
 import triton
-from typing import List, Tuple
-from typing import Optional
+from typing import List, Tuple, Optional
 from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
@@ -20,13 +19,17 @@ logger = init_logger(__name__)
 class PrefillCudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int):
+    def __init__(self, decode_cuda_graph: Optional[CudaGraph], tp_world_size: int):
         self.graph = {}
-        self.platform_backend = get_backend()
         self.tp_world_size = tp_world_size
+
         if decode_cuda_graph is not None:
+            self.platform_backend = decode_cuda_graph.platform_backend
+            self.target_device = decode_cuda_graph.target_device
             self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
         else:
+            self.platform_backend = get_backend()
+            self.target_device = self.platform_backend.runtime.target_device()
             self.mempool = self.platform_backend.graph.graph_pool_handle() \
                 if self.platform_backend.runtime.is_available() else None
 
@@ -168,14 +171,14 @@ class PrefillCudaGraph:
         for handle_token_num in self.graph_handle_token_nums[::-1]:
             logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
             total_token_num = handle_token_num
-            input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-            b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
-            b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
+            input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device=self.target_device)
+            mem_indexes = model.mem_manager.alloc(len(input_ids)).to(device=self.target_device, non_blocking=True)
+            b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device=self.target_device)
+            b_seq_len = torch.empty(1, dtype=torch.int32, device=self.target_device)
             b_seq_len.fill_(total_token_num)
-            b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_mtp_index = torch.zeros(1, dtype=torch.int32, device=self.target_device)
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device=self.target_device)
+            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device=self.target_device)
 
             model_input = ModelInput(
                 batch_size=1,
@@ -228,14 +231,14 @@ class PrefillCudaGraph:
             for micro_batch_index in [0, 1]:
                 # dummy prefill, capture the cudagraph
                 total_token_num = handle_token_num
-                input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-                b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
-                b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
+                input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device=self.target_device)
+                mem_indexes = model.mem_manager.alloc(len(input_ids)).to(device=self.target_device, non_blocking=True)
+                b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device=self.target_device)
+                b_seq_len = torch.empty(1, dtype=torch.int32, device=self.target_device)
                 b_seq_len.fill_(total_token_num)
-                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_mtp_index = torch.zeros(1, dtype=torch.int32, device=self.target_device)
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device=self.target_device)
+                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device=self.target_device)
 
                 micro_batch = ModelInput(
                     batch_size=1,
