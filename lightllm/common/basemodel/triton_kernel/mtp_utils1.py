@@ -21,9 +21,13 @@ def _fwd_kernel_cumprod_probs(
     store_mask = offset < (mtp_step + 1)
 
     probs = tl.load(base_ptr + offset, mask=store_mask, other=0.0)
-    # 对于 probs 中大于 1.0 的值，设置为 0.99，避免错误的值，照成后续的采样操作失败。
-    probs = tl.where(probs >= 1.0, 0.99, probs)
-    probs = tl.where(probs <= 0.0, 0.01, probs)
+    # 对于 probs 中大于 0.99 的值，设置为 0.99，避免错误的值，照成后续的采样操作失败。
+    # 对于 probs 中小于 0.01 的值，设置为 0.01，避免错误的值，照成后续的采样操作失败。
+    # 这样修改后，我们可以做到，对于一个req的所有mtp step 步的概率的cumprod是降序的
+    # 从而在采样时，我们只需要进行排序，则选中的位置，必然满足先后关系，避免一些复杂的
+    # 额外操作。
+    probs = tl.where(probs >= 0.99, 0.99, probs)
+    probs = tl.where(probs <= 0.01, 0.01, probs)
 
     cum_probs = tl.cumprod(probs, axis=0)
 

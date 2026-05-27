@@ -15,8 +15,8 @@ def _reference_cumprod_probs(req_to_next_token_probs, b_req_idx, mtp_step: int) 
         req_idx = int(b_req_idx[req_i * (mtp_step + 1)].item())
         row = probs[req_idx, : mtp_step + 1].clone()
         row[0] = 1.0
-        row = torch.where(row >= 1.0, torch.tensor(0.99, device=row.device, dtype=row.dtype), row)
-        row = torch.where(row <= 0.0, torch.tensor(0.01, device=row.device, dtype=row.dtype), row)
+        row = torch.where(row >= 0.99, torch.tensor(0.99, device=row.device, dtype=row.dtype), row)
+        row = torch.where(row <= 0.01, torch.tensor(0.01, device=row.device, dtype=row.dtype), row)
         probs[req_idx, : mtp_step + 1] = torch.cumprod(row, dim=0)
     return probs
 
@@ -94,10 +94,34 @@ def test_cumprod_probs_clamps_invalid_values():
         num_stages=1,
     )
     row = probs[0, : mtp_step + 1]
-    # index 0 is written as 1.0, then clamped (>=1.0 -> 0.99) before cumprod
+    # index 0 is written as 1.0, then clamped (>=0.99 -> 0.99, <=0.01 -> 0.01) before cumprod
     assert row[0].item() == pytest.approx(0.99)
     assert row[1].item() == pytest.approx(0.99 * 0.01, rel=1e-4)
     assert row[2].item() == pytest.approx(0.99 * 0.01 * 0.99, rel=1e-4)
+
+
+def test_cumprod_probs_clamps_boundary_values():
+    mtp_step = 3
+    req_num = 1
+    probs, b_req_idx = _make_batch_probs(req_num, mtp_step, rows=[[1.0, 0.995, 0.005, 0.5]])
+    raw_probs = probs.clone()
+    _fwd_kernel_cumprod_probs[(req_num,)](
+        req_to_next_token_probs=probs,
+        req_to_next_token_probs_stride=probs.stride(0),
+        b_req_idx=b_req_idx,
+        mtp_step=mtp_step,
+        BLOCK_SIZE=triton.next_power_of_2(mtp_step + 1),
+        num_warps=1,
+        num_stages=1,
+    )
+    expected = _reference_cumprod_probs(raw_probs, b_req_idx, mtp_step)
+    row = probs[0, : mtp_step + 1]
+    assert torch.allclose(row, expected[0, : mtp_step + 1], rtol=1e-5, atol=1e-5)
+    # 0.995 -> 0.99, 0.005 -> 0.01, then cumprod
+    assert row[0].item() == pytest.approx(0.99)
+    assert row[1].item() == pytest.approx(0.99 * 0.99, rel=1e-4)
+    assert row[2].item() == pytest.approx(0.99 * 0.99 * 0.01, rel=1e-4)
+    assert row[3].item() == pytest.approx(0.99 * 0.99 * 0.01 * 0.5, rel=1e-4)
 
 
 def test_sample_select_count():
