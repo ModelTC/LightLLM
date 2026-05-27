@@ -56,7 +56,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                 # 构建 chuncked trans task
                 self._decode_node_gen_trans_tasks(req_obj=req_obj)
             else:
-                # 对于不合法的请求， 主要是health请求，直接模拟将其finished掉
+                # 对于不合法的请求，直接模拟将其finished掉
                 req_obj.cur_output_len += 1
                 req_obj.set_next_gen_token_id(0, 0.0, 1)
                 req_obj.finish_status.set_status(FinishStatus.FINISHED_STOP)

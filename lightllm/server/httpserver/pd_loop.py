@@ -213,11 +213,8 @@ async def _pd_process_generate(
             nixl_pd_upload_websocket=nixl_pd_upload_websocket,
             nixl_pd_event=nixl_pd_event,
         ):
-            # p d 模式下，将 token 数据放入到转发队列中, 请求id 小于0的请求是health探测请求，不用转发。
-            is_health_check_req = sub_req_id < 0
-            if not is_health_check_req:
-                metadata["node_mode"] = manager.args.run_mode
-                await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
+            metadata["node_mode"] = manager.args.run_mode
+            await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except NixlPrefillNodeStopGenToken as e:
         logger.info(f"nixl prefill node stop gen token for group_request_id {e.group_request_id}")
     except BaseException as e:

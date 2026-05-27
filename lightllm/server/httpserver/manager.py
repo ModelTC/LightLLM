@@ -118,8 +118,7 @@ class HttpServerManager:
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
-        # The timemark of the latest inference(prefill/decode) which is used to check the health status of the system.
-        # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
+        # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
 
@@ -283,12 +282,9 @@ class HttpServerManager:
             asyncio.create_task(generate_wrapper(results_generator))
         return
 
-    def alloc_req_id(self, sampling_params, is_health_req: bool = False):
+    def alloc_req_id(self, sampling_params):
         # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
         # 否则会造成异常问题。目前限制 NORMAL 模式都使用内部id替换， P 和 D 模式按需设置
-        # health 请求 request_id 为负数，直接返回
-        if is_health_req:
-            return sampling_params.group_request_id
         if self.pd_mode.is_normal():
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
@@ -312,7 +308,6 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-        is_health_req: bool = False,
         # 该参数只会在 nixl pd mode 中使用，用于上报一些信息给 pd_master
         nixl_pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
@@ -321,7 +316,7 @@ class HttpServerManager:
 
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
-        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+        group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
         self._log_stage_timing(
@@ -368,7 +363,7 @@ class HttpServerManager:
                 "check_and_repair_length_done",
             )
 
-            if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
+            if nixl_pd_upload_websocket is not None and self.pd_mode.is_NP():
                 # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
                 # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
                 logger.info(
@@ -754,9 +749,6 @@ class HttpServerManager:
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
-                        if group_request_id < 0:
-                            # health 探测请求，不记录日志和监控
-                            return
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
                         self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
                         self.metric_client.histogram_observe(
