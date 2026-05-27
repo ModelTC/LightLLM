@@ -4,6 +4,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
+import collections
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
@@ -775,14 +776,18 @@ class ModeBackend:
 
         return
 
-    def _update_mtp_verify_token_num(self, decode_reqs: List[InferReq]):
+    def _update_mtp_verify_token_num(
+        self, decode_reqs: List[InferReq], dynamic_mtp_run_reqs: Optional[List[InferReq]] = None
+    ):
         if self.is_master_in_dp:
-            for req in decode_reqs:
-                # 统计发送给主模型验证的 token 数量：1 个主 token + 当前 mtp_size 个 draft token
-                # 在静态 MTP 模式下，使用固定的 mtp_step；在动态 MTP 模式下，使用动态调整的 current_mtp_step
-                # current_mtp_step 在静态 MTP 模式下为 mtp_step，在动态 MTP 模式下会在推理过程中动态设置。
-                assert req.current_mtp_step >= 0
-                req.update_mtp_verify_token_num(verify_token_num=1 + req.current_mtp_step)
+            if dynamic_mtp_run_reqs is None:
+                for req in decode_reqs:
+                    assert req.mtp_step > 0
+                    req.update_mtp_verify_token_num(verify_token_num=1 + req.mtp_step)
+            else:
+                counter = collections.Counter([req.req_idx for req in dynamic_mtp_run_reqs])
+                for req in decode_reqs:
+                    req.update_mtp_verify_token_num(verify_token_num=1 + counter[req.req_idx] - 1)
         return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
