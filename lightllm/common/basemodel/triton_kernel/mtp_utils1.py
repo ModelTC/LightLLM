@@ -118,7 +118,7 @@ def _fwd_kernel_sample_dynamic_mtp_steps(
 
     sorted_probs, sorted_ids = argsort(probs, offset, descending=True)
 
-    tl.store(select_run_reqs + sorted_ids, 1, mask=mask & offset < dynamic_batch_size)
+    tl.store(select_run_reqs + sorted_ids, 1, mask=mask & (offset < dynamic_batch_size))
     return
 
 
