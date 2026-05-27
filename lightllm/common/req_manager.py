@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, enable_dynamic_mtp_verify
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
@@ -116,6 +116,15 @@ class ReqSamplingParamsManager:
             dtype=torch.int64,
             device="cuda",
         )
+        if enable_dynamic_mtp_verify():
+            self.req_to_next_token_probs = torch.zeros(
+                (max_request_num + 1, 16),
+                dtype=torch.float32,
+                device="cuda",
+            )
+        else:
+            self.req_to_next_token_probs = None
+
         self.req_to_exponential_decay_length_penalty = torch.zeros(
             max_request_num + 1, dtype=torch.float32, device="cuda"
         )
@@ -137,6 +146,9 @@ class ReqSamplingParamsManager:
 
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
+        if enable_dynamic_mtp_verify():
+            self.req_to_next_token_probs[req.req_idx].fill_(0.0)
+            self.req_to_next_token_probs[req.req_idx][0:1].fill_(1.0)
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
         self.req_to_frequency_penalty[req.req_idx].fill_(shm_param.frequency_penalty)
         self.req_to_repetition_penalty[req.req_idx].fill_(shm_param.repetition_penalty)
