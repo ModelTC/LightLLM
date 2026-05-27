@@ -583,6 +583,13 @@ class HttpServerManager:
                 else:
                     raise ValueError("prompt List[int] format contain id > vocab_size")
             else:
+                if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
+                    assert (
+                        len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+                    ), "too many multimodal items!"
+                    if multimodal_params.audios:
+                        assert not self.args.disable_audio, "audio multimodal not enabled"
+                    await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 return prompt
         else:
             raise ValueError(f"prompt format error, get type{type(prompt)}")
