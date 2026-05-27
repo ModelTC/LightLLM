@@ -1,13 +1,20 @@
 import torch
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.apply_penalty_gpu_cache import apply_penalty_gpu_cache
+from lightllm.common.basemodel.triton_kernel.mtp_utils import _pack_selected_rows_1d
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+def sample(
+    logits: torch.Tensor,
+    reqs: List[InferReq],
+    eos_id: List[int] = [2],
+    dynamic_batch_size: Optional[int] = None,
+    selected_run_reqs: Optional[torch.Tensor] = None,
+):
     (
         b_req_idx,
         b_temperatures,
@@ -20,6 +27,27 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         skip_top_p,
         exist_req_use_random_seed,
     ) = _get_post_sample_tensors(reqs)
+
+    if selected_run_reqs is not None:
+        assert dynamic_batch_size is not None
+        (
+            b_req_idx,
+            b_temperatures,
+            b_top_ps,
+            b_top_ks,
+            b_length_penalty_param,
+            b_mask_eos_reqs,
+        ) = _trim_post_sample_tensors(
+            dynamic_batch_size=dynamic_batch_size,
+            selected_run_reqs=selected_run_reqs,
+            b_req_idx=b_req_idx,
+            b_temperatures=b_temperatures,
+            b_top_ps=b_top_ps,
+            b_top_ks=b_top_ks,
+            b_length_penalty_param=b_length_penalty_param,
+            b_mask_eos_reqs=b_mask_eos_reqs,
+        )
+
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
@@ -195,3 +223,46 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         skip_top_p,
         exist_req_use_random_seed,
     )
+
+
+def _trim_post_sample_tensors(
+    dynamic_batch_size: int,
+    selected_run_reqs: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_temperatures: torch.Tensor,
+    b_top_ps: torch.Tensor,
+    b_top_ks: torch.Tensor,
+    b_length_penalty_param: torch.Tensor,
+    b_mask_eos_reqs: torch.Tensor,
+):
+    assert selected_run_reqs.is_cuda
+
+    return (
+        _pack_selected_rows_1d(b_req_idx, selected_run_reqs, dynamic_batch_size),
+        _pack_selected_rows_1d(b_temperatures, selected_run_reqs, dynamic_batch_size),
+        _pack_selected_rows_1d(b_top_ps, selected_run_reqs, dynamic_batch_size),
+        _pack_selected_rows_1d(b_top_ks, selected_run_reqs, dynamic_batch_size),
+        _pack_selected_rows_1d(b_length_penalty_param, selected_run_reqs, dynamic_batch_size),
+        _pack_selected_rows_1d(b_mask_eos_reqs, selected_run_reqs, dynamic_batch_size),
+    )
+
+
+def _get_post_sample_runtime_flags(reqs: List[InferReq]):
+    is_all_greedy = True
+    skip_top_k = True
+    skip_top_p = True
+    exist_req_use_random_seed = False
+
+    for req_obj in reqs:
+        shm_param = req_obj.sampling_param.shm_param
+        top_k_val = shm_param.top_k
+        if top_k_val > 1:
+            is_all_greedy = False
+        if top_k_val != req_obj.vocab_size:
+            skip_top_k = False
+        if shm_param.top_p != 1.0:
+            skip_top_p = False
+        if req_obj.generator is not None:
+            exist_req_use_random_seed = True
+
+    return is_all_greedy, skip_top_k, skip_top_p, exist_req_use_random_seed
