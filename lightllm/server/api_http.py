@@ -443,9 +443,12 @@ async def metrics() -> Response:
 async def abort_request(request: AbortReq, raw_request: Request):
     """Abort a request."""
     try:
-        await g_objs.httpserver_manager.abort_request(request)
+        success, msg = await g_objs.httpserver_manager.abort_request(request)
+        if not success:
+            return create_error_response(HTTPStatus.REQUEST_TIMEOUT, msg, err_type="AbortRequestTimeout")
         return Response(status_code=200)
     except Exception as e:
+        logger.error("abort_request error occurred: %s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
 
 

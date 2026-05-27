@@ -816,7 +816,29 @@ class HttpServerManager:
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
 
-    async def abort_request(self, request: AbortReq):
+    async def _wait_for_abort_released(
+        self, request_id: Optional[int], abort_all: bool, timeout: float = 60.0
+    ) -> Tuple[bool, str]:
+        start_time = time.time()
+        while True:
+            if abort_all:
+                if len(self.req_id_to_out_inf) == 0:
+                    return True, ""
+            elif request_id not in self.req_id_to_out_inf:
+                return True, ""
+
+            if time.time() - start_time > timeout:
+                error_msg = (
+                    f"abort request wait release timeout, request_id={request_id}, abort_all={abort_all}, "
+                    f"timeout={timeout}s"
+                )
+                logger.error(error_msg)
+                return False, error_msg
+
+            await asyncio.sleep(0.02)
+        return True, ""
+
+    async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
         request_id = request.request_id
         abort_all = request.abort_all
         if request_id is not None and not abort_all:
@@ -824,7 +846,7 @@ class HttpServerManager:
         if abort_all:
             for group_req_id in list(self.req_id_to_out_inf.keys()):
                 await self.abort(group_req_id)
-        return
+        return await self._wait_for_abort_released(request_id=None, abort_all=True)
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
@@ -1010,21 +1032,27 @@ class HttpServerManager:
 
     async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
         if request.abort_all_requests:
-            await self.abort_request(AbortReq(abort_all=True))
+            success, msg = await self.abort_request(AbortReq(abort_all=True))
+            if not success:
+                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_distributed")
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
         return await self._control_rpyc_client.call("update_weights_from_distributed", request)
 
     async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
         if request.abort_all_requests:
-            await self.abort_request(AbortReq(abort_all=True))
+            success, msg = await self.abort_request(AbortReq(abort_all=True))
+            if not success:
+                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_tensor")
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
         return await self._control_rpyc_client.call("update_weights_from_tensor", request)
 
     async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
         if request.abort_all_requests:
-            await self.abort_request(AbortReq(abort_all=True))
+            success, msg = await self.abort_request(AbortReq(abort_all=True))
+            if not success:
+                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_ipc")
         if request.flush_cache:
             await self.flush_cache(FlushCacheReq())
         return await self._control_rpyc_client.call("update_weights_from_ipc", request)
