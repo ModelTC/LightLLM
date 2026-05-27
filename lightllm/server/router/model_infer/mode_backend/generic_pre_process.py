@@ -113,9 +113,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mtp_index.append(0)
         multimodal_params.append(req.multimodal_params)
         # process the draft tokens.
-        # 动态 MTP 模式：使用动态 current_mtp_step 构建 batch
-        # 非动态 MTP 模式：current_mtp_step 为固定的 mtp_step
-        for step in range(req.current_mtp_step):
+        for step in range(req.mtp_step):
             run_reqs.append(req)
             b_req_idx.append(req.req_idx)
             seq_len += 1
