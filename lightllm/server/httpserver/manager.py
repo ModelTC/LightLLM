@@ -590,6 +590,11 @@ class HttpServerManager:
                     if multimodal_params.audios:
                         assert not self.args.disable_audio, "audio multimodal not enabled"
                     await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                    return self.tokenizer.encode(
+                        prompt,
+                        multimodal_params,
+                        add_special_tokens=sampling_params.add_special_tokens,
+                    )
                 return prompt
         else:
             raise ValueError(f"prompt format error, get type{type(prompt)}")
