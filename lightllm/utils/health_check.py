@@ -16,8 +16,11 @@ logger = init_logger(__name__)
 @dataclass
 class HealthObj:
     grace_timeout: int = int(os.getenv("HEALTH_TIMEOUT", "200"))
-    latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
-    run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
+
+    def __post_init__(self):
+        uid = get_unique_server_name()
+        self.latest_success_infer_time_mark = SharedInt(f"{uid}_latest_success_infer_time_mark")
+        self.run_reqs_count_mark = SharedInt(f"{uid}_run_reqs_count_mark")
 
     def check(self, shm_req_manager: "ShmReqManager") -> bool:
         """On-the-fly health check: recent success is ok; otherwise require no in-flight shm requests."""
