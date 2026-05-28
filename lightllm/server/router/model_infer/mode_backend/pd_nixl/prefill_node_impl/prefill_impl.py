@@ -55,9 +55,6 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         """
         在每一步chuncked prefill 后，尝试生成chuncked 传输任务，发个 kv_move_manager 进行处理。
         """
-        # 系统内部的 health 请求不创建 kv 传输任务。
-        if req_obj.req_id < 0:
-            return
 
         assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
         input_len = req_obj.shm_req.input_len

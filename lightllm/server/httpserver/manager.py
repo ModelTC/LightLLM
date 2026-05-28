@@ -360,10 +360,10 @@ class HttpServerManager:
             prompt_tokens = len(prompt_ids)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
             # 监控
-            if group_request_id > 0:
-                self.metric_client.counter_inc("lightllm_request_count")
-                self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
-                self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
+            self.metric_client.counter_inc("lightllm_request_count")
+            self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
+            self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
+
             self._log_stage_timing(
                 group_request_id,
                 start_time,
