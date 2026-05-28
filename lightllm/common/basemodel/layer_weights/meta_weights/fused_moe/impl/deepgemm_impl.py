@@ -9,11 +9,10 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    fused_experts_impl,
+    do_fused_experts,
     get_ep_num_sms,
     masked_group_gemm,
     deepgemm_grouped_fp8_nt_contiguous,
-    mega_moe_impl,
     use_sm100_fp4_moe,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
@@ -78,27 +77,15 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        w13_weight, w13_scale = w13.weight, w13.weight_scale
-        w2_weight, w2_scale = w2.weight, w2.weight_scale
-        if use_sm100_fp4_moe(self.quant_method):
-            return mega_moe_impl(input_tensor, w13, w2, topk_weights, topk_ids.to(torch.long), self.quant_method)
-
-        use_fp8_w8a8 = self.quant_method.method_name != "none"
-        buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
-        output = fused_experts_impl(
+        output = do_fused_experts(
             hidden_states=input_tensor,
-            w1=w13_weight,
-            w2=w2_weight,
+            w13=w13,
+            w2=w2,
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
             num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
-            buffer=buffer,
+            quant_method=self.quant_method,
             is_prefill=is_prefill,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_fp8_all2all=use_fp8_w8a8,
-            use_int8_w8a16=False,  # default to False
-            w1_scale=w13_scale,
-            w2_scale=w2_scale,
             previous_event=None,  # for overlap
         )
         return output

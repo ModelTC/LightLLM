@@ -144,6 +144,40 @@ def mega_moe_impl(
     return output
 
 
+def do_fused_experts(
+    hidden_states: torch.Tensor,
+    w13: Any,
+    w2: Any,
+    topk_weights: torch.Tensor,
+    topk_idx: torch.Tensor,
+    num_experts: int,
+    quant_method: Any,
+    is_prefill: Optional[bool],
+    previous_event: Optional[Any] = None,
+):
+    if use_sm100_fp4_moe(quant_method):
+        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
+
+    use_fp8_w8a8 = quant_method.method_name != "none"
+    buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
+    return fused_experts_impl(
+        hidden_states=hidden_states,
+        w1=w13.weight,
+        w2=w2.weight,
+        topk_weights=topk_weights,
+        topk_idx=topk_idx,
+        num_experts=num_experts,
+        buffer=buffer,
+        is_prefill=is_prefill,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_fp8_all2all=use_fp8_w8a8,
+        use_int8_w8a16=False,
+        w1_scale=w13.weight_scale,
+        w2_scale=w2.weight_scale,
+        previous_event=previous_event,
+    )
+
+
 def fused_experts_impl(
     hidden_states: torch.Tensor,  # [M, K]
     w1: torch.Tensor,  # [group, N, K]
