@@ -11,7 +11,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
-from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
 
@@ -53,7 +52,6 @@ class FusedMoeWeight(BaseWeightTpl):
         self.quant_method = quant_method
         assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
-        self.quant_method = self._maybe_upgrade_quant_method_for_ep_moe(self.quant_method)
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
@@ -71,28 +69,6 @@ class FusedMoeWeight(BaseWeightTpl):
         )
         self.lock = threading.Lock()
         self._create_weight()
-
-    def _maybe_upgrade_quant_method_for_ep_moe(self, quant_method: QuantizationMethod) -> QuantizationMethod:
-        if not self.enable_ep_moe:
-            return quant_method
-
-        target_method = "deepgemm-fp4fp8-b32" if is_sm100_gpu() else "deepgemm-fp8w8a8-b128"
-        if quant_method.method_name == "none":
-            from lightllm.common.quantization.registry import QUANTMETHODS
-
-            logger.info(
-                f"enable_ep_moe requires DeepGEMM MoE expert weights; "
-                f"auto-upgrading fused_moe quantization from `none` to `{target_method}`."
-            )
-            quant_method = QUANTMETHODS.get(target_method)
-
-        if quant_method.method_name != target_method:
-            raise ValueError(
-                f"enable_ep_moe currently requires `{target_method}` for fused_moe on this GPU, "
-                f"but got `{quant_method.method_name}`."
-            )
-
-        return quant_method
 
     def _init_config(self, network_config: Dict[str, Any]):
         self.n_group = network_config.get("n_group", 0)

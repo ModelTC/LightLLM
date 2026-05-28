@@ -44,6 +44,24 @@ class Quantcfg:
                 else:
                     self.quant_type = "vllm-fp8w8a8-b128"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+
+            # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
+            # 按其值给 fused_moe 选用对应的 deepgemm 量化方法。
+            expert_dtype = self.network_config_.get("expert_dtype", None)
+            if expert_dtype is not None:
+                expert_dtype_to_quant_type = {
+                    "fp4": "deepgemm-fp4fp8-b32",
+                    "fp8": "deepgemm-fp8w8a8-b128",
+                }
+                target = expert_dtype_to_quant_type.get(expert_dtype)
+                if target is None:
+                    raise ValueError(
+                        f"unsupported expert_dtype `{expert_dtype}`; "
+                        f"expected one of {sorted(expert_dtype_to_quant_type)}"
+                    )
+                for layer_num in range(self.layer_num):
+                    self.quant_cfg[layer_num].setdefault("fused_moe", target)
+                logger.info(f"select fused_moe quant way from expert_dtype=`{expert_dtype}`: {target}")
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):
