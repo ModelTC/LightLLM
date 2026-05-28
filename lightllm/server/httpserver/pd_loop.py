@@ -6,6 +6,9 @@ import socket
 import httpx
 import base64
 import weakref
+import os
+import signal
+import sys
 from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
@@ -31,7 +34,12 @@ async def timer_log(manager: HttpServerManager):
 
 
 async def pd_handle_loop(manager: HttpServerManager):
-    assert manager.args.host not in ["127.0.0.1", "localhost"], "pd mode must specify host ip"
+    if manager.args.host in ["127.0.0.1", "localhost"]:
+        logger.error("pd mode must specify host ip, not use 127.0.0.1 or localhost")
+        # kill father process to trigger graceful exit, avoid orphan process
+        os.kill(os.getppid(), signal.SIGINT)
+        sys.exit(-1)
+
     if manager.args.host in ["0.0.0.0"]:
         manager.host_ip = get_hostname_ip()
     else:
