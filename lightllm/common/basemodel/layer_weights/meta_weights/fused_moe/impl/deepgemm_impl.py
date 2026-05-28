@@ -9,11 +9,11 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    do_fused_experts,
+    fused_experts,
     get_ep_num_sms,
     masked_group_gemm,
     deepgemm_grouped_fp8_nt_contiguous,
-    use_sm100_mega_moe,
+    quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
@@ -77,7 +77,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        output = do_fused_experts(
+        output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
@@ -152,24 +152,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
-        w13_weight, w13_scale = w13.weight, w13.weight_scale
-        if use_sm100_mega_moe(self.quant_method):
-            from deep_gemm.utils import per_token_cast_to_fp8
-
-            qinput_tensor = per_token_cast_to_fp8(
-                hidden_states,
-                use_ue8m0=True,
-                gran_k=self.quant_method.block_size,
-                use_packed_ue8m0=True,
-            )
-            return topk_weights, topk_idx.to(torch.long), qinput_tensor
-
-        block_size_k = 0
-        if w13_weight.ndim == 3:
-            block_size_k = w13_weight.shape[2] // w13_scale.shape[2]
-        assert block_size_k == 128, "block_size_k must be 128"
-        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13_weight.dtype)
-        return topk_weights, topk_idx.to(torch.long), (qinput_tensor, input_scale)
+        qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
+        return topk_weights, topk_idx.to(torch.long), qinput_tensor
 
     def dispatch(
         self,

@@ -160,7 +160,30 @@ def mega_moe_impl(
     return output
 
 
-def do_fused_experts(
+def quantize_fused_experts_input(
+    hidden_states: torch.Tensor,
+    w13: Any,
+    quant_method: Any,
+):
+    check_ep_expert_dtype(quant_method)
+    if use_sm100_mega_moe(quant_method):
+        from deep_gemm.utils import per_token_cast_to_fp8
+
+        return per_token_cast_to_fp8(
+            hidden_states,
+            use_ue8m0=True,
+            gran_k=quant_method.block_size,
+            use_packed_ue8m0=True,
+        )
+
+    block_size_k = 0
+    if w13.weight.ndim == 3:
+        block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
+    assert block_size_k == 128, "block_size_k must be 128"
+    return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
+
+
+def fused_experts(
     hidden_states: torch.Tensor,
     w13: Any,
     w2: Any,
