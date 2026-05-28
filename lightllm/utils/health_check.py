@@ -17,6 +17,7 @@ logger = init_logger(__name__)
 class HealthObj:
     grace_timeout: int = int(os.getenv("HEALTH_TIMEOUT", "200"))
     latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
+    run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
 
     def check(self, shm_req_manager: "ShmReqManager") -> bool:
         """On-the-fly health check: recent success is ok; otherwise require no in-flight shm requests."""
@@ -27,7 +28,7 @@ class HealthObj:
             # 如果最近一次成功推理的时间距离现在小于 grace_timeout，则认为系统健康
             if now - last_success_time <= self.grace_timeout:
                 return True
-            elif shm_req_manager.is_idle():
+            elif self.run_reqs_count_mark.get_value() == 0 and shm_req_manager.is_idle():
                 # 如果最近一次成功推理的时间距离现在大于 grace_timeout，并且没有在推理的请求，则认为系统健康
                 return True
             else:

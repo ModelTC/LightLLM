@@ -52,8 +52,9 @@ class HttpServerManager:
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
-        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 1)
+        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 2)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
+        self._run_reqs_count_lock = AsyncLock(self._shm_lock_pool.get_lock_context(1))
         self.node_rank = args.node_rank
         self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
@@ -121,6 +122,9 @@ class HttpServerManager:
         # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
+        self.run_reqs_count_mark.set_value(0)
 
         # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
         # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
@@ -327,6 +331,9 @@ class HttpServerManager:
             image_count=image_count,
         )
 
+        async with self._run_reqs_count_lock:
+            self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
+
         try:
             original_multimodal_params = None
             if self.is_multinode_tp_master:
@@ -474,6 +481,9 @@ class HttpServerManager:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
+        finally:
+            async with self._run_reqs_count_lock:
+                self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
