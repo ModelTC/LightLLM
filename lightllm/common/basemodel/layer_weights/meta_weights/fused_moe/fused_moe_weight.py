@@ -152,10 +152,6 @@ class FusedMoeWeight(BaseWeightTpl):
             per_expert_scale=self.per_expert_scale,
         )
 
-    def use_sm100_mega_moe(self) -> bool:
-        quant_method = getattr(self.fuse_moe_impl, "quant_method", None)
-        return is_sm100_gpu() and getattr(quant_method, "method_name", None) == "deepgemm-fp4fp8-b32"
-
     def low_latency_dispatch(
         self,
         hidden_states: torch.Tensor,
