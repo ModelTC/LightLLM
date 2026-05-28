@@ -82,6 +82,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         g_infer_state_lock.release()
 
         req_ids = [e[0] for e in current_dp_reqs]
+
+        if self.args.enable_cpu_cache:
+            self._load_cpu_cache_to_reqs(req_ids=req_ids)
+
         return req_ids
 
     def infer_loop(self):

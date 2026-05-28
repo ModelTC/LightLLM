@@ -33,11 +33,14 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
         g_infer_state_lock.acquire()
 
-        uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=False)
+        uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         # 匹配radix cache，并更新一些资源的管理。
         self._post_init_reqs(uninit_reqs=uninit_reqs)
-
         g_infer_state_lock.release()
+
+        # pd nixl 的 decode 节点模式下当前不支持 cpu cache, 未来可能会支持。
+        assert not self.args.enable_cpu_cache
+
         req_ids = [e[0] for e in reqs]
         return req_ids
 
@@ -50,7 +53,6 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
 
         for req_obj in uninit_reqs:
             req_obj: InferReq = req_obj  # for easy typing
-            req_obj._match_radix_cache()
             # 构建 chuncked trans task
             self._decode_node_gen_trans_tasks(req_obj=req_obj)
 

@@ -56,6 +56,9 @@ class DecodeNode(ChunkedPrefillBackend):
 
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
+
+        # pd nccl 的 decode 节点模式下不支持 cpu cache
+        assert not self.args.enable_cpu_cache
         return req_ids
 
     def _post_init_reqs(self, uninit_reqs: List[InferReq]):

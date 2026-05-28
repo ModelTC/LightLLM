@@ -451,9 +451,7 @@ class ModeBackend:
                 else:
                     assert False, f"error type {type(obj)}"
             if init_reqs:
-                req_ids = self._init_reqs(reqs=init_reqs)
-                if self.args.enable_cpu_cache and req_ids:
-                    self._load_cpu_cache_to_reqs(req_ids=req_ids)
+                self._init_reqs(reqs=init_reqs)
         return
 
     def _read_nixl_trans_io_buffer_and_update_req_status(self):
@@ -506,6 +504,10 @@ class ModeBackend:
         g_infer_context.add_reqs(reqs)
         g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
+
+        if self.args.enable_cpu_cache:
+            self._load_cpu_cache_to_reqs(req_ids=req_ids)
+
         return req_ids
 
     def _load_cpu_cache_to_reqs(self, req_ids):
