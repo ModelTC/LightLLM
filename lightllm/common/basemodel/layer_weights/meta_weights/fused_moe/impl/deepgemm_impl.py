@@ -13,7 +13,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     get_ep_num_sms,
     masked_group_gemm,
     deepgemm_grouped_fp8_nt_contiguous,
-    use_sm100_fp4_moe,
+    use_sm100_mega_moe,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
@@ -153,7 +153,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             scoring_func=scoring_func,
         )
         w13_weight, w13_scale = w13.weight, w13.weight_scale
-        if use_sm100_fp4_moe(self.quant_method):
+        if use_sm100_mega_moe(self.quant_method):
             from deep_gemm.utils import per_token_cast_to_fp8
 
             qinput_tensor = per_token_cast_to_fp8(

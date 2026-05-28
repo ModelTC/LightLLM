@@ -465,6 +465,14 @@ Quantization Parameters
     
     Examples can be found in test/advanced_config/mixed_quantization/llamacls-mix-down.yaml.
 
+.. option:: --expert_dtype
+
+    Expert quantization dtype for EP MoE, optional values:
+
+    * ``fp8``
+    * ``fp4``: SM100 GPUs only
+    * ``None`` (default)
+
 .. option:: --vit_quant_type
 
     ViT quantization method, optional values:

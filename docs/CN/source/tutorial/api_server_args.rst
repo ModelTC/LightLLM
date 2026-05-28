@@ -464,6 +464,14 @@ PD 分离模式参数
     
     示例可以在 test/advanced_config/mixed_quantization/llamacls-mix-down.yaml 中找到。
 
+.. option:: --expert_dtype
+
+    EP MoE 专家量化类型，可选值：
+
+    * ``fp8``
+    * ``fp4``，仅支持 SM100 GPU
+    * ``None`` (默认)
+
 .. option:: --vit_quant_type
 
     ViT 量化方法，可选值：

@@ -621,6 +621,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
             Examples can be found in test/advanced_config/mixed_quantization/llamacls-mix-down.yaml.""",
     )
     parser.add_argument(
+        "--expert_dtype",
+        type=str,
+        default=None,
+        choices=["fp8", "fp4"],
+        help="""Expert quantization dtype for EP MoE. Supported values are
+            fp8 and fp4. Note that fp4 is only supported on SM100 GPUs.""",
+    )
+    parser.add_argument(
         "--vit_quant_type",
         type=str,
         default="none",

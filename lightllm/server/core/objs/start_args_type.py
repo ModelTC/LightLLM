@@ -133,6 +133,7 @@ class StartArgs:
     graph_max_len_in_batch: int = field(default=0)
     quant_type: Optional[str] = field(default=None)
     quant_cfg: Optional[str] = field(default=None)
+    expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     vit_quant_type: Optional[str] = field(default=None)
     vit_quant_cfg: Optional[str] = field(default=None)
     llm_prefill_att_backend: List[str] = field(

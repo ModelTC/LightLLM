@@ -22,6 +22,7 @@ from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 _MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
+SUPPORTED_EP_EXPERT_DTYPES = ("deepgemm-fp8w8a8-b128", "deepgemm-fp4fp8-b32")
 
 try:
     from deep_ep import Buffer, EventOverlap
@@ -37,8 +38,23 @@ def get_ep_num_sms() -> int:
     return getattr(dist_group_manager, "ep_num_sms", None) or 0
 
 
-def use_sm100_fp4_moe(quant_method: Any) -> bool:
+def use_sm100_mega_moe(quant_method: Any) -> bool:
     return is_sm100_gpu() and quant_method.method_name == "deepgemm-fp4fp8-b32"
+
+
+def check_ep_expert_dtype(quant_method: Any):
+    expert_dtype = getattr(quant_method, "method_name", None)
+    if expert_dtype not in SUPPORTED_EP_EXPERT_DTYPES:
+        raise ValueError(
+            "EP MoE requires --expert_dtype to be one of ['fp8', 'fp4'], "
+            f"but the resolved fused_moe quant method is `{expert_dtype}`. "
+            "Please start with --expert_dtype fp8 or --expert_dtype fp4. "
+            "Note that --expert_dtype fp4 is only supported on SM100 GPUs."
+        )
+    if expert_dtype == "deepgemm-fp4fp8-b32" and not is_sm100_gpu():
+        raise RuntimeError(
+            "--expert_dtype fp4 requires an SM100 GPU for EP MoE; " "please use --expert_dtype fp8 on non-SM100 GPUs."
+        )
 
 
 def masked_group_gemm(
@@ -155,10 +171,10 @@ def do_fused_experts(
     is_prefill: Optional[bool],
     previous_event: Optional[Any] = None,
 ):
-    if use_sm100_fp4_moe(quant_method):
+    check_ep_expert_dtype(quant_method)
+    if use_sm100_mega_moe(quant_method):
         return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
 
-    use_fp8_w8a8 = quant_method.method_name != "none"
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
         hidden_states=hidden_states,
@@ -169,8 +185,8 @@ def do_fused_experts(
         num_experts=num_experts,
         buffer=buffer,
         is_prefill=is_prefill,
-        use_fp8_w8a8=use_fp8_w8a8,
-        use_fp8_all2all=use_fp8_w8a8,
+        use_fp8_w8a8=True,
+        use_fp8_all2all=True,
         use_int8_w8a16=False,
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,

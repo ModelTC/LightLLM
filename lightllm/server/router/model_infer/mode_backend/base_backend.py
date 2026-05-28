@@ -164,6 +164,7 @@ class ModeBackend:
             "batch_max_tokens": kvargs.get("batch_max_tokens", None),
             "quant_type": kvargs.get("quant_type", None),
             "quant_cfg": kvargs.get("quant_cfg", None),
+            "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
@@ -338,6 +339,7 @@ class ModeBackend:
                 "batch_max_tokens": main_kvargs.get("batch_max_tokens", None),
                 "quant_type": main_kvargs.get("quant_type", None),
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
+                "expert_dtype": main_kvargs.get("expert_dtype", None),
                 "run_mode": "normal",
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
