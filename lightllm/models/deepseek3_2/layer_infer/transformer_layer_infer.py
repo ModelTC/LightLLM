@@ -227,7 +227,15 @@ class NsaInfer:
 
         import deep_gemm
 
-        logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke)
+        logits = deep_gemm.fp8_mqa_logits(
+            q_fp8,
+            (k_fp8_, k_scale_),
+            weights.squeeze(-1),
+            ks,
+            ke,
+            clean_logits=False,
+            max_seqlen_k=infer_state.max_kv_seq_len,
+        )
 
         from sgl_kernel import fast_topk_v2
 
@@ -235,7 +243,6 @@ class NsaInfer:
             score=logits,
             lengths=lengths,
             topk=self.index_topk,
-            row_starts=ks,
         )
         b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
         # 将 topk index 转化为 mem index
