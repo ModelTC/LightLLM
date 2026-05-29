@@ -38,7 +38,7 @@ def _fwd_kernel_cumprod_probs(
 @triton.jit
 def _compare_and_swap(x, ids, flip, i: tl.core.constexpr, n_dims: tl.core.constexpr):
     n_outer: tl.core.constexpr = x.numel >> n_dims
-    shape: tl.core.constexpr = [n_outer * 2 ** i, 2, 2 ** (n_dims - i - 1)]
+    shape: tl.core.constexpr = [n_outer * 2**i, 2, 2 ** (n_dims - i - 1)]
     y = tl.core.reshape(x, shape)
     # slice left/right with 'stride' 2**(n_dims - i - 1)
     mask = tl.core.arange(0, 2)[None, :, None]
@@ -58,7 +58,7 @@ def _compare_and_swap(x, ids, flip, i: tl.core.constexpr, n_dims: tl.core.conste
     iright = right.to(idtype, bitcast=True)
     ix = x.to(idtype, bitcast=True)
 
-    cond = (left > right) ^ flip
+    cond = (left > right) != (flip != 0)
 
     ret = ix ^ tl.core.where(cond, ileft ^ iright, zeros_like(ix))
     new_ids = ids ^ tl.core.where(cond, left_idx ^ right_idx, zeros_like(ids))
@@ -76,7 +76,7 @@ def _bitonic_merge(x, ids, stage: tl.core.constexpr, order: tl.core.constexpr, n
     n_outer: tl.core.constexpr = x.numel >> n_dims
     tl.core.static_assert(stage <= n_dims)
     if order == 2:
-        shape: tl.core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2 ** stage]
+        shape: tl.core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2**stage]
         flip = tl.core.reshape(tl.core.broadcast_to(tl.core.arange(0, 2)[None, :, None], shape), x.shape)
     else:
         flip = order
@@ -132,6 +132,8 @@ def sample_dynamic_mtp_req_mask(
     req_to_next_token_probs: torch.Tensor,
     mtp_step: int,
 ) -> torch.Tensor:
+    dynamic_batch_size = int(dynamic_batch_size)
+    mtp_step = int(mtp_step)
     assert b_req_idx.shape[0] % (mtp_step + 1) == 0
     assert req_to_next_token_probs.is_cuda
     assert dynamic_batch_size <= b_req_idx.shape[0]
