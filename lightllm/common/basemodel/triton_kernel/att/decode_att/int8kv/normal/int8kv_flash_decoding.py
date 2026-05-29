@@ -36,8 +36,8 @@ def token_decode_attention_flash_decoding(
     else:
         block_num = 32
 
-    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
-    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device="cuda")
+    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device=q.device)
+    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device=q.device)
 
     flash_decode_stage1(
         q=q.view(calcu_shape1),

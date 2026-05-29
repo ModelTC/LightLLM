@@ -32,7 +32,8 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
             )
             cfg = self._load_and_check_config()
             all_head_num = cfg["num_head"]
-            all_scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
+            all_scales = torch.tensor(
+                cfg["scales"], dtype=torch.float32, device=self.target_device).view(cfg["scales_shape"])
 
             factor = (get_dp_world_size() * head_num) // all_head_num
             assert (get_dp_world_size() * head_num) % all_head_num == 0
@@ -46,7 +47,8 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
             v_scales = all_scales[:, v_offset + start_head : v_offset + end_head].contiguous()
             self.scales = torch.cat((k_scales, v_scales), dim=-1)
         else:
-            self.scales = torch.ones((self.kv_buffer.shape[0], 2 * head_num), dtype=torch.float32, device="cuda")
+            self.scales = torch.ones(
+                (self.kv_buffer.shape[0], 2 * head_num), dtype=torch.float32, device=self.target_device)
         return
 
     def _load_and_check_config(self):

@@ -30,9 +30,11 @@ class FP8StaticPerTensorQuantMemManager(MemoryManager):
                 "will load kv quant calibration config"
             )
             cfg = self._load_and_check_config()
-            self.scales = torch.tensor(cfg["scales"], dtype=torch.float32, device="cuda").view(cfg["scales_shape"])
+            self.scales = torch.tensor(
+                cfg["scales"], dtype=torch.float32, device=self.target_device).view(cfg["scales_shape"])
         else:
-            self.scales = torch.ones((self.kv_buffer.shape[0], 2), dtype=torch.float32, device="cuda")
+            self.scales = torch.ones(
+                (self.kv_buffer.shape[0], 2), dtype=torch.float32, device=self.target_device)
 
         self.cpu_scales = self.scales.detach().cpu().numpy()
         return

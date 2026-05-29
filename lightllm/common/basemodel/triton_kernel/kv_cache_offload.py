@@ -551,7 +551,12 @@ def load_cpu_kv_to_gpu(
     move_token_num = gpu_mem_indexes.shape[0]
 
     cpu_page_indexes = page_indexes.view((cpu_page_num, 1)).tile((1, token_block_size)).view(-1)
-    cpu_mem_indexes = torch.arange(0, cpu_page_all_token_num, device="cuda", dtype=torch.int32) % token_block_size
+    cpu_mem_indexes = torch.arange(
+        0,
+        cpu_page_all_token_num,
+        device=gpu_mem_indexes.device,
+        dtype=torch.int32,
+    ) % token_block_size
     cpu_page_indexes = cpu_page_indexes[-move_token_num:]
     cpu_mem_indexes = cpu_mem_indexes[-move_token_num:]
 

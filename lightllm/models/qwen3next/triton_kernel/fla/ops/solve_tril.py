@@ -19,13 +19,14 @@ import triton.language as tl
 from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
 from .utils import input_guard, is_amd, is_tma_supported
+from lightllm.utils.device_utils import get_target_device
 
 
 def _ensure_triton_allocator():
     """Ensure Triton has an allocator set for kernels requiring scratch memory."""
 
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-        return torch.empty(size, device="cuda", dtype=torch.int8)
+        return torch.empty(size, device=torch.device(get_target_device()), dtype=torch.int8)
 
     triton.set_allocator(alloc_fn)
 

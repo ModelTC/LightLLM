@@ -110,7 +110,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: FlashInferAttBackend = self.backend  # for typing
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
         self.prefill_wrapper.run(
             q,
             (k.unsqueeze(1), v.unsqueeze(1)),

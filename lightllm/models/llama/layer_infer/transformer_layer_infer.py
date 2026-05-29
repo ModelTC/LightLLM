@@ -13,6 +13,45 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def npu_silu_and_mul_fwd(
+    input: torch.Tensor,
+    layout="blocked",
+    limit=None,
+    alpha=None,
+) -> torch.Tensor:
+    assert input.is_contiguous()
+    assert input.dim() == 2
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    N = input.shape[1] // 2
+
+    if layout == "blocked":
+        gate = input[:, :N]
+        up   = input[:, N:]
+    elif layout == "interleaved":
+        gate = input[:, 0::2]
+        up   = input[:, 1::2]
+    else:
+        raise ValueError(f"unknown layout: {layout}")
+
+    if limit is not None and alpha is not None:
+        gate_fp32_limit = torch.minimum(
+            gate.float(),
+            torch.tensor(limit, device=gate.device, dtype=torch.float32),
+        )
+
+        gate_act = torch.sigmoid(gate_fp32_limit * alpha) * gate_fp32_limit
+        gate_act = gate_act.to(input.dtype)
+
+        up_clip = torch.clamp(up, -limit, limit)
+        out = (up_clip + 1) * gate_act
+    else:
+        import torch_npu
+
+        out = torch_npu.npu_swiglu(input, dim=-1)
+
+    return out 
+
+
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """ """
 
@@ -108,7 +147,45 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
+    @torch.no_grad()
+    def _npu_ffn(self, input, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
+        input = input.view(-1, self.embed_dim_)
+        # up
+        gate_up_proj_bias = [layer_weight.gate_up_proj.bias] if layer_weight.gate_up_proj.bias is not None else None
+        weight = layer_weight.gate_up_proj.mm_param.weight
+        # up_gate_out = torch_npu.npu_grouped_matmul(
+        #     x=[input],
+        #     weight=[weight],
+        #     bias=gate_up_proj_bias,
+        #     split_item=0,
+        #     group_type=-1,
+        #     group_list=None,
+        # )[0]
+        import torch.nn.functional as F
+        up_gate_out = F.linear(input, weight, bias=gate_up_proj_bias)
+        
+        # activation
+        ffn1_out = npu_silu_and_mul_fwd(up_gate_out)
+
+        # down
+        down_proj_bias = [layer_weight.down_proj.bias] if layer_weight.down_proj.bias is not None else None
+        weight = layer_weight.down_proj.mm_param.weight
+        # ffn2_out = torch_npu.npu_grouped_matmul(
+        #     x=[ffn1_out],
+        #     weight=[weight],
+        #     bias=down_proj_bias,
+        #     split_item=0,
+        #     group_type=-1,
+        #     group_list=None,
+        # )[0]
+        ffn2_out = F.linear(ffn1_out, weight, bias=down_proj_bias)
+
+        return ffn2_out
+
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
+        if input.device.type == "npu":
+            return self._npu_ffn(input, layer_weight)
+
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         ffn2_out = self._ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
@@ -120,7 +197,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
-        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
+        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype, device=input.device)
         silu_and_mul_fwd(up_gate_out, ffn1_out)
         input = None
         up_gate_out = None

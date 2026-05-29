@@ -36,7 +36,8 @@ class TokenHealingBackend(ChunkedPrefillBackend):
         self.sorted_tokens = SortedList(
             [(token_str, token_id) for token_str, token_id in vob_dict.items()], key=lambda x: x[0]
         )
-        self.token_indexes = torch.tensor([e[1] for e in self.sorted_tokens], dtype=torch.int64, device="cuda")
+        self.token_indexes = torch.tensor(
+            [e[1] for e in self.sorted_tokens], dtype=torch.int64, device=self.model.target_device)
         return
 
     def _decode_mask_callback(self, run_reqs: List[InferReq], logits: torch.Tensor):

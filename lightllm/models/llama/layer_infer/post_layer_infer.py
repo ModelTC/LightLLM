@@ -35,13 +35,13 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 select_token_num += 1
 
             last_index = torch.tensor(select_index, dtype=torch.long, device=input_embdings.device)
-            last_input = self.alloc_tensor((select_token_num, embed_dim_), dtype=input_embdings.dtype)
+            last_input = self.alloc_tensor((select_token_num, embed_dim_), dtype=input_embdings.dtype, device=input_embdings.device)
             last_input[:, :] = input_embdings[last_index, :]
             return last_input, select_token_num
 
         if infer_state.is_prefill and not infer_state.return_all_prompt_logics:
             batch_size = infer_state.batch_size
-            last_input = self.alloc_tensor((batch_size, embed_dim_), dtype=input_embdings.dtype)
+            last_input = self.alloc_tensor((batch_size, embed_dim_), dtype=input_embdings.dtype, device=input_embdings.device)
             last_index = (
                 torch.cumsum(infer_state.b_seq_len - infer_state.b_ready_cache_len, dim=0, dtype=torch.long) - 1
             )
@@ -63,6 +63,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     ):
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
         input_embdings_dtype = input_embdings.dtype
+        input_embdings_device = input_embdings.device
         input_embdings = None
         last_input = self._norm(last_input, infer_state, layer_weight)
         last_input = last_input.permute(1, 0).view(-1, token_num)
@@ -72,7 +73,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         if self.tp_world_size_ == 1:
             gather_data = logic_batch
         else:
-            gather_data = self.alloc_tensor((vocab_size, token_num), dtype=input_embdings_dtype)
+            gather_data = self.alloc_tensor(
+                (vocab_size, token_num), dtype=input_embdings_dtype, device=input_embdings_device)
             split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
             all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
@@ -84,6 +86,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         ans_logics = self.alloc_tensor(
             (token_num, vocab_size),
             dtype=torch.float32,
+            device=input_embdings_device,
         )
         ans_logics[:, :] = gather_data.permute(1, 0)
         gather_data = None

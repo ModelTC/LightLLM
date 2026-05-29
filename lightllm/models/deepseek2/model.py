@@ -100,7 +100,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
         # Build here to make `torch.jit.trace` work.
         max_seq_len_cached = max_position_embeddings
-        t = torch.arange(max_seq_len_cached, device="cuda", dtype=torch.float32)
+        t = torch.arange(max_seq_len_cached, device=self.target_device, dtype=torch.float32)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         self._cos_cached = (freqs.cos() * _mscale).to(self.data_type).to(device=self.target_device)

@@ -13,8 +13,7 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.mrope_section = torch.tensor(
-            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
-        )
+            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device=self.target_device)
 
     def _get_qkv(
         self,

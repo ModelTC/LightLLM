@@ -208,7 +208,7 @@ class LlamaTpPartModel(TpPartBaseModel):
 
         # Build here to make `torch.jit.trace` work.
         max_seq_len_cached = max_position_embeddings
-        t = torch.arange(max(max_seq_len_cached, self.max_seq_length), device="cuda", dtype=torch.float32)
+        t = torch.arange(max(max_seq_len_cached, self.max_seq_length), device=self.target_device, dtype=torch.float32)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -234,8 +234,8 @@ class LlamaTpPartModel(TpPartBaseModel):
             rope_scaling_factor = math.sqrt(1 + math.log(scale) / math.log(original_max_position_embeddings))
 
         max_seq_len = max(self.max_seq_length, max_position_embeddings)
-        self._cos_cached = torch.zeros((max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device="cuda")
-        self._sin_cached = torch.zeros((max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device="cuda")
+        self._cos_cached = torch.zeros((max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device=self.target_device)
+        self._sin_cached = torch.zeros((max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device=self.target_device)
 
         inv_freq = 1.0 / (
             short_factor

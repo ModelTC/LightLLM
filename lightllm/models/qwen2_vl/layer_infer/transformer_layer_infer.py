@@ -7,7 +7,7 @@ class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         mrope_section = network_config["rope_scaling"]["mrope_section"]
-        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
+        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device=self.target_device)
 
     def _get_qkv(self, input, infer_state, layer_weight):
         input = self._tpsp_allgather(input, infer_state)

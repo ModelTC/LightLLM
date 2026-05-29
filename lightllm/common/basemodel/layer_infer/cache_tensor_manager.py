@@ -45,17 +45,27 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self.free_shape_dtype_to_bufs: Dict[Tuple, List[BufNode]] = collections.defaultdict(list)
             self.calcu_shape_cache: Dict[torch.Size, int] = {}
             self.changed_ptr: Set[int] = set()
-            from torch._C import _storage_Use_Count as use_count
-
-            # use_count 函数可以用于获取有多少 tensor 真正引用了这片显存 tensor
-            self.use_count = use_count
+            # lazy init use_count to avoid get_backend() call error in constructor
+            self.use_count = None
             self.managed_total_tensor_bytes = 0
             # 防止误用导致显存泄露，添加标记变量。
             # 当使用者没有合法的调用 cache_env_in 和 cache_env_out 的时候
             # 如果调用了alloc_tensor 接口，则退化为 torch.empty 申请方式。
             self.cache_env_ok = False
 
+        def _ensure_use_count(self):
+            if self.use_count is not None:
+                return
+            from lightllm.platform import get_backend
+
+            if get_backend().name == "ascend":
+                from torch_npu._C import _storage_Use_Count as use_count
+            else:
+                from torch._C import _storage_Use_Count as use_count
+            self.use_count = use_count
+
         def cache_env_in(self):
+            self._ensure_use_count()
             self.managed_total_tensor_bytes = 0
             setattr(torch.Tensor, "__del__", custom_del)
             self.cache_env_ok = True

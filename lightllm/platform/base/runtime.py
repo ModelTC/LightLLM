@@ -1,6 +1,7 @@
 import torch
+import torch.distributed as dist
 from abc import ABC, abstractmethod
-from typing import Any, Optional, ContextManager, Union
+from typing import Any, Dict, Optional, ContextManager, Tuple, Union
 
 
 class BackendRuntime(ABC):
@@ -13,6 +14,40 @@ class BackendRuntime(ABC):
     @property
     @abstractmethod
     def dist_backend(self) -> str:
+        pass
+
+    @property
+    def dist_init_passes_device_id(self) -> bool:
+        return True
+
+    def init_process_group(
+        self,
+        *,
+        host: str,
+        port: int,
+        rank: int,
+        world_size: int,
+        device_id: int,
+    ) -> torch.device:
+        target_device = self.target_device(device_id)
+        self.set_device(target_device)
+        kwargs = dict(
+            backend=self.dist_backend,
+            init_method=f"tcp://{host}:{port}",
+            rank=rank,
+            world_size=world_size,
+        )
+        if self.dist_init_passes_device_id:
+            kwargs["device_id"] = target_device
+        dist.init_process_group(**kwargs)
+        return target_device
+
+    @abstractmethod
+    def mem_get_info(self, device: Union[int, torch.device]) -> Tuple[int, int]:
+        pass
+
+    @abstractmethod
+    def get_device_properties(self, device: Union[int, torch.device]) -> Any:
         pass
 
     def target_device(self, device_id: Optional[int] = None) -> torch.device:

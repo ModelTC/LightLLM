@@ -104,7 +104,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
-    probs_sort[torch.arange(0, probs.shape[-1], device="cuda").view(1, -1) >= top_ks.view(-1, 1)] = 0.0
+    probs_sort[torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1) >= top_ks.view(-1, 1)] = 0.0
 
     return probs_sort, probs_idx
 

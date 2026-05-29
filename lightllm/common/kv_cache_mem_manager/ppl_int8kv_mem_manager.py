@@ -27,9 +27,9 @@ class PPLINT8KVMemoryManager(MemoryManager):
         )
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=torch.int8, device="cuda")
+        self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=torch.int8, device=self.target_device)
         self.scale_buffer = torch.empty(
-            (layer_num, size + 1, 2 * head_num, head_dim // self.group_quant_size), dtype=dtype, device="cuda"
+            (layer_num, size + 1, 2 * head_num, head_dim // self.group_quant_size), dtype=dtype, device=self.target_device
         )
 
     def _free_buffers(self):

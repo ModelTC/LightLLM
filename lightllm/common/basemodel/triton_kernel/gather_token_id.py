@@ -28,6 +28,8 @@ def _fwd_kernel_scatter(
 
     if not HAS_OUT_IS_NONE:
         cur_has_out = tl.load(b_has_out + block_range, mask=block_mask, other=False)
+        # Mask must have boolean scalar type on NPU
+        cur_has_out = cur_has_out.to(tl.int1)
         if OLD_VERSION_TRITON:
             cur_has_out = cur_has_out != 0
         tl.store(
@@ -122,7 +124,7 @@ def gather_token(req_to_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b
         output: (batch_size,)
     """
     batch_size = b_req_idx.shape[0]
-    output = torch.empty(batch_size, dtype=req_to_next_token_ids.dtype, device="cuda")
+    output = torch.empty(batch_size, dtype=req_to_next_token_ids.dtype, device=b_req_idx.device)
     BLOCK = 256
     grid = (triton.cdiv(batch_size, BLOCK),)
     num_warps = 1

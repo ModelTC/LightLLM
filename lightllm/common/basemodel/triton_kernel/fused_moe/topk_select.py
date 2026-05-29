@@ -171,9 +171,10 @@ def select_experts(
     ######################################## warning ##################################################
     # here is used to match autotune feature, make topk_ids more random
     if Autotuner.is_autotune_warmup():
-        rand_gen = torch.Generator(device="cuda")
+        device = hidden_states.device
+        rand_gen = torch.Generator(device=device)
         rand_gen.manual_seed(router_logits.shape[0])
-        router_logits = torch.randn(size=router_logits.shape, generator=rand_gen, dtype=torch.float32, device="cuda")
+        router_logits = torch.randn(size=router_logits.shape, generator=rand_gen, dtype=torch.float32, device=device)
         _, topk_ids = torch.topk(router_logits, k=top_k, dim=1)
 
     return topk_weights, topk_ids

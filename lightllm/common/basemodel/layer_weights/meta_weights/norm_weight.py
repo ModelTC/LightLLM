@@ -2,15 +2,14 @@ import torch
 from typing import Optional, Dict
 
 from .base_weight import BaseWeightTpl
-from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
+from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
-from .platform_op import PlatformAwareOp
 
 
-class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
+class RMSNormWeight(BaseWeightTpl):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype):
         super().__init__(tp_rank=0, tp_world_size=1)
         self.dim = dim
@@ -129,7 +128,7 @@ class GatedRMSNormWeight(RMSNormWeight):
         )
 
 
-class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
+class LayerNormWeight(BaseWeightTpl):
     def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, bias_name: str = None):
         super().__init__(tp_rank=0, tp_world_size=1)
         self.dim = dim
@@ -254,7 +253,7 @@ class NoTpGEMMANormWeight(RMSNormWeight):
             self.weight.load_ok = True
 
 
-class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
+class QKRMSNORMWeight(BaseWeightTpl):
     def __init__(self, dim: int, q_weight_name: str, k_weight_name: str, data_type: torch.dtype):
         super().__init__(tp_rank=0, tp_world_size=1)
         self.dim = dim

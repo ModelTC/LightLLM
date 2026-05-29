@@ -6,6 +6,7 @@ from transformers import AutoModelForCausalLM
 import argparse
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform import get_backend
 
 data_type_dict = {"float32": 4, "float16": 2, "bfloat16": 2, "fp32": 4, "fp16": 2, "bf16": 2, "int8": 1, "int4": 0.5}
 
@@ -14,10 +15,12 @@ def get_available_gpu_memory(world_size):
     """
     Get available memory.
     """
-    torch.cuda.empty_cache()
-    free_gpu_memory, _ = torch.cuda.mem_get_info(get_current_device_id())
+    backend_runtime = get_backend().runtime
+    backend_runtime.empty_cache()
+    free_gpu_memory, _ = backend_runtime.mem_get_info(get_current_device_id())
     if world_size > 1:
-        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(f"cuda:{get_current_device_id()}")
+        target_device = backend_runtime.target_device(get_current_device_id())
+        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(target_device)
         torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN)
         free_gpu_memory = tensor.item()
     return free_gpu_memory / (1024 ** 3)
@@ -27,7 +30,8 @@ def get_total_gpu_memory():
     """
     Get the total GPU memory of the machine
     """
-    total_memory = torch.cuda.get_device_properties(0).total_memory
+    backend_runtime = get_backend().runtime
+    total_memory = backend_runtime.get_device_properties(0).total_memory
     return total_memory / (1024 ** 3)  # Convert to GB
 
 

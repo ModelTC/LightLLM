@@ -45,8 +45,8 @@ def gen_cumsum_pad0_tensor(b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor
     assert b_q_seq_len.shape == b_kv_seq_len.shape
     assert b_q_seq_len.is_contiguous()
 
-    b1_cu_q_seq_len = torch.empty((b_q_seq_len.shape[0] + 1,), dtype=torch.int32, device="cuda")
-    b1_cu_kv_seq_len = torch.empty((b_kv_seq_len.shape[0] + 1,), dtype=torch.int32, device="cuda")
+    b1_cu_q_seq_len = torch.empty((b_q_seq_len.shape[0] + 1,), dtype=torch.int32, device=b_q_seq_len.device)
+    b1_cu_kv_seq_len = torch.empty((b_kv_seq_len.shape[0] + 1,), dtype=torch.int32, device=b_kv_seq_len.device)
     _gen_cumsum_pad0_kernel[(1,)](
         b_q_seq_len,
         b1_cu_q_seq_len,
@@ -85,7 +85,7 @@ def _gen_prefill_position(
 @torch.no_grad()
 def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_seq_len: torch.Tensor):
     batch_size = b_ready_cache_len.shape[0]
-    position_ids = torch.empty((input_token_num,), dtype=torch.int32, device="cuda")
+    position_ids = torch.empty((input_token_num,), dtype=torch.int32, device=b_ready_cache_len.device)
     assert b_ready_cache_len.shape[0] == b_seq_len.shape[0]
     b_q_seq_len = b_seq_len - b_ready_cache_len
     b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_seq_len)
@@ -103,3 +103,48 @@ def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_
     )
     b_kv_seq_len = b_seq_len
     return b_q_seq_len, b1_cu_q_seq_len, b_kv_seq_len, b1_cu_kv_seq_len, position_ids
+
+
+@torch.no_grad()
+def npu_gen_prefill_params(
+    input_token_num: int,
+    b_ready_cache_len: torch.Tensor,
+    b_seq_len: torch.Tensor,
+):
+    assert b_ready_cache_len.shape == b_seq_len.shape
+    device = b_ready_cache_len.device
+    dtype = torch.int32
+
+    # qkv length
+    b_q_seq_len = b_seq_len - b_ready_cache_len
+    b_kv_seq_len = b_seq_len
+
+    # batch cumsum q length
+    b1_cu_q_seq_len = torch.empty(
+        (b_q_seq_len.shape[0] + 1,), dtype=dtype, device=device
+    )
+    b1_cu_q_seq_len[0] = 0
+    b1_cu_q_seq_len[1:] = torch.cumsum(b_q_seq_len.to(dtype), dim=0)
+
+    # batch cumsum kv length
+    b1_cu_kv_seq_len = torch.empty(
+        (b_kv_seq_len.shape[0] + 1,), dtype=dtype, device=device
+    )
+    b1_cu_kv_seq_len[0] = 0
+    b1_cu_kv_seq_len[1:] = torch.cumsum(b_kv_seq_len.to(dtype), dim=0)
+
+    # get position ids
+    global_idx = torch.arange(input_token_num, device=device, dtype=dtype)
+    cu_q = b1_cu_q_seq_len[1:]
+    batch_id = torch.searchsorted(cu_q, global_idx, right=True)
+    batch_start = b1_cu_q_seq_len[:-1]
+    local_offset = global_idx - batch_start[batch_id]
+    position_ids = b_ready_cache_len[batch_id].to(dtype) + local_offset
+
+    return (
+        b_q_seq_len,
+        b1_cu_q_seq_len,
+        b_kv_seq_len,
+        b1_cu_kv_seq_len,
+        position_ids,
+    )

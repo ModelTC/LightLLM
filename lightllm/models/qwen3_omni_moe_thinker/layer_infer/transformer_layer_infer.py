@@ -10,6 +10,5 @@ class Qwen3OmniMOETransformerLayerInfer(Qwen3VLMOETransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         self.mrope_section = torch.tensor(
-            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
-        )
+            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device=self.target_device)
         return

@@ -171,7 +171,7 @@ def token_attention_fwd(
     batch_size = b_seq_len.shape[0]
     calcu_shape1 = (batch_size, head_num, k.shape[2])
 
-    att_m_tensor = alloc_tensor_func((head_num, total_token_num), dtype=q.dtype, device="cuda")
+    att_m_tensor = alloc_tensor_func((head_num, total_token_num), dtype=q.dtype, device=q.device)
 
     token_att_fwd(
         q.view(calcu_shape1), k, att_m_tensor, alibi, req_to_tokens, b_req_idx, b_start_loc, b_seq_len, max_len_in_batch

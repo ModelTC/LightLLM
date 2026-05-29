@@ -30,19 +30,19 @@ class Deepseek2MemoryManager(MemoryManager):
         return self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = torch.empty((layer_num, size + 1, head_num, head_dim), dtype=dtype, device=self.target_device)
 
     def alloc_kv_move_buffer(self, max_req_total_len):
         self.kv_move_buffer = torch.empty(
-            (1, max_req_total_len + 8, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
+            (1, max_req_total_len + 8, self.head_num, self.head_dim), dtype=self.dtype, device=self.target_device
         )
-        self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
+        self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device=self.target_device)
         self.token_dim_size = self.kv_move_buffer.shape[-1] * self.kv_move_buffer.shape[-2]
         return
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         self.kv_move_buffer = torch.empty(
-            (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
+            (page_num, page_size, self.layer_num, self.head_num, self.head_dim), dtype=self.dtype, device=self.target_device
         )
         self._buffer_mem_indexes_tensors = [
             torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
@@ -173,7 +173,7 @@ class Deepseek2MemoryManager(MemoryManager):
                 mems_ptr = []
                 for i in range(0, len(mem_managers), len(mem_managers) // dp_size_in_node):
                     mems_ptr.append(mem_managers[i].kv_buffer[layer_index, :, :, :].data_ptr())
-                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
+                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device=self.target_device)
                 self.mem_ptrs_dict[layer_index] = mems_ptr
 
         move_token_indexes = []
@@ -183,8 +183,8 @@ class Deepseek2MemoryManager(MemoryManager):
                 move_token_indexes.extend(task.prefill_token_indexes[-task.move_kv_len :])
                 token_dp_indexes.extend([task.prefill_dp_index for _ in range(task.move_kv_len)])
 
-        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
-        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
+        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device=self.target_device)
+        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device=self.target_device)
         for layer_index in range(self.layer_num):
             move_buffer = self._get_kv_move_data_p2p(
                 move_token_indexes, token_dp_indexes, layer_index, self.kv_move_buffer, dp_size_in_node
@@ -226,7 +226,7 @@ class Deepseek2MemoryManager(MemoryManager):
                 mems_ptr = []
                 for i in range(0, len(mem_managers)):
                     mems_ptr.append(mem_managers[i].kv_buffer[layer_index, :, :, :].data_ptr())
-                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device="cuda")
+                mems_ptr = torch.tensor(mems_ptr, dtype=torch.uint64, device=self.target_device)
                 self.mem_ptrs_dict[layer_index] = mems_ptr
 
         move_token_indexes = []
@@ -236,8 +236,8 @@ class Deepseek2MemoryManager(MemoryManager):
                 move_token_indexes.extend(task.decode_token_indexes[-task.move_kv_len :])
                 token_dp_indexes.extend([task.decode_dp_index for _ in range(task.move_kv_len)])
 
-        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
-        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device="cuda")
+        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device=self.target_device)
+        token_dp_indexes = torch.tensor(token_dp_indexes, dtype=torch.int32, device=self.target_device)
 
         token_num = len(move_token_indexes)
         move_size = self.token_dim_size * token_num

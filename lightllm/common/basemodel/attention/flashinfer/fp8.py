@@ -46,7 +46,7 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
     def _fp8_prefill_att(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
     ) -> torch.Tensor:
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
@@ -97,7 +97,7 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         v: torch.Tensor,
         alloc_func=torch.empty,
     ):
-        o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
+        o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
 
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)

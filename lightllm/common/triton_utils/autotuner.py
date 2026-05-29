@@ -104,17 +104,9 @@ class Autotuner:
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
-        self.cache_dir = os.path.join(
-            Path(__file__).parent,
-            "autotune_kernel_configs",
-            get_triton_version(),
-            get_current_device_name(),
-            self.kernel_name,
-        )
-        os.makedirs(self.cache_dir, exist_ok=True)
+        self._cache_dir = None
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -146,6 +138,19 @@ class Autotuner:
         if self._platform_backend is None:
             self._platform_backend = get_backend()
         return self._platform_backend
+
+    @property
+    def cache_dir(self) -> str:
+        if self._cache_dir is None:
+            self._cache_dir = os.path.join(
+                Path(__file__).parent,
+                "autotune_kernel_configs",
+                get_triton_version(),
+                get_current_device_name(),
+                self.kernel_name,
+            )
+            os.makedirs(self._cache_dir, exist_ok=True)
+        return self._cache_dir
 
     @torch.no_grad()
     def __call__(self, *args, **kwargs):

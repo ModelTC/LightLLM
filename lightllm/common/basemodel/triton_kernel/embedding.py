@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from typing import Optional
 
 
 @triton.jit
@@ -63,6 +64,24 @@ def embedding(input_ids, weight: torch.Tensor, vob_start_id, vob_end_id, out: to
         num_warps=1,
         num_stages=1,
     )
+
+
+@torch.no_grad()
+def npu_embedding(
+    input_ids: torch.Tensor,
+    wte_weight: torch.Tensor,
+    vob_start_id: int,
+    vob_end_id: int,
+    out: Optional[torch.Tensor] = None,
+) -> None:
+    token_ids = input_ids - vob_start_id
+
+    mask = (token_ids < 0) | (token_ids >= vob_end_id - vob_start_id)
+    token_ids = token_ids.masked_fill(mask, 0)
+
+    emb = torch.nn.functional.embedding(token_ids, wte_weight)
+    res = emb.masked_fill_(mask.unsqueeze(-1), 0)
+    out.copy_(res)
 
 
 @torch.no_grad()

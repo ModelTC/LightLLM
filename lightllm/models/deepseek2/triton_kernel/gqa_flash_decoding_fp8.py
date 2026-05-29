@@ -56,9 +56,10 @@ def gqa_token_decode_attention_flash_decoding_fp8(
 
     o_tensor = alloc_tensor_func(q_nope.shape, q_nope.dtype, q_nope.device) if out is None else out
 
-    fake_decode_att_block_seq = torch.empty([0], dtype=torch.int64, device="cuda")
-    mid_o = torch.empty([q_head_num, 0, kv_lora_rank], dtype=torch.float32, device="cuda")
-    mid_o_logexpsum = torch.empty([q_head_num, 0], dtype=torch.float32, device="cuda")
+    device = q_nope.device
+    fake_decode_att_block_seq = torch.empty([0], dtype=torch.int64, device=device)
+    mid_o = torch.empty([q_head_num, 0, kv_lora_rank], dtype=torch.float32, device=device)
+    mid_o_logexpsum = torch.empty([q_head_num, 0], dtype=torch.float32, device=device)
 
     vsm_count = flash_decode_stage1_fp8(
         fake_decode_att_block_seq,
@@ -84,14 +85,14 @@ def gqa_token_decode_attention_flash_decoding_fp8(
                 1,
             ],
             dtype=torch.int64,
-            device="cuda",
+            device=device,
         )
         mid_o_batch_start_index = torch.empty(
             [
                 batch_size,
             ],
             dtype=torch.int64,
-            device="cuda",
+            device=device,
         )
         _fwd_kernel_calcu_index_and_block_seq[(1,)](
             infer_state.b_seq_len,
@@ -106,8 +107,8 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         infer_state.decode_att_block_seq = decode_att_block_seq
         infer_state.mid_o_batch_start_index = mid_o_batch_start_index
 
-    mid_o = torch.empty([q_head_num, vsm_count * 4 + batch_size, kv_lora_rank], dtype=torch.float32, device="cuda")
-    mid_o_logexpsum = torch.empty([q_head_num, vsm_count * 4 + batch_size], dtype=torch.float32, device="cuda")
+    mid_o = torch.empty([q_head_num, vsm_count * 4 + batch_size, kv_lora_rank], dtype=torch.float32, device=device)
+    mid_o_logexpsum = torch.empty([q_head_num, vsm_count * 4 + batch_size], dtype=torch.float32, device=device)
 
     flash_decode_stage1_fp8(
         infer_state.decode_att_block_seq,

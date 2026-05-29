@@ -7,13 +7,39 @@ from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
 
 from lightllm.platform import get_backend
-from .triton_kernel.gen_prefill_params import gen_prefill_params
+from .triton_kernel.gen_prefill_params import gen_prefill_params, npu_gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
+
+
+class SeqLenManager:
+    def __init__(self, max_batch: int):
+        self.max_batch = max_batch
+
+        self.b1_cu_q_seq_len_cpu = torch.empty(
+            max_batch, dtype=torch.int32, device='cpu', pin_memory=True)
+        self.b_cu_kv_seq_len_cpu = torch.empty(
+            max_batch, dtype=torch.int32, device='cpu', pin_memory=True)
+
+        self.b_cu_q_seq_len_list = None
+        self.b_cu_kv_seq_len_list = None
+
+    def update(self, b1_cu_q_seq_len: torch.Tensor, b_cu_kv_seq_len: torch.Tensor):
+        n_q = b1_cu_q_seq_len.numel() - 1
+        n_kv = b_cu_kv_seq_len.numel()
+
+        self.b1_cu_q_seq_len_cpu[:n_q].copy_(b1_cu_q_seq_len[1:], non_blocking=False)
+        self.b_cu_kv_seq_len_cpu[:n_kv].copy_(b_cu_kv_seq_len, non_blocking=False)
+
+        self.n_q = n_q
+        self.n_kv = n_kv
+
+    def get_tensor_slices(self) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.b1_cu_q_seq_len_cpu[:self.n_q], self.b_cu_kv_seq_len_cpu[:self.n_kv]
 
 
 class InferStateInfo:
@@ -70,7 +96,9 @@ class InferStateInfo:
         # b1 开头的tensor变量其shape为[batch_size + 1,]
         self.b_q_seq_len: torch.Tensor = None
         self.b1_cu_q_seq_len: torch.Tensor = None
+        self.b1_cu_q_seq_len_cpu: torch.Tensor = None
         self.b_kv_seq_len: torch.Tensor = None
+        self.b_kv_seq_len_cpu: torch.Tensor = None
         self.b1_cu_kv_seq_len: torch.Tensor = None
         self.position_ids: torch.Tensor = None
         self.max_q_seq_len: int = None
@@ -104,19 +132,35 @@ class InferStateInfo:
 
         self.platform_backend = get_backend()
 
+        args = get_env_start_args()
+        self.seq_len_manager = SeqLenManager(args.running_max_req_size + 1)
+
     def init_some_extra_state(self, model):
         if self.is_prefill:
-            (
-                self.b_q_seq_len,
-                self.b1_cu_q_seq_len,
-                self.b_kv_seq_len,
-                self.b1_cu_kv_seq_len,
-                self.position_ids,
-            ) = gen_prefill_params(
-                input_token_num=self.input_ids.shape[0],
-                b_ready_cache_len=self.b_ready_cache_len,
-                b_seq_len=self.b_seq_len,
-            )
+            if self.input_ids.device.type == "npu":
+                (
+                    self.b_q_seq_len,
+                    self.b1_cu_q_seq_len,
+                    self.b_kv_seq_len,
+                    self.b1_cu_kv_seq_len,
+                    self.position_ids,
+                ) = npu_gen_prefill_params(
+                    input_token_num=self.input_ids.shape[0],
+                    b_ready_cache_len=self.b_ready_cache_len,
+                    b_seq_len=self.b_seq_len,
+                )
+            else:
+                (
+                    self.b_q_seq_len,
+                    self.b1_cu_q_seq_len,
+                    self.b_kv_seq_len,
+                    self.b1_cu_kv_seq_len,
+                    self.position_ids,
+                ) = gen_prefill_params(
+                    input_token_num=self.input_ids.shape[0],
+                    b_ready_cache_len=self.b_ready_cache_len,
+                    b_seq_len=self.b_seq_len,
+                )
             self.b_q_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:
             (
@@ -127,6 +171,8 @@ class InferStateInfo:
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
+        self.seq_len_manager.update(self.b1_cu_q_seq_len, self.b_kv_seq_len)
+        self.b1_cu_q_seq_len_cpu, self.b_cu_kv_seq_len_cpu = self.seq_len_manager.get_tensor_slices()
 
     def init_att_state(self):
         if self.is_prefill:
@@ -176,8 +222,8 @@ class InferStateInfo:
 
         args = get_env_start_args()
 
-        dp_input_lens = torch.empty(size=(args.dp,), device="cuda", dtype=torch.int32)
-        input_len = torch.empty(size=(1,), device="cuda", dtype=torch.int32)
+        dp_input_lens = torch.empty(size=(args.dp,), device=input_ids.device, dtype=torch.int32)
+        input_len = torch.empty(size=(1,), device=input_ids.device, dtype=torch.int32)
         input_len.fill_(len(input_ids))
         dist.all_gather_into_tensor(
             output_tensor=dp_input_lens,
@@ -306,7 +352,7 @@ class InferStateInfo:
         dest_data = g_cache_manager.alloc_tensor(
             shape=(handle_len * scale_size,),
             data_type=data.dtype,
-            device="cuda",
+            device=data.device,
         )
         dist.all_to_all_single(
             output=dest_data.view(-1),
@@ -336,7 +382,7 @@ class InferStateInfo:
         origin_data = g_cache_manager.alloc_tensor(
             shape=(origin_len * scale_size,),
             data_type=data.dtype,
-            device="cuda",
+            device=data.device,
         )
         dist.all_to_all_single(
             output=origin_data.view(-1),

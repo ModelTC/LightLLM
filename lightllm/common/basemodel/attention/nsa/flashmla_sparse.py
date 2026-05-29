@@ -135,10 +135,19 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         self.nsa_cache_seqlens = torch.minimum(
-            torch.full(size=(self.infer_state.batch_size,), fill_value=2048, dtype=torch.int32, device="cuda"),
+            torch.full(
+                size=(self.infer_state.batch_size,),
+                fill_value=2048,
+                dtype=torch.int32,
+                device=self.infer_state.input_ids.device,
+            ),
             self.infer_state.b_seq_len,
         )
-        padded_seq_lens = torch.zeros(size=(self.nsa_cache_seqlens.shape[0] + 1,), dtype=torch.int32, device="cuda")
+        padded_seq_lens = torch.zeros(
+            size=(self.nsa_cache_seqlens.shape[0] + 1,),
+            dtype=torch.int32,
+            device=self.infer_state.input_ids.device,
+        )
         # 进行 cumsum 操作
         padded_seq_lens[1:].copy_(self.nsa_cache_seqlens, non_blocking=True)
         self.nsa_cu_seqlens_k_new = padded_seq_lens.cumsum(dim=0, dtype=torch.int32)

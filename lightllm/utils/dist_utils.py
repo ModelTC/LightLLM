@@ -55,6 +55,19 @@ def get_environ(environ_name):
     return value
 
 
+def _setup_distributed(*, host: str, port: int, rank: int, world_size: int, device_id: int) -> None:
+    target_device = get_backend().runtime.init_process_group(
+        host=host,
+        port=port,
+        rank=rank,
+        world_size=world_size,
+        device_id=device_id,
+    )
+    _a = torch.zeros([1], device=target_device)
+    dist.all_reduce(_a)
+    del _a
+
+
 def init_vision_distributed_env(kvargs):
     """
     # kvargs = {
@@ -81,20 +94,13 @@ def init_vision_distributed_env(kvargs):
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
 
-    backend_runtime = get_backend().runtime
-    target_device = backend_runtime.target_device(device_id)
-    backend_runtime.set_device(target_device)
-    dist.init_process_group(
-        backend_runtime.dist_backend,
-        init_method=f'tcp://127.0.0.1:{kvargs["visual_nccl_port"]}',
+    _setup_distributed(
+        host="127.0.0.1",
+        port=kvargs["visual_nccl_port"],
         rank=kvargs["tp_rank_id"],
         world_size=tp_world_size,
-        device_id=target_device,
+        device_id=device_id,
     )
-    # warmup nccl communicator
-    _a = torch.zeros([1]).to(target_device)
-    dist.all_reduce(_a)
-    del _a
 
 
 def init_audio_distributed_env(kvargs):
@@ -116,19 +122,13 @@ def init_audio_distributed_env(kvargs):
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
 
-    backend_runtime = get_backend().runtime
-    target_device = backend_runtime.target_device(device_id)
-    backend_runtime.set_device(target_device)
-    dist.init_process_group(
-        backend_runtime.dist_backend,
-        init_method=f'tcp://127.0.0.1:{kvargs["audio_nccl_port"]}',
+    _setup_distributed(
+        host="127.0.0.1",
+        port=kvargs["audio_nccl_port"],
         rank=tp_rank_id,
         world_size=tp_world_size,
-        device_id=target_device,
+        device_id=device_id,
     )
-    _a = torch.zeros([1]).to(target_device)
-    dist.all_reduce(_a)
-    del _a
 
 
 def init_distributed_env(kvargs):
@@ -152,21 +152,13 @@ def init_distributed_env(kvargs):
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
 
-    backend_runtime = get_backend().runtime
-    target_device = backend_runtime.target_device(device_id)
-    get_backend().runtime.set_device(target_device)
-    dist.init_process_group(
-        get_backend().runtime.dist_backend,
-        init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
+    _setup_distributed(
+        host=kvargs["nccl_host"],
+        port=kvargs["nccl_port"],
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
-        device_id=target_device,
+        device_id=device_id,
     )
-    # warmup nccl communicator
-    _a = torch.zeros([1]).to(target_device)
-    dist.all_reduce(_a)
-    del _a
-
 
 def set_global_rank(global_rank: int):
     set_environ("LIGHTLLM_GLOBAL_RANK", global_rank)

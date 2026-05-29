@@ -17,7 +17,7 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
         # Initialize mrope section from config
         rope_scaling = network_config.get("rope_scaling", {})
         mrope_section = rope_scaling.get("mrope_section", [11, 11, 10])
-        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
+        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device=self.target_device)
 
     def _get_qkv(
         self,

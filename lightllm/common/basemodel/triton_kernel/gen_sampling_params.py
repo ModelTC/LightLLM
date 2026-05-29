@@ -46,11 +46,12 @@ def gen_sampling_params(b_req_idx: torch.Tensor, req_sampling_params_manager):
     req_sampling_params_manager: ReqSamplingParamsManager = req_sampling_params_manager
 
     batch_size = b_req_idx.shape[0]
-    b_presence_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_frequency_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_repetition_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_temperature = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_exponential_decay_length_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
+    device = b_req_idx.device
+    b_presence_penalty = torch.empty((batch_size,), dtype=torch.float32, device=device)
+    b_frequency_penalty = torch.empty((batch_size,), dtype=torch.float32, device=device)
+    b_repetition_penalty = torch.empty((batch_size,), dtype=torch.float32, device=device)
+    b_temperature = torch.empty((batch_size,), dtype=torch.float32, device=device)
+    b_exponential_decay_length_penalty = torch.empty((batch_size,), dtype=torch.float32, device=device)
 
     BLOCK = 256
 
@@ -136,15 +137,16 @@ def _token_id_counter_update_kernel(
 
     req_idx = tl.load(b_req_idx_ptr + offs, mask=loc_mask, other=0)
     token_ids = tl.load(next_token_ids_ptr + offs, mask=loc_mask, other=0)
-    valid = (token_ids >= 0) & (token_ids < vocab_size) & (req_idx >= 0) & (req_idx < num_req_rows)
 
     if HAS_MASK:
         mask = tl.load(mask_ptr + offs, mask=loc_mask, other=False)
+        # tt.atomic_rmw must be 1-bit inputs on NPU 
+        add_mask = (loc_mask & mask) != 0
         if OLD_VERSION_TRITON:
             mask = mask != 0
-        update_mask = loc_mask & mask & valid
+        update_mask = add_mask
     else:
-        update_mask = loc_mask & valid
+        update_mask = loc_mask
 
     tl.atomic_add(
         req_to_out_token_id_counter_ptr + req_idx * counter_stride_m + token_ids * counter_stride_n,

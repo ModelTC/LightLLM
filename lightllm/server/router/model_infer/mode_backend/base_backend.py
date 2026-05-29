@@ -288,7 +288,7 @@ class ModeBackend:
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        self.backend_runtime.set_device(self.backend_runtime.target_device())
+        self.backend_runtime.set_device(get_current_device_id())
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,

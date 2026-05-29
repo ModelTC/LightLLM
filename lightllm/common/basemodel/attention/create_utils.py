@@ -1,5 +1,6 @@
 """Attention backend selection utilities."""
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.common.basemodel.attention.paged_fa3.fp import PagedFa3AttBackend
+from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
 from typing import Dict
@@ -23,7 +24,7 @@ logger = init_logger(__name__)
 data_type_to_backend = {
     "None": {
         "triton": TritonAttBackend,
-        "fa3": Fa3AttBackend,
+        "fa3": PagedFa3AttBackend if get_page_size() > 1 else Fa3AttBackend,
         "flashinfer": FlashInferAttBackend,
     },
     "int4kv": {

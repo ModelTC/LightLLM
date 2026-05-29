@@ -66,7 +66,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
                     end=self.n_routed_experts + self.num_fused_shared_experts,
                     step=1,
                     dtype=topk_ids.dtype,
-                    device="cuda",
+                    device=topk_ids.device,
                 )
                 .view(1, self.num_fused_shared_experts)
                 .repeat(topk_ids.shape[0], 1)
@@ -74,7 +74,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             pad_topk_weights = torch.full(
                 (topk_weights.shape[0], self.num_fused_shared_experts),
                 fill_value=1.0,
-                device="cuda",
+                device=topk_weights.device,
                 dtype=topk_weights.dtype,
             )
 

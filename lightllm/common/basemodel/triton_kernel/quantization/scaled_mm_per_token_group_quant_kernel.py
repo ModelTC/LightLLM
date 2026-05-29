@@ -220,7 +220,7 @@ def scaled_mm_act_per_group_w_perchannel(
     if support_tma:
         # TMA descriptors require a global memory allocation
         def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-            return torch.empty(size, device="cuda", dtype=torch.int8)
+            return torch.empty(size, device=A.device, dtype=torch.int8)
 
         triton.set_allocator(alloc_fn)
 

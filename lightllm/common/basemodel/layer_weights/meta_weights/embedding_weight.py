@@ -3,12 +3,10 @@ import numpy as np
 from typing import Dict, Optional
 
 from .base_weight import BaseWeightTpl
-from .platform_op import PlatformAwareOp
 from lightllm.common.basemodel.triton_kernel.embedding import embedding as embedding_kernel
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 
 
-class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
+class EmbeddingWeight(BaseWeightTpl):
     def __init__(self, dim: int, vocab_size: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
         self.dim = dim
@@ -154,7 +152,7 @@ class LMHeadWeight(EmbeddingWeight):
         return self.platform_backend.ops.lm_head(input=input, weight=self.weight, out=out, alloc_func=alloc_func)
 
 
-class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
+class NoTpPosEmbeddingWeight(BaseWeightTpl):
     def __init__(self, dim: int, max_position_embeddings: int, weight_name: str, data_type: torch.dtype):
         super().__init__()
         self.dim = dim

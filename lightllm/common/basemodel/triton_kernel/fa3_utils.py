@@ -1,3 +1,4 @@
+import torch
 import triton
 import triton.language as tl
 
@@ -29,13 +30,31 @@ def page_table_copy_kernel(
     tl.store(page_table_ptr + output_pos, mem_index, mask=mask)
 
 
+@torch.no_grad()
+def paged_page_table_copy(
+    page_table: torch.Tensor,
+    req_to_token_indexs: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    page_size: int,
+) -> None:
+    num_pages = page_table.shape[1]
+    max_seq_len_k = num_pages * page_size
+    sampled = req_to_token_indexs[b_req_idx, :max_seq_len_k:page_size]
+    page_table.copy_(sampled // page_size)
+
+
 def page_table_copy(
-    page_table,  # destination tensor [batch, seq]
+    page_table,  # destination tensor [batch, seq] or [batch, num_pages]
     req_to_token_indexs,  # source tensor [batch, seq]
     b_req_idx,  # request index to copy from
+    page_size: int = 1,
 ):
     assert page_table.dim() == 2, "page_table should be 2D"
     assert req_to_token_indexs.dim() == 2, "req_to_token_indexs should be 2D"
+
+    if page_size > 1:
+        paged_page_table_copy(page_table, req_to_token_indexs, b_req_idx, page_size)
+        return
 
     max_seq_len_k = page_table.shape[1]
     batch_size = page_table.size(0)

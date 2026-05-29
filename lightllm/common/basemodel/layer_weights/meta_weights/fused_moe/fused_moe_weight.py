@@ -79,8 +79,10 @@ class FusedMoeWeight(BaseWeightTpl):
         self.redundancy_expert_num = get_redundancy_expert_num()
         self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
         self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
-        self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
-        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
+        self.redundancy_expert_ids_tensor = torch.tensor(
+            self.redundancy_expert_ids, dtype=torch.int64, device=self.target_device)
+        self.routed_expert_counter_tensor = torch.zeros(
+            (self.n_routed_experts,), dtype=torch.int64, device=self.target_device)
         # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
         assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
@@ -278,7 +280,7 @@ class FusedMoeWeight(BaseWeightTpl):
             self.e_score_correction_bias = torch.empty(
                 (self.n_routed_experts,),
                 dtype=self.data_type_,
-                device=f"cuda:{self.device_id_}",
+                device=self.target_device,
             )
 
         self.w13, w13_param_list = self.quant_method.create_moe_weight(
