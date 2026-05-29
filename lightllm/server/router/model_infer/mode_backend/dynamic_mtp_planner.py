@@ -32,7 +32,7 @@ class DynamicMTPPlanner:
     def update_req_verify_len_statics(self, verify_lens: List[int]) -> None:
         for verify_len in verify_lens:
             self.req_verify_len_ema.update(float(verify_len))
-            self.req_verify_len_second_moment_ema.update(float(verify_len**2))
+            self.req_verify_len_second_moment_ema.update(float(verify_len ** 2))
         return
 
     def update_req_num_speed_statics(self, req_num: int, dynamic_batch_size: int, per_token_cost_ms: float) -> None:
@@ -55,11 +55,9 @@ class DynamicMTPPlanner:
             return random.randint(req_num, max_batch_size)
 
         # case 2 如果采用统计的方式决定 dynamic_batch_size, 利用统计的 ema 信息来决定
-        ema_batch_size = max(req_num, int(self.req_verify_len_ema.get()))
+        ema_batch_size = max(req_num, int(req_num * self.req_verify_len_ema.get()))
         sigma = self._get_verify_len_sigma()
-        max_batch_size = min(
-            req_num * (self.mtp_step + 1), int(req_num * (self.req_verify_len_ema.get() + 1 * sigma))
-        )
+        max_batch_size = min(req_num * (self.mtp_step + 1), int(req_num * (self.req_verify_len_ema.get() + 1 * sigma)))
         max_batch_size = max(req_num, max_batch_size)
 
         start = req_num - req_num
@@ -77,7 +75,7 @@ class DynamicMTPPlanner:
     def _get_req_num_speed_ema_list(self, req_num: int) -> List["_EMAValue"]:
         if req_num not in self.req_num_to_speed_dict:
             self.req_num_to_speed_dict[req_num] = [
-                _EMAValue(decay=self.ema_decay, init_value=10000000.0) for _ in range(req_num * (self.mtp_step))
+                _EMAValue(decay=self.ema_decay, init_value=10000000.0) for _ in range(req_num * (self.mtp_step) + 1)
             ]
         return self.req_num_to_speed_dict[req_num]
 
