@@ -1,6 +1,5 @@
 import dataclasses
 import torch
-import torch_npu
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_current_device_id
@@ -8,6 +7,7 @@ from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+from typing import Any
 
 
 class PagedFa3AttBackend(BaseAttBackend):
@@ -86,6 +86,8 @@ class PagedFa3PrefillAttState(BasePrefillAttState):
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)
 
         if q.device.type == "npu":
+            import torch_npu
+
             N_KV, HEAD_DIM = k.shape[-2:]
             # to (num_blocks, block_size, hidden_size)
             key = k.view(-1, self.backend.page_size, N_KV * HEAD_DIM)
@@ -209,6 +211,8 @@ class PagedFa3DecodeAttState(BaseDecodeAttState):
 
         sm_scale = 1.0 / (q.shape[-1] ** 0.5)
         if q.device.type == "npu":
+            import torch_npu
+
             N_Q = q.shape[-2]
             N_KV, HEAD_DIM = k.shape[-2:]
 
@@ -255,8 +259,9 @@ def update_attn_params(
     batch_size: int,
     actual_seq_lengths: list[int],
     actual_seq_lengths_kv: list[int],
-    update_stream: torch.npu.Stream,
+    update_stream: Any,
 ):
+    import torch_npu
     from lightllm.common.basemodel.acl_graph import get_attn_params
 
     attn_params = get_attn_params()
