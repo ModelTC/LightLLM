@@ -251,7 +251,7 @@ class NsaInfer:
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         assert x.dtype == torch.bfloat16
-        from sgl_kernel import hadamard_transform
+        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
