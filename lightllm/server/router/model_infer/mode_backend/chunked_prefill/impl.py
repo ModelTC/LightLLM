@@ -1,5 +1,6 @@
 import torch
 import time
+import torch.distributed as dist
 from typing import List, Optional, Callable, Dict, Any
 from queue import Queue
 from lightllm.server.router.model_infer.mode_backend.update_mem_index import update_eagle_mem_indexes_triton
@@ -29,6 +30,7 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
 from .control_state import ControlState
 from lightllm.server.router.model_infer.mode_backend.dynamic_mtp_planner import DynamicMTPPlanner
+from lightllm.utils.dist_utils import create_new_group_for_current_dp
 
 logger = init_logger(__name__)
 
@@ -54,6 +56,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
         if self.enable_dynamic_mtp:
             self.dynamic_mtp_planner = DynamicMTPPlanner(mtp_step=get_env_start_args().mtp_step)
+            self.mtp_gloo_group = create_new_group_for_current_dp("gloo")
 
         self.classed_req_strict_prefill = False
         return
@@ -247,10 +250,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 dynamic_batch_size = self.dynamic_mtp_planner.get_dynamic_batch_size(
                     req_num=len(decode_reqs),
                     original_batch_size=model_input.batch_size,
-                ) 
+                )
                 # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
                 model_input, selected_run_reqs = prepare_dynamic_mtp_model_input(
-                    model_input=model_input, 
+                    model_input=model_input,
                     req_num=len(decode_reqs),
                     dynamic_batch_size=dynamic_batch_size,
                     req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -378,6 +381,14 @@ class ChunkedPrefillBackend(ModeBackend):
             )
             # 更新单token的速度信息到 planner 中去
             per_token_cost_ms = start_time_event.elapsed_time(verify_event) / (mtp_accept_len_cpu.sum().item())
+            per_token_cost_ms = float(per_token_cost_ms)
+
+            if self.is_master_in_dp:
+                dist.broadcast_object_list([per_token_cost_ms], src=0, group=self.mtp_gloo_group)
+            else:
+                ans = [None]
+                dist.broadcast_object_list(ans, src=0, group=self.mtp_gloo_group)
+                per_token_cost_ms = ans[0]
 
             self.dynamic_mtp_planner.update_req_num_speed_statics(
                 req_num=len(decode_reqs),
