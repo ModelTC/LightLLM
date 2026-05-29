@@ -132,8 +132,9 @@ class InferStateInfo:
 
         self.platform_backend = get_backend()
 
-        args = get_env_start_args()
-        self.seq_len_manager = SeqLenManager(args.running_max_req_size + 1)
+        if self.platform_backend.name == "ascend":
+            args = get_env_start_args()
+            self.seq_len_manager = SeqLenManager(args.running_max_req_size + 1)
 
     def init_some_extra_state(self, model):
         if self.is_prefill:
@@ -158,8 +159,12 @@ class InferStateInfo:
                 self.position_ids,
             ) = gen_decode_params(self.b_seq_len)
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
-        self.seq_len_manager.update(self.b1_cu_q_seq_len, self.b_kv_seq_len)
-        self.b1_cu_q_seq_len_cpu, self.b_cu_kv_seq_len_cpu = self.seq_len_manager.get_tensor_slices()
+        if self.platform_backend.name == "ascend":
+            self.seq_len_manager.update(self.b1_cu_q_seq_len, self.b_kv_seq_len)
+            self.b1_cu_q_seq_len_cpu, self.b_cu_kv_seq_len_cpu = self.seq_len_manager.get_tensor_slices()
+        else:
+            self.b1_cu_q_seq_len_cpu = [] 
+            self.b_cu_kv_seq_len_cpu = [] 
 
     def init_att_state(self):
         if self.is_prefill:

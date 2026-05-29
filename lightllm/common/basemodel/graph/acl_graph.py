@@ -53,7 +53,7 @@ class AclGraph(DecodeGraph):
 @dataclass
 class AclGraphParams:
     handles: dict[int, list[Any]] = field(default_factory=dict)
-    events: dict[int, list[torch.npu.ExternalEvent]] = field(default_factory=dict)
+    events: dict[int, list[Any]] = field(default_factory=dict)
     workspaces: dict[int, Any] = field(default_factory=dict)
     attn_params: dict[int, list[tuple]] = field(default_factory=dict)
 
@@ -75,7 +75,7 @@ def get_attn_params():
     return ATTN_PARAMS
 
 
-def add_attn_params(batch_size: int, event: torch.npu.ExternalEvent, handle: Any, attn_params: tuple):
+def add_attn_params(batch_size: int, event: Any, handle: Any, attn_params: tuple):
     global ATTN_PARAMS
     if ATTN_PARAMS is not None:
         ATTN_PARAMS.handles[batch_size].append(handle)
