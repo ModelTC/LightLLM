@@ -56,9 +56,15 @@ class ChunkedPrefillBackend(ModeBackend):
 
         if self.enable_dynamic_mtp:
             self.dynamic_mtp_planner = DynamicMTPPlanner(mtp_step=get_env_start_args().mtp_step)
-            self.mtp_gloo_group = create_new_group_for_current_dp("gloo")
 
         self.classed_req_strict_prefill = False
+        return
+
+    def init_custom(self):
+        super().init_custom()
+        if self.enable_dynamic_mtp:
+            self.mtp_gloo_group = create_new_group_for_current_dp("gloo")
+            logger.info(f"mtp_gloo_group ranks {dist.get_rank(self.mtp_gloo_group)}")
         return
 
     def infer_loop(self):
