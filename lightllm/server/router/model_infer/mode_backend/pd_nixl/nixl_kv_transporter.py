@@ -1,5 +1,6 @@
 import pickle
 import copy
+import time
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Dict, List, Any, Optional, Tuple
@@ -63,6 +64,8 @@ class NixlKVTransporter:
         if remote_agent.agent_name in self.remote_agents:
             return
 
+        start_time = time.time()
+
         peer_name = self.nixl_agent.add_remote_agent(remote_agent.agent_metadata)
         if isinstance(peer_name, bytes):
             peer_name = peer_name.decode()
@@ -77,7 +80,9 @@ class NixlKVTransporter:
         )
         remote_agent.page_xfer_handles = kv_page_xfer_handles
 
-        logger.info(f"Added remote agent {peer_name} with mem desc {page_mem_desc}")
+        logger.info(
+            f"Added remote agent {peer_name} with mem desc {page_mem_desc} cost time: {time.time() - start_time} s"
+        )
 
         self.remote_agents[remote_agent.agent_name] = remote_agent
         return

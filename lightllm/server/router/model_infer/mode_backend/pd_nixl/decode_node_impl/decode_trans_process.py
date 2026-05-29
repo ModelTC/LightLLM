@@ -177,7 +177,7 @@ class _DecodeTransModule:
                         self.waiting_dict[task.get_key()] = task
                     else:
                         task.start_trans_time = time.time()
-                        self.success_queue.put((None, task))
+                        self.success_queue.put((None, None, task))
 
             # up status
             task = trans_task_group.task_list[0]
@@ -335,7 +335,10 @@ class _DecodeTransModule:
         while True:
             trans_task: NIXLChunckedTransTask = self.ready_page_task_queue.get()
             # 将数据写回 mem manger
+            copy_start_event = torch.cuda.Event(enable_timing=True)
+            copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
+                copy_start_event.record(self.copy_cuda_stream)
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
                     mem_indexes=trans_task.mem_indexes,
@@ -344,22 +347,21 @@ class _DecodeTransModule:
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
                 )
-                sync_event = torch.cuda.Event()
-                sync_event.record()
+                copy_end_event.record(self.copy_cuda_stream)
 
-            self.success_queue.put((sync_event, trans_task))
+            self.success_queue.put((copy_end_event, copy_start_event, trans_task))
         return
 
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            sync_event, trans_task = self.success_queue.get()
+            copy_end_event, copy_start_event, trans_task = self.success_queue.get()
             trans_task: NIXLChunckedTransTask = trans_task
-            sync_event: Optional[torch.cuda.Event] = sync_event
-            # 兼容传输kv 数量为0的时候， sync_event 为 None的情况。
-            if sync_event is not None:
-                sync_event.synchronize()
+            read_page_gpu_time_ms = -1.0
+            if copy_end_event is not None:
+                copy_end_event.synchronize()
+                read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
@@ -369,7 +371,13 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
+            if read_page_gpu_time_ms >= 0:
+                logger.info(
+                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                )
+            else:
+                logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
 
     @log_exception
     def fail_loop(self):
