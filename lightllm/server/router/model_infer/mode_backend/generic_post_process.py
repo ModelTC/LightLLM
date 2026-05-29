@@ -1,8 +1,9 @@
 import torch
+import triton
+import triton.language as tl
 from typing import List, Tuple, Optional
 from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.apply_penalty_gpu_cache import apply_penalty_gpu_cache
-from lightllm.common.basemodel.triton_kernel.mtp_utils import _pack_selected_rows_1d
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -225,6 +226,47 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     )
 
 
+@triton.jit
+def _fwd_kernel_trim_post_sample_tensors(
+    b_req_idx,
+    out_b_req_idx,
+    b_temperatures,
+    out_b_temperatures,
+    b_top_ps,
+    out_b_top_ps,
+    b_top_ks,
+    out_b_top_ks,
+    b_length_penalty_param,
+    out_b_length_penalty_param,
+    b_mask_eos_reqs,
+    out_b_mask_eos_reqs,
+    selected_run_reqs,
+    selected_dst_pos,
+    batch_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+    selected = tl.load(selected_run_reqs + offsets, mask=mask, other=0) != 0
+    dst_pos = tl.load(selected_dst_pos + offsets, mask=mask, other=0)
+    write_mask = mask & selected
+
+    req_idx = tl.load(b_req_idx + offsets, mask=mask, other=0)
+    temperature = tl.load(b_temperatures + offsets, mask=mask, other=0.0)
+    top_p = tl.load(b_top_ps + offsets, mask=mask, other=0.0)
+    top_k = tl.load(b_top_ks + offsets, mask=mask, other=0)
+    length_penalty = tl.load(b_length_penalty_param + offsets, mask=mask, other=0)
+    mask_eos_req = tl.load(b_mask_eos_reqs + offsets, mask=mask, other=0)
+
+    tl.store(out_b_req_idx + dst_pos, req_idx, mask=write_mask)
+    tl.store(out_b_temperatures + dst_pos, temperature, mask=write_mask)
+    tl.store(out_b_top_ps + dst_pos, top_p, mask=write_mask)
+    tl.store(out_b_top_ks + dst_pos, top_k, mask=write_mask)
+    tl.store(out_b_length_penalty_param + dst_pos, length_penalty, mask=write_mask)
+    tl.store(out_b_mask_eos_reqs + dst_pos, mask_eos_req, mask=write_mask)
+
+
 def _trim_post_sample_tensors(
     dynamic_batch_size: int,
     selected_run_reqs: torch.Tensor,
@@ -236,33 +278,48 @@ def _trim_post_sample_tensors(
     b_mask_eos_reqs: torch.Tensor,
 ):
     assert selected_run_reqs.is_cuda
+    dynamic_batch_size = int(dynamic_batch_size)
+    selected_run_reqs = selected_run_reqs.to(torch.int32)
+    selected_dst_pos = torch.cumsum(selected_run_reqs, dim=0, dtype=torch.int32) - 1
+    batch_size = selected_run_reqs.shape[0]
 
-    return (
-        _pack_selected_rows_1d(b_req_idx, selected_run_reqs, dynamic_batch_size),
-        _pack_selected_rows_1d(b_temperatures, selected_run_reqs, dynamic_batch_size),
-        _pack_selected_rows_1d(b_top_ps, selected_run_reqs, dynamic_batch_size),
-        _pack_selected_rows_1d(b_top_ks, selected_run_reqs, dynamic_batch_size),
-        _pack_selected_rows_1d(b_length_penalty_param, selected_run_reqs, dynamic_batch_size),
-        _pack_selected_rows_1d(b_mask_eos_reqs, selected_run_reqs, dynamic_batch_size),
+    out_b_req_idx = torch.empty((dynamic_batch_size,), dtype=b_req_idx.dtype, device=b_req_idx.device)
+    out_b_temperatures = torch.empty((dynamic_batch_size,), dtype=b_temperatures.dtype, device=b_temperatures.device)
+    out_b_top_ps = torch.empty((dynamic_batch_size,), dtype=b_top_ps.dtype, device=b_top_ps.device)
+    out_b_top_ks = torch.empty((dynamic_batch_size,), dtype=b_top_ks.dtype, device=b_top_ks.device)
+    out_b_length_penalty_param = torch.empty(
+        (dynamic_batch_size,), dtype=b_length_penalty_param.dtype, device=b_length_penalty_param.device
+    )
+    out_b_mask_eos_reqs = torch.empty((dynamic_batch_size,), dtype=b_mask_eos_reqs.dtype, device=b_mask_eos_reqs.device)
+
+    BLOCK_SIZE = 256
+    grid = (triton.cdiv(batch_size, BLOCK_SIZE),)
+    _fwd_kernel_trim_post_sample_tensors[grid](
+        b_req_idx=b_req_idx,
+        out_b_req_idx=out_b_req_idx,
+        b_temperatures=b_temperatures,
+        out_b_temperatures=out_b_temperatures,
+        b_top_ps=b_top_ps,
+        out_b_top_ps=out_b_top_ps,
+        b_top_ks=b_top_ks,
+        out_b_top_ks=out_b_top_ks,
+        b_length_penalty_param=b_length_penalty_param,
+        out_b_length_penalty_param=out_b_length_penalty_param,
+        b_mask_eos_reqs=b_mask_eos_reqs,
+        out_b_mask_eos_reqs=out_b_mask_eos_reqs,
+        selected_run_reqs=selected_run_reqs,
+        selected_dst_pos=selected_dst_pos,
+        batch_size=batch_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+        num_stages=1,
     )
 
-
-def _get_post_sample_runtime_flags(reqs: List[InferReq]):
-    is_all_greedy = True
-    skip_top_k = True
-    skip_top_p = True
-    exist_req_use_random_seed = False
-
-    for req_obj in reqs:
-        shm_param = req_obj.sampling_param.shm_param
-        top_k_val = shm_param.top_k
-        if top_k_val > 1:
-            is_all_greedy = False
-        if top_k_val != req_obj.vocab_size:
-            skip_top_k = False
-        if shm_param.top_p != 1.0:
-            skip_top_p = False
-        if req_obj.generator is not None:
-            exist_req_use_random_seed = True
-
-    return is_all_greedy, skip_top_k, skip_top_p, exist_req_use_random_seed
+    return (
+        out_b_req_idx,
+        out_b_temperatures,
+        out_b_top_ps,
+        out_b_top_ks,
+        out_b_length_penalty_param,
+        out_b_mask_eos_reqs,
+    )

@@ -1,6 +1,7 @@
 import torch
 import pytest
 import triton
+import numpy as np
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils1 import (
     _fwd_kernel_cumprod_probs,
@@ -148,6 +149,26 @@ def test_sample_select_count():
         assert select.shape[0] == all_num
         assert int(select.sum().item()) == dynamic_batch_size
         assert torch.all((select == 0) | (select == 1))
+
+
+def test_sample_accepts_numpy_scalar_dynamic_batch_size():
+    mtp_step = 3
+    probs, b_req_idx = _make_batch_probs(
+        3,
+        mtp_step,
+        rows=[
+            [1.0, 0.95, 0.90, 0.10],
+            [1.0, 0.20, 0.80, 0.80],
+            [1.0, 0.99, 0.99, 0.99],
+        ],
+    )
+    select = sample_dynamic_mtp_req_mask(
+        dynamic_batch_size=np.int64(8),
+        b_req_idx=b_req_idx,
+        req_to_next_token_probs=probs,
+        mtp_step=np.int64(mtp_step),
+    )
+    assert int(select.sum().item()) == 8
 
 
 def test_sample_topk_by_cumprod_score():

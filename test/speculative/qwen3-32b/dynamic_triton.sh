@@ -1,4 +1,5 @@
 MTP_STEP=4
+export CUDA_VISIBLE_DEVICES=3,4
 # 解析命名参数
 while [[ $# -gt 0 ]]; do
     case $1 in
