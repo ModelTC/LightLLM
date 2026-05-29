@@ -44,12 +44,13 @@ class DynamicMTPPlanner:
 
     def get_dynamic_batch_size(self, req_num: int, original_batch_size: int) -> int:
         assert req_num * (self.mtp_step + 1) == original_batch_size
+        prob_delta = 2
         # case 1 如果采用随机的方式决定 dynamic_batch_size
         self._iter += 1
         if self._use_random_mode and self._iter % self._iter_threshold == 0:
             sigma = self._get_verify_len_sigma()
             max_batch_size = min(
-                req_num * (self.mtp_step + 1), int(req_num * (self.req_verify_len_ema.get() + 1 * sigma))
+                req_num * (self.mtp_step + 1), int(req_num * (self.req_verify_len_ema.get() + prob_delta * sigma))
             )
             max_batch_size = max(req_num, max_batch_size)
             return random.randint(req_num, max_batch_size)
@@ -57,7 +58,9 @@ class DynamicMTPPlanner:
         # case 2 如果采用统计的方式决定 dynamic_batch_size, 利用统计的 ema 信息来决定
         ema_batch_size = max(req_num, int(req_num * self.req_verify_len_ema.get()))
         sigma = self._get_verify_len_sigma()
-        max_batch_size = min(req_num * (self.mtp_step + 1), int(req_num * (self.req_verify_len_ema.get() + 1 * sigma)))
+        max_batch_size = min(
+            req_num * (self.mtp_step + 1), int(req_num * (self.req_verify_len_ema.get() + prob_delta * sigma))
+        )
         max_batch_size = max(req_num, max_batch_size)
 
         start = req_num - req_num
