@@ -219,19 +219,89 @@ class PagedFa3DecodeAttState(BaseDecodeAttState):
             k = k.view(-1, self.backend.page_size, N_KV * HEAD_DIM)
             v = v.view(-1, self.backend.page_size, N_KV * HEAD_DIM)
 
-            output = torch_npu.npu_fused_infer_attention_score(
-                query=q,
-                key=k,
-                value=v,
-                input_layout="TND",
-                scale=sm_scale,
-                actual_seq_lengths=self.infer_state.b1_cu_q_seq_len_cpu,
-                actual_seq_lengths_kv=self.infer_state.b_cu_kv_seq_len_cpu,
-                num_heads=N_Q,
-                num_key_value_heads=N_KV,
-                block_table=self.page_table,
-                block_size=self.backend.page_size,
-            )[0]
+            output = torch.empty_like(q)
+            softmax_lse = torch.empty(1, dtype=torch.float16, device=q.device)
+            if torch.npu.is_current_stream_capturing():
+                stream = torch.npu.current_stream()
+
+                from lightllm.common.basemodel.graph.acl_graph import get_attn_params
+
+                batch_size = self.infer_state.batch_size
+                attn_params = get_attn_params()
+
+                event = torch.npu.ExternalEvent()
+                event.wait(stream)
+                event.reset(stream)
+
+                workspace = attn_params.workspaces.get(batch_size, None)
+                if workspace is None:
+                    workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                        query=q,
+                        key=k,
+                        value=v,
+                        input_layout="TND",
+                        scale=sm_scale,
+                        actual_seq_lengths=self.infer_state.b1_cu_q_seq_len_cpu,
+                        actual_seq_lengths_kv=self.infer_state.b_cu_kv_seq_len_cpu,
+                        num_heads=N_Q,
+                        num_key_value_heads=N_KV,
+                        block_table=self.page_table,
+                        block_size=self.backend.page_size,
+                    )
+                    attn_params.workspaces[batch_size] = workspace
+
+                torch.npu.graph_task_group_begin(stream)
+                torch_npu.npu_fused_infer_attention_score.out(
+                    query=q,
+                    key=k,
+                    value=v,
+                    input_layout="TND",
+                    scale=sm_scale,
+                    actual_seq_lengths=self.infer_state.b1_cu_q_seq_len_cpu,
+                    actual_seq_lengths_kv=self.infer_state.b_cu_kv_seq_len_cpu,
+                    num_heads=N_Q,
+                    num_key_value_heads=N_KV,
+                    block_table=self.page_table,
+                    block_size=self.backend.page_size,
+                    workspace=workspace,
+                    out=[output, softmax_lse],
+                )
+                handle = torch.npu.graph_task_group_end(stream)
+
+                from lightllm.common.basemodel.graph.acl_graph import add_attn_params
+
+                add_attn_params(
+                    batch_size=self.infer_state.batch_size,
+                    event=event,
+                    handle=handle,
+                    attn_params=(
+                        weak_ref_tensor(q),
+                        weak_ref_tensor(k),
+                        weak_ref_tensor(v),
+                        sm_scale,
+                        N_Q,
+                        N_KV,
+                        weak_ref_tensor(self.page_table),
+                        self.backend.page_size,
+                        weak_ref_tensor(output),
+                        weak_ref_tensor(softmax_lse),
+                    )
+                )
+            else:
+                torch_npu.npu_fused_infer_attention_score.out(
+                    query=q,
+                    key=k,
+                    value=v,
+                    input_layout="TND",
+                    scale=sm_scale,
+                    actual_seq_lengths=self.infer_state.b1_cu_q_seq_len_cpu,
+                    actual_seq_lengths_kv=self.infer_state.b_cu_kv_seq_len_cpu,
+                    num_heads=N_Q,
+                    num_key_value_heads=N_KV,
+                    block_table=self.page_table,
+                    block_size=self.backend.page_size,
+                    out=[output, softmax_lse],
+                )
 
             return output
         else:
@@ -262,7 +332,7 @@ def update_attn_params(
     update_stream: Any,
 ):
     import torch_npu
-    from lightllm.common.basemodel.acl_graph import get_attn_params
+    from lightllm.common.basemodel.graph.acl_graph import get_attn_params
 
     attn_params = get_attn_params()
     handles = attn_params.handles[batch_size]
@@ -291,3 +361,12 @@ def update_attn_params(
             )
             torch.npu.graph_task_update_end(update_stream)
             event.record(update_stream)
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    import torch_npu
+
+    if isinstance(tensor, torch.Tensor):
+        return torch_npu._C._weak_ref_tensor(tensor)
+    else:
+        return tensor

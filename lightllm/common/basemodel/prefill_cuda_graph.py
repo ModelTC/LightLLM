@@ -10,16 +10,15 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph
 from .infer_struct import InferStateInfo
-from .cuda_graph import CudaGraph
 
 logger = init_logger(__name__)
 
 
 class PrefillCudaGraph:
-    # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, decode_cuda_graph: Optional[CudaGraph], tp_world_size: int):
+    def __init__(self, decode_cuda_graph: Optional[DecodeGraph], tp_world_size: int):
         self.graph = {}
         self.tp_world_size = tp_world_size
 

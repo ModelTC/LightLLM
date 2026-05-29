@@ -7,7 +7,7 @@ from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
 
 from lightllm.platform import get_backend
-from .triton_kernel.gen_prefill_params import gen_prefill_params, npu_gen_prefill_params
+from .triton_kernel.gen_prefill_params import gen_prefill_params 
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
@@ -137,30 +137,17 @@ class InferStateInfo:
 
     def init_some_extra_state(self, model):
         if self.is_prefill:
-            if self.input_ids.device.type == "npu":
-                (
-                    self.b_q_seq_len,
-                    self.b1_cu_q_seq_len,
-                    self.b_kv_seq_len,
-                    self.b1_cu_kv_seq_len,
-                    self.position_ids,
-                ) = npu_gen_prefill_params(
-                    input_token_num=self.input_ids.shape[0],
-                    b_ready_cache_len=self.b_ready_cache_len,
-                    b_seq_len=self.b_seq_len,
-                )
-            else:
-                (
-                    self.b_q_seq_len,
-                    self.b1_cu_q_seq_len,
-                    self.b_kv_seq_len,
-                    self.b1_cu_kv_seq_len,
-                    self.position_ids,
-                ) = gen_prefill_params(
-                    input_token_num=self.input_ids.shape[0],
-                    b_ready_cache_len=self.b_ready_cache_len,
-                    b_seq_len=self.b_seq_len,
-                )
+            (
+                self.b_q_seq_len,
+                self.b1_cu_q_seq_len,
+                self.b_kv_seq_len,
+                self.b1_cu_kv_seq_len,
+                self.position_ids,
+            ) = gen_prefill_params(
+                input_token_num=self.input_ids.shape[0],
+                b_ready_cache_len=self.b_ready_cache_len,
+                b_seq_len=self.b_seq_len,
+            )
             self.b_q_start_loc = self.b1_cu_q_seq_len[0:-1]
         else:
             (

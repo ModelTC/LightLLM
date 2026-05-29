@@ -19,7 +19,8 @@ from lightllm.common.infer_utils import init_req_to_token_indexes
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.basemodel.graph import DecodeGraph
+from lightllm.common.basemodel.attention.paged_fa3.fp import update_attn_params
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
@@ -133,6 +134,11 @@ class TpPartBaseModel:
         if self.prefill_att_backend1 is not None:
             logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
+
+        if not self.disable_cudagraph:
+            self.b1_cu_q_seq_len_cpu_ref = torch.zeros(self.graph_max_batch_size, dtype=torch.int32)
+            self.b_cu_kv_seq_len_cpu_ref = torch.zeros(self.graph_max_batch_size, dtype=torch.int32)
+            self.ref_initialized = False
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -278,15 +284,15 @@ class TpPartBaseModel:
         return
 
     def _init_cudagraph(self):
-        self.graph = (
-            None
-            if self.disable_cudagraph
-            else CudaGraph(
+        if self.disable_cudagraph:
+            self.graph = None
+        else:
+            self.graph = DecodeGraph(
+                platform_backend=self.platform_backend.name,
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
             )
-        )
         if self.graph is not None:
             if get_env_start_args().enable_decode_microbatch_overlap:
                 self.graph.warmup_overlap(self)
@@ -580,11 +586,34 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
+            batch_size = infer_state.batch_size
+            b1_cu_q_seq_len_cpu_slice = self.b1_cu_q_seq_len_cpu_ref[:batch_size]
+            b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
+            if self.platform_backend.name == "ascend":
+                if not self.platform_backend.graph.is_capturing():
+                    need_update_attn_params = not self.ref_initialized or not torch.equal(
+                        b_cu_kv_seq_len_cpu_slice, infer_state.b_cu_kv_seq_len_cpu
+                    )
+                    if need_update_attn_params:
+                        b1_cu_q_seq_len_cpu_slice.copy_(infer_state.b1_cu_q_seq_len_cpu)
+                        b_cu_kv_seq_len_cpu_slice.copy_(infer_state.b_cu_kv_seq_len_cpu)
+                        update_attn_params(
+                            batch_size,
+                            b1_cu_q_seq_len_cpu_slice,
+                            b_cu_kv_seq_len_cpu_slice,
+                            self.graph.update_stream,
+                        )
+                        self.ref_initialized = True
+
             if self.graph.need_capture(infer_batch_size):
                 infer_state.is_cuda_graph = True
                 model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
-                model_output: ModelOutput = self.graph.replay(infer_state)
+                model_output: ModelOutput = self.graph.replay(
+                    infer_state,
+                    b1_cu_q_seq_len_cpu_slice,
+                    b_cu_kv_seq_len_cpu_slice,
+                )
 
             model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
         else:
@@ -692,7 +721,7 @@ class TpPartBaseModel:
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
-        if infer_state.is_cuda_graph:
+        if infer_state.is_cuda_graph and self.target_device.type != "npu":
             model_output.to_no_ref_tensor()
 
         return model_output
@@ -821,6 +850,10 @@ class TpPartBaseModel:
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
+            batch_size = infer_state0.batch_size
+            b1_cu_q_seq_len_cpu_slice = self.b1_cu_q_seq_len_cpu_ref[:batch_size]
+            b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
+
             if self.graph.need_capture(infer_batch_size):
                 infer_state0.is_cuda_graph = True
                 infer_state1.is_cuda_graph = True
@@ -833,6 +866,8 @@ class TpPartBaseModel:
             else:
                 model_output0, model_output1 = self.graph.replay(
                     infer_state0,
+                    b1_cu_q_seq_len_cpu_slice,
+                    b_cu_kv_seq_len_cpu_slice,
                     infer_state1=infer_state1,
                 )
 

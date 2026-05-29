@@ -1,96 +1,104 @@
-import os
-import torch
-import copy
 import bisect
+import copy
 import triton
-from typing import Optional
+import torch
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from .infer_struct import InferStateInfo
-
+from typing import Optional
 
 logger = init_logger(__name__)
 
 
-class CudaGraph:
-    # CudaGraph forward pass for the decoding stage.
+class DecodeGraph:
 
-    def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
-        self.graph = {}
+    PLATFORM_CLASS_MAP: dict[str, type["DecodeGraph"]] = {}
 
-        self.platform_backend = get_backend()
-        self.target_device = self.platform_backend.runtime.target_device()
+    def __new__(
+        cls,
+        max_batch_size: int,
+        max_len_in_batch: int,
+        tp_world_size: int = 1,
+        platform_backend: str = "cuda",
+    ):
+        if cls is not DecodeGraph:
+            return object.__new__(cls)
+        impl_cls = cls.PLATFORM_CLASS_MAP[platform_backend]
+        return object.__new__(impl_cls)
 
-        self.tp_world_size = tp_world_size
-        self.mempool = self.platform_backend.graph.graph_pool_handle() if self.platform_backend.runtime.is_available() else None
-        self.args = get_env_start_args()
-        self.mtp_step = self.args.mtp_step
+    def __init__(
+        self,
+        max_batch_size: int,
+        max_len_in_batch: int,
+        tp_world_size: int = 1,
+        platform_backend: str = "cuda",
+    ):
+        self.hardware_platform = platform_backend
+        self._init_decode_graph(max_batch_size, max_len_in_batch, tp_world_size)
+        self._init_decode_graph_extra()
+
+    def _init_decode_graph_extra(self):
+        pass
+
+    def _init_decode_graph(self, max_batch_size: int, max_len_in_batch: int, tp_world_size: int):
+        self.graph: dict[int, tuple] = {}
+
+        args = get_env_start_args()
+        mtp_step = args.mtp_step
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
-        self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
+        self.enable_decode_microbatch_overlap = args.enable_decode_microbatch_overlap
 
-        # gen cuda graph batch_sizes
-        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
-        # and [graph_split_batch_size + graph_grow_step_size,
-        # if the mtp_step is not 0, then the batch_sizes will be multiply of (mtp_step + 1)
+        self.platform_backend = get_backend()        
+        self.target_device = self.platform_backend.runtime.target_device()
 
-        graph_split_batch_size = self.args.graph_split_batch_size * (self.mtp_step + 1)
-        graph_grow_step_size = self.args.graph_grow_step_size * (self.mtp_step + 1)
+        self.mempool = self.platform_backend.graph.graph_pool_handle()
 
-        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, self.args.graph_split_batch_size + 1)]
+        graph_split_batch_size = args.graph_split_batch_size * (mtp_step + 1)
+        graph_grow_step_size = args.graph_grow_step_size * (mtp_step + 1)
+        batch_sizes = [i * (mtp_step + 1) for i in range(1, graph_split_batch_size + 1)]
         for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
             batch_sizes.append(_batch_size)
-
         batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
         batch_sizes.append(max_batch_size)
         batch_sizes.sort()
-        if self.args.enable_tpsp_mix_mode:
-            batch_sizes = [triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in batch_sizes]
+
+        if args.enable_tpsp_mix_mode:
+            batch_sizes = [triton.cdiv(e, tp_world_size) * tp_world_size for e in batch_sizes]
             batch_sizes = list(set(batch_sizes))
             batch_sizes.sort()
-
-        self.cuda_graph_batch_sizes = batch_sizes
+        
+        self.graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
-        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
+        logger.info(f"decode graph batch_sizes: {self.graph_batch_sizes}")
 
-    def can_run(self, batch_size, max_len_in_batch):
+    def can_run(self, batch_size: int, max_len_in_batch: int) -> bool:
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
 
-    def need_capture(self, batch_size):
+    def need_capture(self, batch_size: int) -> bool:
         find_batch_size = self.find_closest_graph_batch_size(batch_size)
         if find_batch_size is not None:
             return find_batch_size not in self.graph
         else:
             assert False, "dead code"
 
-    def find_closest_graph_batch_size(self, batch_size):
-        index = bisect.bisect_left(self.cuda_graph_batch_sizes, batch_size)
-        if index < len(self.cuda_graph_batch_sizes):
-            find_batch_size = self.cuda_graph_batch_sizes[index]
+    def find_closest_graph_batch_size(self, batch_size: int) -> Optional[int]:
+        index = bisect.bisect_left(self.graph_batch_sizes, batch_size)
+        if index < len(self.graph_batch_sizes):
+            find_batch_size = self.graph_batch_sizes[index]
             return find_batch_size
         else:
             return None
 
-    def _capture_decode(self, decode_func, infer_state: InferStateInfo):
+    def _capture_decode(self, decode_func, infer_state: InferStateInfo) -> ModelOutput:
         graph_obj = self.platform_backend.graph.create_graph()
-        input_ids = infer_state.input_ids
-        batch_size = input_ids.shape[0]
+        batch_size = infer_state.input_ids.shape[0]
         infer_state.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
         # warmup
-        # 因为有些推理过程的代码，会通过判断infer_state中是否存在某些属性来在一层上
-        # 做一些初始化的操作，后续层可以复用这些计算的结果，如
-        # lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding.py
-        # 中做的一些操作，所以在 warmup 的时候，需要调用infer_state的copy函数做一个
-        # 浅拷贝，不然后续传入到cuda graph捕获过程中后，infer_state因为提前拥有了这些属性，
-        # 导致不会重新初始化，这样捕获过程中会不能捕获这些临时添加到 infer_state 管理对象
-        # 中的 tensor。
-
         for _ in range(1):
-            # 记录原始存在的变量
             pure_para_set = set(vars(infer_state).keys())
             self.platform_backend.runtime.synchronize()
             decode_func(copy.copy(infer_state))
@@ -102,7 +110,7 @@ class CudaGraph:
         with self.platform_backend.graph.graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
-        self.platform_backend.graph.replay_graph(graph_obj)
+
         return model_output
 
     def _capture_decode_overlap(
@@ -110,39 +118,31 @@ class CudaGraph:
         decode_func,
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
-    ):
+    ) -> tuple[ModelOutput, ModelOutput]:
         graph_obj = self.platform_backend.graph.create_graph()
-        input_ids = infer_state.input_ids
-        batch_size = input_ids.shape[0]
+        batch_size = infer_state.input_ids.shape[0]
         infer_state.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state.total_token_num = self.graph_max_len_in_batch * batch_size
         infer_state1.max_kv_seq_len = self.graph_max_len_in_batch
         infer_state1.total_token_num = self.graph_max_len_in_batch * batch_size
         # warmup
         for _ in range(1):
-            # 记录原始存在的变量
             pure_para_set = set(vars(infer_state).keys())
             pure_para_set1 = set(vars(infer_state1).keys())
-            self.platform_backend.runtime.synchronize() 
+            self.platform_backend.runtime.synchronize()
             decode_func(copy.copy(infer_state), copy.copy(infer_state1))
             self.platform_backend.runtime.synchronize()
-            for para_name in set(vars(infer_state).keys()):
-                if para_name not in pure_para_set:
-                    delattr(infer_state, para_name)
-            for para_name in set(vars(infer_state1).keys()):
-                if para_name not in pure_para_set1:
-                    delattr(infer_state1, para_name)
+            for param_name in set(vars(infer_state).keys()):
+                if param_name not in pure_para_set:
+                    delattr(infer_state, param_name)
+            for param_name in set(vars(infer_state1).keys()):
+                if param_name not in pure_para_set1:
+                    delattr(infer_state1, param_name)
 
         with self.platform_backend.graph.graph(graph_obj, pool=self.mempool):
             model_output, model_output1 = decode_func(infer_state, infer_state1)
-        self.graph[batch_size] = (
-            graph_obj,
-            infer_state,
-            infer_state1,
-            model_output,
-            model_output1,
-        )
-        self.platform_backend.graph.replay_graph(graph_obj)
+        self.graph[batch_size] = (graph_obj, infer_state, infer_state1, model_output, model_output1)
+
         return model_output, model_output1
 
     def capture_decode(
@@ -150,28 +150,32 @@ class CudaGraph:
         decode_func,
         infer_state: InferStateInfo,
         infer_state1: Optional[InferStateInfo] = None,
-    ):
-        """
-        Capture the cuda graph for the decoding stage.
-        input_ids1 and infer_state1 is used for the overlap.
-        """
+    ) -> tuple[ModelOutput, ModelOutput]:
         if self.enable_decode_microbatch_overlap:
             return self._capture_decode_overlap(decode_func, infer_state, infer_state1)
         else:
             assert infer_state1 is None
             return self._capture_decode(decode_func, infer_state)
 
-    def _replay(self, infer_state: InferStateInfo):
+    def _replay(
+        self,
+        infer_state: InferStateInfo,
+        b1_cu_q_seq_len_cpu: list[int],
+        b_cu_kv_seq_len_cpu: list[int],
+    ) -> ModelOutput:
         batch_size = infer_state.input_ids.shape[0]
         graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         self.platform_backend.graph.replay_graph(graph_obj)
+
         return graph_output
 
     def _replay_overlap(
         self,
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
+        b1_cu_q_seq_len_cpu: list[int],
+        b_cu_kv_seq_len_cpu: list[int],
     ):
         batch_size = infer_state.input_ids.shape[0]
         (
@@ -183,27 +187,28 @@ class CudaGraph:
         ) = self.graph[batch_size]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_infer_state1.copy_for_cuda_graph(infer_state1)
-        self.platform_backend.graph.replay_graph(graph_obj)
+        self.platform_backend.graph.replay_graph(graph_obj, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
+
         return graph_model_output, graph_model_output1
 
-    def replay(self, infer_state, infer_state1=None):
+    def replay(self, infer_state, b1_cu_q_seq_len_cpu: list[int], b_cu_kv_seq_len_cpu: list[int], infer_state1=None):
         if self.enable_decode_microbatch_overlap:
-            return self._replay_overlap(infer_state, infer_state1)
+            return self._replay_overlap(infer_state, infer_state1, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
         else:
             assert infer_state1 is None
-            return self._replay(infer_state)
+            return self._replay(infer_state, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
 
     @torch.no_grad()
     def warmup(self, model):
         logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
-        from .basemodel import TpPartBaseModel
+        from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
 
         # decode cuda graph init
-        for batch_size in self.cuda_graph_batch_sizes[::-1]:
-            seq_len = 2
+        for batch_size in self.graph_batch_sizes[::-1]:
+            seq_len = self.graph_max_len_in_batch
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
             input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device=self.target_device)
@@ -253,15 +258,15 @@ class CudaGraph:
     def warmup_overlap(self, model):
         logger.info("Begin capture overlap cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
-        from .basemodel import TpPartBaseModel
+        from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
 
-        for batch_size in self.cuda_graph_batch_sizes[::-1]:
+        for batch_size in self.graph_batch_sizes[::-1]:
             decode_batches = []
             for micro_batch_index in [0, 1]:
                 # dummy decoding, capture the cudagraph
-                seq_len = 2
+                seq_len = self.graph_max_len_in_batch
                 total_token_num = batch_size * seq_len
                 max_len_in_batch = self.graph_max_len_in_batch
                 input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device=self.target_device)
