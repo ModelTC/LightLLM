@@ -177,7 +177,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_only_server")
     start_parent_check_thread()
 
     try:

@@ -1,4 +1,5 @@
 import inspect
+import setproctitle
 import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Union, Callable
@@ -9,6 +10,7 @@ from lightllm.server.core.objs import StartArgs
 from ..trans_process_obj import KVTransProcess
 from ..base_kv_move_manager import BaseKVMoveManager
 from lightllm.utils.error_utils import log_exception
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -28,6 +30,7 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_prefill_kv_move_manager")
 
     from .prefill_trans_process import start_prefill_trans_process
 

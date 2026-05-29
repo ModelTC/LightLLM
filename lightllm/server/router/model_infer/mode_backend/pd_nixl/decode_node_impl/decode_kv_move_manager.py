@@ -1,5 +1,6 @@
 import inspect
 import pickle
+import setproctitle
 import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Optional, Tuple, Union, Callable
@@ -10,6 +11,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from ..trans_process_obj import KVTransProcess
 from ..base_kv_move_manager import BaseKVMoveManager
 from lightllm.utils.error_utils import log_exception
+from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
 
@@ -29,6 +31,7 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_decode_kv_move_manager")
 
     from .up_status import start_up_kv_status_process
 

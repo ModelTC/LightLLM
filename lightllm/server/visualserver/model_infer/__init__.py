@@ -4,12 +4,13 @@ import inspect
 import uuid
 import os
 import multiprocessing
+import setproctitle
 from lightllm.utils.retry_utils import retry
 from rpyc.utils.factory import unix_connect
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
 from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from .model_rpc_client import VisualModelRpcClient
 from .model_rpc import VisualModelRpcServer
 from ..objs import rpyc_config
@@ -18,6 +19,7 @@ from ..objs import rpyc_config
 def _init_env(socket_path: str, success_event):
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_model_infer")
 
     import lightllm.utils.rpyc_fix_utils as _
 

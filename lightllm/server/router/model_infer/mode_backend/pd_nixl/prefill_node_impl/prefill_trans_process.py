@@ -2,6 +2,7 @@ import torch
 import time
 import inspect
 import threading
+import setproctitle
 import torch.multiprocessing as mp
 import collections
 import queue
@@ -15,6 +16,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..nixl_kv_transporter import NixlKVTransporter
 from lightllm.utils.error_utils import log_exception
+from lightllm.utils.envs_utils import get_unique_server_name
 
 
 logger = init_logger(__name__)
@@ -41,6 +43,7 @@ def _init_env(
     task_out_queue: mp.Queue,
 ):
     torch.backends.cudnn.enabled = False
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_prefill_trans:Device{device_id}")
 
     try:
         torch.cuda.set_device(device_id)
