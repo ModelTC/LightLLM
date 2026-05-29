@@ -401,6 +401,12 @@ def main():
     )
     parser.add_argument("--num_clients", type=int, default=100)
     parser.add_argument("--tokenizer_path", type=str, default=None)
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="Model name passed to the server. Defaults to --tokenizer_path.",
+    )
     parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--input_num", type=int, default=2000)
     parser.add_argument("--input_qps", type=float, default=30.0)
@@ -436,7 +442,7 @@ def main():
         return
 
     assert args.tokenizer_path is not None
-    model_name.append(normalize_model_name(args.tokenizer_path))
+    model_name.append(args.model_name if args.model_name is not None else normalize_model_name(args.tokenizer_path))
     seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)
