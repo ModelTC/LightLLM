@@ -1,5 +1,6 @@
 import pytest
 import torch
+import triton
 
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
 
@@ -21,19 +22,9 @@ def _get_sgl_kernel_hadamard_transform():
     return sgl_hadamard_transform
 
 
-def _bench(fn, x, warmup=30, iters=300):
-    for _ in range(warmup):
-        fn(x, scale=SCALE)
-    torch.cuda.synchronize()
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        y = fn(x, scale=SCALE)
-    end.record()
-    torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters, y
+def _bench(fn, x):
+    ms = triton.testing.do_bench_cudagraph(lambda: fn(x, scale=SCALE), return_mode="median")
+    return ms, fn(x, scale=SCALE)
 
 
 @pytest.mark.parametrize("tokens", [1, 16, 128, 512, 1024, 2048, 4096, 8192, 16384])
