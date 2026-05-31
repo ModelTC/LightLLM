@@ -5,8 +5,9 @@ For each concurrency level in --concurrency_levels, launches N concurrent
 "sessions". Each session starts from a prompt of ~start_input_len tokens
 (with a per-session random prefix so different sessions don't share KV
 cache) and keeps issuing streaming requests turn by turn. After every
-turn the model's generated text plus a dynamically sampled number of new
-tokens are appended to the prompt, simulating the user's next message.
+turn, deterministic synthetic assistant tokens plus a dynamically sampled
+number of new user tokens are appended to the prompt. This keeps the exact
+request stream reproducible for a fixed seed.
 A session stops when the next prompt would exceed max_input_len, or
 after max_turns turns.
 
@@ -178,19 +179,28 @@ def append_turn_input(
     tokenizer,
     prompt: str,
     prompt_token_len: int,
-    generated_text: str,
+    assistant_token_count: int,
     turn_input_increment: int,
     rng: random.Random,
 ) -> Tuple[str, int]:
-    """Append the model's generated text plus a fresh random user turn
-    to the prompt. Returns (new_prompt, new_prompt_token_len)."""
-    if turn_input_increment > 0:
-        new_ids = gen_random_token_ids(tokenizer, turn_input_increment, rng)
-        new_text = decode_ids(tokenizer, new_ids)
-    else:
-        new_text = ""
+    """Append deterministic synthetic assistant/user text to the prompt.
 
-    appended_text = generated_text + new_text
+    The benchmark measures server output, but the next request must not depend
+    on that output; otherwise repeated runs with the same seed can diverge.
+    """
+    if assistant_token_count > 0:
+        assistant_ids = gen_random_token_ids(tokenizer, assistant_token_count, rng)
+        assistant_text = decode_ids(tokenizer, assistant_ids)
+    else:
+        assistant_text = ""
+
+    if turn_input_increment > 0:
+        user_ids = gen_random_token_ids(tokenizer, turn_input_increment, rng)
+        user_text = decode_ids(tokenizer, user_ids)
+    else:
+        user_text = ""
+
+    appended_text = assistant_text + user_text
     new_prompt = prompt + appended_text
     if not appended_text:
         return new_prompt, prompt_token_len
@@ -408,8 +418,8 @@ def run_session(
             prompt, prompt_len = append_turn_input(
                 tokenizer,
                 prompt,
-                result["prompt_tokens"] or prompt_len,
-                result["generated_text"],
+                prompt_len,
+                turn_output_len,
                 turn_input_len,
                 rng,
             )
@@ -631,7 +641,7 @@ def main() -> None:
         "--turn_input_increment",
         type=int,
         default=2048,
-        help="Maximum new 'user' tokens sampled after each turn, on top " "of the model's generated text.",
+        help="Maximum new 'user' tokens sampled after each turn, on top of deterministic synthetic assistant tokens.",
     )
     parser.add_argument(
         "--min_turn_input_increment", type=int, default=512, help="Minimum new 'user' tokens sampled after each turn."
