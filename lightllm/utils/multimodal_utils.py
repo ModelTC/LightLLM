@@ -20,7 +20,7 @@ class UrlResourcePool:
     def __init__(self, maxsize: int = 256):
         self._maxsize = maxsize
         self._cache: "OrderedDict[Tuple[str, Optional[str]], bytes]" = OrderedDict()
-        self._inflight: Dict[Tuple[str, Optional[str]], asyncio.Future] = {}
+        self._inflight: Dict[Tuple[str, Optional[str]], asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -39,42 +39,36 @@ class UrlResourcePool:
                 logger.info(f"url_pool hit")
                 return cached
 
-            inflight = self._inflight.get(key)
-            if inflight is None:
-                inflight = asyncio.get_running_loop().create_future()
-                self._inflight[key] = inflight
-                creator = True
-            else:
-                creator = False
+            task = self._inflight.get(key)
+            if task is None:
 
-        if not creator:
-            return await inflight
+                async def _run_and_cache() -> bytes:
+                    try:
+                        content = await loader()
+                        async with self._lock:
+                            self._cache[key] = content
+                            self._cache.move_to_end(key)
+                            while len(self._cache) > self._maxsize:
+                                self._cache.popitem(last=False)
+                        return content
+                    finally:
+                        async with self._lock:
+                            self._inflight.pop(key, None)
 
-        try:
-            content = await loader()
-        except BaseException as exc:
-            async with self._lock:
-                current = self._inflight.get(key)
-                if current is inflight:
-                    self._inflight.pop(key, None)
-                    if not inflight.done():
-                        inflight.set_exception(exc)
-                        inflight.exception()
-            raise
+                task = asyncio.create_task(_run_and_cache())
 
-        async with self._lock:
-            self._cache[key] = content
-            self._cache.move_to_end(key)
-            while len(self._cache) > self._maxsize:
-                self._cache.popitem(last=False)
+                def _consume_task_exception(completed_task: asyncio.Task) -> None:
+                    if completed_task.cancelled():
+                        return
+                    try:
+                        completed_task.exception()
+                    except BaseException:
+                        return
 
-            current = self._inflight.get(key)
-            if current is inflight:
-                self._inflight.pop(key, None)
-                if not inflight.done():
-                    inflight.set_result(content)
+                task.add_done_callback(_consume_task_exception)
+                self._inflight[key] = task
 
-        return content
+        return await asyncio.shield(task)
 
 
 URL_RESOURCE_POOL = UrlResourcePool(maxsize=get_lightllm_url_pool_maxsize())
@@ -124,11 +118,6 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
             response.raise_for_status()
             ans_bytes = []
             async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                if request is not None and await request.is_disconnected():
-                    await response.aclose()
-                    raise ClientDisconnected(
-                        reason=f"client disconnected during url download"
-                    )
                 ans_bytes.append(chunk)
                 # 接收的数据不能大于128M
                 if len(ans_bytes) > 128:
