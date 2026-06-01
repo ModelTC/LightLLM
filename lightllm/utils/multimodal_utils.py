@@ -15,6 +15,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 class UrlResourcePool:
     def __init__(self, maxsize: int = 256):
         self._maxsize = maxsize
@@ -26,7 +27,9 @@ class UrlResourcePool:
     def _normalize_url(url: str) -> str:
         return url.strip()
 
-    async def get_or_create(self, url: str, proxy: Optional[str], loader: Callable[[], Awaitable[bytes]]) -> bytes:
+    async def get_or_create(
+        self, url: str, proxy: Optional[str], loader: Callable[[], Awaitable[bytes]]
+    ) -> bytes:
         key = (self._normalize_url(url), proxy)
 
         async with self._lock:
@@ -72,6 +75,7 @@ class UrlResourcePool:
                     inflight.set_result(content)
 
         return content
+
 
 URL_RESOURCE_POOL = UrlResourcePool(maxsize=get_lightllm_url_pool_maxsize())
 
@@ -122,7 +126,9 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
             async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
                 if request is not None and await request.is_disconnected():
                     await response.aclose()
-                    raise ClientDisconnected(reason=f"client disconnected during url download")
+                    raise ClientDisconnected(
+                        reason=f"client disconnected during url download"
+                    )
                 ans_bytes.append(chunk)
                 # 接收的数据不能大于128M
                 if len(ans_bytes) > 128:
