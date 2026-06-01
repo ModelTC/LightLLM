@@ -178,8 +178,11 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
     ):
         # 确定传输设备
         if req_obj.nixl_trans_device_id == -1:
+            if not hasattr(self, "nixl_iter_device_id"):
+                self.nixl_iter_device_id = 0
+            req_obj.nixl_trans_device_id = self.nixl_iter_device_id
             # only self.is_master_in_dp will be used.
-            req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
+            self.nixl_iter_device_id = (self.nixl_iter_device_id + 1) % self.node_world_size
 
         trans_task = NIXLChunckedTransTask(
             request_id=req_obj.req_id,

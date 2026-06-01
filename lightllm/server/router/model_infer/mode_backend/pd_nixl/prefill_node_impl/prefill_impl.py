@@ -89,7 +89,10 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
     ) -> NIXLChunckedTransTask:
         # 确定传输设备
         if req_obj.nixl_trans_device_id == -1:
-            req_obj.nixl_trans_device_id = random.randint(0, self.node_world_size - 1)
+            if not hasattr(self, "nixl_iter_device_id"):
+                self.nixl_iter_device_id = 0
+            req_obj.nixl_trans_device_id = self.nixl_iter_device_id
+            self.nixl_iter_device_id = (self.nixl_iter_device_id + 1) % self.node_world_size
 
         nixl_decode_node_info = req_obj.sampling_param.nixl_decode_node
         mem_indexes = (
