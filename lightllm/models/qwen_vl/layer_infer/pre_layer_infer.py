@@ -70,7 +70,13 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
         ).to(device=self.target_device, non_blocking=True)
 
-        multimodal_emb(
+        if input_ids.device.type == "npu":
+            from lightllm.common.basemodel.triton_kernel.multimodal_emb import npu_multimodal_emb
+
+            multimodal_emb_func = npu_multimodal_emb
+        else:
+            multimodal_emb_func = multimodal_emb
+        multimodal_emb_func(
             out=out,
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_.weight,

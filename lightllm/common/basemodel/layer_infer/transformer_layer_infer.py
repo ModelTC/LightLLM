@@ -10,4 +10,5 @@ class TransformerLayerInfer(BaseLayerInfer):
         self.layer_num_ = layer_num
         self.network_config_ = network_config
         self.platform_backend = get_backend()
+        self.target_device = self.platform_backend.runtime.target_device()
         return

@@ -60,7 +60,7 @@ def rotary_kernel(
 def apply_rotary_pos_emb_triton(
     tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_D: int = 128
 ) -> torch.Tensor:
-    assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
+    # assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
     assert cos.is_contiguous() and sin.is_contiguous()
     if tensor.ndim != 3:
         raise RuntimeError("tensor shape should be [L, H, D]")

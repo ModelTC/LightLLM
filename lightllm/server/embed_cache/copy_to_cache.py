@@ -49,6 +49,11 @@ def offload_embed_tensor_to_cache(
         embed_tensor = embed_tensor.reshape(embed_tensor.shape[0], 1, embed_tensor.shape[1])
 
     token_num = embed_tensor.shape[0]
+    if embed_tensor.device.type == "npu":
+        end = start_index_in_cache + token_num
+        cache_tensor[start_index_in_cache:end].copy_(embed_tensor.cpu())
+        return
+
     grid = (token_num,)
 
     _offload_embed_tensor_to_cache[grid](

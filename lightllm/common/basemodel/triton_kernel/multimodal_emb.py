@@ -116,6 +116,51 @@ def multimodal_emb(
     return
 
 
+@torch.no_grad()
+def npu_multimodal_emb(
+    out: torch.Tensor,
+    prompt_ids: torch.Tensor,
+    text_weight_embs: torch.Tensor,
+    embed_cache: torch.Tensor,
+    img_token_lens: torch.Tensor,
+    img_start_token_ids: torch.Tensor,
+    img_start_locs_in_cache: torch.Tensor,
+    tp_text_start_token_id: int,
+    tp_text_end_token_id: int,
+    tp_world_size: int,
+):
+    # text mask
+    text_mask = (prompt_ids >= tp_text_start_token_id) & (prompt_ids < tp_text_end_token_id)
+    if text_mask.any():
+        text_ids = prompt_ids[text_mask] - tp_text_start_token_id
+        out[text_mask] = torch.nn.functional.embedding(text_ids, text_weight_embs)
+    # image mask
+    image_mask = torch.zeros_like(text_mask, dtype=torch.bool)
+    image_index = torch.zeros_like(prompt_ids, dtype=torch.long)
+
+    for i in range(img_token_lens.shape[0]):
+        start_token = img_start_token_ids[i]
+        start_loc = img_start_locs_in_cache[i]
+        token_len = img_token_lens[i]
+
+        mask = (prompt_ids >= start_token) & (prompt_ids < start_token + token_len)
+        image_mask |= mask
+
+        rel = prompt_ids[mask] - start_token
+        image_index[mask] = start_loc + rel
+
+    if image_mask.any():
+        target_indices = image_index[image_mask].cpu()
+        if embed_cache.dim() == 3:
+            selected = embed_cache[target_indices, 0, :]
+        else:
+            selected = embed_cache[target_indices]
+        selected_npu = selected.to(out.device, dtype=out.dtype, non_blocking=True)
+        out[image_mask] = selected_npu / tp_world_size
+
+    return out 
+
+
 @triton.jit
 def _mark_multimodal_obj_need_kernel(
     obj_start_token_ids_ptr,
