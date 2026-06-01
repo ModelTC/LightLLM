@@ -57,3 +57,6 @@ class AscendRuntime(BackendRuntime):
 
     def empty_cache(self) -> None:
         torch.npu.empty_cache()
+
+    def manual_seed_all(self, seed: int) -> None:
+        torch.npu.manual_seed_all(seed)

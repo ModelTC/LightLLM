@@ -721,7 +721,7 @@ class TpPartBaseModel:
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
-        if infer_state.is_cuda_graph and self.target_device.type != "npu":
+        if infer_state.is_cuda_graph and self.platform_backend.name != "ascend":
             model_output.to_no_ref_tensor()
 
         return model_output
@@ -989,7 +989,7 @@ class TpPartBaseModel:
             model_output.mtp_main_output_hiddens = input_embs.contiguous()
             model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
 
-        if infer_state.is_cuda_graph:
+        if infer_state.is_cuda_graph and self.platform_backend.name != "ascend":
             model_output.to_no_ref_tensor()
             model_output1.to_no_ref_tensor()
 

@@ -69,7 +69,7 @@ class Gemma3PreLayerInfer(LlamaMultimodalPreLayerInfer):
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
         ).to(device=self.target_device, non_blocking=True)
 
-        multimodal_emb(
+        self.platform_backend.ops.infer.multimodal_emb(
             out=out,
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_.weight,

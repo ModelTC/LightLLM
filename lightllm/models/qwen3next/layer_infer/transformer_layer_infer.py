@@ -15,7 +15,6 @@ from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_g
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
 from functools import partial
 
@@ -182,11 +181,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             eps=self.eps_,
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-        rotary_emb_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
+        self.platform_backend.ops.infer.rotary_emb(
+            is_prefill=infer_state.is_prefill,
+            batch_size=infer_state.batch_size,
+            q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            k=cache_kv[:, : self.tp_k_head_num_, :],
+            cos=infer_state.position_cos,
+            sin=infer_state.position_sin,
             partial_rotary_factor=self.partial_rotary_factor,
         )
         if infer_state.need_dp_prefill_balance:

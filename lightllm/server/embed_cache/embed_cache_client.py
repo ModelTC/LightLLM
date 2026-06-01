@@ -4,8 +4,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.embed_utils import calcu_embed_cache_meta
 from lightllm.common.cpu_cache import CpuCacheCreator, CpuCacheTensorSpec
+from lightllm.platform import get_backend
 from .allocator import MemoryBlock, MemoryManager
-from .copy_to_cache import offload_embed_tensor_to_cache
 
 logger = init_logger(__name__)
 
@@ -40,6 +40,7 @@ class CpuEmbedCacheClient(object):
             pin=pin_shm,
             pin_no_blocking=False,
         )
+        self.platform_backend = get_backend()
         return
 
     def alloc_indexes(self, token_num: int) -> Optional["MemoryBlock"]:
@@ -50,7 +51,7 @@ class CpuEmbedCacheClient(object):
         return
 
     def copy_to_cache(self, embed_tensor: torch.Tensor, start_index_in_cache: int):
-        offload_embed_tensor_to_cache(
+        self.platform_backend.ops.infer.offload_embed_tensor_to_cache(
             embed_tensor=embed_tensor,
             cache_tensor=self.cpu_embed_cache_tensor,
             start_index_in_cache=start_index_in_cache,
@@ -62,7 +63,7 @@ class CpuEmbedCacheClient(object):
             # check for qwen3 vision embed tensor shape, use apply deepstack
             assert embed_tensor.shape[1] == self.cpu_embed_cache_tensor.shape[1]
 
-        offload_embed_tensor_to_cache(
+        self.platform_backend.ops.infer.offload_embed_tensor_to_cache(
             embed_tensor=embed_tensor,
             cache_tensor=self.cpu_embed_cache_tensor,
             start_index_in_cache=start_index_in_cache,

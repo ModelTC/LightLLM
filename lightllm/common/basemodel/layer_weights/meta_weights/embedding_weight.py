@@ -80,7 +80,7 @@ class EmbeddingWeight(BaseWeightTpl):
     def __call__(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        return self.platform_backend.ops.embedding(
+        return self.platform_backend.ops.weight.embedding(
             input_ids=input_ids,
             weight=self.weight,
             out=out,
@@ -149,7 +149,12 @@ class LMHeadWeight(EmbeddingWeight):
         return out
 
     def __call__(self, input: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty) -> torch.Tensor:
-        return self.platform_backend.ops.lm_head(input=input, weight=self.weight, out=out, alloc_func=alloc_func)
+        return self.platform_backend.ops.weight.lm_head(
+            input=input,
+            weight=self.weight,
+            out=out,
+            alloc_func=alloc_func,
+        )
 
 
 class NoTpPosEmbeddingWeight(BaseWeightTpl):
@@ -212,7 +217,7 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl):
     def __call__(
         self, input_ids: torch.Tensor, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
-        return self.platform_backend.ops.embedding(
+        return self.platform_backend.ops.weight.embedding(
             input_ids=input_ids,
             weight=self.weight,
             out=out, 

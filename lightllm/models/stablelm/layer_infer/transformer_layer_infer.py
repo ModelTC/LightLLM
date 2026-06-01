@@ -1,6 +1,5 @@
 import torch
 from functools import partial
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.stablelm.layer_weights.transformer_layer_weight import StablelmTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
@@ -25,12 +24,14 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
         cache_kv = layer_weight.kv_proj.mm(
             input.view(-1, self.embed_dim_),
         ).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
-        rotary_emb_fwd(
-            q.view(-1, self.tp_q_head_num_, self.head_dim_),
-            cache_kv[:, 0 : self.tp_k_head_num_, :],
-            infer_state.position_cos,
-            infer_state.position_sin,
-            self.partial_rotary_factor,
+        self.platform_backend.ops.infer.rotary_emb(
+            is_prefill=infer_state.is_prefill,
+            batch_size=infer_state.batch_size,
+            q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            k=cache_kv[:, 0 : self.tp_k_head_num_, :],
+            cos=infer_state.position_cos,
+            sin=infer_state.position_sin,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)

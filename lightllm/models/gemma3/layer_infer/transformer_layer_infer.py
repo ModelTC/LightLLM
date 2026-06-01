@@ -4,7 +4,6 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3TransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
-from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
 
 class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -42,18 +41,22 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         is_sliding = bool((self.layer_num_ + 1) % self.sliding_window_pattern)
         if is_sliding:
-            rotary_emb_fwd(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                cache_kv[:, 0 : self.tp_k_head_num_, :],
-                infer_state.position_cos_local.to(q.dtype),
-                infer_state.position_sin_local.to(q.dtype),
+            self.platform_backend.ops.infer.rotary_emb(
+                is_prefill=infer_state.is_prefill,
+                batch_size=infer_state.batch_size,
+                q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                k=cache_kv[:, 0 : self.tp_k_head_num_, :],
+                cos=infer_state.position_cos_local.to(q.dtype),
+                sin=infer_state.position_sin_local.to(q.dtype),
             )
         else:
-            rotary_emb_fwd(
-                q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                cache_kv[:, 0 : self.tp_k_head_num_, :],
-                infer_state.position_cos_global.to(q.dtype),
-                infer_state.position_sin_global.to(q.dtype),
+            self.platform_backend.ops.infer.rotary_emb(
+                is_prefill=infer_state.is_prefill,
+                batch_size=infer_state.batch_size,
+                q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                k=cache_kv[:, 0 : self.tp_k_head_num_, :],
+                cos=infer_state.position_cos_global.to(q.dtype),
+                sin=infer_state.position_sin_global.to(q.dtype),
             )
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)

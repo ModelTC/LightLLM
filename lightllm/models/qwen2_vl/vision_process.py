@@ -322,7 +322,7 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
             grid_t = grid_t // self.temporal_patch_size
             grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
 
-            if patches.device.type == "npu":
+            if self.platform_backend.name == "ascend":
                 flatten_patches = _flatten_patches_qwen2vl_npu(
                     patches=patches,
                     batch_size=batch_size,

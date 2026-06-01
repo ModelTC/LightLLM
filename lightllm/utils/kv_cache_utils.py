@@ -30,6 +30,7 @@ from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.platform import get_backend
 
 logger = init_logger(__name__)
 
@@ -290,7 +291,27 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
 
         handle.tasks_finished.set()
 
-    th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
+    def _worker_npu():
+        import acl
+
+        acl.init()
+        ret = acl.rt.set_device(get_current_device_id())
+        assert ret == 0, f"acl.rt.set_device failed with error code {ret}"
+
+        ACL_HOST_REGISTER_MAPPED = 0
+        for offset, seg_len in tasks:
+            ptr = shm_ptr + offset
+            res = acl.rt.host_register(ptr, seg_len, ACL_HOST_REGISTER_MAPPED)
+            assert res[1] == 0, f"acl.rt.host_register failed with error code {res}"
+            handle.task_count += 1
+
+        handle.tasks_finished.set()
+
+    if get_backend().name == "ascend":
+        _target_worker = _worker_npu
+    else:
+        _target_worker = _worker
+    th = threading.Thread(target=_target_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
     handle.thread = th
     th.start()
     return handle

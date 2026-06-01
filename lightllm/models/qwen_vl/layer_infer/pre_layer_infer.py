@@ -4,7 +4,6 @@ import torch.distributed as dist
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
-from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
 
 
@@ -70,13 +69,7 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
         ).to(device=self.target_device, non_blocking=True)
 
-        if input_ids.device.type == "npu":
-            from lightllm.common.basemodel.triton_kernel.multimodal_emb import npu_multimodal_emb
-
-            multimodal_emb_func = npu_multimodal_emb
-        else:
-            multimodal_emb_func = multimodal_emb
-        multimodal_emb_func(
+        self.platform_backend.ops.infer.multimodal_emb(
             out=out,
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_.weight,

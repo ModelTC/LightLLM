@@ -48,6 +48,7 @@ class BackendRegistry:
 
 backend_registry = BackendRegistry()
 
+
 def register_backend(name: str) -> callable:
 
     def decorator(backend_cls: Type[Backend]) -> Type[Backend]:

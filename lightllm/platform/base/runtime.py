@@ -1,7 +1,7 @@
 import torch
 import torch.distributed as dist
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, ContextManager, Tuple, Union
+from typing import Any, Optional, ContextManager, Tuple, Union
 
 
 class BackendRuntime(ABC):
@@ -113,4 +113,8 @@ class BackendRuntime(ABC):
 
     @abstractmethod
     def empty_cache(self) -> None:
+        pass
+
+    @abstractmethod
+    def manual_seed_all(self, seed: int) -> None:
         pass

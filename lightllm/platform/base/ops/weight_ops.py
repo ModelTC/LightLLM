@@ -1,21 +1,10 @@
 import torch
 from abc import ABC, abstractmethod
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple
+from lightllm.platform.base.ops.buffer import ensure_out
 
 
-class BackendOps(ABC):
-
-    @staticmethod
-    def _ensure_out(
-        out: Optional[torch.Tensor],
-        shape: Tuple[int, ...],
-        dtype: torch.dtype,
-        device: Union[str, torch.device],
-        alloc_func: Callable = torch.empty,
-    ) -> torch.Tensor:
-        if out is None:
-            return alloc_func(shape, dtype=dtype, device=device)
-        return out
+class WeightOps(ABC):
 
     def embedding(
         self,
@@ -29,7 +18,7 @@ class BackendOps(ABC):
     ) -> torch.Tensor:
         if vob_end_id is None:
             vob_end_id = weight.shape[0]
-        out = self._ensure_out(
+        out = ensure_out(
             out,
             shape=(input_ids.shape[0], weight.shape[1]),
             dtype=weight.dtype,
@@ -64,7 +53,7 @@ class BackendOps(ABC):
         out: Optional[torch.Tensor] = None,
         alloc_func: Callable = torch.empty,
     ) -> torch.Tensor:
-        out = self._ensure_out(
+        out = ensure_out(
             out,
             shape=(weight.shape[0], input.shape[1]),
             dtype=input.dtype,
@@ -93,9 +82,9 @@ class BackendOps(ABC):
         alloc_func: Callable = torch.empty,
         gate_value: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        out = self._ensure_out(
+        out = ensure_out(
             out,
-            shape=input.shape,
+            shape=tuple(input.shape),
             dtype=input.dtype,
             device=input.device,
             alloc_func=alloc_func,
@@ -118,6 +107,7 @@ class BackendOps(ABC):
 
     def layer_norm(
         self,
+        *,
         input: torch.Tensor,
         weight: torch.Tensor,
         bias: torch.Tensor,
@@ -125,9 +115,9 @@ class BackendOps(ABC):
         out: Optional[torch.Tensor] = None,
         alloc_func: Callable = torch.empty,
     ) -> torch.Tensor:
-        out = self._ensure_out(
+        out = ensure_out(
             out,
-            shape=input.shape,
+            shape=tuple(input.shape),
             dtype=input.dtype,
             device=input.device,
             alloc_func=alloc_func,

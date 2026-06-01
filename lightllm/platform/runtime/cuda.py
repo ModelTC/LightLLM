@@ -14,10 +14,6 @@ class CudaRuntime(BackendRuntime):
         return "nccl"
 
     @property
-    def new_group_backend(self) -> str:
-        return "nccl"
-
-    @property
     def dist_init_passes_device_id(self) -> bool:
         return False
 
@@ -61,3 +57,6 @@ class CudaRuntime(BackendRuntime):
 
     def empty_cache(self) -> None:
         torch.cuda.empty_cache()
+
+    def manual_seed_all(self, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)

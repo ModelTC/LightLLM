@@ -4,13 +4,14 @@ from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd as ds2_rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
+from lightllm.platform import get_backend
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -55,11 +56,14 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             out=cache_kv[:, :, : self.kv_lora_rank],
         )
 
-        rotary_emb_fwd(
-            q_rope,
-            cache_kv[:, :, self.kv_lora_rank :],
-            infer_state.position_cos,
-            infer_state.position_sin,
+        self.platform_backend.ops.infer.rotary_emb(
+            is_prefill=infer_state.is_prefill,
+            batch_size=infer_state.batch_size,
+            q=q_rope,
+            k=cache_kv[:, :, self.kv_lora_rank :],
+            cos=infer_state.position_cos,
+            sin=infer_state.position_sin,
+            rotary_impl=ds2_rotary_emb_fwd,
         )
         return q, cache_kv
 
@@ -270,13 +274,14 @@ class NsaInfer:
         k = layer_weight.k_norm_(k, eps=self.eps)
 
         # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
-        from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
-
-        rotary_emb_fwd(
-            q[:, :, : self.qk_rope_head_dim],
-            k[:, None, : self.qk_rope_head_dim],
-            infer_state.position_cos,
-            infer_state.position_sin,
+        get_backend().ops.infer.rotary_emb(
+            is_prefill=infer_state.is_prefill,
+            batch_size=infer_state.batch_size,
+            q=q[:, :, : self.qk_rope_head_dim],
+            k=k[:, None, : self.qk_rope_head_dim],
+            cos=infer_state.position_cos,
+            sin=infer_state.position_sin,
+            rotary_impl=ds2_rotary_emb_fwd,
         )
 
         q = self._rotate_activation(q)

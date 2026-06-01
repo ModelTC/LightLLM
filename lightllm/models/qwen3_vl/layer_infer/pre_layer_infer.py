@@ -1,7 +1,6 @@
 import torch
 import torch.distributed as dist
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
-from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from ..layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
@@ -58,7 +57,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         ).to(device=self.target_device, non_blocking=True)
         infer_state.input_ids = input_ids
 
-        multimodal_emb(
+        self.platform_backend.ops.infer.multimodal_emb(
             out=out,
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_.weight,

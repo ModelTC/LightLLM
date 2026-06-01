@@ -49,10 +49,6 @@ def offload_embed_tensor_to_cache(
         embed_tensor = embed_tensor.reshape(embed_tensor.shape[0], 1, embed_tensor.shape[1])
 
     token_num = embed_tensor.shape[0]
-    if embed_tensor.device.type == "npu":
-        end = start_index_in_cache + token_num
-        cache_tensor[start_index_in_cache:end].copy_(embed_tensor.cpu())
-        return
 
     grid = (token_num,)
 
@@ -73,3 +69,17 @@ def offload_embed_tensor_to_cache(
         num_stages=1,
     )
     return
+
+
+@torch.no_grad()
+def npu_offload_embed_tensor_to_cache(
+    embed_tensor: torch.Tensor,
+    cache_tensor: torch.Tensor,
+    start_index_in_cache: int,
+):
+    if len(embed_tensor.shape) == 2:
+        embed_tensor = embed_tensor.reshape(embed_tensor.shape[0], 1, embed_tensor.shape[1])
+
+    token_num = embed_tensor.shape[0]
+    end = start_index_in_cache + token_num
+    cache_tensor[start_index_in_cache:end].copy_(embed_tensor.cpu())
