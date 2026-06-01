@@ -42,6 +42,13 @@ def _init_env(
     task_in_queue: mp.Queue,
     task_out_queue: mp.Queue,
 ):
+
+    import os
+
+    # prefill 节点不一定需要 mps 来协调，所以优先级设置为 1.
+    # 本身并不产生严重的阻塞。
+    os.environ["CUDA_MPS_CLIENT_PRIORITY"] = "1"
+
     torch.backends.cudnn.enabled = False
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_prefill_trans:Device{device_id}")
 

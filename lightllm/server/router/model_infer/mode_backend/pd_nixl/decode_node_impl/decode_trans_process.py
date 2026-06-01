@@ -49,6 +49,29 @@ def _init_env(
     task_out_queue: mp.Queue,
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
+    import os
+
+    # -------------------------------------------------------------------------
+    # 问题背景（PD NIXL + 同卡多进程）：
+    #   decode 物理 GPU 上至少有两个独立 CUDA 进程：model_infer（解码推理）与
+    #   nixl_decode_trans（把 prefill 侧 KV page 拷入 decode KV cache）。
+    #   lm_eval batch=64 时会在短时间内并发大量 read_page；拷贝在 copy_cuda_stream
+    #   上排队，而推理在另一进程的 stream 上执行，彼此无法 cudaStreamWaitEvent
+    #   协调。日志里的 read_page_gpu_time（event 差值）会把「等 GPU 时间片 /
+    #   与推理争抢 SM」算进去，出现数十秒级毛刺，但并不代表单次 memcpy 真那么慢。
+    #
+    # 解决思路：依赖 NVIDIA MPS（Multi-Process Service）在同一 GPU 上多进程
+    #   共享上下文并做客户端级调度；在子进程 import torch / 创建 CUDA 上下文
+    #   **之前**设置下列环境变量（故必须放在本函数最前）。
+    #
+    # CUDA_MPS_CLIENT_PRIORITY="0"：
+    #   MPS 下数值越小优先级越高。decode 侧 KV 拷贝处于 decode 关键路径（须先
+    #   落盘 KV 才能出首 token），故给 trans 进程最高优先级，减轻被同卡推理
+    #   饿死导致的排队放大。须集群已启动 nvidia-cuda-mps-control / mps-server，
+    #   否则该变量不生效。 启动 mps 的命令为 nvidia-cuda-mps-control -d
+    # -------------------------------------------------------------------------
+    os.environ["CUDA_MPS_CLIENT_PRIORITY"] = "0"
+
     torch.backends.cudnn.enabled = False
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_decode_trans:Device{device_id}")
 
