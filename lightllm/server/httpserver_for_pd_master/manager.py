@@ -331,7 +331,7 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+            await asyncio.wait_for(up_status_event.wait(), timeout=180)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
