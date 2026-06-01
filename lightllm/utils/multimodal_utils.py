@@ -56,12 +56,8 @@ class UrlResourcePool:
                 task = asyncio.create_task(_run_and_cache())
 
                 def _consume_task_exception(completed_task: asyncio.Task) -> None:
-                    if completed_task.cancelled():
-                        return
-                    try:
+                    if not completed_task.cancelled():
                         completed_task.exception()
-                    except BaseException:
-                        return
 
                 task.add_done_callback(_consume_task_exception)
                 self._inflight[key] = task
