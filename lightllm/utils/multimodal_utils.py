@@ -107,6 +107,7 @@ def _get_xhttp_client(proxy=None):
 
 
 async def fetch_resource(url, request: Request, timeout, proxy=None):
+    logger.info(f"Begin to download resource from url: {url}")
     if request is not None and await request.is_disconnected():
         raise ClientDisconnected(reason=f"client disconnected during url download")
 
