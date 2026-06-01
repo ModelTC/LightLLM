@@ -14,6 +14,7 @@ from frozendict import frozendict
 from .control_rpyc_client import ControlRpycClient
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from contextlib import asynccontextmanager
 from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
@@ -48,7 +49,7 @@ from lightllm.server.io_struct import (
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken, ServerBusyError
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -139,8 +140,7 @@ class HttpServerManager:
         # Cache routing config for MoE expert routing data extraction
         self._routing_shm = get_routing_config_shm() if args.enable_return_routed_experts else None
 
-        self.is_pause = False
-        self.is_pause_cond = asyncio.Condition()
+        self._gen_pause = _GenerationPauseGate()
 
         # 控制面 rpyc client: 到 master router 的 rpyc service, 懒初始化 + 自动重连
         self._control_rpyc_client = ControlRpycClient(host="127.0.0.1", port=args.control_rpyc_port)
@@ -370,8 +370,7 @@ class HttpServerManager:
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
 
-            async with self.is_pause_cond:
-                await self.is_pause_cond.wait_for(lambda: not self.is_pause)
+            await self._gen_pause.wait_until_running()
 
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
@@ -1001,24 +1000,20 @@ class HttpServerManager:
             self.recycle_event.set()
         return
 
-    async def pause_generation(self):
+    async def pause_generation(self, reject_new: bool = False):
         # 因为请求是从master node转发到slave node的
         # 所以只要master暂停了，slave自然暂停。
-        if self.is_pause:
-            return
-        async with self.is_pause_cond:
-            self.is_pause = True
+        async with self._gen_pause.pause_and_abort_context(reject_new) as do_abort:
+            if not do_abort:
+                return
             while True:
                 await self.abort_request(AbortReq(request_id=None, abort_all=True))
-                running_req_num = len(list(self.req_id_to_out_inf.keys()))
-                if running_req_num == 0:
+                if len(self.req_id_to_out_inf) == 0:
                     break
                 await asyncio.sleep(1.0)
 
     async def continue_generation(self):
-        async with self.is_pause_cond:
-            self.is_pause = False
-            self.is_pause_cond.notify_all()
+        await self._gen_pause.resume()
 
     # -------- master router 控制面 rpyc 调用 --------
 
@@ -1088,3 +1083,37 @@ class ReqStatus:
             if not req.can_release():
                 return False
         return True
+
+
+class _GenerationPauseGate:
+    """生成暂停门控：RUNNING / PAUSED(新请求排队) / PAUSED_REJECT(新请求直接拒绝)。"""
+
+    _RUNNING = 0
+    _PAUSED = 1
+    _PAUSED_REJECT = 2
+
+    def __init__(self) -> None:
+        self._state = self._RUNNING
+        self._cond = asyncio.Condition()
+
+    @asynccontextmanager
+    async def pause_and_abort_context(self, reject_new: bool):
+        async with self._cond:
+            if self._state != self._RUNNING:
+                if reject_new:
+                    self._state = self._PAUSED_REJECT
+                yield False
+                return
+            self._state = self._PAUSED_REJECT if reject_new else self._PAUSED
+            yield True
+
+    async def wait_until_running(self) -> None:
+        if self._state == self._PAUSED_REJECT:
+            raise ServerBusyError("Generation is paused, new requests are rejected")
+        async with self._cond:
+            await self._cond.wait_for(lambda: self._state == self._RUNNING)
+
+    async def resume(self) -> None:
+        async with self._cond:
+            self._state = self._RUNNING
+            self._cond.notify_all()

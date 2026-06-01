@@ -501,8 +501,8 @@ async def flush_cache():
 
 
 @app.post("/pause_generation")
-async def pause_generation():
-    await g_objs.httpserver_manager.pause_generation()
+async def pause_generation(reject_new: bool = False):
+    await g_objs.httpserver_manager.pause_generation(reject_new=reject_new)
     return Response(content="Generation paused successfully.", status_code=200)
 
 
