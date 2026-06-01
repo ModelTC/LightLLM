@@ -228,3 +228,8 @@ def get_added_mtp_kv_layer_num() -> int:
 @lru_cache(maxsize=None)
 def get_pd_split_max_new_tokens() -> int:
     return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
+
+
+@lru_cache(maxsize=None)
+def get_lightllm_url_pool_maxsize() -> int:
+    return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 256))
