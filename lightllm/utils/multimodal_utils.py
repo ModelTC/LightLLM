@@ -27,9 +27,7 @@ class UrlResourcePool:
     def _normalize_url(url: str) -> str:
         return url.strip()
 
-    async def get_or_create(
-        self, url: str, proxy: Optional[str], loader: Callable[[], Awaitable[bytes]]
-    ) -> bytes:
+    async def get_or_create(self, url: str, proxy: Optional[str], loader: Callable[[], Awaitable[bytes]]) -> bytes:
         key = (self._normalize_url(url), proxy)
 
         async with self._lock:
