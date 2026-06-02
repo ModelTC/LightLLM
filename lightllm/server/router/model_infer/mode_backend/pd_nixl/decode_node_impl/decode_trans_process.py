@@ -146,6 +146,9 @@ class _DecodeTransModule:
         for page_index in range(self.args.nixl_pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
+        # warmup 预先加载一次kv 数据到 mem manager，避免第一次拷贝时出现卡顿。
+        self._warmup()
+
         for func in [
             self.recv_task_loop,
             self.dispatch_task_loop,
@@ -373,6 +376,20 @@ class _DecodeTransModule:
                 copy_end_event.record(self.copy_cuda_stream)
 
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))
+        return
+
+    def _warmup(self):
+        for dp_index in range(self.args.dp // self.args.nnodes):
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.read_page_kv_move_buffer_to_mem(
+                    mem_indexes=[0],
+                    page_index=0,
+                    dp_index=dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
+                torch.cuda.current_stream().synchronize()
         return
 
     @log_exception
