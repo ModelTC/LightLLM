@@ -501,19 +501,7 @@ async def flush_cache():
 
 
 @app.post("/pause_generation")
-async def pause_generation(raw_request: Request, reject_new: bool = False):
-    try:
-        body = await raw_request.json()
-        if isinstance(body, dict) and "reject_new" in body:
-            reject_new_value = body["reject_new"]
-            if isinstance(reject_new_value, bool):
-                reject_new = reject_new_value
-            elif isinstance(reject_new_value, str):
-                reject_new = reject_new_value.lower() in ("1", "true", "yes", "on")
-            else:
-                reject_new = bool(reject_new_value)
-    except Exception:
-        pass
+async def pause_generation(reject_new: bool = False):
     await g_objs.httpserver_manager.pause_generation(reject_new=reject_new)
     return Response(content="Generation paused successfully.", status_code=200)
 

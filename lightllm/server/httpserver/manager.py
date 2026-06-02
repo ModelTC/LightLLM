@@ -831,10 +831,20 @@ class HttpServerManager:
         self, request_id: Optional[int], abort_all: bool, timeout: float = 60.0
     ) -> Tuple[bool, str]:
         start_time = time.time()
+        empty_since = None
         while True:
             if abort_all:
                 if len(self.req_id_to_out_inf) == 0:
-                    return True, ""
+                    empty_since = empty_since or time.time()
+                    if time.time() - empty_since >= 1.0:
+                        return True, ""
+                else:
+                    empty_since = None
+                for group_req_id, req_status in list(self.req_id_to_out_inf.items()):
+                    if req_status is not None and any(
+                        not req.is_aborted for req in req_status.group_req_objs.shm_req_objs
+                    ):
+                        await self.abort(group_req_id)
             elif request_id not in self.req_id_to_out_inf:
                 return True, ""
 
@@ -1007,9 +1017,10 @@ class HttpServerManager:
             if not do_abort:
                 return
             while True:
-                await self.abort_request(AbortReq(request_id=None, abort_all=True))
-                if len(self.req_id_to_out_inf) == 0:
+                success, msg = await self.abort_request(AbortReq(request_id=None, abort_all=True))
+                if success:
                     break
+                logger.warning(f"pause_generation abort_all still waiting: {msg}")
                 await asyncio.sleep(1.0)
 
     async def continue_generation(self):
