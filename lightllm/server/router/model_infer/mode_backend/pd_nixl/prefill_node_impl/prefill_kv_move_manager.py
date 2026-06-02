@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLAbortReq
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..trans_process_obj import KVTransProcess
@@ -56,12 +56,20 @@ class PrefillKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task: NIXLChunckedTransTask = self.info_queue.get()
+            task = self.info_queue.get()
 
-            device_id = task.src_device_id
+            if isinstance(task, NIXLAbortReq):
+                device_id = task.device_id
+            elif isinstance(task, NIXLChunckedTransTask):
+                device_id = task.src_device_id
+            else:
+                logger.error(f"unexpected task type: {type(task)}")
+                continue
+
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task)
-                logger.info(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
+                if isinstance(task, NIXLChunckedTransTask):
+                    logger.info(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
             except BaseException as e:
                 logger.exception(str(e))

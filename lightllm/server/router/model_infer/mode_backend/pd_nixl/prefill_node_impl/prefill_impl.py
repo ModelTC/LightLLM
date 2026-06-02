@@ -1,8 +1,9 @@
+import time
 import torch.multiprocessing as mp
 import random
 from typing import List, Tuple, Optional
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
+from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLAbortReq
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -33,15 +34,31 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
+            all_tasks_done = req_obj.nixl_pd_task_num == (
+                req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num
+            )
+            has_pending_tasks = req_obj.nixl_pd_task_num > (
+                req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num
+            )
+            now = time.time()
             if prefill_finished:
-                # 等待所有传输任务都已经完成。
-                if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+                if self.is_master_in_dp and req_obj.infer_aborted and has_pending_tasks:
+                    if now - req_obj.nixl_abort_last_send_time > 1.0:
+                        req_obj.nixl_abort_last_send_time = now
+                        self.info_queue.put(
+                            NIXLAbortReq(request_id=req_obj.req_id, device_id=req_obj.nixl_trans_device_id)
+                        )
+                if all_tasks_done:
                     ans_list.append(req_obj)
             else:
                 if req_obj.infer_aborted:
-                    if req_obj.nixl_pd_task_num == (
-                        req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num
-                    ):
+                    if self.is_master_in_dp and has_pending_tasks:
+                        if now - req_obj.nixl_abort_last_send_time > 1.0:
+                            req_obj.nixl_abort_last_send_time = now
+                            self.info_queue.put(
+                                NIXLAbortReq(request_id=req_obj.req_id, device_id=req_obj.nixl_trans_device_id)
+                            )
+                    if all_tasks_done:
                         ans_list.append(req_obj)
                     else:
                         continue

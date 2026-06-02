@@ -9,7 +9,7 @@ import weakref
 import os
 import signal
 import sys
-from typing import Dict, Optional, Union, List
+from typing import Dict, Optional, Set, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
@@ -108,6 +108,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
+                pending_aborts: Set[int] = set()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
                     recv_bytes = await websocket.recv()
@@ -126,20 +127,32 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 forwarding_queue=forwarding_queue,
                                 nixl_pd_upload_websocket=websocket,
                                 nixl_pd_event=nixl_pd_event,
+                                pending_aborts=pending_aborts,
                             )
                         )
                     elif obj[0] == ObjType.ABORT:
                         group_req_id = obj[1]
                         logger.warning(f"recv cmd aborted req id {group_req_id}")
                         if not (await manager.abort(group_req_id)):
+                            pending_aborts.add(group_req_id)
 
-                            async def delayed_abort_task(group_req_id, retry_count):
-                                for _ in range(retry_count):
+                            async def delayed_abort_task(group_req_id, pending_aborts):
+                                for i in range(60):
                                     await asyncio.sleep(5.0)
+                                    if group_req_id not in pending_aborts:
+                                        return
                                     if await manager.abort(group_req_id):
-                                        break
+                                        pending_aborts.discard(group_req_id)
+                                        return
+                                pending_aborts.discard(group_req_id)
+                                logger.error(f"abort lost for group_req_id {group_req_id} after all retries")
 
-                            asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
+                            asyncio.create_task(
+                                delayed_abort_task(
+                                    group_req_id=group_req_id,
+                                    pending_aborts=pending_aborts,
+                                )
+                            )
 
                     elif obj[0] == ObjType.NIXL_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
@@ -211,7 +224,14 @@ async def _pd_process_generate(
     forwarding_queue: AsyncQueue,
     nixl_pd_upload_websocket: ClientConnection,
     nixl_pd_event: asyncio.Event,
+    pending_aborts: Set[int] = None,
 ):
+    group_req_id = sampling_params.group_request_id
+    if pending_aborts is not None and group_req_id in pending_aborts:
+        pending_aborts.discard(group_req_id)
+        logger.info(f"skip pre-aborted request {group_req_id}")
+        return
+
     try:
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
             prompt=prompt,
@@ -220,6 +240,7 @@ async def _pd_process_generate(
             request=None,
             nixl_pd_upload_websocket=nixl_pd_upload_websocket,
             nixl_pd_event=nixl_pd_event,
+            pending_aborts=pending_aborts,
         ):
             metadata["node_mode"] = manager.args.run_mode
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))

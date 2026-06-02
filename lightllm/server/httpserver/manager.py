@@ -316,6 +316,8 @@ class HttpServerManager:
         nixl_pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
         nixl_pd_event: asyncio.Event = None,
+        # 用于在 generate 内部检测请求是否已被提前 abort
+        pending_aborts: set = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
@@ -371,6 +373,10 @@ class HttpServerManager:
             )
 
             if nixl_pd_upload_websocket is not None and self.pd_mode.is_NP():
+                if pending_aborts is not None and group_request_id in pending_aborts:
+                    pending_aborts.discard(group_request_id)
+                    raise Exception(f"req_id {group_request_id} aborted before nixl upload")
+
                 # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
                 # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
                 logger.info(
@@ -384,6 +390,10 @@ class HttpServerManager:
                 except asyncio.TimeoutError:
                     logger.error(f"nixl np node wait nixl_pd_event 36s time out, group_req_id {group_request_id}")
                     raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
+
+                if pending_aborts is not None and group_request_id in pending_aborts:
+                    pending_aborts.discard(group_request_id)
+                    raise Exception(f"req_id {group_request_id} aborted while waiting nixl decode node info")
 
                 decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
                 sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
@@ -399,11 +409,19 @@ class HttpServerManager:
                 alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
                 sleep_time = 0.1
                 while alloc_req_index is None:
+                    if pending_aborts is not None and group_request_id in pending_aborts:
+                        pending_aborts.discard(group_request_id)
+                        raise Exception(f"req_id {group_request_id} aborted during SHM allocation wait")
+
                     await asyncio.sleep(sleep_time)
                     sleep_time *= 1.1
                     sleep_time = min(1, sleep_time)
 
                     alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
+                if pending_aborts is not None and group_request_id in pending_aborts:
+                    pending_aborts.discard(group_request_id)
+                    await self.shm_req_manager.async_release_req_index(alloc_req_index)
+                    raise Exception(f"req_id {group_request_id} aborted after SHM allocation")
                 alloced_req_indexes.append(alloc_req_index)
             req_objs: List[Req] = []
             for i, req_index in enumerate(alloced_req_indexes):

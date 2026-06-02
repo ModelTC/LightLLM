@@ -534,6 +534,7 @@ class InferReq:
         self.nixl_pd_task_sunccess_num: int = 0
         self.nixl_pd_task_failed_num: int = 0
         self.nixl_trans_device_id: int = -1
+        self.nixl_abort_last_send_time: float = 0.0
 
         # 类似 qwen3.5 这种混合linear att 模型使用的状态，记录申请来用于保存对应的线性att缓存的 buffer id
         # 当 prefill 阶段结束后, 对应长度的 linear att state 会写入到申请 buffer id 对应的块中， 方便插入到 radix cache中

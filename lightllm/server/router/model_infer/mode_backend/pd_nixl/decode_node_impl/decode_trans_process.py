@@ -148,22 +148,15 @@ class _DecodeTransModule:
                 assert False, f"recv error obj {obj}"
 
     def _abort(self, cmd: NIXLAbortReq):
-        # check time_out update
+        aborted_tasks = []
         with self.waiting_dict_lock:
-            keys = list(self.waiting_dict.keys())
+            for key in list(self.waiting_dict.keys()):
+                if self.waiting_dict[key].request_id == cmd.request_id:
+                    aborted_tasks.append(self.waiting_dict.pop(key))
 
-        for key in keys:
-            with self.waiting_dict_lock:
-                trans_task = self.waiting_dict.pop(key, None)
-
-            if trans_task is not None and trans_task.request_id == cmd.request_id:
-                trans_task.error_info = "aborted req"
-                self.failed_queue.put(trans_task)
-                continue
-
-            if trans_task is not None:
-                with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
+        for trans_task in aborted_tasks:
+            trans_task.error_info = "aborted req"
+            self.failed_queue.put(trans_task)
         return
 
     @log_exception
@@ -261,22 +254,15 @@ class _DecodeTransModule:
             self._check_tasks_time_out()
 
     def _check_tasks_time_out(self):
-        # check time_out update
+        expired_tasks = []
         with self.waiting_dict_lock:
-            keys = list(self.waiting_dict.keys())
+            for key in list(self.waiting_dict.keys()):
+                if self.waiting_dict[key].time_out():
+                    expired_tasks.append(self.waiting_dict.pop(key))
 
-        for key in keys:
-            with self.waiting_dict_lock:
-                trans_task = self.waiting_dict.pop(key, None)
-
-            if trans_task is not None and trans_task.time_out():
-                trans_task.error_info = "time out in accept_peer_task_loop"
-                self.failed_queue.put(trans_task)
-                continue
-
-            if trans_task is not None:
-                with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
+        for trans_task in expired_tasks:
+            trans_task.error_info = "time out in accept_peer_task_loop"
+            self.failed_queue.put(trans_task)
         return
 
     @log_exception
@@ -310,23 +296,34 @@ class _DecodeTransModule:
     def update_task_status_loop(
         self,
     ):
-        while True:
-            trans_task: NIXLChunckedTransTask = self.update_status_task_queue.get()
+        in_flight: List[NIXLChunckedTransTask] = []
 
+        while True:
+            # Drain all newly submitted tasks
+            if not in_flight:
+                in_flight.append(self.update_status_task_queue.get())
             while True:
+                try:
+                    in_flight.append(self.update_status_task_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            remaining = []
+            for trans_task in in_flight:
                 ret = self.transporter.check_task_status(trans_task=trans_task)
                 if ret == "DONE":
                     self.ready_page_task_queue.put(trans_task)
-                    break
                 elif ret == "ERR":
                     trans_task.error_info = "xfer error"
                     self.failed_queue.put(trans_task)
-                    break
                 elif trans_task.time_out():
                     trans_task.error_info = "time out in update_task_status_loop"
                     self.failed_queue.put(trans_task)
-                    break
+                else:
+                    remaining.append(trans_task)
 
+            in_flight = remaining
+            if in_flight:
                 time.sleep(0.001)
 
     @log_exception

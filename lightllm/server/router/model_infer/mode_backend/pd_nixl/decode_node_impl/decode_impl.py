@@ -1,3 +1,4 @@
+import time
 import random
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskGroup, NIXLAbortReq
@@ -69,10 +70,16 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
-            if self.is_master_in_dp and req_obj.infer_aborted and req_obj.nixl_pd_task_num != 0:
-                self.info_queue.put(NIXLAbortReq(request_id=req_obj.req_id, device_id=req_obj.nixl_trans_device_id))
+            has_pending_tasks = req_obj.nixl_pd_task_num > (
+                req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num
+            )
+            now = time.time()
+            if self.is_master_in_dp and req_obj.infer_aborted and has_pending_tasks:
+                if now - req_obj.nixl_abort_last_send_time > 1.0:
+                    req_obj.nixl_abort_last_send_time = now
+                    self.info_queue.put(NIXLAbortReq(request_id=req_obj.req_id, device_id=req_obj.nixl_trans_device_id))
 
-            if req_obj.nixl_pd_task_num != (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+            if has_pending_tasks:
                 continue
 
             if req_obj.nixl_pd_task_failed_num > 0:

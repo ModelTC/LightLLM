@@ -262,7 +262,7 @@ class HttpServerManagerForPDMaster:
             return
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+            await self._wait_event_or_disconnect(up_status_event, 60, request, group_request_id)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
@@ -289,6 +289,25 @@ class HttpServerManagerForPDMaster:
 
         return
 
+    async def _wait_event_or_disconnect(self, event: asyncio.Event, timeout: float, request: Request, group_request_id):
+        """Wait for an event with periodic client disconnect checks."""
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=min(remaining, 3.0))
+                return
+            except asyncio.TimeoutError:
+                if event.is_set():
+                    return
+                if await request.is_disconnected():
+                    raise ClientDisconnected(
+                        group_request_id=group_request_id,
+                        reason="client disconnected while waiting",
+                    )
+
     async def fetch_nixl_stream(
         self,
         p_node: PD_Client_Obj,
@@ -312,15 +331,10 @@ class HttpServerManagerForPDMaster:
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
-            await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
+            await self._wait_event_or_disconnect(nixl_np_up_prompt_ids_event, 60, request, group_request_id)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
             raise ServerBusyError()
-
-        if await request.is_disconnected():
-            raise ClientDisconnected(
-                group_request_id=group_request_id, reason="fetch_nixl_stream prefill period check network disconnected"
-            )
 
         prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
@@ -331,7 +345,7 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+            await self._wait_event_or_disconnect(up_status_event, 60, request, group_request_id)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
