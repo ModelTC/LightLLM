@@ -108,6 +108,11 @@ def get_custom_input_data(data_path, output_len, tokenizer, range_ratio):
 
 
 model_name = []
+sampling_config = {
+    "temperature": 1.0,
+    "top_p": 0.9,
+    "top_k": -1,
+}
 
 
 # Minimal fix: one retry on transient network errors.
@@ -123,7 +128,9 @@ async def async_post_stream_openai(url, prompt, max_new_tokens, session):
             "max_tokens": max_new_tokens,
             "ignore_eos": True,
             "stream": True,
-            "temperature": 0.0,
+            "temperature": sampling_config["temperature"],
+            "top_p": sampling_config["top_p"],
+            "top_k": sampling_config["top_k"],
             "best_of": 1,
         }
         headers = {"Content-Type": "application/json"}
@@ -166,9 +173,12 @@ async def async_post_stream_lightllm(url, prompt, max_new_tokens, session):
         data = {
             "inputs": text_input,
             "parameters": {
-                "do_sample": False,
+                "do_sample": True,
                 "ignore_eos": True,
                 "max_new_tokens": max_new_tokens,
+                "temperature": sampling_config["temperature"],
+                "top_p": sampling_config["top_p"],
+                "top_k": sampling_config["top_k"],
                 "add_special_tokens": False,
             },
         }

@@ -114,7 +114,9 @@ def _top_p_top_k_sample(
     b_top_ks: torch.Tensor,
     exist_req_use_random_seed: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if get_env_start_args().sampling_backend == "triton":
+    sampling_backend = get_env_start_args().sampling_backend
+
+    if sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         if not exist_req_use_random_seed:
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
@@ -124,8 +126,23 @@ def _top_p_top_k_sample(
         next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
-    elif get_env_start_args().sampling_backend == "sglang_kernel":
+    elif sampling_backend == "sglang_kernel":
         from sgl_kernel import top_k_top_p_sampling_from_probs
+
+        batch_next_token_ids = top_k_top_p_sampling_from_probs(
+            probs,
+            b_top_ks,
+            b_top_ps,
+            filter_apply_order="joint",
+            check_nan=False,
+        )
+        int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
+        int64_batch_next_token_ids[:] = batch_next_token_ids
+        batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
+        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+
+    elif sampling_backend == "flashinfer":
+        from flashinfer.sampling import top_k_top_p_sampling_from_probs
 
         batch_next_token_ids = top_k_top_p_sampling_from_probs(
             probs,
