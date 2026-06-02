@@ -187,7 +187,7 @@ class DecodeGraph:
         ) = self.graph[batch_size]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_infer_state1.copy_for_cuda_graph(infer_state1)
-        self.platform_backend.graph.replay_graph(graph_obj, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
+        self.platform_backend.graph.replay_graph(graph_obj)
 
         return graph_model_output, graph_model_output1
 

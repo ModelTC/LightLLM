@@ -16,10 +16,6 @@ class AclGraph(DecodeGraph):
         init_attn_params(self.graph_batch_sizes)
         self.update_stream = torch.npu.Stream()
 
-    @property
-    def acl_graph_batch_sizes(self):
-        return self.graph_batch_sizes
-
     def _replay(
         self,
         infer_state: InferStateInfo,
@@ -36,6 +32,24 @@ class AclGraph(DecodeGraph):
         )
         return graph_output
 
+    def _replay_overlap(
+        self,
+        infer_state: InferStateInfo,
+        infer_state1: InferStateInfo,
+        b1_cu_q_seq_len_cpu: list[int],
+        b_cu_kv_seq_len_cpu: list[int],
+    ):
+        graph_model_output, graph_model_output1 = super()._replay_overlap(
+            infer_state, infer_state1, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
+        batch_size = infer_state.input_ids.shape[0]
+        update_attn_params(
+            batch_size,
+            b1_cu_q_seq_len_cpu,
+            b_cu_kv_seq_len_cpu.add_(1),
+            self.update_stream,
+        )
+        return graph_model_output, graph_model_output1
+
     def replay(
         self,
         infer_state: InferStateInfo,
@@ -44,7 +58,7 @@ class AclGraph(DecodeGraph):
         infer_state1: Optional[InferStateInfo] = None,
     ):
         if self.enable_decode_microbatch_overlap:
-            return self._replay_overlap(infer_state, infer_state1)
+            return self._replay_overlap(infer_state, infer_state1, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
         assert infer_state1 is None
         return self._replay(infer_state, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
 
