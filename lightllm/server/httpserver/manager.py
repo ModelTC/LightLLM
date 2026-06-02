@@ -1022,7 +1022,6 @@ class HttpServerManager:
 
     async def release_memory_occupation(self, request: ReleaseMemoryReq):
         assert len(self.req_id_to_out_inf) == 0, "there are still requests running, cannot release memory occupation"
-        await self.pause_generation()
         return await self._control_rpyc_client.call("release_memory_occupation", request.tags)
 
     async def resume_memory_occupation(self, request: ResumeMemoryReq):
