@@ -1026,8 +1026,6 @@ class HttpServerManager:
 
     async def resume_memory_occupation(self, request: ResumeMemoryReq):
         ret = await self._control_rpyc_client.call("resume_memory_occupation", request.tags)
-        if ret.success:
-            await self.continue_generation()
         return ret
 
     async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
