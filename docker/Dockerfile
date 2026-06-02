@@ -48,9 +48,11 @@ WORKDIR /root
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
 RUN pip install --no-cache-dir \
+    -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     vllm==${VLLM_VERSION}
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
+    -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
 RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
     git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \
