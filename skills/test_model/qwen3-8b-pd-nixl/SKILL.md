@@ -8,7 +8,8 @@ description: >-
   PD_MASTER_IP when co-located. Before lm_eval, must POST one completion via curl to
   pd_master for warmup verification. Requires LOG_DIR, MODEL_DIR, proxy cleared, no_proxy,
   summary.txt. Same-GPU model_infer + nixl_*_trans need NVIDIA MPS for best KV copy perf;
-  record MPS on/off in summary. Use for PD NIXL-style separation tests.
+  record MPS on/off in summary. Run test/check_nvidia_peermem.sh; record in summary.txt.
+  Use for PD NIXL-style separation tests.
 ---
 
 # Qwen3-8B **PD 分离（NIXL）**（`pd_master` + `nixl_prefill` + `nixl_decode`）本地 GSM8K 评测
@@ -25,7 +26,7 @@ description: >-
 
 - 每次评测先选定或新建**一个日志目录**（例如带时间戳或任务名），与其它测试轮次分开。
 - **三个 `api_server` 的标准输出/错误**分别写入该目录，建议命名：**`pd_master.log`**、**`prefill.log`**、**`decode.log`**（文件名可沿用习惯，与 NCCL 测试一致便于对比）。
-- **`summary.txt` 固定放在该日志目录下**，汇总：三台进程的启动参数摘要、端口与就绪情况、**UCX 配置要点**、**MPS 是否开启**、**KV 传输指标**、`lm_eval` 关键结果、失败原因与最终结论。
+- **`summary.txt` 固定放在该日志目录下**，汇总：三台进程的启动参数摘要、端口与就绪情况、**UCX 配置要点**、**`check_nvidia_peermem.sh` 输出**、**MPS 是否开启**、**KV 传输指标**、`lm_eval` 关键结果、失败原因与最终结论。
 - **`eval_gsm8k.log`**：`lm_eval` 终端输出；**`curl_warmup.log`**：测试前 **`curl`** 打 **`pd_master`** 的留档（建议）；**`summary.txt`** 仍为**总览结论**。
 
 ## 启动说明
@@ -39,7 +40,8 @@ description: >-
 3. **网络 / IP**：**`HOST`** 与 **`PD_MASTER_IP`** 约定同 NCCL PD skill；单机三进程 **`export HOST="${PD_MASTER_IP}"`**。
 4. **代理**：启动 **任一 server 前**将 **`http_proxy` / `https_proxy` 置空**；评测使用 **`no_proxy`**（见评测命令）。
 5. **RDMA / UCX**：prefill 与 decode 进程在启动 Python 前须设置 **`UCX_NET_DEVICES`**（及可选 **`UCX_LOG_LEVEL`**、**`UCX_TLS`**），取值依赖本机 **`ibv_devinfo`** 与机房拓扑（见「UCX / RDMA」）；**不要**默认照抄他机上的设备名或排除列表。
-6. **CUDA MPS（强烈建议，见下节）**：**要达到 NIXL PD 最优 KV 拷贝与 batch 评测性能，须在启动 `api_server` 之前在本机启用 NVIDIA MPS**。未开 MPS 时功能通常仍可用，但易出现 **`read_page_gpu_time` 数十秒级毛刺**、**`lm_eval` 单 batch 近百秒**；**`summary.txt` 须写明 MPS 是否已开启及验证方式**。
+6. **`nvidia_peermem`**：`bash test/check_nvidia_peermem.sh >> "${LOG_DIR}/summary.txt"`；失败按脚本提示 `modprobe` 后重启服务（跨机各节点都要做）。
+7. **CUDA MPS（强烈建议，见下节）**：**要达到 NIXL PD 最优 KV 拷贝与 batch 评测性能，须在启动 `api_server` 之前在本机启用 NVIDIA MPS**。未开 MPS 时功能通常仍可用，但易出现 **`read_page_gpu_time` 数十秒级毛刺**、**`lm_eval` 单 batch 近百秒**；**`summary.txt` 须写明 MPS 是否已开启及验证方式**。
 
 ### 启动服务的命令模板（可变项）
 
@@ -81,6 +83,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 
 - **`UCX_NET_DEVICES`**：须覆盖本进程要用的 **RDMA 设备**；是否排除某些 HCA（例如数据面网卡）由**本机拓扑**决定，在 **`summary.txt`** 中写明依据。
 - **`UCX_TLS`**：常见 **`rc,cuda,gdr_copy`**；若环境不支持再按报错调整。
+- **IB 传 GPU KV** 需加载内核模块 **`nvidia_peermem`**（检测：**`test/check_nvidia_peermem.sh`**）。
 
 #### 要达到最优性能：须开启 MPS
 
