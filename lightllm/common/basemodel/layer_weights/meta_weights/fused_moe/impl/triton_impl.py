@@ -98,6 +98,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn
+        act_quant_group_size = getattr(self.quant_method, "act_quant_group_size", 0)
 
         from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
 
@@ -111,6 +112,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            act_quant_group_size=act_quant_group_size,
         )
         return input_tensor
 

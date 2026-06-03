@@ -27,7 +27,10 @@ from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
-from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
+    lightllm_per_token_group_quant_fp8,
+    per_token_group_quant_fp8,
+)
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
 from lightllm.common.triton_utils.autotuner import autotune
 
@@ -479,7 +482,7 @@ def grouped_matmul_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
     if use_fp8_w8a8:
-        if block_size_k > 0 and block_size_n > 0:
+        if block_size_k > 0:
             assert BLOCK_SIZE_K <= block_size_k
             token_scale_stride0 = token_stride_0 // block_size_k
             if TOKEN_INPUT_USE_TMA:
@@ -488,13 +491,19 @@ def grouped_matmul_kernel(
             else:
                 a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * token_scale_stride0
 
-            if BLOCK_SIZE_N > block_size_n:
-                offs_bsn = offs_bn // block_size_n
-            else:
-                # single b scale
-                offs_bsn = (tile_n_idx * BLOCK_SIZE_N) // block_size_n
+            if block_size_n > 0:
+                if BLOCK_SIZE_N > block_size_n:
+                    offs_bsn = offs_bn // block_size_n
+                else:
+                    # single b scale
+                    offs_bsn = (tile_n_idx * BLOCK_SIZE_N) // block_size_n
 
-            b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
+                b_scale_ptrs = weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bsn * weight_scale_stride1
+            else:
+                b_scale = tl.load(
+                    weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bn * weight_scale_stride1,
+                    eviction_policy="evict_last",
+                )
         else:
             # per token scale quant
             if TOKEN_INPUT_USE_TMA:
@@ -566,21 +575,27 @@ def grouped_matmul_kernel(
                 b = tl.load(b_ptrs)
 
         if use_fp8_w8a8:
-            if block_size_k > 0 and block_size_n > 0:
+            if block_size_k > 0:
                 offs_ks = k_start // block_size_k
                 a_scale = tl.load(a_scale_ptrs + offs_ks, mask=token_mask, other=0.0)
-                b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
-                if NEED_TRANS:
-                    if BLOCK_SIZE_N > block_size_n:
+                if block_size_n > 0:
+                    b_scale = tl.load(b_scale_ptrs + offs_ks * weight_scale_stride2)
+                    if NEED_TRANS:
+                        if BLOCK_SIZE_N > block_size_n:
+                            accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
+                        else:
+                            # single b scale
+                            accumulator += tl.dot(b, a) * (a_scale[None, :] * b_scale)
+                    else:
+                        if BLOCK_SIZE_N > block_size_n:
+                            accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                        else:
+                            accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
+                else:
+                    if NEED_TRANS:
                         accumulator += tl.dot(b, a) * b_scale[:, None] * a_scale[None, :]
                     else:
-                        # single b scale
-                        accumulator += tl.dot(b, a) * (a_scale[None, :] * b_scale)
-                else:
-                    if BLOCK_SIZE_N > block_size_n:
                         accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
-                    else:
-                        accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
             else:
                 if NEED_TRANS:
                     accumulator = tl.dot(b, a, acc=accumulator)
@@ -598,7 +613,7 @@ def grouped_matmul_kernel(
         accumulator = accumulator.T
 
     if use_fp8_w8a8:
-        if not (block_size_k > 0 and block_size_n > 0):
+        if block_size_k == 0:
             accumulator *= ab_scale
 
     # Apply bias if requested
@@ -636,6 +651,7 @@ def _get_grouped_matmul_static_key(
     out: torch.Tensor,
     mul_routed_weight: bool,
     use_fp8_w8a8: bool,
+    act_quant_group_size: int = 0,
 ) -> dict:
     expert_num, n, k = expert_weights.shape
     return {
@@ -645,6 +661,7 @@ def _get_grouped_matmul_static_key(
         "expert_num": expert_num,
         "mul_routed_weight": mul_routed_weight,
         "use_fp8_w8a8": use_fp8_w8a8,
+        "act_quant_group_size": act_quant_group_size,
         "out_dtype": str(out.dtype),
     }
 
@@ -694,6 +711,7 @@ def grouped_matmul(
     reused_mblock_infos=None,
     run_config: Optional[dict] = None,
     bias: Optional[torch.Tensor] = None,  # per-expert bias [expert_num, N]
+    act_quant_group_size: int = 0,
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -702,8 +720,8 @@ def grouped_matmul(
     expert_to_token_num is tensor shape [expert_num],
     expert_to_token_index is tensor shape [expert_num, token_num * topk_num],
     expert_weights is tensor shape [expert_num, out_dim, hidden_dim]
-    expert_to_weights_scale is tensor shape [expert_num] or
-    [expert_num, out_dim // block_size_, hidden_dim // block_size_k],
+    expert_to_weights_scale is tensor shape [expert_num, out_dim] or
+    [expert_num, out_dim // block_size_n, hidden_dim // block_size_k],
     when use_fp8_w8a8 is False, it must be None
     out is tensor shape [token_num * topk_num, out_dim]
     """
@@ -716,13 +734,16 @@ def grouped_matmul(
     assert expert_to_weights.is_contiguous()
     assert expert_weights.is_contiguous()
 
-    # for deepseek_v3 block-wise quant
+    # block_size_n > 0 means block-wise weight scales. block_size_k may
+    # also represent activation-only group quantization for per-channel weights.
     block_size_n = 0
     block_size_k = 0
     if use_fp8_w8a8:
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
+        elif act_quant_group_size:
+            block_size_k = act_quant_group_size
 
     if run_config is None:
         if token_inputs.shape[0] <= expert_num:
@@ -762,12 +783,24 @@ def grouped_matmul(
         assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
 
     if use_fp8_w8a8:
-        # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
+        # block-wise weights and g*m methods use per-token, per-group activation quantization.
         if block_size_k == 0:
             # input 使用 per token 量化
-            token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(
-                token_inputs, token_input_scale, use_per_token_if_dynamic=True
-            )
+            if vllm_ops is None:
+                token_input_scale = alloc_tensor_func(
+                    (token_inputs.shape[0], 1), dtype=torch.float32, device=token_inputs.device
+                )
+                q_token_inputs = alloc_tensor_func(
+                    token_inputs.shape, dtype=expert_weights.dtype, device=token_inputs.device
+                )
+                lightllm_per_token_group_quant_fp8(
+                    token_inputs, token_inputs.shape[1], q_token_inputs, token_input_scale, dtype=expert_weights.dtype
+                )
+                token_inputs = q_token_inputs
+            else:
+                token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(
+                    token_inputs, token_input_scale, use_per_token_if_dynamic=True
+                )
         else:
             # input 使用 per group quant 量化
             _m, _k = token_inputs.shape
@@ -906,6 +939,7 @@ def fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    act_quant_group_size: int = 0,
     alloc_tensor_func=torch.empty,
     run_config: Optional[dict] = None,
     layout="blocked",
@@ -982,6 +1016,7 @@ def fused_experts_impl(
             alloc_tensor_func=alloc_tensor_func,
             run_config=run_config,
             bias=w1_bias,
+            act_quant_group_size=act_quant_group_size,
         )
 
         silu_and_mul_fwd(
@@ -1009,6 +1044,7 @@ def fused_experts_impl(
             reused_mblock_infos=reused_mblock_infos,
             run_config=run_config,
             bias=w2_bias,
+            act_quant_group_size=act_quant_group_size,
         )
 
         moe_sum_reduce(
@@ -1032,6 +1068,7 @@ def inplace_fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    act_quant_group_size: int = 0,
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
@@ -1051,6 +1088,7 @@ def inplace_fused_experts_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        act_quant_group_size,
         layout=layout,
         alpha=alpha,
         limit=limit,
@@ -1072,6 +1110,7 @@ def inplace_fused_experts_impl_fake(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    act_quant_group_size: int = 0,
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
@@ -1102,6 +1141,7 @@ def outplace_fused_experts_impl(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    act_quant_group_size: int = 0,
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
@@ -1121,6 +1161,7 @@ def outplace_fused_experts_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        act_quant_group_size,
         layout=layout,
         alpha=alpha,
         limit=limit,
@@ -1142,6 +1183,7 @@ def outplace_fused_experts_impl_fake(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    act_quant_group_size: int = 0,
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
@@ -1170,6 +1212,7 @@ def fused_experts(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    act_quant_group_size: int = 0,
     # optional bias for w1 and w2
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
@@ -1192,6 +1235,7 @@ def fused_experts(
             w2_scale,
             a1_scale,
             a2_scale,
+            act_quant_group_size,
             layout=layout,
             alpha=alpha,
             limit=limit,
@@ -1212,6 +1256,7 @@ def fused_experts(
             w2_scale,
             a1_scale,
             a2_scale,
+            act_quant_group_size,
             layout=layout,
             alpha=alpha,
             limit=limit,
