@@ -8,7 +8,7 @@ description: >-
   PD_MASTER_IP when co-located. Before lm_eval, must POST one completion via curl to
   pd_master for warmup verification. Requires LOG_DIR, MODEL_DIR, proxy cleared, no_proxy,
   summary.txt. Same-GPU model_infer + nixl_*_trans need NVIDIA MPS for best KV copy perf;
-  record MPS on/off in summary. Run test/check_nvidia_peermem.sh; record in summary.txt.
+  record MPS on/off in summary. Run check_nvidia_peermem.sh in this skill dir; record in summary.txt.
   Use for PD NIXL-style separation tests.
 ---
 
@@ -40,7 +40,7 @@ description: >-
 3. **网络 / IP**：**`HOST`** 与 **`PD_MASTER_IP`** 约定同 NCCL PD skill；单机三进程 **`export HOST="${PD_MASTER_IP}"`**。
 4. **代理**：启动 **任一 server 前**将 **`http_proxy` / `https_proxy` 置空**；评测使用 **`no_proxy`**（见评测命令）。
 5. **RDMA / UCX**：prefill 与 decode 进程在启动 Python 前须设置 **`UCX_NET_DEVICES`**（及可选 **`UCX_LOG_LEVEL`**、**`UCX_TLS`**），取值依赖本机 **`ibv_devinfo`** 与机房拓扑（见「UCX / RDMA」）；**不要**默认照抄他机上的设备名或排除列表。
-6. **`nvidia_peermem`**：`bash test/check_nvidia_peermem.sh >> "${LOG_DIR}/summary.txt"`；失败按脚本提示 `modprobe` 后重启服务（跨机各节点都要做）。
+6. **`nvidia_peermem`**：`bash skills/test_model/qwen3-8b-pd-nixl/check_nvidia_peermem.sh >> "${LOG_DIR}/summary.txt"`；失败按脚本提示 `modprobe` 后重启服务（跨机各节点都要做）。
 7. **CUDA MPS（强烈建议，见下节）**：**要达到 NIXL PD 最优 KV 拷贝与 batch 评测性能，须在启动 `api_server` 之前在本机启用 NVIDIA MPS**。未开 MPS 时功能通常仍可用，但易出现 **`read_page_gpu_time` 数十秒级毛刺**、**`lm_eval` 单 batch 近百秒**；**`summary.txt` 须写明 MPS 是否已开启及验证方式**。
 
 ### 启动服务的命令模板（可变项）
@@ -83,7 +83,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 
 - **`UCX_NET_DEVICES`**：须覆盖本进程要用的 **RDMA 设备**；是否排除某些 HCA（例如数据面网卡）由**本机拓扑**决定，在 **`summary.txt`** 中写明依据。
 - **`UCX_TLS`**：常见 **`rc,cuda,gdr_copy`**；若环境不支持再按报错调整。
-- **IB 传 GPU KV** 需加载内核模块 **`nvidia_peermem`**（检测：**`test/check_nvidia_peermem.sh`**）。
+- **IB 传 GPU KV** 需加载内核模块 **`nvidia_peermem`**（检测：**`skills/test_model/qwen3-8b-pd-nixl/check_nvidia_peermem.sh`**）。
 
 #### 要达到最优性能：须开启 MPS
 
@@ -212,7 +212,7 @@ lm_eval --model local-completions \
 
 **模型目录**：首轮可 **`export MODEL_DIR=/mtc/models/qwen3-8b`**；路径报错时由用户提供本机 **`MODEL_DIR`**。
 
-1. **启动顺序**：**`pd_master`** → **`nvidia-smi` + export 四卡** → **设置 UCX** → **`nixl_prefill`** → **`nixl_decode`** → **`curl` warmup（须成功）** → **`lm_eval`**。
+1. **启动顺序**：**`bash skills/test_model/qwen3-8b-pd-nixl/check_nvidia_peermem.sh >> "${LOG_DIR}/summary.txt"`** → **`pd_master`** → **`nvidia-smi` + export 四卡** → **设置 UCX** → **`nixl_prefill`** → **`nixl_decode`** → **`curl` warmup（须成功）** → **`lm_eval`**。
 2. **不要用 health 接口**作为唯一依据；结合 **端口 listen** 与 **`pd_master.log` / `prefill.log` / `decode.log`**。
 3. **约每 20 秒**查看日志直至就绪或报错；异常写入 **`summary.txt`**。
 4. **`summary.txt`**：记录启动摘要、**`PREFILL_CUDA_DEVICES` / `DECODE_CUDA_DEVICES`** 与选卡依据、**`UCX_NET_DEVICES` 等**、**`curl` warmup 结果（或 `curl_warmup.log` 路径）**、评测关键输出、最终结论。
