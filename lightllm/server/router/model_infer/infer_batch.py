@@ -590,6 +590,8 @@ class InferReq:
         self.cur_output_len = 0
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
+        if hasattr(g_infer_context.req_manager, "init_compress_state"):
+            g_infer_context.req_manager.init_compress_state(req_idx=self.req_idx)
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
         # token healing mode 才被使用的管理对象

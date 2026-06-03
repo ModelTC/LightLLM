@@ -3,7 +3,7 @@ import collections
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 from lightllm.utils.log_utils import init_logger
-from .kv_cache_mem_manager import MemoryManager
+from .kv_cache_mem_manager import MemoryManager, DeepseekV4MemoryManager
 from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
@@ -298,4 +298,108 @@ class ReqManagerForMamba(ReqManager):
         # 同时，非连续对象的拷贝，可能存在效率问题。
         self.req_to_conv_state.buffer[:, dest_req_idx, ...] = conv_state
         self.req_to_ssm_state.buffer[:, dest_req_idx, ...] = ssm_state
+        return
+
+
+class DeepseekV4ReqManager(ReqManager):
+    """DeepSeek-V4 的请求级管理(锁定决策: SWA 全历史 + 不分页)。
+
+    在基类 ReqManager 之上补三类 V4 专有的 per-request 结构(均从 mem_manager 读取 n_c4/n_c128/
+    layer_to_*_idx/head_dim 等，避免重复配置):
+
+      * ``req_to_c4_indexs`` / ``req_to_c128_indexs`` —— (req, 窗口下标) -> 压缩池槽位。
+        窗口下标 = position // compress_rate;窗口关闭时由 layer-infer 写入,attention 读取前
+        n_windows 列即该 req 的全部压缩条目槽。未填充列为 0(不会被读到,语义同 req_to_token_indexs)。
+      * ``req_to_c4_state`` / ``req_to_c128_state`` / ``req_to_c4_indexer_state`` —— compressor 的
+        “在途窗口”累加状态(per req、per 压缩层),fp32。形状为
+        ``(kv_or_score, coff * ratio, coff * dim)``; c4 因 Ca/Cb overlap 取 ``coff=2``,
+        c128 取 ``coff=1``。score 初始化为 ``-inf``，与官方 reference compressor 的
+        ``kv_state``/``score_state`` 对齐。
+      * entry_count 不另存:= position // compress_rate,可由序列长度推出。
+    """
+
+    def __init__(self, max_request_num, max_sequence_length, mem_manager: DeepseekV4MemoryManager):
+        super().__init__(max_request_num, max_sequence_length, mem_manager)
+        assert isinstance(mem_manager, DeepseekV4MemoryManager)
+        self.n_c4 = mem_manager.n_c4
+        self.n_c128 = mem_manager.n_c128
+        head_dim = mem_manager.head_dim
+        indexer_head_dim = mem_manager.indexer_head_dim
+
+        # (req, 窗口) -> 压缩槽。列数取 ceil(max_seq / ratio) 留足余量。
+        c4_windows = (max_sequence_length + 4 - 1) // 4
+        c128_windows = (max_sequence_length + 128 - 1) // 128
+        self.req_to_c4_indexs = torch.zeros((max_request_num + 1, c4_windows), dtype=torch.int32, device="cuda")
+        self.req_to_c128_indexs = torch.zeros((max_request_num + 1, c128_windows), dtype=torch.int32, device="cuda")
+
+        # compressor 在途窗口累加状态(fp32): [kv_or_score, coff * ratio, coff * dim].
+        state_dtype = torch.float32
+        self.req_to_c4_state = LayerCache(
+            size=max_request_num + 1,
+            dtype=state_dtype,
+            shape=(2, 8, 2 * head_dim),
+            layer_num=self.n_c4,
+            device="cuda",
+        )
+        self.req_to_c128_state = LayerCache(
+            size=max_request_num + 1,
+            dtype=state_dtype,
+            shape=(2, 128, head_dim),
+            layer_num=self.n_c128,
+            device="cuda",
+        )
+        self.req_to_c4_indexer_state = LayerCache(
+            size=max_request_num + 1,
+            dtype=state_dtype,
+            shape=(2, 8, 2 * indexer_head_dim),
+            layer_num=self.n_c4,
+            device="cuda",
+        )
+        self._init_all_score_state()
+        return
+
+    def _init_all_score_state(self):
+        if self.n_c4 > 0:
+            self.req_to_c4_state.buffer[:, :, 1, ...].fill_(float("-inf"))
+            self.req_to_c4_indexer_state.buffer[:, :, 1, ...].fill_(float("-inf"))
+        if self.n_c128 > 0:
+            self.req_to_c128_state.buffer[:, :, 1, ...].fill_(float("-inf"))
+        return
+
+    def _reset_compress_cache_req(self, cache: LayerCache, req_idx: int):
+        if cache.layer_num == 0:
+            return
+        cache.buffer[:, req_idx, 0, ...].fill_(0)
+        cache.buffer[:, req_idx, 1, ...].fill_(float("-inf"))
+        return
+
+    def init_compress_state(self, req_idx: int):
+        """新请求开始时重置其 compressor 在途状态(对应 mamba 的 init_linear_att_state)。"""
+        if self.n_c4 > 0:
+            self._reset_compress_cache_req(self.req_to_c4_state, req_idx)
+            self._reset_compress_cache_req(self.req_to_c4_indexer_state, req_idx)
+        if self.n_c128 > 0:
+            self._reset_compress_cache_req(self.req_to_c128_state, req_idx)
+        return
+
+    def get_c4_compress_state(self, layer_index: int) -> torch.Tensor:
+        local = self.mem_manager.layer_to_c4_idx[layer_index]
+        return self.req_to_c4_state.buffer[local]
+
+    def get_c128_compress_state(self, layer_index: int) -> torch.Tensor:
+        local = self.mem_manager.layer_to_c128_idx[layer_index]
+        return self.req_to_c128_state.buffer[local]
+
+    def get_c4_indexer_compress_state(self, layer_index: int) -> torch.Tensor:
+        local = self.mem_manager.layer_to_c4_idx[layer_index]
+        return self.req_to_c4_indexer_state.buffer[local]
+
+    def free(self, free_req_indexes, free_token_index, free_c4_index=None, free_c128_index=None):
+        """释放 dense 槽(基类)+ 压缩槽。压缩槽由调用方(infer batch)从 req_to_c*_indexs 收集后传入,
+        与基类用 free_token_index 传 dense 槽的方式一致。"""
+        super().free(free_req_indexes, free_token_index)
+        if free_c4_index is not None and len(free_c4_index) > 0:
+            self.mem_manager.free_c4(free_c4_index)
+        if free_c128_index is not None and len(free_c128_index) > 0:
+            self.mem_manager.free_c128(free_c128_index)
         return
