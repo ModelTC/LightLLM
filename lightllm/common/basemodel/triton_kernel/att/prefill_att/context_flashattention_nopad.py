@@ -7,6 +7,7 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 
+from lightllm.platform import get_backend
 from lightllm.utils.device_utils import is_tesla
 
 
@@ -459,7 +460,10 @@ def _fwd_kernel_contiguous_kv(
 def context_attention_fwd_contiguous_kv(
     q, k, v, o, b_start_loc, b_kv_start_loc, b_seq_len, max_q_input_len, b_prompt_cache_len
 ):
-    BLOCK_M = 128 if not is_tesla() else 64
+    if is_tesla() or get_backend().name == "maca":
+        BLOCK_M = 64
+    else:
+        BLOCK_M = 128
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv

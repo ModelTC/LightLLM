@@ -804,8 +804,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--hardware_platform",
         type=str,
         default="cuda",
-        choices=["cuda", "musa", "ascend"],
-        help="""Hardware platform: cuda | musa | ascend""",
+        choices=["cuda", "musa", "ascend", "maca"],
+        help="""Hardware platform: cuda | musa | ascend | maca""",
     )
     parser.add_argument(
         "--enable_torch_fallback",

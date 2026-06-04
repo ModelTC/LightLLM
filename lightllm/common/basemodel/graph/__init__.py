@@ -6,6 +6,7 @@ DECODE_GRAPH_MAP = {
     "cuda": CudaGraph,
     "musa": CudaGraph,
     "ascend": AclGraph,
+    "maca": CudaGraph,
 }
 
 DecodeGraph.PLATFORM_CLASS_MAP = DECODE_GRAPH_MAP

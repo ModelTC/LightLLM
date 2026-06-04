@@ -1,12 +1,17 @@
+import inspect
 import torch
 import torch.nn.functional as F
 
 try:
     from xformers import ops as xformers_ops
     from xformers.ops import fmha
+
+    _HAS_DEVICE_ARG = "device" in inspect.signature(fmha.BlockDiagonalMask.from_seqlens).parameters
 except ImportError:
     xformers_ops = None
     fmha = None
+
+    _HAS_DEVICE_ARG = False
 
 from lightllm.common.basemodel.attention_vit.base_att import BaseVitAttBackend
 
@@ -34,7 +39,13 @@ class XformersVitAttBackend(BaseVitAttBackend):
         if max_seqlen:
             assert max(seqlens) <= max_seqlen
 
-        attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens, device=q.device)
+        # In xformers, the API for BlockDiagonalMask.from_seqlens changed across versions:
+        # - v0.0.26 and earlier: no `device` argument is supported
+        # - v0.0.27 and later: a `device` argument was added
+        if not _HAS_DEVICE_ARG:
+            attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens)
+        else:
+            attn_bias = fmha.BlockDiagonalMask.from_seqlens(seqlens, device=q.device)
 
         q_ = q.unsqueeze(0)  # [1, T, H, D]
         k_ = k.unsqueeze(0)  # [1, T, H, D]
