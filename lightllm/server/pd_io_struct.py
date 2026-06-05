@@ -302,7 +302,7 @@ class NIXLChunckedTransTask:
                 return True
             return False
         else:
-            if time.time() - self.start_trans_time > self.time_out_secs + 88:
+            if time.time() - self.start_trans_time > 36:
                 return True
             else:
                 return False
