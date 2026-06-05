@@ -134,6 +134,7 @@ class _DecodeTransModule:
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
         self.request_page_task_queue = queue.Queue()
+        self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
@@ -149,6 +150,7 @@ class _DecodeTransModule:
             self.dispatch_task_loop,
             self.accept_peer_task_loop,
             self.request_page_loop,
+            self.read_page_to_mems_loop,
             self.success_loop,
             self.fail_loop,
         ]:
@@ -176,15 +178,15 @@ class _DecodeTransModule:
             if isinstance(obj, NIXLChunckedTransTaskGroup):
                 self.recv_task_group_queue.put(obj)
             elif isinstance(obj, NIXLAbortReq):
-                self._abort(cmd=obj)
+                self._abort(request_id=obj.request_id)
             else:
                 assert False, f"recv error obj {obj}"
 
-    def _abort(self, cmd: NIXLAbortReq, error_info: str = "aborted req"):
+    def _abort(self, request_id: int, error_info: str = "aborted req"):
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == cmd.request_id and trans_task.nixl_dst_page_index is None:
+                if trans_task.request_id == request_id and trans_task.nixl_dst_page_index is None:
                     # 对于 已经分配了page index 的任务，不能直接失败，需要两边走完正常流程再失败，不然可能
                     # 出现复杂的异步协同问题。
                     aborted_tasks.append(self.waiting_dict.pop(key))
@@ -204,7 +206,7 @@ class _DecodeTransModule:
                     if task.transfer_kv_num() != 0:
                         self.waiting_dict[task.get_key()] = task
                     else:
-                        self.success_queue.put(task)
+                        self.success_queue.put((None, None, task))
 
             # up status
             task = trans_task_group.task_list[0]
@@ -257,7 +259,8 @@ class _DecodeTransModule:
                         if notify_obj.error_info is not None:
                             # 直接清理掉所有的相关请求。
                             self._abort(
-                                cmd=NIXLAbortReq(request_id=notify_obj.request_id), error_info=notify_obj.error_info
+                                request_id=notify_obj.request_id,
+                                error_info=notify_obj.error_info,
                             )
                             continue
 
@@ -290,7 +293,7 @@ class _DecodeTransModule:
                             if local_trans_task is not None:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
-                                self.success_queue.put(local_trans_task)
+                                self.ready_page_task_queue.put(local_trans_task)
                                 logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
                                 logger.warning(
@@ -340,11 +343,37 @@ class _DecodeTransModule:
         return
 
     @log_exception
+    def read_page_to_mems_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            trans_task: NIXLChunckedTransTask = self.ready_page_task_queue.get()
+            copy_start_event = torch.cuda.Event(enable_timing=True)
+            copy_end_event = torch.cuda.Event(enable_timing=True)
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                copy_start_event.record(self.copy_cuda_stream)
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.read_page_kv_move_buffer_to_mem(
+                    trans_task.mem_indexes,
+                    page_index=trans_task.nixl_dst_page_index,
+                    dp_index=trans_task.decode_dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
+                copy_end_event.record(self.copy_cuda_stream)
+            self.success_queue.put((copy_end_event, copy_start_event, trans_task))
+
+    @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            trans_task = self.success_queue.get()
+            copy_end_event, copy_start_event, trans_task = self.success_queue.get()
             trans_task: NIXLChunckedTransTask = trans_task
+            copy_end_event: Optional[torch.cuda.Event] = copy_end_event
+            copy_start_event: Optional[torch.cuda.Event] = copy_start_event
+            read_page_gpu_time_ms = -1.0
+            if copy_end_event is not None:
+                copy_end_event.synchronize()
+                read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
@@ -356,7 +385,13 @@ class _DecodeTransModule:
             self.task_out_queue.put(ret)
 
             if trans_task.start_trans_time is not None:
-                logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
+                if read_page_gpu_time_ms >= 0:
+                    logger.info(
+                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                    )
+                else:
+                    logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
             else:
                 logger.info(f"trans task ret success:{ret}")
 
@@ -379,5 +414,8 @@ class _DecodeTransModule:
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。
-                self._abort(cmd=NIXLAbortReq(request_id=trans_task.request_id), error_info=trans_task.error_info)
+                self._abort(
+                    request_id=trans_task.request_id,
+                    error_info=trans_task.error_info,
+                )
                 self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
