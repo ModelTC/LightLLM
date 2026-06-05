@@ -380,3 +380,4 @@ class _DecodeTransModule:
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。
                 self._abort(cmd=NIXLAbortReq(request_id=trans_task.request_id), error_info=trans_task.error_info)
+                self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)

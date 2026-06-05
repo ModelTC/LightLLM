@@ -179,6 +179,11 @@ class NixlKVTransporter:
         return
 
     def send_error_info_to_prefill_node(self, trans_task: NIXLChunckedTransTask):
+        # decode node 主动发送错误信息给 prefill node, 但是只有到达一定阶段的任务才有对端的信息
+        # 才能发送
+        if trans_task.prefill_agent_name is None:
+            return
+
         try:
             prefill_agent_name = trans_task.prefill_agent_name
             if prefill_agent_name not in self.remote_agents:
