@@ -6,12 +6,16 @@ from lightllm.utils.log_utils import init_logger
 from .kv_cache_mem_manager import MemoryManager, DeepseekV4MemoryManager
 from typing import List, Optional, TYPE_CHECKING
 from lightllm.common.basemodel.triton_kernel.gen_sampling_params import token_id_counter
-from lightllm.common.basemodel.triton_kernel.gen_sampling_params import update_req_to_token_id_counter
+from lightllm.common.basemodel.triton_kernel.gen_sampling_params import (
+    update_req_to_token_id_counter,
+)
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
-from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import LinearAttCacheManager
+from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import (
+    LinearAttCacheManager,
+)
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -131,11 +135,13 @@ class ReqSamplingParamsManager:
             )
         elif self.penalty_counter_mode == "pin_mem_counter":
             self.req_to_out_token_id_counter = torch.zeros(
-                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
+                (max_request_num + 1, self.vocab_size),
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
             )
 
     def init_req_sampling_params(self, req: "InferReq"):
-
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
@@ -165,14 +171,18 @@ class ReqSamplingParamsManager:
                     dtype=torch.int32,
                 ).cuda(non_blocking=True)
                 token_id_counter(
-                    prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
+                    prompt_ids=prompt_ids,
+                    out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx],
                 )
                 torch.cuda.current_stream().synchronize()
 
         return
 
     def update_reqs_out_token_counter_gpu(
-        self, b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, mask: torch.Tensor = None
+        self,
+        b_req_idx: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        mask: torch.Tensor = None,
     ):
         if self.penalty_counter_mode not in ["gpu_counter", "pin_mem_counter"]:
             return
@@ -188,7 +198,10 @@ class ReqSamplingParamsManager:
         return
 
     def update_reqs_token_counter(
-        self, req_objs: List["InferReq"], next_token_ids: List[int], accept_mark: Optional[List[List[bool]]] = None
+        self,
+        req_objs: List["InferReq"],
+        next_token_ids: List[int],
+        accept_mark: Optional[List[List[bool]]] = None,
     ):
         if self.penalty_counter_mode != "cpu_counter":
             return
@@ -230,7 +243,13 @@ class ReqSamplingParamsManager:
 
 
 class ReqManagerForMamba(ReqManager):
-    def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
+    def __init__(
+        self,
+        max_request_num,
+        max_sequence_length,
+        mem_manager,
+        linear_config: LinearAttCacheConfig,
+    ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
         self.big_page_token_num = (
@@ -275,7 +294,6 @@ class ReqManagerForMamba(ReqManager):
         return conv_states, ssm_states
 
     def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
-
         from .linear_att_cache_manager import LinearAttCacheManager
 
         big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
@@ -304,8 +322,9 @@ class ReqManagerForMamba(ReqManager):
 class DeepseekV4ReqManager(ReqManager):
     """DeepSeek-V4 的请求级管理(锁定决策: SWA 全历史 + 不分页)。
 
-    在基类 ReqManager 之上补三类 V4 专有的 per-request 结构(均从 mem_manager 读取 n_c4/n_c128/
-    layer_to_*_idx/head_dim 等，避免重复配置):
+    在基类 ReqManager 之上补三类 V4 专有的 per-request 结构。该对象在 mem manager profile 前创建，
+    所以初始化只依赖 config 派生出的 compress_rates/head_dim/indexer_head_dim；真实 mem_manager
+    会在 `_init_mem_manager()` 后通过 `bind_mem_manager()` 接入。
 
       * ``req_to_c4_indexs`` / ``req_to_c128_indexs`` —— (req, 窗口下标) -> 压缩池槽位。
         窗口下标 = position // compress_rate;窗口关闭时由 layer-infer 写入,attention 读取前
@@ -318,19 +337,48 @@ class DeepseekV4ReqManager(ReqManager):
       * entry_count 不另存:= position // compress_rate,可由序列长度推出。
     """
 
-    def __init__(self, max_request_num, max_sequence_length, mem_manager: DeepseekV4MemoryManager):
+    def __init__(
+        self,
+        max_request_num,
+        max_sequence_length,
+        mem_manager: Optional[DeepseekV4MemoryManager] = None,
+        compress_rates: Optional[List[int]] = None,
+        head_dim: Optional[int] = None,
+        indexer_head_dim: Optional[int] = None,
+    ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
-        assert isinstance(mem_manager, DeepseekV4MemoryManager)
-        self.n_c4 = mem_manager.n_c4
-        self.n_c128 = mem_manager.n_c128
-        head_dim = mem_manager.head_dim
-        indexer_head_dim = mem_manager.indexer_head_dim
+        if mem_manager is not None:
+            assert isinstance(mem_manager, DeepseekV4MemoryManager)
+            compress_rates = mem_manager.compress_rates
+            head_dim = mem_manager.head_dim
+            indexer_head_dim = mem_manager.indexer_head_dim
+        assert compress_rates is not None, "DeepSeek-V4 req manager requires compress_rates"
+        assert head_dim is not None, "DeepSeek-V4 req manager requires head_dim"
+        assert indexer_head_dim is not None, "DeepSeek-V4 req manager requires indexer_head_dim"
+
+        self.compress_rates = list(compress_rates)
+        self.n_c4 = sum(1 for r in self.compress_rates if r == 4)
+        self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
+        self.head_dim = head_dim
+        self.indexer_head_dim = indexer_head_dim
+        self.layer_to_c4_idx = {}
+        self.layer_to_c128_idx = {}
+        c4 = c128 = 0
+        for lid, r in enumerate(self.compress_rates):
+            if r == 4:
+                self.layer_to_c4_idx[lid] = c4
+                c4 += 1
+            elif r == 128:
+                self.layer_to_c128_idx[lid] = c128
+                c128 += 1
 
         # (req, 窗口) -> 压缩槽。列数取 ceil(max_seq / ratio) 留足余量。
         c4_windows = (max_sequence_length + 4 - 1) // 4
         c128_windows = (max_sequence_length + 128 - 1) // 128
         self.req_to_c4_indexs = torch.zeros((max_request_num + 1, c4_windows), dtype=torch.int32, device="cuda")
         self.req_to_c128_indexs = torch.zeros((max_request_num + 1, c128_windows), dtype=torch.int32, device="cuda")
+        self._c4_entry_counts = [0 for _ in range(max_request_num + 1)]
+        self._c128_entry_counts = [0 for _ in range(max_request_num + 1)]
 
         # compressor 在途窗口累加状态(fp32): [kv_or_score, coff * ratio, coff * dim].
         state_dtype = torch.float32
@@ -355,7 +403,37 @@ class DeepseekV4ReqManager(ReqManager):
             layer_num=self.n_c4,
             device="cuda",
         )
+        self.req_to_c4_state_pool = LayerCache(
+            size=max_request_num + 1,
+            dtype=state_dtype,
+            shape=(1, 8, 4 * head_dim),
+            layer_num=self.n_c4,
+            device="cuda",
+        )
+        self.req_to_c128_state_pool = LayerCache(
+            size=max_request_num + 1,
+            dtype=state_dtype,
+            shape=(1, 128, 2 * head_dim),
+            layer_num=self.n_c128,
+            device="cuda",
+        )
+        self.req_to_c4_indexer_state_pool = LayerCache(
+            size=max_request_num + 1,
+            dtype=state_dtype,
+            shape=(1, 8, 4 * indexer_head_dim),
+            layer_num=self.n_c4,
+            device="cuda",
+        )
+        self._runtime_states = [{} for _ in range(max_request_num + 1)]
         self._init_all_score_state()
+        return
+
+    def bind_mem_manager(self, mem_manager: DeepseekV4MemoryManager):
+        assert isinstance(mem_manager, DeepseekV4MemoryManager)
+        assert self.compress_rates == mem_manager.compress_rates
+        assert self.head_dim == mem_manager.head_dim
+        assert self.indexer_head_dim == mem_manager.indexer_head_dim
+        self.mem_manager = mem_manager
         return
 
     def _init_all_score_state(self):
@@ -373,33 +451,184 @@ class DeepseekV4ReqManager(ReqManager):
         cache.buffer[:, req_idx, 1, ...].fill_(float("-inf"))
         return
 
+    def _reset_state_pool_req(self, cache: LayerCache, req_idx: int):
+        if cache.layer_num == 0:
+            return
+        cache.buffer[:, req_idx, ...].fill_(0)
+        return
+
     def init_compress_state(self, req_idx: int):
         """新请求开始时重置其 compressor 在途状态(对应 mamba 的 init_linear_att_state)。"""
+        self.clear_runtime_state(req_idx)
+        c4, c128 = self.pop_compress_indices_for_req(req_idx)
+        self.free_compress_indices(free_c4_index=c4, free_c128_index=c128)
         if self.n_c4 > 0:
             self._reset_compress_cache_req(self.req_to_c4_state, req_idx)
             self._reset_compress_cache_req(self.req_to_c4_indexer_state, req_idx)
+            self._reset_state_pool_req(self.req_to_c4_state_pool, req_idx)
+            self._reset_state_pool_req(self.req_to_c4_indexer_state_pool, req_idx)
         if self.n_c128 > 0:
             self._reset_compress_cache_req(self.req_to_c128_state, req_idx)
+            self._reset_state_pool_req(self.req_to_c128_state_pool, req_idx)
         return
 
-    def get_c4_compress_state(self, layer_index: int) -> torch.Tensor:
-        local = self.mem_manager.layer_to_c4_idx[layer_index]
-        return self.req_to_c4_state.buffer[local]
+    def _ensure_compress_slots(self, req_idx: int, ratio: int, entry_start: int, entry_count: int) -> torch.Tensor:
+        if entry_count == 0:
+            return torch.empty((0,), dtype=torch.int32, device="cuda")
+        assert entry_start >= 0 and entry_count >= 0
+        assert self.mem_manager is not None, "DeepSeek-V4 mem manager is not bound yet"
+        if ratio == 4:
+            table = self.req_to_c4_indexs
+            counts = self._c4_entry_counts
+            alloc = self.mem_manager.alloc_c4
+        elif ratio == 128:
+            table = self.req_to_c128_indexs
+            counts = self._c128_entry_counts
+            alloc = self.mem_manager.alloc_c128
+        else:
+            raise AssertionError(f"invalid DeepSeek-V4 compress ratio {ratio}")
 
-    def get_c128_compress_state(self, layer_index: int) -> torch.Tensor:
-        local = self.mem_manager.layer_to_c128_idx[layer_index]
-        return self.req_to_c128_state.buffer[local]
+        required_count = entry_start + entry_count
+        assert required_count <= table.shape[1], (
+            f"DeepSeek-V4 compressed slot table overflow: req={req_idx} "
+            f"ratio={ratio} required={required_count} capacity={table.shape[1]}"
+        )
+        old_count = counts[req_idx]
+        if required_count > old_count:
+            new_slots_cpu = alloc(required_count - old_count)
+            table[req_idx, old_count:required_count] = new_slots_cpu.cuda(non_blocking=True)
+            counts[req_idx] = required_count
+        return table[req_idx, entry_start:required_count]
 
-    def get_c4_indexer_compress_state(self, layer_index: int) -> torch.Tensor:
-        local = self.mem_manager.layer_to_c4_idx[layer_index]
-        return self.req_to_c4_indexer_state.buffer[local]
+    def ensure_c4_slots(self, req_idx: int, entry_start: int, entry_count: int) -> torch.Tensor:
+        return self._ensure_compress_slots(req_idx, 4, entry_start, entry_count)
 
-    def free(self, free_req_indexes, free_token_index, free_c4_index=None, free_c128_index=None):
-        """释放 dense 槽(基类)+ 压缩槽。压缩槽由调用方(infer batch)从 req_to_c*_indexs 收集后传入,
-        与基类用 free_token_index 传 dense 槽的方式一致。"""
-        super().free(free_req_indexes, free_token_index)
+    def ensure_c128_slots(self, req_idx: int, entry_start: int, entry_count: int) -> torch.Tensor:
+        return self._ensure_compress_slots(req_idx, 128, entry_start, entry_count)
+
+    def ensure_compress_slots(self, layer_index: int, req_idx: int, entry_start: int, entry_count: int) -> torch.Tensor:
+        ratio = self.compress_rates[layer_index]
+        if ratio == 4:
+            return self.ensure_c4_slots(req_idx, entry_start, entry_count)
+        if ratio == 128:
+            return self.ensure_c128_slots(req_idx, entry_start, entry_count)
+        raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
+
+    def pop_compress_indices_for_req(self, req_idx: int):
+        c4_count = self._c4_entry_counts[req_idx]
+        if c4_count > 0:
+            c4 = self.req_to_c4_indexs[req_idx, :c4_count].clone()
+            self.req_to_c4_indexs[req_idx, :c4_count].fill_(0)
+            self._c4_entry_counts[req_idx] = 0
+        else:
+            c4 = None
+
+        c128_count = self._c128_entry_counts[req_idx]
+        if c128_count > 0:
+            c128 = self.req_to_c128_indexs[req_idx, :c128_count].clone()
+            self.req_to_c128_indexs[req_idx, :c128_count].fill_(0)
+            self._c128_entry_counts[req_idx] = 0
+        else:
+            c128 = None
+        return c4, c128
+
+    def free_compress_indices(self, free_c4_index=None, free_c128_index=None):
         if free_c4_index is not None and len(free_c4_index) > 0:
             self.mem_manager.free_c4(free_c4_index)
         if free_c128_index is not None and len(free_c128_index) > 0:
             self.mem_manager.free_c128(free_c128_index)
+        return
+
+    def alloc(self):
+        req_idx = super().alloc()
+        if req_idx is not None:
+            self.init_compress_state(req_idx)
+        return req_idx
+
+    def clear_runtime_state(self, req_idx: int):
+        self._runtime_states[req_idx].clear()
+        if self.mem_manager is not None and hasattr(self.mem_manager, "free_swa_for_req"):
+            self.mem_manager.free_swa_for_req(req_idx)
+        return
+
+    def set_runtime_state(self, req_idx: int, layer_index: int, state: dict):
+        self._runtime_states[req_idx][layer_index] = state
+        return
+
+    def get_runtime_state(self, req_idx: int, layer_index: int):
+        return self._runtime_states[req_idx][layer_index]
+
+    def get_compress_state_for_req(self, layer_index: int, req_idx: int):
+        if self.compress_rates[layer_index] == 4:
+            state = self.get_c4_compress_state(layer_index)
+        elif self.compress_rates[layer_index] == 128:
+            state = self.get_c128_compress_state(layer_index)
+        else:
+            raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
+        return state[req_idx, 0], state[req_idx, 1]
+
+    def get_compress_state_pool_for_req(self, layer_index: int, req_idx: int):
+        if self.compress_rates[layer_index] == 4:
+            cache = self.req_to_c4_state_pool
+            local = self.layer_to_c4_idx[layer_index]
+        elif self.compress_rates[layer_index] == 128:
+            cache = self.req_to_c128_state_pool
+            local = self.layer_to_c128_idx[layer_index]
+        else:
+            raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
+        return cache.buffer[local, req_idx]
+
+    def get_c4_compress_state(self, layer_index: int) -> torch.Tensor:
+        local = self.layer_to_c4_idx[layer_index]
+        return self.req_to_c4_state.buffer[local]
+
+    def get_c128_compress_state(self, layer_index: int) -> torch.Tensor:
+        local = self.layer_to_c128_idx[layer_index]
+        return self.req_to_c128_state.buffer[local]
+
+    def get_c4_indexer_compress_state(self, layer_index: int) -> torch.Tensor:
+        local = self.layer_to_c4_idx[layer_index]
+        return self.req_to_c4_indexer_state.buffer[local]
+
+    def get_c4_indexer_state_pool_for_req(self, layer_index: int, req_idx: int) -> torch.Tensor:
+        local = self.layer_to_c4_idx[layer_index]
+        return self.req_to_c4_indexer_state_pool.buffer[local, req_idx]
+
+    def free(
+        self,
+        free_req_indexes,
+        free_token_index,
+        free_c4_index=None,
+        free_c128_index=None,
+    ):
+        """释放 dense 槽(基类)+ 压缩槽。压缩槽由调用方(infer batch)从 req_to_c*_indexs 收集后传入,
+        与基类用 free_token_index 传 dense 槽的方式一致。"""
+        for req_index in free_req_indexes:
+            self.clear_runtime_state(req_index)
+        super().free(free_req_indexes, free_token_index)
+        self.free_compress_indices(free_c4_index=free_c4_index, free_c128_index=free_c128_index)
+        return
+
+    def free_req(self, free_req_index: int):
+        self.clear_runtime_state(free_req_index)
+        c4, c128 = self.pop_compress_indices_for_req(free_req_index)
+        self.free_compress_indices(free_c4_index=c4, free_c128_index=c128)
+        return super().free_req(free_req_index)
+
+    def free_all(self):
+        super().free_all()
+        self._runtime_states = [{} for _ in range(self.max_request_num + 1)]
+        self._c4_entry_counts = [0 for _ in range(self.max_request_num + 1)]
+        self._c128_entry_counts = [0 for _ in range(self.max_request_num + 1)]
+        if self.n_c4 > 0:
+            self.req_to_c4_indexs.fill_(0)
+            self.req_to_c4_state.buffer.fill_(0)
+            self.req_to_c4_indexer_state.buffer.fill_(0)
+            self.req_to_c4_state_pool.buffer.fill_(0)
+            self.req_to_c4_indexer_state_pool.buffer.fill_(0)
+        if self.n_c128 > 0:
+            self.req_to_c128_indexs.fill_(0)
+            self.req_to_c128_state.buffer.fill_(0)
+            self.req_to_c128_state_pool.buffer.fill_(0)
+        self._init_all_score_state()
         return

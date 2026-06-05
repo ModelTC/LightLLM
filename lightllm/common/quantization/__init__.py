@@ -68,6 +68,9 @@ class Quantcfg:
             expert_dtype = self.expert_dtype or self.network_config_.get("expert_dtype", None)
             if expert_dtype is None:
                 return
+            if expert_dtype == "fp4" and self.network_config_.get("model_type") == "deepseek_v4" and not is_sm100_gpu():
+                logger.info("skip generic fused_moe quant mapping for DeepSeek-V4 fp4 experts on non-SM100 GPUs")
+                return
             target = self._get_expert_quant_type(expert_dtype)
             for layer_num in range(self.layer_num):
                 if self.expert_dtype is not None:

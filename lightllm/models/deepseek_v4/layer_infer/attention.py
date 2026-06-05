@@ -1,34 +1,101 @@
+import os
+
 import torch
-import torch.nn.functional as F
-
-# DeepSeek-V4 attention: MLA with a single shared KV head (head_dim=512), per-head learnable attention
-# sink, and a candidate set = sliding-window tokens (size `window`) ++ compressed KV entries. Pure-torch
-# transcription of the bundled reference (inference/model.py Attention.forward + kernel.py sparse_attn).
-# Correctness-first prefill path. head_dim=512 > 256 so FlashAttention is unusable anyway; a fused
-# triton sparse-gather kernel is a perf follow-up.
 
 
-def torch_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
-    """Gather-then-softmax attention with a per-head sink, matching reference kernel.sparse_attn.
+FLASHMLA_MIN_HEADS = 64
+FLASHMLA_TOPK_MULTIPLE = 128
+DSV4_DEBUG_TORCH_SPARSE_ATTN = os.getenv("DSV4_DEBUG_TORCH_SPARSE_ATTN", "0") == "1"
 
-    q:[b,m,h,d], kv:[b,n,d] (single KV head shared over h), attn_sink:[h] (fp32),
-    topk_idxs:[b,m,K] int (-1 = invalid/skip). Returns o:[b,m,h,d].
+
+def _pad_topk_for_flashmla(topk_idxs):
+    K = topk_idxs.shape[-1]
+    padded_K = ((K + FLASHMLA_TOPK_MULTIPLE - 1) // FLASHMLA_TOPK_MULTIPLE) * FLASHMLA_TOPK_MULTIPLE
+    if padded_K == K:
+        return topk_idxs.contiguous()
+    padded = torch.full((*topk_idxs.shape[:-1], padded_K), -1, device=topk_idxs.device, dtype=topk_idxs.dtype)
+    padded[..., :K] = topk_idxs
+    return padded.contiguous()
+
+
+def _compact_topk_indices(topk_idxs, kv_len):
+    valid = (topk_idxs >= 0) & (topk_idxs < kv_len)
+    topk_lens = valid.sum(dim=-1).to(torch.int32)
+    if valid.all():
+        return topk_idxs.contiguous(), topk_lens.contiguous()
+
+    compact = torch.full_like(topk_idxs, -1)
+    ranks = valid.to(torch.int32).cumsum(dim=-1) - 1
+    rows = torch.arange(topk_idxs.shape[0], device=topk_idxs.device).unsqueeze(1).expand_as(topk_idxs)
+    compact[rows[valid], ranks[valid].long()] = topk_idxs[valid]
+    return compact.contiguous(), topk_lens.contiguous()
+
+
+def _pad_heads_for_flashmla(q, attn_sink):
+    h = q.shape[1]
+    if h == FLASHMLA_MIN_HEADS:
+        return q.contiguous(), attn_sink.to(torch.float32).contiguous(), h
+    if h > FLASHMLA_MIN_HEADS:
+        raise RuntimeError(f"DeepSeek-V4 FlashMLA sparse attention only supports up to 64 local heads, got {h}")
+
+    q_pad = q.new_zeros(q.shape[0], FLASHMLA_MIN_HEADS, q.shape[2])
+    q_pad[:, :h] = q
+    sink_pad = torch.full((FLASHMLA_MIN_HEADS,), -float("inf"), device=q.device, dtype=torch.float32)
+    sink_pad[:h] = attn_sink.to(torch.float32)
+    return q_pad.contiguous(), sink_pad.contiguous(), h
+
+
+def _torch_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
+    q0 = q[0].float()
+    kv0 = kv[0].float()
+    indices = topk_idxs[0].long()
+    valid = (indices >= 0) & (indices < kv0.shape[0])
+    safe_indices = torch.where(valid, indices, torch.zeros_like(indices))
+    kv_sel = kv0[safe_indices]
+    scores = torch.einsum("mhd,mkd->mhk", q0, kv_sel) * scale
+    scores = scores.masked_fill(~valid.unsqueeze(1), float("-inf"))
+    sink = attn_sink.float().view(1, -1)
+    max_scores = torch.maximum(scores.max(dim=-1).values, sink)
+    exp_scores = torch.exp(scores - max_scores.unsqueeze(-1)).masked_fill(~valid.unsqueeze(1), 0.0)
+    exp_sink = torch.exp(sink - max_scores)
+    denom = exp_scores.sum(dim=-1) + exp_sink
+    out = torch.einsum("mhk,mkd->mhd", exp_scores / denom.unsqueeze(-1), kv_sel)
+    return out.unsqueeze(0).to(q.dtype)
+
+
+def vllm_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
+    """DeepSeek-V4 sparse MLA through vLLM FlashMLA.
+
+    q:[1,m,h,d], kv:[1,n,d] (single KV head shared over h), attn_sink:[h],
+    topk_idxs:[1,m,K] int (-1 = invalid/skip). Returns o:[1,m,h,d].
     """
     b, m, h, d = q.shape
-    n = kv.shape[1]
-    K = topk_idxs.shape[-1]
-    idx = topk_idxs.clamp(min=0).long()  # [b,m,K]
-    keys = torch.gather(kv.unsqueeze(1).expand(b, m, n, d), 2, idx.unsqueeze(-1).expand(b, m, K, d))  # [b,m,K,d]
-    qf, kf = q.float(), keys.float()
-    scores = torch.einsum("bmhd,bmkd->bmhk", qf, kf) * scale  # [b,m,h,K]
-    valid = (topk_idxs != -1).unsqueeze(2)  # [b,m,1,K]
-    scores = scores.masked_fill(~valid, float("-inf"))
-    mx = scores.amax(dim=-1, keepdim=True)  # [b,m,h,1]
-    mx = torch.nan_to_num(mx, neginf=0.0)
-    ex = (scores - mx).exp()  # [b,m,h,K]
-    denom = ex.sum(-1) + (attn_sink.view(1, 1, h) - mx.squeeze(-1)).exp()  # [b,m,h]
-    o = torch.einsum("bmhk,bmkd->bmhd", ex, kf) / denom.unsqueeze(-1)
-    return o.to(q.dtype)
+    if b != 1 or kv.shape[0] != 1 or topk_idxs.shape[0] != 1:
+        raise RuntimeError("DeepSeek-V4 FlashMLA sparse attention wrapper expects one request per call")
+    if d != 512:
+        raise RuntimeError(f"DeepSeek-V4 FlashMLA sparse attention requires head_dim=512, got {d}")
+    if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
+        raise RuntimeError(f"DeepSeek-V4 FlashMLA sparse attention requires bf16 q/kv, got {q.dtype}/{kv.dtype}")
+
+    if DSV4_DEBUG_TORCH_SPARSE_ATTN:
+        return _torch_sparse_attn(q, kv, attn_sink, topk_idxs, scale)
+
+    from vllm.third_party.flashmla.flash_mla_interface import flash_mla_sparse_fwd
+
+    q_pad, sink_pad, real_heads = _pad_heads_for_flashmla(q[0], attn_sink)
+    indices, topk_lens = _compact_topk_indices(topk_idxs[0].to(torch.int32), kv.shape[1])
+    indices = _pad_topk_for_flashmla(indices).unsqueeze(1)
+    kv_flat = kv[0].unsqueeze(1).contiguous()
+    out, _, _ = flash_mla_sparse_fwd(
+        q=q_pad,
+        kv=kv_flat,
+        indices=indices,
+        sm_scale=scale,
+        attn_sink=sink_pad,
+        topk_length=topk_lens,
+        out=None,
+    )
+    return out[:, :real_heads].unsqueeze(0).to(q.dtype)
 
 
 def build_prefill_topk_idxs(seqlen, window, ratio, n_window, device):
@@ -40,11 +107,9 @@ def build_prefill_topk_idxs(seqlen, window, ratio, n_window, device):
     entries are attended (matches the reference for short context).
     """
     t = torch.arange(seqlen, device=device)
-    # sliding window: query t attends tokens [max(0, t-window+1) .. t]
-    j = torch.arange(n_window, device=device)
-    win = j.unsqueeze(0).expand(seqlen, n_window).clone()  # [s, n_window]
-    win_valid = (j.unsqueeze(0) <= t.unsqueeze(1)) & (j.unsqueeze(0) > (t.unsqueeze(1) - window))
-    win = torch.where(win_valid, win, torch.full_like(win, -1))
+    offsets = torch.arange(window, device=device)
+    win = t.unsqueeze(1) - (window - 1 - offsets).unsqueeze(0)
+    win = torch.where(win >= 0, win, torch.full_like(win, -1))
     if ratio:
         ncomp = seqlen // ratio
         c = torch.arange(ncomp, device=device)

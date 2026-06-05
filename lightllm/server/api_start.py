@@ -10,7 +10,11 @@ from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import (
+    set_env_start_args,
+    set_unique_server_name,
+    get_unique_server_name,
+)
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
@@ -23,6 +27,8 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    get_model_type,
+    get_config_json,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -83,7 +89,14 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
+    if args.run_mode not in [
+        "normal",
+        "prefill",
+        "decode",
+        "nixl_prefill",
+        "nixl_decode",
+        "visual_only",
+    ]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -107,6 +120,23 @@ def normal_or_p_d_start(args):
         args.enable_multimodal = False
     else:
         args.enable_multimodal = True
+
+    model_type = get_model_type(args.model_dir)
+    if model_type == "deepseek_v4":
+        if args.run_mode != "normal":
+            raise NotImplementedError("DeepSeek-V4 currently supports only run_mode=normal in LightLLM.")
+        if args.enable_cpu_cache or args.enable_disk_cache:
+            raise NotImplementedError("DeepSeek-V4 CPU/disk KV cache is not supported yet.")
+        if args.mtp_mode is not None or args.mtp_draft_model_dir is not None or args.mtp_step != 0:
+            raise NotImplementedError("DeepSeek-V4 MTP/speculative decoding is not supported yet.")
+        if args.enable_ep_moe:
+            raise NotImplementedError("DeepSeek-V4 EP MoE is not supported yet; use TP for now.")
+        if "prompt_cache_kv_buffer" in get_config_json(args.model_dir):
+            raise NotImplementedError("DeepSeek-V4 prompt_cache_kv_buffer is not supported yet.")
+        if not args.disable_dynamic_prompt_cache:
+            logger.info("DeepSeek-V4 runtime state does not support radix prompt cache yet; disabling it.")
+        args.disable_dynamic_prompt_cache = True
+        args.use_dynamic_prompt_cache = False
 
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
@@ -333,7 +363,14 @@ def normal_or_p_d_start(args):
         from lightllm.utils.config_utils import get_dtype
 
         args.data_type = get_dtype(args.model_dir)
-        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+        assert args.data_type in [
+            "fp16",
+            "float16",
+            "bf16",
+            "bfloat16",
+            "fp32",
+            "float32",
+        ]
 
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
@@ -432,7 +469,6 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
-
         if not args.visual_use_proxy_mode:
             from .visualserver.manager import start_visual_process
 
@@ -616,7 +652,14 @@ def visual_only_start(args):
         from lightllm.utils.config_utils import get_dtype
 
         args.data_type = get_dtype(args.model_dir)
-        assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+        assert args.data_type in [
+            "fp16",
+            "float16",
+            "bf16",
+            "bfloat16",
+            "fp32",
+            "float32",
+        ]
 
     logger.info(f"alloced ports: {can_use_ports}")
 

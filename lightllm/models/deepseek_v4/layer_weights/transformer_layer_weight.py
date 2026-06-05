@@ -1,3 +1,5 @@
+import threading
+
 import torch
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
@@ -10,10 +12,16 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.registry import QUANTMETHODS
+from lightllm.utils.log_utils import init_logger
 from ..triton_kernel.quant_convert import dequant_fp8_block_to_bf16
 
 
+logger = init_logger(__name__)
+
+
 class DeepseekV4FP4ExpertsWeight(BaseWeightTpl):
+    _marlin_pack_lock = threading.Lock()
+
     def __init__(self, weight_prefix, n_routed_experts, hidden_size, moe_intermediate_size, data_type):
         super().__init__(data_type=data_type)
         self.weight_prefix = weight_prefix
@@ -23,10 +31,21 @@ class DeepseekV4FP4ExpertsWeight(BaseWeightTpl):
         self.split_inter_size = moe_intermediate_size // self.tp_world_size_
         self.local_expert_ids = list(range(n_routed_experts))
         self.expert_idx_to_local_idx = {expert_idx: expert_idx for expert_idx in self.local_expert_ids}
-        self._create_weight()
+        self.moe_backend = None
+        self.moe_backend_error = None
+        self._marlin_checked = False
+        self._load_lock = threading.Lock()
+        self.load_ok = {
+            name: [False] * n_routed_experts for name in ("w1", "w1_scale", "w2", "w2_scale", "w3", "w3_scale")
+        }
 
     def _create_weight(self):
-        device = f"cuda:{self.device_id_}"
+        self._ensure_raw_fp4_weight()
+
+    def _ensure_raw_fp4_weight(self):
+        if hasattr(self, "w1"):
+            return
+        device = "cpu"
         n = self.n_routed_experts
         h = self.hidden_size
         inter = self.split_inter_size
@@ -36,10 +55,6 @@ class DeepseekV4FP4ExpertsWeight(BaseWeightTpl):
         self.w1_scale = torch.empty((n, inter, h // 32), dtype=torch.float8_e8m0fnu, device=device)
         self.w3_scale = torch.empty((n, inter, h // 32), dtype=torch.float8_e8m0fnu, device=device)
         self.w2_scale = torch.empty((n, h, inter // 32), dtype=torch.float8_e8m0fnu, device=device)
-        self.load_ok = {
-            name: [False] * n
-            for name in ("w1", "w1_scale", "w2", "w2_scale", "w3", "w3_scale")
-        }
 
     def _copy_expert_weight(self, dst, weight, expert_idx, name, is_down=False):
         if is_down:
@@ -66,29 +81,121 @@ class DeepseekV4FP4ExpertsWeight(BaseWeightTpl):
         self.load_ok[name][expert_idx] = True
 
     def load_hf_weights(self, weights):
+        if self._marlin_checked:
+            return
+        has_weight = False
         for expert_idx in self.local_expert_ids:
             prefix = f"{self.weight_prefix}.{expert_idx}"
-            w1 = f"{prefix}.w1.weight"
-            w1_scale = f"{prefix}.w1.scale"
-            w2 = f"{prefix}.w2.weight"
-            w2_scale = f"{prefix}.w2.scale"
-            w3 = f"{prefix}.w3.weight"
-            w3_scale = f"{prefix}.w3.scale"
-            if w1 in weights:
-                self._copy_expert_weight(self.w1, weights[w1], expert_idx, "w1")
-            if w1_scale in weights:
-                self._copy_expert_scale(self.w1_scale, weights[w1_scale], expert_idx, "w1_scale")
-            if w3 in weights:
-                self._copy_expert_weight(self.w3, weights[w3], expert_idx, "w3")
-            if w3_scale in weights:
-                self._copy_expert_scale(self.w3_scale, weights[w3_scale], expert_idx, "w3_scale")
-            if w2 in weights:
-                self._copy_expert_weight(self.w2, weights[w2], expert_idx, "w2", is_down=True)
-            if w2_scale in weights:
-                self._copy_expert_scale(self.w2_scale, weights[w2_scale], expert_idx, "w2_scale", is_down=True)
+            if (
+                f"{prefix}.w1.weight" in weights
+                or f"{prefix}.w1.scale" in weights
+                or f"{prefix}.w2.weight" in weights
+                or f"{prefix}.w2.scale" in weights
+                or f"{prefix}.w3.weight" in weights
+                or f"{prefix}.w3.scale" in weights
+            ):
+                has_weight = True
+                break
+        if not has_weight:
+            return
+
+        with self._load_lock:
+            if self._marlin_checked:
+                return
+            self._ensure_raw_fp4_weight()
+            for expert_idx in self.local_expert_ids:
+                prefix = f"{self.weight_prefix}.{expert_idx}"
+                w1 = f"{prefix}.w1.weight"
+                w1_scale = f"{prefix}.w1.scale"
+                w2 = f"{prefix}.w2.weight"
+                w2_scale = f"{prefix}.w2.scale"
+                w3 = f"{prefix}.w3.weight"
+                w3_scale = f"{prefix}.w3.scale"
+                if w1 in weights:
+                    self._copy_expert_weight(self.w1, weights[w1], expert_idx, "w1")
+                if w1_scale in weights:
+                    self._copy_expert_scale(self.w1_scale, weights[w1_scale], expert_idx, "w1_scale")
+                if w3 in weights:
+                    self._copy_expert_weight(self.w3, weights[w3], expert_idx, "w3")
+                if w3_scale in weights:
+                    self._copy_expert_scale(self.w3_scale, weights[w3_scale], expert_idx, "w3_scale")
+                if w2 in weights:
+                    self._copy_expert_weight(self.w2, weights[w2], expert_idx, "w2", is_down=True)
+                if w2_scale in weights:
+                    self._copy_expert_scale(self.w2_scale, weights[w2_scale], expert_idx, "w2_scale", is_down=True)
+            if self._raw_load_complete():
+                self._try_init_marlin()
 
     def verify_load(self):
+        with self._load_lock:
+            ok = self._raw_load_complete()
+            if ok and not self._marlin_checked:
+                self._try_init_marlin()
+            return ok
+
+    def _raw_load_complete(self):
         return all(all(ok_list) for ok_list in self.load_ok.values())
+
+    def _try_init_marlin(self):
+        try:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+                prepare_moe_mxfp4_layer_for_marlin,
+            )
+
+            class _MarlinLayer:
+                pass
+
+            with self._marlin_pack_lock:
+                torch.cuda.set_device(self.device_id_)
+                device = torch.device("cuda", self.device_id_)
+                layer = _MarlinLayer()
+                layer.params_dtype = self.data_type_
+                w13_cpu, w13_scale_cpu = self._build_w13_weight()
+                w13 = w13_cpu.to(device=device, non_blocking=True).contiguous()
+                w2 = self.w2.view(torch.uint8).to(device=device, non_blocking=True).contiguous()
+                w13_scale = w13_scale_cpu.to(device=device, non_blocking=True).contiguous()
+                w2_scale = self.w2_scale.to(device=device, non_blocking=True).contiguous()
+                (
+                    self.marlin_w13,
+                    self.marlin_w2,
+                    self.marlin_w13_scale,
+                    self.marlin_w2_scale,
+                    _,
+                    _,
+                ) = prepare_moe_mxfp4_layer_for_marlin(layer, w13, w2, w13_scale, w2_scale, None, None)
+                del w13_cpu, w13_scale_cpu, w13, w2, w13_scale, w2_scale
+                self.moe_backend = "marlin"
+                self._marlin_checked = True
+                self._release_raw_fp4_weight()
+                torch.cuda.empty_cache()
+            logger.info(
+                "DeepSeek-V4 FP4 experts use vLLM Marlin backend, prefix=%s, rank=%s",
+                self.weight_prefix,
+                self.tp_rank_,
+            )
+        except Exception as e:
+            self.moe_backend_error = repr(e)
+            raise RuntimeError(
+                "DeepSeek-V4 FP4 experts require vLLM Marlin backend, "
+                f"prefix={self.weight_prefix}, rank={self.tp_rank_}, error={self.moe_backend_error}"
+            ) from e
+
+    def _build_w13_weight(self):
+        n = self.n_routed_experts
+        h = self.hidden_size
+        inter = self.split_inter_size
+        w13 = torch.empty((n, 2 * inter, h // 2), dtype=torch.uint8, device=self.w1.device)
+        w13[:, :inter, :].copy_(self.w1.view(torch.uint8))
+        w13[:, inter:, :].copy_(self.w3.view(torch.uint8))
+        w13_scale = torch.empty((n, 2 * inter, h // 32), dtype=self.w1_scale.dtype, device=self.w1_scale.device)
+        w13_scale[:, :inter, :].copy_(self.w1_scale)
+        w13_scale[:, inter:, :].copy_(self.w3_scale)
+        return w13.contiguous(), w13_scale.contiguous()
+
+    def _release_raw_fp4_weight(self):
+        for name in ("w1", "w1_scale", "w2", "w2_scale", "w3", "w3_scale"):
+            if hasattr(self, name):
+                delattr(self, name)
 
 
 class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):

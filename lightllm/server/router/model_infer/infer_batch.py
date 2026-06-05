@@ -51,7 +51,9 @@ class InferenceContext:
         vocab_size: int,
     ):
         self.args = get_env_start_args()
-        from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+        from lightllm.server.router.model_infer.mode_backend.base_backend import (
+            ModeBackend,
+        )
 
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
@@ -122,7 +124,21 @@ class InferenceContext:
 
         return req_objs
 
-    def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
+    def free_a_req_mem(
+        self,
+        free_token_index: List,
+        req: "InferReq",
+        free_c4_index: Optional[List] = None,
+        free_c128_index: Optional[List] = None,
+    ):
+        if hasattr(self.req_manager, "pop_compress_indices_for_req"):
+            c4, c128 = self.req_manager.pop_compress_indices_for_req(req.req_idx)
+            if c4 is not None and free_c4_index is not None:
+                free_c4_index.append(c4)
+            if c128 is not None and free_c128_index is not None:
+                free_c128_index.append(c128)
+            self.req_manager.clear_runtime_state(req.req_idx)
+
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
         else:
@@ -258,11 +274,13 @@ class InferenceContext:
 
         free_req_index = []
         free_token_index = []
+        free_c4_index = []
+        free_c128_index = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-            self.free_a_req_mem(free_token_index, req)
+            self.free_a_req_mem(free_token_index, req, free_c4_index, free_c128_index)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
@@ -270,7 +288,17 @@ class InferenceContext:
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         free_token_index = custom_cat(free_token_index)
-        self.req_manager.free(free_req_index, free_token_index)
+        if hasattr(self.req_manager, "free_compress_indices"):
+            free_c4_index = custom_cat(free_c4_index) if free_c4_index else None
+            free_c128_index = custom_cat(free_c128_index) if free_c128_index else None
+            self.req_manager.free(
+                free_req_index,
+                free_token_index,
+                free_c4_index=free_c4_index,
+                free_c128_index=free_c128_index,
+            )
+        else:
+            self.req_manager.free(free_req_index, free_token_index)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -299,11 +327,13 @@ class InferenceContext:
             g_infer_state_lock.acquire()
 
             free_token_index = []
+            free_c4_index = []
+            free_c128_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self.free_a_req_mem(free_token_index, req)
+                self.free_a_req_mem(free_token_index, req, free_c4_index, free_c128_index)
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
@@ -314,11 +344,23 @@ class InferenceContext:
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
+            if hasattr(self.req_manager, "free_compress_indices"):
+                free_c4_index = custom_cat(free_c4_index) if free_c4_index else None
+                free_c128_index = custom_cat(free_c128_index) if free_c128_index else None
+                self.req_manager.free_compress_indices(
+                    free_c4_index=free_c4_index,
+                    free_c128_index=free_c128_index,
+                )
 
             g_infer_state_lock.release()
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
+    def recover_paused_reqs(
+        self,
+        paused_reqs: List["InferReq"],
+        is_master_in_dp: bool,
+        can_alloc_token_num: int,
+    ):
         if paused_reqs:
             g_infer_state_lock.acquire()
 
@@ -375,7 +417,9 @@ class InferenceContext:
         big_page_buffer_ids = torch.tensor(big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu")
         big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
 
-        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+        from lightllm.common.basemodel.triton_kernel.linear_att_copy import (
+            copy_linear_att_state_to_kv_buffer,
+        )
 
         copy_linear_att_state_to_kv_buffer(
             b_req_idx=b_req_idx,
@@ -405,9 +449,10 @@ class InferenceContext:
                         gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...]
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
 
-                        dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_small_page_buffers.get_state_cache(
-                            buffer_idx=dst_buffer_idx
-                        )
+                        (
+                            dst_conv_state,
+                            dst_ssm_state,
+                        ) = self.radix_cache.linear_att_small_page_buffers.get_state_cache(buffer_idx=dst_buffer_idx)
                         # TODO 对于非连续对象调用 copy_ 效率并不高
                         dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
                         dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
@@ -640,7 +685,10 @@ class InferReq:
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
         linear_att_hash_page_size = self.args.linear_att_hash_page_size
-        match_tokens = min(len(linear_hash_list) * linear_att_hash_page_size, self.get_cur_total_len() - 1)
+        match_tokens = min(
+            len(linear_hash_list) * linear_att_hash_page_size,
+            self.get_cur_total_len() - 1,
+        )
         match_tokens = max(0, match_tokens)
         match_tokens = (match_tokens // linear_att_hash_page_size) * linear_att_hash_page_size
         match_block_num = match_tokens // linear_att_hash_page_size
@@ -706,7 +754,8 @@ class InferReq:
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
-                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
+                                value_tensor[cur_big_page_tokens:shared_kv_len],
+                                tail_mems,
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
@@ -737,7 +786,8 @@ class InferReq:
                                 assert self.tail_linear_att_small_page_buffer_id is None
                                 # 恢复linear att 状态
                                 g_infer_context.req_manager.copy_big_page_buffer_to_linear_att_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
+                                    big_page_buffer_idx=share_node.big_page_buffer_idx,
+                                    req=self,
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
