@@ -273,6 +273,8 @@ class NIXLChunckedTransTask:
     first_gen_token_id: Optional[int]
     first_gen_token_logprob: Optional[float]
 
+    nixl_write_stage: Optional[str] = None
+
     # transfer params
     nixl_src_page_index: Optional[int] = None
     nixl_dst_page_index: Optional[int] = None
