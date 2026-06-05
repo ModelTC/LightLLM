@@ -171,6 +171,8 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+        if hasattr(self.model.req_manager, "build_prompt_cache_payload"):
+            self.support_overlap = False
 
         if self.is_linear_att_mixed_model:
             self.linear_att_cache_manager = LinearAttCacheManager(
@@ -182,6 +184,7 @@ class ModeBackend:
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
+            setattr(self.args, "dynamic_prompt_cache_page_size", 1)
         else:
             if self.is_linear_att_mixed_model:
                 self.radix_cache = LinearAttPagedRadixCache(
@@ -193,12 +196,21 @@ class ModeBackend:
                     kv_cache_mem_manager=self.model.mem_manager,
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
+                setattr(self.args, "dynamic_prompt_cache_page_size", 1)
             else:
+                radix_page_size = 1
+                radix_extra_value_ops = None
+                if hasattr(self.model.req_manager, "get_prompt_cache_value_ops"):
+                    radix_page_size = self.model.req_manager.get_prompt_cache_page_size()
+                    radix_extra_value_ops = self.model.req_manager.get_prompt_cache_value_ops()
+                setattr(self.args, "dynamic_prompt_cache_page_size", radix_page_size)
                 self.radix_cache = RadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    page_size=radix_page_size,
+                    extra_value_ops=radix_extra_value_ops,
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:
@@ -701,6 +713,31 @@ class ModeBackend:
         """
         pass
 
+    def _maybe_capture_prompt_cache_payload(self, req_obj: InferReq):
+        if self.radix_cache is None:
+            return
+        req_manager = g_infer_context.req_manager
+        if not hasattr(req_manager, "build_prompt_cache_payload"):
+            return
+        if req_obj.sampling_param.disable_prompt_cache:
+            return
+        page_size = getattr(self.args, "dynamic_prompt_cache_page_size", 1)
+        cache_len = int(req_obj.cur_kv_len)
+        if page_size <= 1 or cache_len <= 0 or cache_len % page_size != 0:
+            return
+        if cache_len > req_obj.shm_req.input_len:
+            return
+        if getattr(req_obj, "prompt_cache_snapshot_len", 0) >= cache_len:
+            return
+
+        payload = req_manager.build_prompt_cache_payload(req_obj.req_idx, cache_len, clone_swa=True)
+        old_payload = getattr(req_obj, "prompt_cache_snapshot_payload", None)
+        if old_payload is not None:
+            req_manager.release_prompt_cache_detached_swa(old_payload, keep_payload=payload)
+        req_obj.prompt_cache_snapshot_len = cache_len
+        req_obj.prompt_cache_snapshot_payload = payload
+        return
+
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
@@ -748,6 +785,7 @@ class ModeBackend:
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
+            self._maybe_capture_prompt_cache_payload(req_obj)
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,

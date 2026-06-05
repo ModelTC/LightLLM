@@ -593,19 +593,25 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         if k == 0:
             return torch.empty((idx_q.shape[0], 0), device=idx_q.device, dtype=torch.long)
 
-        scores = torch.einsum("thd,nd->thn", idx_q.float(), idx_comp.float())
-        scores = F.relu(scores) * self.indexer_score_scale
-        index_scores = (scores * idx_weight.unsqueeze(-1)).sum(dim=1)
-        if self.tp_world_size_ > 1:
-            all_reduce(
-                index_scores,
-                op=dist.ReduceOp.SUM,
-                group=infer_state.dist_group,
-                async_op=False,
-            )
-
-        causal_threshold = positions_1based // 4
-        top = self._indexer_topk_kernel(index_scores, causal_threshold, k)
+        top_chunks = []
+        heads = max(1, idx_q.shape[1])
+        max_score_elems = 16 * 1024 * 1024
+        chunk_size = max(1, min(idx_q.shape[0], max_score_elems // max(1, heads * ncomp)))
+        for start in range(0, idx_q.shape[0], chunk_size):
+            end = min(idx_q.shape[0], start + chunk_size)
+            scores = torch.einsum("thd,nd->thn", idx_q[start:end].float(), idx_comp.float())
+            scores = F.relu(scores) * self.indexer_score_scale
+            index_scores = (scores * idx_weight[start:end].unsqueeze(-1)).sum(dim=1)
+            if self.tp_world_size_ > 1:
+                all_reduce(
+                    index_scores,
+                    op=dist.ReduceOp.SUM,
+                    group=infer_state.dist_group,
+                    async_op=False,
+                )
+            causal_threshold = positions_1based[start:end] // 4
+            top_chunks.append(self._indexer_topk_kernel(index_scores, causal_threshold, k))
+        top = torch.cat(top_chunks, dim=0)
         valid = top >= 0
         return torch.where(valid, top + offset, torch.full_like(top, -1))
 

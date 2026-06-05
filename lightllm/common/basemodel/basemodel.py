@@ -527,12 +527,22 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
+        if hasattr(self.mem_manager, "prepare_prefill_swa_slots"):
+            self.mem_manager.prepare_prefill_swa_slots(
+                b_req_idx=infer_state.b_req_idx,
+                b_seq_len=infer_state.b_seq_len,
+                b_ready_cache_len=infer_state.b_ready_cache_len,
+                b_start_loc=model_input.b_prefill_start_loc,
+                mem_index=infer_state.mem_index,
+            )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
         model_output = self._context_forward(infer_state)
+        if hasattr(self.mem_manager, "commit_prefill_swa_slots"):
+            self.mem_manager.commit_prefill_swa_slots()
 
         model_output = self._create_unpad_prefill_model_output(
             padded_model_output=model_output,
@@ -747,6 +757,14 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state0.mem_index,
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
+        if hasattr(self.mem_manager, "prepare_prefill_swa_slots"):
+            self.mem_manager.prepare_prefill_swa_slots(
+                b_req_idx=infer_state0.b_req_idx,
+                b_seq_len=infer_state0.b_seq_len,
+                b_ready_cache_len=infer_state0.b_ready_cache_len,
+                b_start_loc=model_input0.b_prefill_start_loc,
+                mem_index=infer_state0.mem_index,
+            )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
 
@@ -760,6 +778,14 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state1.mem_index,
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
+        if hasattr(self.mem_manager, "prepare_prefill_swa_slots"):
+            self.mem_manager.prepare_prefill_swa_slots(
+                b_req_idx=infer_state1.b_req_idx,
+                b_seq_len=infer_state1.b_seq_len,
+                b_ready_cache_len=infer_state1.b_ready_cache_len,
+                b_start_loc=model_input1.b_prefill_start_loc,
+                mem_index=infer_state1.mem_index,
+            )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
 
@@ -767,6 +793,8 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
+        if hasattr(self.mem_manager, "commit_prefill_swa_slots"):
+            self.mem_manager.commit_prefill_swa_slots()
 
         model_output0 = self._create_unpad_prefill_model_output(
             padded_model_output=model_output0,

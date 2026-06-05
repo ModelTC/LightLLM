@@ -133,10 +133,6 @@ def normal_or_p_d_start(args):
             raise NotImplementedError("DeepSeek-V4 EP MoE is not supported yet; use TP for now.")
         if "prompt_cache_kv_buffer" in get_config_json(args.model_dir):
             raise NotImplementedError("DeepSeek-V4 prompt_cache_kv_buffer is not supported yet.")
-        if not args.disable_dynamic_prompt_cache:
-            logger.info("DeepSeek-V4 runtime state does not support radix prompt cache yet; disabling it.")
-        args.disable_dynamic_prompt_cache = True
-        args.use_dynamic_prompt_cache = False
 
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。

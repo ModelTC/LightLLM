@@ -28,7 +28,7 @@ DSV4_MLA_PAGE_ALIGN_BYTES = DSV4_MLA_DATA_BYTES_PER_TOKEN
 DSV4_SWA_PAGE_SIZE = 128
 DSV4_C4_PAGE_SIZE = 64
 DSV4_C128_PAGE_SIZE = 2
-DSV4_PROFILE_MAX_FULL_TOKENS = 2_000_000
+DSV4_PROFILE_MAX_FULL_TOKENS = 1_500_000
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -294,6 +294,7 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
         self.cache_dtype = torch.uint8
         self.max_request_num = max_request_num
         self.sliding_window = sliding_window
+        self._pending_prefill_swa: Dict[int, Dict[str, torch.Tensor]] = {}
 
         # 全局层号 -> 各压缩池内的压实层号(同 qwen3next 的层号压实手法)
         self.layer_to_c4_idx: Dict[int, int] = {}
@@ -560,6 +561,127 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
             out[i] = swa
         return out
 
+    def _reserve_prefill_swa_slots(
+        self,
+        req_idx: int,
+        positions: torch.Tensor,
+        full_slots: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        full_slots = full_slots.long().reshape(-1)
+        positions = positions.long().reshape(-1)
+        assert positions.numel() == full_slots.numel()
+
+        out = torch.empty_like(full_slots, dtype=torch.long)
+        ring_to_swa: Dict[int, int] = {}
+        ring_to_old_full: Dict[int, int] = {}
+        ring_to_final_full: Dict[int, int] = {}
+        hold = self.swa_pool.HOLD_TOKEN_MEMINDEX
+
+        for i, (pos, full) in enumerate(zip(positions.tolist(), full_slots.tolist())):
+            if full == self.HOLD_TOKEN_MEMINDEX:
+                out[i] = hold
+                continue
+
+            ring_pos = int(pos) % int(self.sliding_window)
+            swa = ring_to_swa.get(ring_pos)
+            if swa is None:
+                old_swa = int(self.req_to_swa_indexs[req_idx, ring_pos].item())
+                old_full = int(self.req_to_swa_full_indexs[req_idx, ring_pos].item())
+                if old_swa == hold:
+                    old_swa = int(self.swa_allocator.alloc(1)[0].item())
+                swa = old_swa
+                ring_to_swa[ring_pos] = swa
+                ring_to_old_full[ring_pos] = old_full
+
+            ring_to_final_full[ring_pos] = int(full)
+            out[i] = swa
+
+        rings = sorted(ring_to_final_full)
+        return {
+            "positions": positions.detach().clone(),
+            "full_slots": full_slots.detach().clone(),
+            "swa_slots": out.detach().clone(),
+            "commit_rings": torch.tensor(rings, dtype=torch.long, device=full_slots.device),
+            "commit_full_slots": torch.tensor(
+                [ring_to_final_full[r] for r in rings],
+                dtype=torch.long,
+                device=full_slots.device,
+            ),
+            "commit_swa_slots": torch.tensor(
+                [ring_to_swa[r] for r in rings],
+                dtype=torch.long,
+                device=full_slots.device,
+            ),
+            "commit_old_full_slots": torch.tensor(
+                [ring_to_old_full[r] for r in rings],
+                dtype=torch.long,
+                device=full_slots.device,
+            ),
+        }
+
+    def prepare_prefill_swa_slots(
+        self,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        b_ready_cache_len: torch.Tensor,
+        b_start_loc: torch.Tensor,
+        mem_index: torch.Tensor,
+    ) -> None:
+        if self.req_to_swa_indexs is None or self.req_to_swa_full_indexs is None:
+            return
+
+        self._pending_prefill_swa = {}
+        req_list = b_req_idx.detach().cpu().tolist()
+        seq_list = b_seq_len.detach().cpu().tolist()
+        ready_list = b_ready_cache_len.detach().cpu().tolist()
+        start_list = b_start_loc.detach().cpu().tolist()
+        for req_idx, seq_len, ready_len, start_loc in zip(req_list, seq_list, ready_list, start_list):
+            token_num = int(seq_len) - int(ready_len)
+            if token_num <= 0:
+                continue
+            pos = torch.arange(int(ready_len), int(seq_len), dtype=torch.long, device=mem_index.device)
+            slots = mem_index[int(start_loc) : int(start_loc) + token_num]
+            self._pending_prefill_swa[int(req_idx)] = self._reserve_prefill_swa_slots(int(req_idx), pos, slots)
+        return
+
+    def _get_pending_prefill_swa_slots(
+        self,
+        req_idx: int,
+        positions: torch.Tensor,
+        full_slots: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        pending = self._pending_prefill_swa.get(int(req_idx))
+        if pending is None:
+            return None
+        if pending["positions"].numel() != positions.numel():
+            return None
+        if not torch.equal(pending["positions"].to(positions.device), positions.long().reshape(-1)):
+            return None
+        if not torch.equal(pending["full_slots"].to(full_slots.device), full_slots.long().reshape(-1)):
+            return None
+        return pending["swa_slots"].to(full_slots.device)
+
+    def commit_prefill_swa_slots(self) -> None:
+        if not self._pending_prefill_swa:
+            return
+        for req_idx, pending in self._pending_prefill_swa.items():
+            rings = pending["commit_rings"].to(self.req_to_swa_indexs.device)
+            if rings.numel() == 0:
+                continue
+            old_full = pending["commit_old_full_slots"].to(self.full_to_swa_indexs.device)
+            valid_old = old_full >= 0
+            if valid_old.any():
+                self.full_to_swa_indexs[old_full[valid_old].long()] = -1
+
+            full_slots = pending["commit_full_slots"].to(self.full_to_swa_indexs.device)
+            swa_slots = pending["commit_swa_slots"].to(self.full_to_swa_indexs.device)
+            self.req_to_swa_indexs[int(req_idx), rings] = swa_slots.to(torch.int32)
+            self.req_to_swa_full_indexs[int(req_idx), rings] = full_slots.to(torch.int32)
+            self.full_to_swa_indexs[full_slots.long()] = swa_slots.to(torch.int32)
+        self.full_to_swa_indexs[self.HOLD_TOKEN_MEMINDEX] = self.swa_pool.HOLD_TOKEN_MEMINDEX
+        self._pending_prefill_swa = {}
+        return
+
     def _swa_slots_from_full(self, full_slots: torch.Tensor) -> torch.Tensor:
         full_slots = full_slots.long().reshape(-1)
         if full_slots.numel() == 0:
@@ -596,6 +718,79 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
         self.req_to_swa_indexs[req_idx].fill_(self.swa_pool.HOLD_TOKEN_MEMINDEX)
         self.req_to_swa_full_indexs[req_idx].fill_(-1)
         self.full_to_swa_indexs[self.HOLD_TOKEN_MEMINDEX] = self.swa_pool.HOLD_TOKEN_MEMINDEX
+
+    def snapshot_swa_for_prompt_cache(self, req_idx: int, cache_len: int, full_slots: torch.Tensor):
+        if self.req_to_swa_indexs is None or self.req_to_swa_full_indexs is None or cache_len <= 0:
+            return None
+        tail_start = max(0, int(cache_len) - int(self.sliding_window))
+        full_slots = full_slots[tail_start:cache_len].long().to(self.kv_buffer.device)
+        if full_slots.numel() == 0:
+            return None
+        swa_slots = self.full_to_swa_indexs[full_slots].long()
+        if (swa_slots < 0).any():
+            bad = int(full_slots[swa_slots < 0][0].item())
+            raise RuntimeError(f"DeepSeek-V4 prompt cache cannot snapshot evicted SWA full slot {bad}")
+        return {
+            "positions": torch.arange(tail_start, cache_len, dtype=torch.int64, device="cpu"),
+            "full_slots": full_slots.detach().cpu(),
+            "swa_slots": swa_slots.detach().cpu(),
+        }
+
+    def clone_swa_for_prompt_cache(self, req_idx: int, cache_len: int, full_slots: torch.Tensor):
+        payload = self.snapshot_swa_for_prompt_cache(req_idx, cache_len, full_slots)
+        if payload is None:
+            return None
+
+        src_slots = payload["swa_slots"].long().to(self.kv_buffer.device)
+        dst_slots = self.swa_allocator.alloc(src_slots.numel()).long().to(self.kv_buffer.device)
+        for layer_idx in range(self.layer_num):
+            self.swa_pool.write(layer_idx, dst_slots, self.swa_pool.read(layer_idx, src_slots))
+        payload["swa_slots"] = dst_slots.detach().cpu()
+        return payload
+
+    def detach_swa_for_prompt_cache(self, req_idx: int, swa_payload) -> None:
+        if (
+            swa_payload is None
+            or self.req_to_swa_indexs is None
+            or self.req_to_swa_full_indexs is None
+            or len(swa_payload["positions"]) == 0
+        ):
+            return
+        req_idx = int(req_idx)
+        positions = swa_payload["positions"].tolist()
+        full_slots = swa_payload["full_slots"].tolist()
+        swa_slots = swa_payload["swa_slots"].tolist()
+        for pos, full, swa in zip(positions, full_slots, swa_slots):
+            ring_pos = int(pos) % int(self.sliding_window)
+            if int(self.req_to_swa_indexs[req_idx, ring_pos].item()) == int(swa) and int(
+                self.req_to_swa_full_indexs[req_idx, ring_pos].item()
+            ) == int(full):
+                self.req_to_swa_indexs[req_idx, ring_pos] = self.swa_pool.HOLD_TOKEN_MEMINDEX
+                self.req_to_swa_full_indexs[req_idx, ring_pos] = -1
+        return
+
+    def restore_swa_from_prompt_cache(self, swa_payload) -> None:
+        if swa_payload is None or len(swa_payload["full_slots"]) == 0:
+            return
+        full_slots = swa_payload["full_slots"].long().to(self.kv_buffer.device)
+        swa_slots = swa_payload["swa_slots"].long().to(self.kv_buffer.device)
+        self.full_to_swa_indexs[full_slots] = swa_slots.to(torch.int32)
+        self.full_to_swa_indexs[self.HOLD_TOKEN_MEMINDEX] = self.swa_pool.HOLD_TOKEN_MEMINDEX
+        return
+
+    def free_swa_prompt_cache(self, swa_payload) -> None:
+        if swa_payload is None or len(swa_payload["swa_slots"]) == 0:
+            return
+        swa_slots = torch.unique(swa_payload["swa_slots"].long()).detach().cpu()
+        self.swa_allocator.free(swa_slots)
+        full_slots = swa_payload["full_slots"].long().to(self.kv_buffer.device)
+        mapped = self.full_to_swa_indexs[full_slots].long()
+        expected = swa_payload["swa_slots"].long().to(self.kv_buffer.device)
+        same = mapped == expected
+        if same.any():
+            self.full_to_swa_indexs[full_slots[same]] = -1
+        self.full_to_swa_indexs[self.HOLD_TOKEN_MEMINDEX] = self.swa_pool.HOLD_TOKEN_MEMINDEX
+        return
 
     def _keep_last_swa_writes(self, swa_slots: torch.Tensor, packed: torch.Tensor):
         """Drop duplicate SWA writes generated by long prefill ring reuse."""
@@ -634,7 +829,11 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
         if req_idx is None or positions is None:
             swa_slots = self._identity_swa_slots(mem_index).to(kv.device)
         else:
-            swa_slots = self.ensure_swa_slots(req_idx, positions, mem_index).to(kv.device)
+            pending_slots = self._get_pending_prefill_swa_slots(req_idx, positions, mem_index)
+            if pending_slots is None:
+                swa_slots = self.ensure_swa_slots(req_idx, positions, mem_index).to(kv.device)
+            else:
+                swa_slots = pending_slots.to(kv.device)
             swa_slots, packed = self._keep_last_swa_writes(swa_slots, packed)
             if swa_slots.numel() == 0:
                 return
@@ -712,6 +911,7 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
         if getattr(self, "req_to_swa_indexs", None) is not None:
             self.req_to_swa_indexs.fill_(self.swa_pool.HOLD_TOKEN_MEMINDEX)
             self.req_to_swa_full_indexs.fill_(-1)
+        self._pending_prefill_swa = {}
         if self.c4_pool is not None:
             self.c4_pool.free_all()
         if self.c128_pool is not None:

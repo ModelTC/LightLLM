@@ -131,7 +131,8 @@ class InferenceContext:
         free_c4_index: Optional[List] = None,
         free_c128_index: Optional[List] = None,
     ):
-        if hasattr(self.req_manager, "pop_compress_indices_for_req"):
+        is_dsv4_req_manager = hasattr(self.req_manager, "build_prompt_cache_payload")
+        if hasattr(self.req_manager, "pop_compress_indices_for_req") and not is_dsv4_req_manager:
             c4, c128 = self.req_manager.pop_compress_indices_for_req(req.req_idx)
             if c4 is not None and free_c4_index is not None:
                 free_c4_index.append(c4)
@@ -141,14 +142,34 @@ class InferenceContext:
 
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+            if is_dsv4_req_manager:
+                c4, c128 = self.req_manager.pop_compress_indices_for_req(req.req_idx)
+                if c4 is not None and free_c4_index is not None:
+                    free_c4_index.append(c4)
+                if c128 is not None and free_c128_index is not None:
+                    free_c128_index.append(c128)
+                self.req_manager.clear_runtime_state(req.req_idx)
         else:
             if not self.is_linear_att_mixed_model:
-                self._full_att_free_req(free_token_index=free_token_index, req=req)
+                if is_dsv4_req_manager:
+                    self._dsv4_full_att_free_req(
+                        free_token_index=free_token_index,
+                        req=req,
+                        free_c4_index=free_c4_index,
+                        free_c128_index=free_c128_index,
+                    )
+                else:
+                    self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
                 self._linear_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.linear_att_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
+        return
+
+    def _append_free_token_index(self, free_token_index: List, tensor: torch.Tensor):
+        if tensor.numel() > 0:
+            free_token_index.append(tensor)
         return
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
@@ -162,6 +183,86 @@ class InferenceContext:
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
+        return
+
+    def _dsv4_full_att_free_req(
+        self,
+        free_token_index: List,
+        req: "InferReq",
+        free_c4_index: Optional[List] = None,
+        free_c128_index: Optional[List] = None,
+    ):
+        if req.cur_kv_len == 0:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0:0])
+            return
+
+        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        cache_len = self.radix_cache.align_len(req.cur_kv_len)
+        inserted_len = old_prefix_len
+        duplicate_prefix_len = old_prefix_len
+        inserted_payload = None
+        pending_payload = getattr(req, "prompt_cache_snapshot_payload", None)
+        pending_cache_len = getattr(req, "prompt_cache_snapshot_len", 0)
+
+        # The current V4 runtime state is only guaranteed to describe the current
+        # sequence end. Cache aligned current ends; leave unaligned tails uncached.
+        if pending_payload is not None and pending_cache_len > old_prefix_len:
+            cache_len = pending_cache_len
+            input_token_ids = req.get_input_token_ids()
+            key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
+            duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value, extra_value=pending_payload)
+            inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
+            if inserted_len == cache_len:
+                inserted_payload = pending_payload
+            else:
+                self.req_manager.release_prompt_cache_detached_swa(pending_payload)
+                pending_payload = None
+                inserted_len = old_prefix_len
+                duplicate_prefix_len = old_prefix_len
+        elif cache_len == req.cur_kv_len and cache_len > old_prefix_len:
+            input_token_ids = req.get_input_token_ids()
+            key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
+            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
+            payload = self.req_manager.build_prompt_cache_payload(req.req_idx, cache_len)
+            duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value, extra_value=payload)
+            inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
+            if inserted_len == cache_len:
+                inserted_payload = payload
+                self.req_manager.detach_prompt_cache_payload_from_req(req.req_idx, inserted_payload)
+            else:
+                inserted_len = old_prefix_len
+                duplicate_prefix_len = old_prefix_len
+
+        if (
+            pending_payload is not None
+            and inserted_payload is not pending_payload
+            and pending_cache_len <= old_prefix_len
+        ):
+            self.req_manager.release_prompt_cache_detached_swa(pending_payload)
+        req.prompt_cache_snapshot_payload = None
+        req.prompt_cache_snapshot_len = 0
+        dense_row = self.req_manager.req_to_token_indexs[req.req_idx]
+        self._append_free_token_index(free_token_index, dense_row[old_prefix_len:duplicate_prefix_len])
+        self._append_free_token_index(free_token_index, dense_row[inserted_len : req.cur_kv_len])
+        if len(free_token_index) == 0:
+            free_token_index.append(dense_row[0:0])
+
+        c4, c128 = self.req_manager.pop_prompt_cache_free_compress_indices(
+            req.req_idx,
+            keep_len=inserted_len,
+            duplicate_start_len=old_prefix_len,
+            duplicate_end_len=duplicate_prefix_len,
+        )
+        if c4 is not None and free_c4_index is not None:
+            free_c4_index.append(c4)
+        if c128 is not None and free_c128_index is not None:
+            free_c128_index.append(c128)
+
+        if req.shared_kv_node is not None:
+            assert req.shared_kv_node.node_prefix_total_len <= max(inserted_len, old_prefix_len)
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
         return
@@ -637,6 +738,8 @@ class InferReq:
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
         if hasattr(g_infer_context.req_manager, "init_compress_state"):
             g_infer_context.req_manager.init_compress_state(req_idx=self.req_idx)
+        self.prompt_cache_snapshot_len = 0
+        self.prompt_cache_snapshot_payload = None
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
         # token healing mode 才被使用的管理对象
@@ -672,6 +775,11 @@ class InferReq:
                 ready_cache_len = share_node.node_prefix_total_len
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                if hasattr(g_infer_context.req_manager, "restore_prompt_cache_payload"):
+                    payload = g_infer_context.radix_cache.get_extra_value_by_node(share_node)
+                    if payload is None:
+                        raise RuntimeError("DeepSeek-V4 radix cache hit is missing prompt-cache payload")
+                    g_infer_context.req_manager.restore_prompt_cache_payload(self.req_idx, payload)
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
@@ -843,6 +951,7 @@ class InferReq:
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        chunked_end = self._align_chuncked_end_for_prompt_cache(chunked_start, chunked_end)
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_linear_att(self):
@@ -863,6 +972,17 @@ class InferReq:
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        return self._align_chuncked_end_for_prompt_cache(chunked_start, chunked_end)
+
+    def _align_chuncked_end_for_prompt_cache(self, chunked_start: int, chunked_end: int):
+        radix_cache = g_infer_context.radix_cache
+        page_size = getattr(radix_cache, "page_size", 1) if radix_cache is not None else 1
+        if page_size <= 1 or self.sampling_param.disable_prompt_cache:
+            return chunked_end
+        prompt_end = self.shm_req.input_len
+        next_page_end = ((int(chunked_start) // page_size) + 1) * page_size
+        if int(chunked_start) < next_page_end < int(chunked_end) and next_page_end <= prompt_end:
+            return next_page_end
         return chunked_end
 
     def get_chuncked_input_token_len_for_linear_att(self):

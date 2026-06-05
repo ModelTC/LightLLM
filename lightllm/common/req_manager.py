@@ -1,5 +1,6 @@
 import torch
 import collections
+from dataclasses import dataclass
 from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 from lightllm.utils.log_utils import init_logger
@@ -21,6 +22,33 @@ if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class DeepseekV4PromptCachePayload:
+    cache_len: int
+    c4_slots: Optional[torch.Tensor] = None
+    c128_slots: Optional[torch.Tensor] = None
+    c4_state: Optional[torch.Tensor] = None
+    c4_state_pool: Optional[torch.Tensor] = None
+    c4_indexer_state: Optional[torch.Tensor] = None
+    c4_indexer_state_pool: Optional[torch.Tensor] = None
+    swa: Optional[dict] = None
+
+
+class DeepseekV4PromptCacheValueOps:
+    def __init__(self, req_manager: "DeepseekV4ReqManager"):
+        self.req_manager = req_manager
+
+    def slice(self, payload: DeepseekV4PromptCachePayload, start: int, end: int):
+        return self.req_manager.slice_prompt_cache_payload(payload, start, end)
+
+    def concat(self, payloads: List[DeepseekV4PromptCachePayload]):
+        return self.req_manager.concat_prompt_cache_payloads(payloads)
+
+    def free(self, payload: DeepseekV4PromptCachePayload):
+        self.req_manager.free_prompt_cache_payload(payload)
+        return
 
 
 class _ReqNode:
@@ -593,6 +621,233 @@ class DeepseekV4ReqManager(ReqManager):
     def get_c4_indexer_state_pool_for_req(self, layer_index: int, req_idx: int) -> torch.Tensor:
         local = self.layer_to_c4_idx[layer_index]
         return self.req_to_c4_indexer_state_pool.buffer[local, req_idx]
+
+    def get_prompt_cache_value_ops(self):
+        return DeepseekV4PromptCacheValueOps(self)
+
+    def get_prompt_cache_page_size(self):
+        return 128
+
+    def _slice_cpu_slots(self, slots: Optional[torch.Tensor], start: int, end: int, ratio: int):
+        if slots is None:
+            return None
+        return slots[start // ratio : end // ratio].clone()
+
+    def _slice_swa_payload(self, swa_payload, start: int, end: int):
+        if swa_payload is None:
+            return None
+        positions = swa_payload["positions"]
+        mask = (positions >= start) & (positions < end)
+        if not bool(mask.any()):
+            return None
+        return {
+            "positions": positions[mask].clone(),
+            "full_slots": swa_payload["full_slots"][mask].clone(),
+            "swa_slots": swa_payload["swa_slots"][mask].clone(),
+        }
+
+    def slice_prompt_cache_payload(self, payload: DeepseekV4PromptCachePayload, start: int, end: int):
+        start = int(start)
+        end = int(end)
+        # c4/c128/indexer-K slots are true historical KV and can be sliced by ratio.
+        # compressor running state only describes the payload end boundary; it is valid
+        # for a slice only when that slice keeps the original end boundary.
+        keep_end_state = end == payload.cache_len
+        return DeepseekV4PromptCachePayload(
+            cache_len=end - start,
+            c4_slots=self._slice_cpu_slots(payload.c4_slots, start, end, 4),
+            c128_slots=self._slice_cpu_slots(payload.c128_slots, start, end, 128),
+            c4_state=payload.c4_state.clone() if keep_end_state and payload.c4_state is not None else None,
+            c4_state_pool=payload.c4_state_pool.clone()
+            if keep_end_state and payload.c4_state_pool is not None
+            else None,
+            c4_indexer_state=payload.c4_indexer_state.clone()
+            if keep_end_state and payload.c4_indexer_state is not None
+            else None,
+            c4_indexer_state_pool=payload.c4_indexer_state_pool.clone()
+            if keep_end_state and payload.c4_indexer_state_pool is not None
+            else None,
+            swa=self._slice_swa_payload(payload.swa, start, end),
+        )
+
+    def concat_prompt_cache_payloads(self, payloads: List[DeepseekV4PromptCachePayload]):
+        if len(payloads) == 0:
+            return None
+        c4_slots = [p.c4_slots for p in payloads if p.c4_slots is not None and len(p.c4_slots) > 0]
+        c128_slots = [p.c128_slots for p in payloads if p.c128_slots is not None and len(p.c128_slots) > 0]
+        last = payloads[-1]
+        return DeepseekV4PromptCachePayload(
+            cache_len=sum(p.cache_len for p in payloads),
+            c4_slots=torch.cat(c4_slots, dim=0) if c4_slots else None,
+            c128_slots=torch.cat(c128_slots, dim=0) if c128_slots else None,
+            c4_state=last.c4_state,
+            c4_state_pool=last.c4_state_pool,
+            c4_indexer_state=last.c4_indexer_state,
+            c4_indexer_state_pool=last.c4_indexer_state_pool,
+            swa=last.swa,
+        )
+
+    def build_prompt_cache_payload(
+        self,
+        req_idx: int,
+        cache_len: int,
+        clone_swa: bool = False,
+    ) -> DeepseekV4PromptCachePayload:
+        assert self.mem_manager is not None
+        cache_len = int(cache_len)
+        full_slots = self.req_to_token_indexs[req_idx, :cache_len].detach().cpu()
+        c4_count = cache_len // 4
+        c128_count = cache_len // 128
+        c4_slots = self.req_to_c4_indexs[req_idx, :c4_count].detach().cpu().clone() if c4_count > 0 else None
+        c128_slots = self.req_to_c128_indexs[req_idx, :c128_count].detach().cpu().clone() if c128_count > 0 else None
+        if clone_swa:
+            swa_payload = self.mem_manager.clone_swa_for_prompt_cache(req_idx, cache_len, full_slots)
+        else:
+            swa_payload = self.mem_manager.snapshot_swa_for_prompt_cache(req_idx, cache_len, full_slots)
+        return DeepseekV4PromptCachePayload(
+            cache_len=cache_len,
+            c4_slots=c4_slots,
+            c128_slots=c128_slots,
+            c4_state=self.req_to_c4_state.buffer[:, req_idx].detach().clone() if self.n_c4 > 0 else None,
+            c4_state_pool=self.req_to_c4_state_pool.buffer[:, req_idx].detach().clone() if self.n_c4 > 0 else None,
+            c4_indexer_state=self.req_to_c4_indexer_state.buffer[:, req_idx].detach().clone()
+            if self.n_c4 > 0
+            else None,
+            c4_indexer_state_pool=self.req_to_c4_indexer_state_pool.buffer[:, req_idx].detach().clone()
+            if self.n_c4 > 0
+            else None,
+            swa=swa_payload,
+        )
+
+    def detach_prompt_cache_payload_from_req(self, req_idx: int, payload: DeepseekV4PromptCachePayload):
+        if payload is not None and self.mem_manager is not None:
+            self.mem_manager.detach_swa_for_prompt_cache(req_idx, payload.swa)
+        return
+
+    def free_prompt_cache_payload(self, payload: DeepseekV4PromptCachePayload):
+        if payload is None or self.mem_manager is None:
+            return
+        if payload.c4_slots is not None and len(payload.c4_slots) > 0:
+            self.mem_manager.free_c4(payload.c4_slots)
+        if payload.c128_slots is not None and len(payload.c128_slots) > 0:
+            self.mem_manager.free_c128(payload.c128_slots)
+        self.mem_manager.free_swa_prompt_cache(payload.swa)
+        return
+
+    def release_prompt_cache_detached_swa(
+        self,
+        payload: DeepseekV4PromptCachePayload,
+        keep_payload: Optional[DeepseekV4PromptCachePayload] = None,
+    ):
+        if payload is None or payload.swa is None or self.mem_manager is None:
+            return
+        old_swa = payload.swa
+        if keep_payload is None or keep_payload.swa is None:
+            self.mem_manager.free_swa_prompt_cache(old_swa)
+            return
+
+        old_slots = old_swa["swa_slots"].long()
+        keep_slots = keep_payload.swa["swa_slots"].long()
+        if old_slots.numel() == 0:
+            return
+        if keep_slots.numel() == 0:
+            self.mem_manager.free_swa_prompt_cache(old_swa)
+            return
+
+        release_mask = ~torch.isin(old_slots, keep_slots)
+        if not release_mask.any():
+            return
+        release_payload = {
+            "full_slots": old_swa["full_slots"][release_mask].clone(),
+            "swa_slots": old_swa["swa_slots"][release_mask].clone(),
+        }
+        self.mem_manager.free_swa_prompt_cache(release_payload)
+        return
+
+    def _reset_c128_for_prompt_cache(self, req_idx: int):
+        if self.n_c128 > 0:
+            self._reset_compress_cache_req(self.req_to_c128_state, req_idx)
+            self._reset_state_pool_req(self.req_to_c128_state_pool, req_idx)
+        return
+
+    def rebuild_runtime_state_for_req(self, req_idx: int):
+        state_map = self._runtime_states[req_idx]
+        state_map.clear()
+        for layer_index, ratio in enumerate(self.compress_rates):
+            if ratio == 4:
+                cstate_kv, cstate_score = self.get_compress_state_for_req(layer_index, req_idx)
+                idx_state = self.get_c4_indexer_compress_state(layer_index)
+                state_map[layer_index] = {
+                    "cstate_kv": cstate_kv,
+                    "cstate_score": cstate_score,
+                    "idx_cstate_kv": idx_state[req_idx, 0],
+                    "idx_cstate_score": idx_state[req_idx, 1],
+                }
+            elif ratio == 128:
+                cstate_kv, cstate_score = self.get_compress_state_for_req(layer_index, req_idx)
+                state_map[layer_index] = {
+                    "cstate_kv": cstate_kv,
+                    "cstate_score": cstate_score,
+                }
+        return
+
+    def restore_prompt_cache_payload(self, req_idx: int, payload: DeepseekV4PromptCachePayload):
+        assert self.mem_manager is not None
+        cache_len = int(payload.cache_len)
+        c4_count = cache_len // 4
+        c128_count = cache_len // 128
+        if c4_count > 0:
+            assert payload.c4_slots is not None and len(payload.c4_slots) == c4_count
+            self.req_to_c4_indexs[req_idx, :c4_count] = payload.c4_slots.cuda(non_blocking=True)
+        if c128_count > 0:
+            assert payload.c128_slots is not None and len(payload.c128_slots) == c128_count
+            self.req_to_c128_indexs[req_idx, :c128_count] = payload.c128_slots.cuda(non_blocking=True)
+        self._c4_entry_counts[req_idx] = c4_count
+        self._c128_entry_counts[req_idx] = c128_count
+
+        if self.n_c4 > 0:
+            if payload.c4_state is None or payload.c4_indexer_state is None:
+                raise RuntimeError("DeepSeek-V4 prompt cache hit is missing c4 running state")
+            self.req_to_c4_state.buffer[:, req_idx].copy_(payload.c4_state)
+            self.req_to_c4_indexer_state.buffer[:, req_idx].copy_(payload.c4_indexer_state)
+            if payload.c4_state_pool is not None:
+                self.req_to_c4_state_pool.buffer[:, req_idx].copy_(payload.c4_state_pool)
+            if payload.c4_indexer_state_pool is not None:
+                self.req_to_c4_indexer_state_pool.buffer[:, req_idx].copy_(payload.c4_indexer_state_pool)
+        self._reset_c128_for_prompt_cache(req_idx)
+        self.mem_manager.restore_swa_from_prompt_cache(payload.swa)
+        self.rebuild_runtime_state_for_req(req_idx)
+        return
+
+    def pop_prompt_cache_free_compress_indices(
+        self,
+        req_idx: int,
+        keep_len: int,
+        duplicate_start_len: Optional[int] = None,
+        duplicate_end_len: Optional[int] = None,
+    ):
+        def collect(table, cur_count, ratio):
+            ranges = []
+            if duplicate_start_len is not None and duplicate_end_len is not None:
+                dup_start = duplicate_start_len // ratio
+                dup_end = duplicate_end_len // ratio
+                if dup_end > dup_start:
+                    ranges.append((dup_start, dup_end))
+            keep_count = keep_len // ratio
+            if cur_count > keep_count:
+                ranges.append((keep_count, cur_count))
+            parts = [table[req_idx, s:e].clone() for s, e in ranges if e > s]
+            return torch.cat(parts, dim=0) if parts else None
+
+        c4 = collect(self.req_to_c4_indexs, self._c4_entry_counts[req_idx], 4)
+        c128 = collect(self.req_to_c128_indexs, self._c128_entry_counts[req_idx], 128)
+        if self._c4_entry_counts[req_idx] > 0:
+            self.req_to_c4_indexs[req_idx, : self._c4_entry_counts[req_idx]].fill_(0)
+        if self._c128_entry_counts[req_idx] > 0:
+            self.req_to_c128_indexs[req_idx, : self._c128_entry_counts[req_idx]].fill_(0)
+        self._c4_entry_counts[req_idx] = 0
+        self._c128_entry_counts[req_idx] = 0
+        return c4, c128
 
     def free(
         self,
