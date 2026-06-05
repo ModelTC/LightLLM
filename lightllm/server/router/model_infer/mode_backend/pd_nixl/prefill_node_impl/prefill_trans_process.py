@@ -151,9 +151,7 @@ class _PrefillTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id and trans_task.nixl_src_page_index is None:
-                    # 对于 已经分配了page index 的任务，不能直接失败，需要两边走完正常流程再失败，不然可能
-                    # 出现复杂的异步协同问题。
+                if trans_task.request_id == request_id:
                     aborted_tasks.append(self.waiting_dict.pop(key))
 
         for trans_task in aborted_tasks:
@@ -385,7 +383,6 @@ class _PrefillTransModule:
                 logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
             else:
                 logger.info(f"trans task ret success:{ret}")
-            return
 
     @log_exception
     def fail_loop(self):
@@ -400,6 +397,7 @@ class _PrefillTransModule:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
 
             ret = trans_task.createRetObj()
+            self.task_out_queue.put(ret)
             logger.info(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
