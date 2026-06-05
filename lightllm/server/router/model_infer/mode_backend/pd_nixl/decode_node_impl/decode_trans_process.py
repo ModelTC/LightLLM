@@ -4,21 +4,18 @@ import inspect
 import threading
 import setproctitle
 import torch.multiprocessing as mp
-import collections
 import queue
 import pickle
-from typing import List, Dict, Union, Deque, Optional
+from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import (
     NIXLChunckedTransTask,
     NIXLChunckedTransTaskGroup,
-    NIXLChunckedTransTaskRet,
     NixlUpKVStatus,
     NIXLAbortReq,
 )
 from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
-from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..nixl_kv_transporter import NixlKVTransporter
@@ -129,16 +126,14 @@ class _DecodeTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
         )
-        self.copy_cuda_stream = torch.cuda.Stream()
+        self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = NixlKVTransporter(
             node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
         )
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
-        self.read_peer_kv_queue = queue.Queue()
-        self.update_status_task_queue = queue.Queue()
-        self.ready_page_task_queue = queue.Queue()
+        self.request_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
@@ -153,13 +148,25 @@ class _DecodeTransModule:
             self.recv_task_loop,
             self.dispatch_task_loop,
             self.accept_peer_task_loop,
-            self.read_peer_kv_loop,
-            self.update_task_status_loop,
-            self.read_page_to_mems_loop,
+            self.request_page_loop,
             self.success_loop,
             self.fail_loop,
         ]:
             threading.Thread(target=func, daemon=True).start()
+        return
+
+    def _warmup(self):
+        for dp_index in range(self.args.dp // self.args.nnodes):
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.read_page_kv_move_buffer_to_mem(
+                    mem_indexes=[0],
+                    page_index=0,
+                    dp_index=dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
+                torch.cuda.current_stream().synchronize()
         return
 
     @log_exception
@@ -173,23 +180,18 @@ class _DecodeTransModule:
             else:
                 assert False, f"recv error obj {obj}"
 
-    def _abort(self, cmd: NIXLAbortReq):
-        # check time_out update
+    def _abort(self, cmd: NIXLAbortReq, error_info: str = "aborted req"):
+        aborted_tasks = []
         with self.waiting_dict_lock:
-            keys = list(self.waiting_dict.keys())
+            for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.request_id == cmd.request_id and trans_task.nixl_dst_page_index is None:
+                    # 对于 已经分配了page index 的任务，不能直接失败，需要两边走完正常流程再失败，不然可能
+                    # 出现复杂的异步协同问题。
+                    aborted_tasks.append(self.waiting_dict.pop(key))
 
-        for key in keys:
-            with self.waiting_dict_lock:
-                trans_task = self.waiting_dict.pop(key, None)
-
-            if trans_task is not None and trans_task.request_id == cmd.request_id:
-                trans_task.error_info = "aborted req"
-                self.failed_queue.put(trans_task)
-                continue
-
-            if trans_task is not None:
-                with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
+        for trans_task in aborted_tasks:
+            trans_task.error_info = error_info
+            self.failed_queue.put(trans_task)
         return
 
     @log_exception
@@ -202,8 +204,7 @@ class _DecodeTransModule:
                     if task.transfer_kv_num() != 0:
                         self.waiting_dict[task.get_key()] = task
                     else:
-                        task.start_trans_time = time.time()
-                        self.success_queue.put((None, None, task))
+                        self.success_queue.put(task)
 
             # up status
             task = trans_task_group.task_list[0]
@@ -233,10 +234,6 @@ class _DecodeTransModule:
     ):
         torch.cuda.set_device(self.device_id)
         while True:
-            if len(self.waiting_dict) == 0:
-                time.sleep(0.001)
-                continue
-
             # notify update
             try:
                 notifies_dict = self.transporter.get_new_notifs()
@@ -253,155 +250,101 @@ class _DecodeTransModule:
                         except:
                             notify_obj = None
 
-                        if isinstance(notify_obj, NIXLChunckedTransTask):
-                            remote_trans_task = notify_obj
-                            key = remote_trans_task.get_key()
-                            logger.info(f"recv peer trans task {remote_trans_task.to_str()}")
+                        if not isinstance(notify_obj, NIXLChunckedTransTask):
+                            continue
+
+                        # 请求有错误
+                        if notify_obj.error_info is not None:
+                            # 直接清理掉所有的相关请求。
+                            self._abort(
+                                cmd=NIXLAbortReq(request_id=notify_obj.request_id), error_info=notify_obj.error_info
+                            )
+                            continue
+
+                        # 到了请求页面的阶段
+                        remote_trans_task = notify_obj
+                        if remote_trans_task.nixl_write_stage == "request":
                             with self.waiting_dict_lock:
-                                local_trans_task: NIXLChunckedTransTask = self.waiting_dict.pop(key, None)
-
-                            if local_trans_task is None:
-                                remote_trans_task.error_info = "peer not find"
-                                try:
-                                    self.transporter.send_notify_to_prefill_node(
-                                        prefill_agent_name=remote_agent_name,
-                                        notify=pickle.dumps(remote_trans_task.createRetObj()),
-                                    )
-                                except BaseException as e:
-                                    logger.error(f"send notify to prefill node failed: {str(e)}")
-                                    logger.exception(str(e))
-                                    self.transporter.remove_remote_agent(peer_name=remote_agent_name)
-                            else:
-                                local_trans_task.nixl_src_page_index = remote_trans_task.nixl_src_page_index
-
+                                local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                            if local_trans_task is not None:
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
+                                self.request_page_task_queue.put(local_trans_task)
+                                logger.info(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
+                            else:
+                                logger.warning(
+                                    f"can not find waiting WRITE task for request notify: {remote_trans_task.to_str()}"
+                                )
+                                # 发一个error信息回去给 prefill 节点，让其可以知道这边有问题了，它可以选择其他清理掉请求。
+                                remote_trans_task.error_info = "can not find waiting WRITE task for request notify"
+                                self.transporter.send_error_info_to_prefill_node(trans_task=remote_trans_task)
 
+                            continue
+
+                        # prefill 写完数据到了 done 阶段
+                        if remote_trans_task.nixl_write_stage == "done":
+                            with self.waiting_dict_lock:
+                                local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                            if local_trans_task is not None:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
-
-                                self.read_peer_kv_queue.put(local_trans_task)
+                                self.success_queue.put(local_trans_task)
+                                logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                            else:
+                                logger.warning(
+                                    f"can not find waiting WRITE task for done notify: {remote_trans_task.to_str()}"
+                                )
+                                # 发一个error信息回去给 prefill 节点，让其可以知道这边有问题了，它可以选择其他清理掉请求。
+                                remote_trans_task.error_info = "can not find waiting WRITE task for done notify"
+                                self.transporter.send_error_info_to_prefill_node(trans_task=remote_trans_task)
+                            continue
 
             self._check_tasks_time_out()
+            if not notifies_dict:
+                time.sleep(0.001)
 
     def _check_tasks_time_out(self):
-        # check time_out update
         with self.waiting_dict_lock:
-            keys = list(self.waiting_dict.keys())
+            timeout_tasks = []
+            for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.time_out():
+                    timeout_tasks.append(self.waiting_dict.pop(key))
 
-        for key in keys:
-            with self.waiting_dict_lock:
-                trans_task = self.waiting_dict.pop(key, None)
+        for trans_task in timeout_tasks:
+            trans_task.error_info = "time out in accept_peer_task_loop"
+            self.failed_queue.put(trans_task)
+        return
 
-            if trans_task is not None and trans_task.time_out():
-                trans_task.error_info = "time out in accept_peer_task_loop"
+    @log_exception
+    def request_page_loop(self):
+        torch.cuda.set_device(self.device_id)
+        while True:
+            dst_page_index = self.page_index_queue.get()
+            trans_task: NIXLChunckedTransTask = self.request_page_task_queue.get()
+            trans_task.nixl_dst_page_index = dst_page_index
+            trans_task.start_trans_time = time.time()
+            try:
+                self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
+                with self.waiting_dict_lock:
+                    self.waiting_dict[trans_task.get_key()] = trans_task
+            except BaseException as e:
+                logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
+                logger.exception(str(e))
+                self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
+                trans_task.error_info = f"send write ready task to prefill node failed: {str(e)}"
                 self.failed_queue.put(trans_task)
                 continue
 
-            if trans_task is not None:
-                with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
-        return
-
-    @log_exception
-    def read_peer_kv_loop(self):
-        torch.cuda.set_device(self.device_id)
-        while True:
-            page_index = self.page_index_queue.get()
-            local_trans_task = self.read_peer_kv_queue.get()
-            local_trans_task: NIXLChunckedTransTask = local_trans_task
-            local_trans_task.nixl_dst_page_index = page_index
-
-            if local_trans_task.time_out():
-                local_trans_task.error_info = "time out in read_peer_kv_loop"
-                self.failed_queue.put(local_trans_task)
-                continue
-
-            try:
-                xfer_handle = self.transporter.read_blocks_paged(trans_task=local_trans_task)
-                local_trans_task.xfer_handle = xfer_handle
-                local_trans_task.start_trans_time = time.time()
-                self.update_status_task_queue.put(local_trans_task)
-            except BaseException as e:
-                logger.error(f"read_blocks_paged node failed: {local_trans_task.to_str()}")
-                logger.exception(str(e))
-                self.transporter.remove_remote_agent(peer_name=local_trans_task.prefill_agent_name)
-                local_trans_task.error_info = f"read_blocks_paged failed: {str(e)}"
-                self.failed_queue.put(local_trans_task)
-                continue
-
-    @log_exception
-    def update_task_status_loop(
-        self,
-    ):
-        while True:
-            trans_task: NIXLChunckedTransTask = self.update_status_task_queue.get()
-
-            while True:
-                ret = self.transporter.check_task_status(trans_task=trans_task)
-                if ret == "DONE":
-                    self.ready_page_task_queue.put(trans_task)
-                    break
-                elif ret == "ERR":
-                    trans_task.error_info = "xfer error"
-                    self.failed_queue.put(trans_task)
-                    break
-                elif trans_task.time_out():
-                    trans_task.error_info = "time out in update_task_status_loop"
-                    self.failed_queue.put(trans_task)
-                    break
-
-                time.sleep(0.001)
-
-    @log_exception
-    def read_page_to_mems_loop(self):
-        torch.cuda.set_device(self.device_id)
-        while True:
-            trans_task: NIXLChunckedTransTask = self.ready_page_task_queue.get()
-            # 将数据写回 mem manger
-            copy_start_event = torch.cuda.Event(enable_timing=True)
-            copy_end_event = torch.cuda.Event(enable_timing=True)
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
-                copy_start_event.record(self.copy_cuda_stream)
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=trans_task.mem_indexes,
-                    page_index=trans_task.nixl_dst_page_index,
-                    dp_index=trans_task.decode_dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                )
-                copy_end_event.record(self.copy_cuda_stream)
-
-            self.success_queue.put((copy_end_event, copy_start_event, trans_task))
-        return
-
-    def _warmup(self):
-        for dp_index in range(self.args.dp // self.args.nnodes):
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[0],
-                    page_index=0,
-                    dp_index=dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                )
-                torch.cuda.current_stream().synchronize()
         return
 
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            copy_end_event, copy_start_event, trans_task = self.success_queue.get()
+            trans_task = self.success_queue.get()
             trans_task: NIXLChunckedTransTask = trans_task
-            read_page_gpu_time_ms = -1.0
-            if copy_end_event is not None:
-                copy_end_event.synchronize()
-                read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
@@ -411,13 +354,11 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            if read_page_gpu_time_ms >= 0:
-                logger.info(
-                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                )
-            else:
+
+            if trans_task.start_trans_time is not None:
                 logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
+            else:
+                logger.info(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
@@ -428,8 +369,14 @@ class _DecodeTransModule:
             # 回收页面
             if trans_task.nixl_dst_page_index is not None:
                 self.page_index_queue.put(trans_task.nixl_dst_page_index)
+
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
+
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
             logger.info(f"trans task ret fail:{ret}")
+
+            if trans_task.error_info is not None:
+                # 提前终结所有有问题的属于同一个请求的任务。
+                self._abort(cmd=NIXLAbortReq(request_id=trans_task.request_id), error_info=trans_task.error_info)
