@@ -286,6 +286,7 @@ class NIXLChunckedTransTask:
     start_trans_time: float = None  # 用于标记传输开始的时间。同时标记是否正在传输中
 
     error_info: Optional[str] = None
+    transfer_time_out_secs: int = 66
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -302,7 +303,7 @@ class NIXLChunckedTransTask:
                 return True
             return False
         else:
-            if time.time() - self.start_trans_time > 36:
+            if time.time() - self.start_trans_time > self.transfer_time_out_secs:
                 return True
             else:
                 return False

@@ -258,6 +258,15 @@ class _DecodeTransModule:
                         # 请求有错误
                         if notify_obj.error_info is not None:
                             # 直接清理掉所有的相关请求。
+                            with self.waiting_dict_lock:
+                                local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
+                                if local_trans_task is not None:
+                                    local_trans_task.error_info = notify_obj.error_info
+                                    # 软性的调整超时时间，防止一些特殊情况，过快的释放task
+                                    # 占用的page 页面，导致多p 复写引起脏内容的问题。
+                                    local_trans_task.transfer_time_out_secs = 12
+                                    self.failed_queue.put(local_trans_task)
+
                             self._abort(
                                 request_id=notify_obj.request_id,
                                 error_info=notify_obj.error_info,
