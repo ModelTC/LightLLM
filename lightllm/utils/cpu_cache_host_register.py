@@ -1,14 +1,38 @@
 import os
 import ctypes
 import torch
-from typing import Any, Tuple
+from typing import Any, Callable, Dict, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.platform import get_backend
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+HostRegisterWorker = Callable[[int, Tuple[int ,int], Any], None]
 
+_REGISTRY: Dict[str, HostRegisterWorker] = {}
+
+
+def register_host_register_worker(backend_name: str):
+
+    def decorator(fn: HostRegisterWorker) -> HostRegisterWorker:
+        if backend_name in _REGISTRY:
+            raise ValueError(f"HostRegisterWorker {backend_name} already registered!")
+        _REGISTRY[backend_name] = fn
+        return fn
+
+    return decorator
+
+
+def get_host_register_worker():
+    backend_name = get_backend().name
+    try:
+        return _REGISTRY[backend_name]
+    except KeyError:
+        raise RuntimeError(f"platform {backend_name} is not registered!")
+
+
+@register_host_register_worker("cuda")
 def _cuda_worker(shm_ptr: int, tasks: Tuple[int ,int], handle: Any):
     cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
     cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
@@ -42,7 +66,7 @@ def _cuda_worker(shm_ptr: int, tasks: Tuple[int ,int], handle: Any):
 
     handle.tasks_finished.set()
 
-
+@register_host_register_worker("ascend")
 def _npu_worker(shm_ptr: int, tasks: Tuple[int ,int], handle: Any):
     import acl
 
@@ -60,6 +84,7 @@ def _npu_worker(shm_ptr: int, tasks: Tuple[int ,int], handle: Any):
     handle.tasks_finished.set()
 
 
+@register_host_register_worker("maca")
 def _metax_worker(shm_ptr: int, tasks: Tuple[int ,int], handle: Any):
     mc = ctypes.CDLL(os.path.join(os.getenv("MACA_PATH", "/opt/maca"), "lib/libmcruntime.so"))
     mc.mcHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
@@ -92,16 +117,3 @@ def _metax_worker(shm_ptr: int, tasks: Tuple[int ,int], handle: Any):
             handle.device_ptr = device_ptr.value
 
     handle.tasks_finished.set()
-
-
-def get_host_register_worker():
-    backend_name = get_backend().name
-    if backend_name == "cuda":
-        return _cuda_worker
-    elif backend_name == "ascend":
-        return _npu_worker
-    elif backend_name == "maca":
-        return _metax_worker
-    else:
-        raise RuntimeError(f"platform {backend_name} is not registered!")
-
