@@ -328,11 +328,14 @@ class _DecodeTransModule:
             trans_task: NIXLChunckedTransTask = self.request_page_task_queue.get()
             trans_task.nixl_dst_page_index = dst_page_index
             trans_task.start_trans_time = time.time()
+            key = trans_task.get_key()
             try:
-                self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
                 with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
+                    self.waiting_dict[key] = trans_task
+                self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
             except BaseException as e:
+                with self.waiting_dict_lock:
+                    self.waiting_dict.pop(key, None)
                 logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
                 logger.exception(str(e))
                 self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)

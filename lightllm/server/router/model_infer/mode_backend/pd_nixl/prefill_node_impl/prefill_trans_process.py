@@ -205,12 +205,15 @@ class _PrefillTransModule:
             trans_task: NIXLChunckedTransTask = trans_task
             sync_event: torch.cuda.Event = sync_event
             sync_event.synchronize()
+            key = trans_task.get_key()
             try:
-                self.transporter.send_write_request_task_to_decode_node(trans_task)
-                logger.info(f"send WRITE request to decode: {trans_task.get_key()}")
                 with self.waiting_dict_lock:
-                    self.waiting_dict[trans_task.get_key()] = trans_task
+                    self.waiting_dict[key] = trans_task
+                self.transporter.send_write_request_task_to_decode_node(trans_task)
+                logger.info(f"send WRITE request to decode: {key}")
             except BaseException as e:
+                with self.waiting_dict_lock:
+                    self.waiting_dict.pop(key, None)
                 logger.error(f"send WRITE request to decode failed: {trans_task.to_str()}")
                 logger.exception(str(e))
                 trans_task.error_info = f"send WRITE request to decode failed: {str(e)}"
