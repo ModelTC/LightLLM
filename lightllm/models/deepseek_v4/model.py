@@ -37,12 +37,13 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
+DSV4_DECODE_CUDAGRAPH_MAX_LEN = 8192
 
 
 class DeepseekV4DirectSparseAttBackend(BaseAttBackend):
     """Lifecycle placeholder for V4 direct attention.
 
-    V4 attention is currently driven inside the layer by `vllm_sparse_attn()`, not by the generic
+    V4 attention is currently driven inside the layer, not by the generic
     `infer_state.prefill_att_state.prefill_att()` / `decode_att()` backend selector.
     """
 
@@ -58,7 +59,7 @@ class DeepseekV4DirectSparsePrefillAttState(BasePrefillAttState):
         return
 
     def prefill_att(self, *args, **kwargs):
-        raise RuntimeError("DeepSeek-V4 attention is executed directly by vllm_sparse_attn() in layer_infer.")
+        raise RuntimeError("DeepSeek-V4 attention is executed directly in layer_infer.")
 
 
 class DeepseekV4DirectSparseDecodeAttState(BaseDecodeAttState):
@@ -66,7 +67,7 @@ class DeepseekV4DirectSparseDecodeAttState(BaseDecodeAttState):
         return
 
     def decode_att(self, *args, **kwargs):
-        raise RuntimeError("DeepSeek-V4 attention is executed directly by vllm_sparse_attn() in layer_infer.")
+        raise RuntimeError("DeepSeek-V4 attention is executed directly in layer_infer.")
 
 
 @ModelRegistry("deepseek_v4")
@@ -79,6 +80,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
 
     infer_state_class = DeepseekV4InferStateInfo
+    _logged_prefill_graph_prefix_skip = False
 
     def _verify_params(self):
         assert self.load_way == "HF", "only support HF format weights"
@@ -136,6 +138,28 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         assert isinstance(self.req_manager, DeepseekV4ReqManager)
         self.req_manager.bind_mem_manager(self.mem_manager)
         return
+
+    def _init_cudagraph(self):
+        if not self.disable_cudagraph and self.graph_max_len_in_batch > DSV4_DECODE_CUDAGRAPH_MAX_LEN:
+            logger.info(
+                "DeepSeek-V4 caps decode cudagraph max_len_in_batch from %s to %s for the current "
+                "graph-safe sparse-attention fallback; longer decode batches run eager.",
+                self.graph_max_len_in_batch,
+                DSV4_DECODE_CUDAGRAPH_MAX_LEN,
+            )
+            self.graph_max_len_in_batch = DSV4_DECODE_CUDAGRAPH_MAX_LEN
+        return super()._init_cudagraph()
+
+    def _can_run_prefill_cudagraph(self, infer_state, handle_token_num):
+        if infer_state.prefix_total_token_num == 0:
+            return True
+        if not self._logged_prefill_graph_prefix_skip:
+            logger.info(
+                "DeepSeek-V4 skips prefill cudagraph for prompt-cache extension batches; "
+                "no-prefix prefill batches still use prefill cudagraph."
+            )
+            self._logged_prefill_graph_prefix_skip = True
+        return False
 
     def _init_att_backend(self):
         self.prefill_att_backend = DeepseekV4DirectSparseAttBackend(model=self)

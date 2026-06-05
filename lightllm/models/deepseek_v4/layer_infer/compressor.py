@@ -459,3 +459,67 @@ def compressor_decode_step(
         eps,
         dtype,
     )
+
+
+def compressor_decode_step_batch(
+    x_new,
+    wkv_w,
+    wgate_w,
+    norm_w,
+    ape,
+    ratio,
+    head_dim,
+    rope_dim,
+    cos_table,
+    sin_table,
+    eps,
+    state_all,
+    b_req_idx,
+    start_pos,
+):
+    """Graph-safe batch decode compressor step.
+
+    Mutates ``state_all`` for the selected request rows and returns one candidate
+    entry per batch row plus a boolean mask telling which rows closed a
+    compression window.
+    """
+    overlap = ratio == 4
+    d = head_dim
+    dtype = x_new.dtype
+    req = b_req_idx.long()
+    pos = start_pos.long()
+    pos_mod = pos % ratio
+
+    xf = x_new.float()
+    kv = F.linear(xf, wkv_w.float())
+    score = F.linear(xf, wgate_w.float()) + ape.float().index_select(0, pos_mod)
+
+    kv_state = state_all[req, 0].clone()
+    score_state = state_all[req, 1].clone()
+    row = pos_mod + (ratio if overlap else 0)
+    batch_ids = torch.arange(x_new.shape[0], device=x_new.device)
+    kv_state[batch_ids, row] = kv
+    score_state[batch_ids, row] = score
+
+    should_compress = ((pos + 1) % ratio) == 0
+    if overlap:
+        kv_cat = torch.cat([kv_state[:, :ratio, :d], kv_state[:, ratio:, d:]], dim=1)
+        score_cat = torch.cat([score_state[:, :ratio, :d], score_state[:, ratio:, d:]], dim=1)
+        entry = (kv_cat * torch.softmax(score_cat, dim=1)).sum(dim=1)
+        shifted_kv_state = kv_state.clone()
+        shifted_score_state = score_state.clone()
+        shifted_kv_state[:, :ratio] = kv_state[:, ratio:]
+        shifted_score_state[:, :ratio] = score_state[:, ratio:]
+        kv_state = torch.where(should_compress.view(-1, 1, 1), shifted_kv_state, kv_state)
+        score_state = torch.where(should_compress.view(-1, 1, 1), shifted_score_state, score_state)
+    else:
+        entry = (kv_state * torch.softmax(score_state, dim=1)).sum(dim=1)
+
+    state_all[req, 0] = kv_state
+    state_all[req, 1] = score_state
+
+    entry = _rmsnorm(entry.to(dtype), norm_w, eps)
+    comp_pos = torch.clamp(pos + 1 - ratio, min=0)
+    entry_rope = apply_rotary_emb(entry[:, -rope_dim:], cos_table[comp_pos], sin_table[comp_pos])
+    entry = torch.cat([entry[:, :-rope_dim], entry_rope], dim=1)
+    return entry, should_compress

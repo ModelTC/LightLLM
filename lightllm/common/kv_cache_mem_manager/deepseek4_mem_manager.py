@@ -561,6 +561,37 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
             out[i] = swa
         return out
 
+    def prepare_decode_swa_slots(
+        self,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        mem_index: torch.Tensor,
+    ) -> None:
+        if self.req_to_swa_indexs is None or self.req_to_swa_full_indexs is None:
+            return
+
+        reqs = b_req_idx.detach().cpu().tolist()
+        seqs = b_seq_len.detach().cpu().tolist()
+        fulls = mem_index.detach().cpu().tolist()
+        hold = self.swa_pool.HOLD_TOKEN_MEMINDEX
+        for req_idx, seq_len, full in zip(reqs, seqs, fulls):
+            req_idx = int(req_idx)
+            full = int(full)
+            if req_idx == self.max_request_num or full == self.HOLD_TOKEN_MEMINDEX:
+                continue
+            ring_pos = (int(seq_len) - 1) % int(self.sliding_window)
+            old_swa = int(self.req_to_swa_indexs[req_idx, ring_pos].item())
+            old_full = int(self.req_to_swa_full_indexs[req_idx, ring_pos].item())
+            if old_swa == hold:
+                old_swa = int(self.swa_allocator.alloc(1)[0].item())
+            if old_full >= 0 and old_full != full:
+                self.full_to_swa_indexs[old_full] = -1
+            self.req_to_swa_indexs[req_idx, ring_pos] = old_swa
+            self.req_to_swa_full_indexs[req_idx, ring_pos] = full
+            self.full_to_swa_indexs[full] = old_swa
+        self.full_to_swa_indexs[self.HOLD_TOKEN_MEMINDEX] = hold
+        return
+
     def _reserve_prefill_swa_slots(
         self,
         req_idx: int,
@@ -838,6 +869,41 @@ class DeepseekV4MemoryManager(Deepseek2MemoryManager):
             if swa_slots.numel() == 0:
                 return
         self.swa_pool.write(layer_index, swa_slots, packed)
+
+    def pack_decode_mla_kv_to_cache(
+        self,
+        layer_index: int,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        mem_index: torch.Tensor,
+        kv: torch.Tensor,
+    ):
+        if kv.shape[0] == 0:
+            return
+        packed = self._pack_mla_kv(kv)
+        if self.req_to_swa_indexs is None or self.req_to_swa_full_indexs is None:
+            swa_slots = self._identity_swa_slots(mem_index).to(kv.device)
+        else:
+            req = b_req_idx.long()
+            ring = ((b_seq_len.long() - 1) % int(self.sliding_window)).long()
+            swa_slots = self.req_to_swa_indexs[req, ring].long()
+
+            old_full = self.req_to_swa_full_indexs[req, ring].long()
+            full_slots = mem_index.long()
+            old_full = torch.where(old_full >= 0, old_full, full_slots)
+            self.full_to_swa_indexs[old_full] = torch.full(
+                old_full.shape,
+                -1,
+                dtype=self.full_to_swa_indexs.dtype,
+                device=old_full.device,
+            )
+
+            self.req_to_swa_full_indexs[req, ring] = full_slots.to(torch.int32)
+            self.full_to_swa_indexs[full_slots] = swa_slots.to(torch.int32)
+        self.swa_pool.write(layer_index, swa_slots.to(kv.device), packed)
+
+    def gather_mla_kv_from_swa_slots(self, layer_index: int, swa_slots: torch.Tensor) -> torch.Tensor:
+        return self._unpack_mla_kv(self.swa_pool.read(layer_index, swa_slots.to(self.kv_buffer.device)))
 
     def pack_compressed_kv_to_cache(self, layer_index: int, slots: torch.Tensor, comp: torch.Tensor):
         if comp.shape[0] == 0:

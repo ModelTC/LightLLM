@@ -542,6 +542,26 @@ class DeepseekV4ReqManager(ReqManager):
             return self.ensure_c128_slots(req_idx, entry_start, entry_count)
         raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
 
+    def prepare_decode_compress_slots(self, b_req_idx: torch.Tensor, b_seq_len: torch.Tensor) -> None:
+        req_list = b_req_idx.detach().cpu().tolist()
+        seq_list = b_seq_len.detach().cpu().tolist()
+        for req_idx, seq_len in zip(req_list, seq_list):
+            req_idx = int(req_idx)
+            if req_idx == self.HOLD_REQUEST_ID:
+                continue
+            seq_len = int(seq_len)
+            if self.n_c4 > 0:
+                required_c4 = seq_len // 4
+                old_c4 = self._c4_entry_counts[req_idx]
+                if required_c4 > old_c4:
+                    self.ensure_c4_slots(req_idx, old_c4, required_c4 - old_c4)
+            if self.n_c128 > 0:
+                required_c128 = seq_len // 128
+                old_c128 = self._c128_entry_counts[req_idx]
+                if required_c128 > old_c128:
+                    self.ensure_c128_slots(req_idx, old_c128, required_c128 - old_c128)
+        return
+
     def pop_compress_indices_for_req(self, req_idx: int):
         c4_count = self._c4_entry_counts[req_idx]
         if c4_count > 0:

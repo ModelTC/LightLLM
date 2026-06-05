@@ -46,9 +46,13 @@ def _pad_heads_for_flashmla(q, attn_sink):
 
 
 def _torch_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
-    q0 = q[0].float()
-    kv0 = kv[0].float()
-    indices = topk_idxs[0].long()
+    return _torch_sparse_attn_flat(q[0], kv[0], attn_sink, topk_idxs[0], scale).unsqueeze(0)
+
+
+def _torch_sparse_attn_flat(q, kv, attn_sink, topk_idxs, scale):
+    q0 = q.float()
+    kv0 = kv.float()
+    indices = topk_idxs.long()
     valid = (indices >= 0) & (indices < kv0.shape[0])
     safe_indices = torch.where(valid, indices, torch.zeros_like(indices))
     kv_sel = kv0[safe_indices]
@@ -60,7 +64,7 @@ def _torch_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
     exp_sink = torch.exp(sink - max_scores)
     denom = exp_scores.sum(dim=-1) + exp_sink
     out = torch.einsum("mhk,mkd->mhd", exp_scores / denom.unsqueeze(-1), kv_sel)
-    return out.unsqueeze(0).to(q.dtype)
+    return out.to(q.dtype)
 
 
 def vllm_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
@@ -77,15 +81,40 @@ def vllm_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
     if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
         raise RuntimeError(f"DeepSeek-V4 FlashMLA sparse attention requires bf16 q/kv, got {q.dtype}/{kv.dtype}")
 
+    return vllm_sparse_attn_flat(q[0], kv[0], attn_sink, topk_idxs[0], scale).unsqueeze(0)
+
+
+def vllm_sparse_attn_flat(q, kv, attn_sink, topk_idxs, scale, already_compact=False):
+    """FlashMLA sparse attention over a flat KV arena.
+
+    q:[m,h,d], kv:[n,d], topk_idxs:[m,K] int. Indices are global offsets into
+    the flat kv tensor, so callers can concatenate per-request KV candidates and
+    run one FlashMLA call for the whole batch. When already_compact=True, each
+    row must place all valid indices before invalid (-1) entries.
+    """
+    m, h, d = q.shape
+    if d != 512:
+        raise RuntimeError(f"DeepSeek-V4 FlashMLA sparse attention requires head_dim=512, got {d}")
+    if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
+        raise RuntimeError(f"DeepSeek-V4 FlashMLA sparse attention requires bf16 q/kv, got {q.dtype}/{kv.dtype}")
+    if q.shape[0] == 0:
+        return q.new_empty((0, h, d))
+
     if DSV4_DEBUG_TORCH_SPARSE_ATTN:
-        return _torch_sparse_attn(q, kv, attn_sink, topk_idxs, scale)
+        return _torch_sparse_attn_flat(q, kv, attn_sink, topk_idxs, scale)
 
     from vllm.third_party.flashmla.flash_mla_interface import flash_mla_sparse_fwd
 
-    q_pad, sink_pad, real_heads = _pad_heads_for_flashmla(q[0], attn_sink)
-    indices, topk_lens = _compact_topk_indices(topk_idxs[0].to(torch.int32), kv.shape[1])
+    q_pad, sink_pad, real_heads = _pad_heads_for_flashmla(q, attn_sink)
+    topk_idxs = topk_idxs.to(torch.int32)
+    if already_compact:
+        valid = (topk_idxs >= 0) & (topk_idxs < kv.shape[0])
+        indices = topk_idxs.contiguous()
+        topk_lens = valid.sum(dim=-1).to(torch.int32).contiguous()
+    else:
+        indices, topk_lens = _compact_topk_indices(topk_idxs, kv.shape[0])
     indices = _pad_topk_for_flashmla(indices).unsqueeze(1)
-    kv_flat = kv[0].unsqueeze(1).contiguous()
+    kv_flat = kv.unsqueeze(1).contiguous()
     out, _, _ = flash_mla_sparse_fwd(
         q=q_pad,
         kv=kv_flat,
@@ -95,7 +124,7 @@ def vllm_sparse_attn(q, kv, attn_sink, topk_idxs, scale):
         topk_length=topk_lens,
         out=None,
     )
-    return out[:, :real_heads].unsqueeze(0).to(q.dtype)
+    return out[:, :real_heads].to(q.dtype)
 
 
 def build_prefill_topk_idxs(seqlen, window, ratio, n_window, device):

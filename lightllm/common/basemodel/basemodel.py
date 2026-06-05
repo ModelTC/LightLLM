@@ -577,6 +577,12 @@ class TpPartBaseModel:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
+            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
+                self.mem_manager.prepare_decode_swa_slots(
+                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
+                )
+            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
+                self.req_manager.prepare_decode_compress_slots(model_input.b_req_idx, model_input.b_seq_len)
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -598,6 +604,12 @@ class TpPartBaseModel:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
+            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
+                self.mem_manager.prepare_decode_swa_slots(
+                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
+                )
+            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
+                self.req_manager.prepare_decode_compress_slots(model_input.b_req_idx, model_input.b_seq_len)
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -633,7 +645,13 @@ class TpPartBaseModel:
 
         handle_token_num = infer_state.input_ids.shape[0]
 
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
+        can_run_prefill_graph = self.prefill_graph is not None and self.prefill_graph.can_run(
+            handle_token_num=handle_token_num
+        )
+        if can_run_prefill_graph and hasattr(self, "_can_run_prefill_cudagraph"):
+            can_run_prefill_graph = self._can_run_prefill_cudagraph(infer_state, handle_token_num)
+
+        if can_run_prefill_graph:
             finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
                 handle_token_num=handle_token_num
             )
@@ -846,6 +864,20 @@ class TpPartBaseModel:
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
+            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
+                self.mem_manager.prepare_decode_swa_slots(
+                    padded_model_input0.b_req_idx, padded_model_input0.b_seq_len, padded_model_input0.mem_indexes
+                )
+                self.mem_manager.prepare_decode_swa_slots(
+                    padded_model_input1.b_req_idx, padded_model_input1.b_seq_len, padded_model_input1.mem_indexes
+                )
+            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
+                self.req_manager.prepare_decode_compress_slots(
+                    padded_model_input0.b_req_idx, padded_model_input0.b_seq_len
+                )
+                self.req_manager.prepare_decode_compress_slots(
+                    padded_model_input1.b_req_idx, padded_model_input1.b_seq_len
+                )
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -887,6 +919,16 @@ class TpPartBaseModel:
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
+            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
+                self.mem_manager.prepare_decode_swa_slots(
+                    model_input0.b_req_idx, model_input0.b_seq_len, model_input0.mem_indexes
+                )
+                self.mem_manager.prepare_decode_swa_slots(
+                    model_input1.b_req_idx, model_input1.b_seq_len, model_input1.mem_indexes
+                )
+            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
+                self.req_manager.prepare_decode_compress_slots(model_input0.b_req_idx, model_input0.b_seq_len)
+                self.req_manager.prepare_decode_compress_slots(model_input1.b_req_idx, model_input1.b_seq_len)
             infer_state0 = self._create_inferstate(model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
