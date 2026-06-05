@@ -178,6 +178,58 @@ class NixlKVTransporter:
         )
         return
 
+    def send_error_info_to_prefill_node(self, trans_task: NIXLChunckedTransTask):
+        try:
+            prefill_agent_name = trans_task.prefill_agent_name
+            if prefill_agent_name not in self.remote_agents:
+                logger.warning(f"prefill_agent_name {prefill_agent_name} not exist")
+                _remote_agent = trans_task.create_prefill_agent_obj()
+                self.connect_add_remote_agent(_remote_agent)
+            assert trans_task.error_info is not None
+            new_trans_task: NIXLChunckedTransTask = copy.copy(trans_task)
+            new_trans_task.nixl_write_stage = "error"
+            new_trans_task.mem_indexes = None
+            new_trans_task.xfer_handle = None
+            new_trans_task.decode_agent_name = self.agent_name
+            new_trans_task.decode_agent_metadata = self.agent_metadata
+            new_trans_task.decode_num_pages = self.num_pages
+            new_trans_task.decode_page_reg_desc = self.local_page_mem_desc
+            self.nixl_agent.send_notif(
+                remote_agent_name=prefill_agent_name,
+                notif_msg=pickle.dumps(new_trans_task),
+            )
+        except BaseException as e:
+            logger.error(f"send error info to prefill node failed: {trans_task.to_str()}")
+            logger.exception(str(e))
+            self.remove_remote_agent(peer_name=prefill_agent_name)
+        return
+
+    def send_error_info_to_decode_node(self, trans_task: NIXLChunckedTransTask):
+        try:
+            decode_agent_name = trans_task.decode_agent_name
+            if decode_agent_name not in self.remote_agents:
+                logger.warning(f"decode_agent_name {decode_agent_name} not exist")
+                _remote_agent = trans_task.create_decode_agent_obj()
+                self.connect_add_remote_agent(_remote_agent)
+            assert trans_task.error_info is not None
+            new_trans_task: NIXLChunckedTransTask = copy.copy(trans_task)
+            new_trans_task.nixl_write_stage = "error"
+            new_trans_task.mem_indexes = None
+            new_trans_task.xfer_handle = None
+            new_trans_task.prefill_agent_name = self.agent_name
+            new_trans_task.prefill_agent_metadata = self.agent_metadata
+            new_trans_task.prefill_num_pages = self.num_pages
+            new_trans_task.prefill_page_reg_desc = self.local_page_mem_desc
+            self.nixl_agent.send_notif(
+                remote_agent_name=decode_agent_name,
+                notif_msg=pickle.dumps(new_trans_task),
+            )
+        except BaseException as e:
+            logger.error(f"send error info to decode node failed: {trans_task.to_str()}")
+            logger.exception(str(e))
+            self.remove_remote_agent(peer_name=decode_agent_name)
+        return
+
     def write_blocks_paged(
         self,
         trans_task: NIXLChunckedTransTask,
