@@ -18,10 +18,11 @@ from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.dynamic_prompt.paged_radix_cache import PagedRadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_page_size, get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, StopStrMatchedReqCmd
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -203,11 +204,12 @@ class ModeBackend:
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
             else:
-                self.radix_cache = RadixCache(
+                radix_cacahe_class = PagedRadixCache if get_page_size() > 1 else RadixCache
+                self.radix_cache = radix_cacahe_class(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
-                    mem_manager=self.model.mem_manager,
+                    mem_manager=self.model.mem_manager
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:

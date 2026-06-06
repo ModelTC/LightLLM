@@ -32,6 +32,7 @@ def padded_prepare_prefill_inputs(
     b_req_idx = []
     b_seq_len = []
     b_q_seq_len = []
+    b_last_mem_index = []
     batch_multimodal_params = []
     b_ready_cache_len = []
     b_mtp_index = []
@@ -68,6 +69,7 @@ def padded_prepare_prefill_inputs(
         b_ready_cache_len.append(0)
         total_token_num += 1
         prefix_total_token_num += 0
+        b_last_mem_index.append(req.last_kv_mem_index)
         batch_multimodal_params.append({"images": [], "audios": []})
 
     max_kv_seq_len = max(b_seq_len)
@@ -79,6 +81,7 @@ def padded_prepare_prefill_inputs(
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_last_mem_index = torch.tensor(b_last_mem_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
     b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
@@ -86,8 +89,18 @@ def padded_prepare_prefill_inputs(
     # dynamic prompt cache 准备 token
     g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0] - padded_req_num)
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0] - padded_req_num)
+        token_num = g_infer_context.req_manager.calc_real_need_token_num(
+            input_ids.shape[0] - padded_req_num, b_seq_len[: len(req_objs)], b_ready_cache_len[: len(req_objs)]
+        )
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
+    mem_indexes = g_infer_context.req_manager.alloc_mem_indices(
+        input_ids.shape[0] - padded_req_num, b_seq_len[: len(req_objs)], b_ready_cache_len[: len(req_objs)]
+    )
+    b_last_mem_index = g_infer_context.req_manager.calc_last_mem_index_in_prefill(
+        mem_indexes, b_seq_len[: len(req_objs)], b_ready_cache_len[: len(req_objs)]
+    )
+    for i, req in enumerate(req_objs):
+        req.last_kv_mem_index = b_last_mem_index[i].item()
     g_infer_state_lock.release()
 
     if padded_req_num > 0:
@@ -140,6 +153,7 @@ def padded_prepare_decode_inputs(
     b_mtp_index = []
     b_seq_len = []
     b_q_seq_len = []
+    b_last_mem_index = []
     args_mtp_step = get_env_start_args().mtp_step
     batch_multimodal_params = []
     for req in req_objs:
@@ -162,7 +176,7 @@ def padded_prepare_decode_inputs(
             b_q_seq_len.append(1)
             b_mtp_index.append(step + 1)
             batch_multimodal_params.append(req.multimodal_params)
-
+            b_last_mem_index.append(req.last_kv_mem_index)
     # padding fake req for decode
     for _ in range(padded_req_num):
         seq_len = 2
@@ -187,13 +201,23 @@ def padded_prepare_decode_inputs(
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_last_mem_index = torch.tensor(b_last_mem_index, dtype=torch.int32, device="cpu")
 
     # dynamic prompt cache 准备 token
     padded_mem_indexes_num = padded_req_num * (args_mtp_step + 1)
     g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
-        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0] - padded_mem_indexes_num)
-    mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0] - padded_mem_indexes_num)
+        token_num = g_infer_context.req_manager.calc_real_need_token_num(
+            b_seq_len.shape[0] - padded_mem_indexes_num, b_seq_len[: len(b_last_mem_index)]
+        )
+        g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(token_num)
+    mem_indexes = g_infer_context.req_manager.alloc_mem_indices(
+        b_seq_len.shape[0] - padded_mem_indexes_num,
+        b_seq_len[: len(b_last_mem_index)],
+        b_last_mem_index=b_last_mem_index,
+    )
+    for i, req in enumerate(req_objs):
+        req.last_kv_mem_index = mem_indexes[i].item()
     g_infer_state_lock.release()
 
     if padded_mem_indexes_num > 0:

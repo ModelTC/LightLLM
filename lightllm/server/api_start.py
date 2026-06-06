@@ -9,7 +9,7 @@ from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import get_page_size, set_env_start_args, set_unique_server_name, get_unique_server_name
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
@@ -212,6 +212,21 @@ def normal_or_p_d_start(args):
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
+
+    # page_size > 1 compatibility check
+    if get_page_size() > 1:
+        assert args.run_mode not in (
+            "prefill",
+            "decode",
+        ), "page_size > 1 is not supported with RPyC PD split mode, please set PAGE_SIZE=1"
+        assert args.run_mode not in (
+            "nixl_prefill",
+            "nixl_decode",
+        ), "page_size > 1 is not supported with NIXL PD split mode, please set PAGE_SIZE=1"
+        assert (
+            not args.enable_dp_prefill_balance
+        ), "page_size > 1 is not supported with DP prefill balance, please set PAGE_SIZE=1"
+        assert not args.enable_cpu_cache, "page_size > 1 is not supported with CPU cache, please set PAGE_SIZE=1"
 
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
