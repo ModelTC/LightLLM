@@ -44,10 +44,10 @@ class DiskCacheWorker:
         storage_size = int(disk_cache_storage_size * (1024 ** 3))
         # num_shard与KVCACHE_MAX_BLOCK_SIZE相关，KVCACHE_MAX_BLOCK_SIZE默认64MB前提下，
         # num_shard设置32, 能使disk cache的容量利用率达到90%，继续增大num_shard会导致容量利用率下降
-        num_shard = 32
-        num_worker = 48
+        num_shard = 8
+        num_worker = 24
         # 读写同时进行时，分配16线程用来写，32线程用来读
-        max_concurrent_write_tasks = 16
+        max_concurrent_write_tasks = 8
 
         cache_dir = disk_cache_dir
         if not cache_dir:
