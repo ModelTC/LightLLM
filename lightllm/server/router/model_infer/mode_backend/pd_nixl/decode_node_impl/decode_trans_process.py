@@ -286,8 +286,16 @@ class _DecodeTransModule:
                                 self.request_page_task_queue.put(local_trans_task)
                                 logger.info(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
+                                # This does not necessarily mean the WRITE protocol state is corrupted.
+                                # A common benign case is: decode has already received an abort for this
+                                # request and removed its waiting task, while prefill's NIXL WRITE request
+                                # notify arrives later. Keep the original cleanup/error path so true
+                                # missing-task bugs are still visible, but make the log explicit enough
+                                # to avoid misclassifying abort-after-cleanup as a transfer failure.
                                 logger.warning(
-                                    f"can not find waiting WRITE task for request notify: {remote_trans_task.to_str()}"
+                                    "can not find waiting WRITE task for request notify, "
+                                    "possibly because request was already aborted and cleaned on decode side: "
+                                    f"{remote_trans_task.to_str()}"
                                 )
                                 # 发一个error信息回去给 prefill 节点，让其可以知道这边有问题了，它可以选择其他清理掉请求。
                                 remote_trans_task.error_info = "can not find waiting WRITE task for request notify"
@@ -305,8 +313,14 @@ class _DecodeTransModule:
                                 self.ready_page_task_queue.put(local_trans_task)
                                 logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
+                                # Same race as the WRITE request stage: decode may have cleaned the
+                                # waiting task because the request was aborted, then a late done notify
+                                # arrives from prefill. Preserve the original error path, but make the
+                                # diagnostic tell future readers this can be abort-related noise.
                                 logger.warning(
-                                    f"can not find waiting WRITE task for done notify: {remote_trans_task.to_str()}"
+                                    "can not find waiting WRITE task for done notify, "
+                                    "possibly because request was already aborted and cleaned on decode side: "
+                                    f"{remote_trans_task.to_str()}"
                                 )
                                 # 发一个error信息回去给 prefill 节点，让其可以知道这边有问题了，它可以选择其他清理掉请求。
                                 remote_trans_task.error_info = "can not find waiting WRITE task for done notify"
