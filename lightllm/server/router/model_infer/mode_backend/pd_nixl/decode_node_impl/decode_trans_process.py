@@ -206,6 +206,7 @@ class _DecodeTransModule:
                     if task.transfer_kv_num() != 0:
                         self.waiting_dict[task.get_key()] = task
                     else:
+                        task.start_trans_time = time.time()
                         self.success_queue.put((None, None, task))
 
             # up status
@@ -411,13 +412,10 @@ class _DecodeTransModule:
             self.task_out_queue.put(ret)
 
             if trans_task.start_trans_time is not None:
-                if read_page_gpu_time_ms >= 0:
-                    logger.info(
-                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                    )
-                else:
-                    logger.info(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s")
+                logger.info(
+                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                )
             else:
                 logger.info(f"trans task ret success:{ret}")
 
