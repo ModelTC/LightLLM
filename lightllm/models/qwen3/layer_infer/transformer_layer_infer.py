@@ -31,7 +31,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         cache_kv = cache_kv.view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        self.platform_backend.ops.infer.rotary_emb(
+        self.platform_backend.ops.rotary_emb(
             is_prefill=infer_state.is_prefill,
             batch_size=infer_state.batch_size,
             q=q.view(-1, self.tp_q_head_num_, self.head_dim_),

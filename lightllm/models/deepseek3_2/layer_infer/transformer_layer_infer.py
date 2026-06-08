@@ -56,7 +56,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             out=cache_kv[:, :, : self.kv_lora_rank],
         )
 
-        self.platform_backend.ops.infer.rotary_emb(
+        self.platform_backend.ops.rotary_emb(
             is_prefill=infer_state.is_prefill,
             batch_size=infer_state.batch_size,
             q=q_rope,
@@ -274,7 +274,7 @@ class NsaInfer:
         k = layer_weight.k_norm_(k, eps=self.eps)
 
         # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
-        get_backend().ops.infer.rotary_emb(
+        get_backend().ops.rotary_emb(
             is_prefill=infer_state.is_prefill,
             batch_size=infer_state.batch_size,
             q=q[:, :, : self.qk_rope_head_dim],

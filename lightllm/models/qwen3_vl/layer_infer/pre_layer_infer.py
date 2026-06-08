@@ -57,7 +57,7 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         ).to(device=self.target_device, non_blocking=True)
         infer_state.input_ids = input_ids
 
-        self.platform_backend.ops.infer.multimodal_emb(
+        self.platform_backend.ops.multimodal_emb(
             out=out,
             prompt_ids=input_ids,
             text_weight_embs=layer_weight.wte_weight_.weight,

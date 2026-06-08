@@ -41,7 +41,7 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
 
         is_sliding = bool((self.layer_num_ + 1) % self.sliding_window_pattern)
         if is_sliding:
-            self.platform_backend.ops.infer.rotary_emb(
+            self.platform_backend.ops.rotary_emb(
                 is_prefill=infer_state.is_prefill,
                 batch_size=infer_state.batch_size,
                 q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
@@ -50,7 +50,7 @@ class Gemma3TransformerLayerInfer(LlamaTransformerLayerInfer):
                 sin=infer_state.position_sin_local.to(q.dtype),
             )
         else:
-            self.platform_backend.ops.infer.rotary_emb(
+            self.platform_backend.ops.rotary_emb(
                 is_prefill=infer_state.is_prefill,
                 batch_size=infer_state.batch_size,
                 q=q.view(-1, self.tp_q_head_num_, self.head_dim_),

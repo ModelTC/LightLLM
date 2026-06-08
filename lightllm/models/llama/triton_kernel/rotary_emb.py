@@ -159,7 +159,7 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
 
 
 @torch.no_grad()
-def rotary_emb_fwd_npu(
+def npu_rotary_emb_fwd(
     *,
     is_prefill: bool,
     batch_size: int,

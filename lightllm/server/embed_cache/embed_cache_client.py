@@ -51,7 +51,7 @@ class CpuEmbedCacheClient(object):
         return
 
     def copy_to_cache(self, embed_tensor: torch.Tensor, start_index_in_cache: int):
-        self.platform_backend.ops.infer.offload_embed_tensor_to_cache(
+        self.platform_backend.ops.offload_embed_tensor_to_cache(
             embed_tensor=embed_tensor,
             cache_tensor=self.cpu_embed_cache_tensor,
             start_index_in_cache=start_index_in_cache,
@@ -63,7 +63,7 @@ class CpuEmbedCacheClient(object):
             # check for qwen3 vision embed tensor shape, use apply deepstack
             assert embed_tensor.shape[1] == self.cpu_embed_cache_tensor.shape[1]
 
-        self.platform_backend.ops.infer.offload_embed_tensor_to_cache(
+        self.platform_backend.ops.offload_embed_tensor_to_cache(
             embed_tensor=embed_tensor,
             cache_tensor=self.cpu_embed_cache_tensor,
             start_index_in_cache=start_index_in_cache,

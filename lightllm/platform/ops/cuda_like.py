@@ -1,15 +1,21 @@
 import torch
 from typing import Any, Callable, Optional, Tuple
 
-from lightllm.common.basemodel.triton_kernel.embedding import npu_embedding
-from lightllm.common.basemodel.triton_kernel.multimodal_emb import npu_multimodal_emb
-from lightllm.models.llama.layer_infer.transformer_layer_infer import npu_ffn_fwd
-from lightllm.models.llama.triton_kernel.rotary_emb import npu_rotary_emb_fwd
+from lightllm.common.basemodel.triton_kernel.embedding import embedding as cuda_embedding
+from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb as cuda_multimodal_emb
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.platform.base.ops import register_op
-from lightllm.server.embed_cache.copy_to_cache import npu_offload_embed_tensor_to_cache
+from lightllm.server.embed_cache.copy_to_cache import (
+    offload_embed_tensor_to_cache as cuda_offload_embed_tensor_to_cache,
+)
 
 
-@register_op("ascend")
+@register_op("cuda_like")
 def multimodal_emb(
     *,
     out: torch.Tensor,
@@ -23,7 +29,7 @@ def multimodal_emb(
     tp_text_end_token_id: int,
     tp_world_size: int,
 ) -> None:
-    npu_multimodal_emb(
+    cuda_multimodal_emb(
         out=out,
         prompt_ids=prompt_ids,
         text_weight_embs=text_weight_embs,
@@ -37,21 +43,21 @@ def multimodal_emb(
     )
 
 
-@register_op("ascend")
+@register_op("cuda_like")
 def offload_embed_tensor_to_cache(
     *,
     embed_tensor: torch.Tensor,
     cache_tensor: torch.Tensor,
     start_index_in_cache: int,
 ) -> None:
-    npu_offload_embed_tensor_to_cache(
+    cuda_offload_embed_tensor_to_cache(
         embed_tensor=embed_tensor,
         cache_tensor=cache_tensor,
         start_index_in_cache=start_index_in_cache,
     )
 
 
-@register_op("ascend")
+@register_op("cuda_like")
 def rotary_emb(
     *,
     is_prefill: bool,
@@ -63,19 +69,11 @@ def rotary_emb(
     partial_rotary_factor: float = 1.0,
     rotary_impl: Optional[Callable] = None,
 ) -> None:
-    impl = rotary_impl or npu_rotary_emb_fwd
-    impl(
-        is_prefill=is_prefill,
-        batch_size=batch_size,
-        q=q,
-        k=k,
-        cos=cos,
-        sin=sin,
-        partial_rotary_factor=partial_rotary_factor,
-    )
+    impl = rotary_impl or rotary_emb_fwd
+    impl(q=q, k=k, cos=cos, sin=sin, partial_rotary_factor=partial_rotary_factor)
 
 
-@register_op("ascend")
+@register_op("cuda_like")
 def ffn(
     *,
     input: torch.Tensor,
@@ -83,12 +81,20 @@ def ffn(
     alloc_func: Callable,
     embed_dim: int,
 ) -> torch.Tensor:
-    return npu_ffn_fwd(input, layer_weight, embed_dim)
+    input = input.view(-1, embed_dim)
+    up_gate_out = layer_weight.gate_up_proj.mm(input)
+    ffn1_out = alloc_func(
+        (input.size(0), up_gate_out.size(1) // 2),
+        dtype=input.dtype,
+        device=input.device,
+    )
+    silu_and_mul_fwd(up_gate_out, ffn1_out)
+    return layer_weight.down_proj.mm(ffn1_out)
 
 
 @register_op(
-    "ascend", 
-    out={"input_name": "weight","out_shape": (("input_ids", 0), ("weight", 1))},
+    "cuda_like", 
+    out={"input_name": "weight", "out_shape": (("input_ids", 0), ("weight", 1))},
 )
 def embedding(
     *,
@@ -100,12 +106,18 @@ def embedding(
 ) -> torch.Tensor:
     if vob_end_id is None:
         vob_end_id = weight.shape[0]
-    npu_embedding(input_ids, weight, vob_start_id, vob_end_id, out)
+    cuda_embedding(
+        input_ids=input_ids,
+        weight=weight,
+        vob_start_id=vob_start_id,
+        vob_end_id=vob_end_id,
+        out=out,
+    )
     return out
 
 
 @register_op(
-    "ascend", 
+    "cuda_like", 
     out={"input_name": "input", "out_shape": (("weight", 0), ("input", 1))},
 )
 def lm_head(
@@ -118,7 +130,7 @@ def lm_head(
     return out
 
 
-@register_op("ascend", out={"input_name": "input"})
+@register_op("cuda_like", out={"input_name": "input"})
 def rms_norm(
     *,
     input: torch.Tensor,
@@ -127,17 +139,14 @@ def rms_norm(
     out: torch.Tensor,
     gate_value: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    if gate_value is not None:
-        raise NotImplementedError("gate_value is not supported for rms_norm on ascend")
-
-    import torch_npu
-
-    _out = torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]
-    out.copy_(_out)
+    if gate_value is None:
+        rmsnorm_forward(x=input, weight=weight, eps=eps, out=out)
+    else:
+        gated_rmsnorm_forward(x=input, weight=weight, bias=None, eps=eps, z=gate_value, out=out)
     return out
 
 
-@register_op("ascend", out={"input_name": "input"})
+@register_op("cuda_like", out={"input_name": "input"})
 def layer_norm(
     *,
     input: torch.Tensor,
@@ -146,10 +155,12 @@ def layer_norm(
     eps: float,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    raise NotImplementedError("layer_norm is not supported on ascend")
+    out_ = layernorm_forward(x=input, weight=weight, bias=bias, eps=eps)
+    out.copy_(out_)
+    return out
 
 
-@register_op("ascend")
+@register_op("cuda_like")
 def qk_rms_norm(
     *,
     q: torch.Tensor,
@@ -159,17 +170,4 @@ def qk_rms_norm(
     eps: float,
     fp32_multiply: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    import torch_npu
-
-    head_dim_q = w_q.shape[0]
-    head_dim_k = w_k.shape[0]
-    flat_q = q.reshape(-1, head_dim_q)
-    flat_k = k.reshape(-1, head_dim_k)
-    _q = torch_npu.npu_rms_norm(flat_q, w_q, epsilon=eps)[0]
-    _k = torch_npu.npu_rms_norm(flat_k, w_k, epsilon=eps)[0]
-    _q = _q.view(q.shape)
-    _k = _k.view(k.shape)
-    q.copy_(_q)
-    k.copy_(_k)
-
-    return q, k
+    return qk_rmsnorm_fused_forward(q=q, k=k, w_q=w_q, w_k=w_k, eps=eps, fp32_multiply=fp32_multiply)

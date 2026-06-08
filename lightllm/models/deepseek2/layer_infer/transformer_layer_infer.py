@@ -161,7 +161,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.kv_a_layernorm_(
                 cache_kv[:, :, : self.kv_lora_rank], eps=self.eps_, out=cache_kv[:, :, : self.kv_lora_rank]
             )
-            self.platform_backend.ops.infer.rotary_emb(
+            self.platform_backend.ops.rotary_emb(
                 is_prefill=infer_state.is_prefill,
                 batch_size=infer_state.batch_size,
                 q=q_rope,
@@ -193,7 +193,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.kv_a_layernorm_(
                 cache_kv[:, :, : self.kv_lora_rank], eps=self.eps_, out=cache_kv[:, :, : self.kv_lora_rank]
             )
-            self.platform_backend.ops.infer.rotary_emb(
+            self.platform_backend.ops.rotary_emb(
                 is_prefill=infer_state.is_prefill,
                 batch_size=infer_state.batch_size,
                 q=q_rope,

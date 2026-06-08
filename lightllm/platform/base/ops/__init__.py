@@ -1,5 +1,4 @@
-from lightllm.platform.base.ops.facade import BackendOps
-from lightllm.platform.base.ops.infer_ops import InferOps
-from lightllm.platform.base.ops.weight_ops import WeightOps
+from lightllm.platform.base.ops.base import OpsProtocol
+from lightllm.platform.base.ops.runtime import build_ops, register_op
 
-__all__ = ["BackendOps", "InferOps", "WeightOps"]
+__all__ = ["OpsProtocol", "build_ops", "register_op"]
