@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import os
 
@@ -27,7 +28,6 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
-from lightllm.models.deepseek3_2.model import DeepSeekChatTokenizerBase
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
@@ -212,13 +212,22 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return
 
 
-class DeepSeekV4Tokenizer(DeepSeekChatTokenizerBase):
+class DeepSeekV4Tokenizer:
     """Tokenizer wrapper for DeepSeek-V4's Python prompt encoding."""
 
     def __init__(self, tokenizer, model_dir):
-        super().__init__(tokenizer)
+        self.tokenizer = tokenizer
         self.model_dir = model_dir
         self._encoding_module = None
+        self._added_vocab = None
+
+    def __getattr__(self, name):
+        return getattr(self.tokenizer, name)
+
+    def get_added_vocab(self):
+        if self._added_vocab is None:
+            self._added_vocab = self.tokenizer.get_added_vocab()
+        return self._added_vocab
 
     def _get_encoding_module(self):
         if self._encoding_module is not None:
@@ -236,12 +245,54 @@ class DeepSeekV4Tokenizer(DeepSeekChatTokenizerBase):
         self._encoding_module = module
         return module
 
-    def _encode_messages(self, msgs, thinking_mode, kwargs):
+    def apply_chat_template(
+        self,
+        conversation=None,
+        messages=None,
+        tools=None,
+        tokenize=False,
+        add_generation_prompt=True,
+        thinking=None,
+        enable_thinking=None,
+        **kwargs,
+    ):
+        msgs = conversation if conversation is not None else messages
+        if msgs is None:
+            raise ValueError("Either 'conversation' or 'messages' must be provided")
+
+        msgs = copy.deepcopy(msgs)
+
+        if tools:
+            wrapped_tools = []
+            for tool in tools:
+                if "function" in tool:
+                    wrapped_tools.append(tool)
+                else:
+                    wrapped_tools.append({"type": "function", "function": tool})
+
+            injected = False
+            for msg in msgs:
+                if msg.get("role") == "system":
+                    existing = msg.get("tools") or []
+                    msg["tools"] = existing + wrapped_tools
+                    injected = True
+                    break
+
+            if not injected:
+                msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
+
+        if thinking is None:
+            thinking = bool(enable_thinking) if enable_thinking is not None else False
+        thinking_mode = "thinking" if thinking else "chat"
         encoding = self._get_encoding_module()
-        return encoding.encode_messages(
+        prompt = encoding.encode_messages(
             msgs,
             thinking_mode=thinking_mode,
             drop_thinking=kwargs.get("drop_thinking", True),
             add_default_bos_token=kwargs.get("add_default_bos_token", True),
             reasoning_effort=kwargs.get("reasoning_effort"),
         )
+
+        if tokenize:
+            return self.tokenizer.encode(prompt, add_special_tokens=False)
+        return prompt
