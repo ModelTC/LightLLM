@@ -163,13 +163,11 @@ class ReqSamplingParamsManager:
             )
         elif self.penalty_counter_mode == "pin_mem_counter":
             self.req_to_out_token_id_counter = torch.zeros(
-                (max_request_num + 1, self.vocab_size),
-                dtype=torch.int32,
-                device="cpu",
-                pin_memory=True,
+                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cpu", pin_memory=True
             )
 
     def init_req_sampling_params(self, req: "InferReq"):
+
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
@@ -199,18 +197,14 @@ class ReqSamplingParamsManager:
                     dtype=torch.int32,
                 ).cuda(non_blocking=True)
                 token_id_counter(
-                    prompt_ids=prompt_ids,
-                    out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx],
+                    prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
                 torch.cuda.current_stream().synchronize()
 
         return
 
     def update_reqs_out_token_counter_gpu(
-        self,
-        b_req_idx: torch.Tensor,
-        next_token_ids: torch.Tensor,
-        mask: torch.Tensor = None,
+        self, b_req_idx: torch.Tensor, next_token_ids: torch.Tensor, mask: torch.Tensor = None
     ):
         if self.penalty_counter_mode not in ["gpu_counter", "pin_mem_counter"]:
             return
@@ -226,10 +220,7 @@ class ReqSamplingParamsManager:
         return
 
     def update_reqs_token_counter(
-        self,
-        req_objs: List["InferReq"],
-        next_token_ids: List[int],
-        accept_mark: Optional[List[List[bool]]] = None,
+        self, req_objs: List["InferReq"], next_token_ids: List[int], accept_mark: Optional[List[List[bool]]] = None
     ):
         if self.penalty_counter_mode != "cpu_counter":
             return
@@ -271,13 +262,7 @@ class ReqSamplingParamsManager:
 
 
 class ReqManagerForMamba(ReqManager):
-    def __init__(
-        self,
-        max_request_num,
-        max_sequence_length,
-        mem_manager,
-        linear_config: LinearAttCacheConfig,
-    ):
+    def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
         self.big_page_token_num = (
@@ -322,6 +307,7 @@ class ReqManagerForMamba(ReqManager):
         return conv_states, ssm_states
 
     def copy_big_page_buffer_to_linear_att_state(self, big_page_buffer_idx: int, req: "InferReq"):
+
         from .linear_att_cache_manager import LinearAttCacheManager
 
         big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
@@ -375,15 +361,8 @@ class DeepseekV4ReqManager(ReqManager):
         indexer_head_dim: Optional[int] = None,
     ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
-        if mem_manager is not None:
-            assert isinstance(mem_manager, DeepseekV4MemoryManager)
-            compress_rates = mem_manager.compress_rates
-            head_dim = mem_manager.head_dim
-            indexer_head_dim = mem_manager.indexer_head_dim
-        assert compress_rates is not None, "DeepSeek-V4 req manager requires compress_rates"
-        assert head_dim is not None, "DeepSeek-V4 req manager requires head_dim"
-        assert indexer_head_dim is not None, "DeepSeek-V4 req manager requires indexer_head_dim"
 
+        self.mem_manager = mem_manager
         self.compress_rates = list(compress_rates)
         self.n_c4 = sum(1 for r in self.compress_rates if r == 4)
         self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
