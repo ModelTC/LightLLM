@@ -7,6 +7,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .hyper_connection import hc_pre, hc_post
 from ..triton_kernel.rotary_emb import apply_rotary_emb
+from ..infer_struct import DeepseekV4InferStateInfo
 from .compressor import compressor_prefill_state, compressor_decode_step, compressor_decode_step_batch
 from .attention import vllm_sparse_attn_flat
 
@@ -60,7 +61,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
 
     # ------------------------------------------------------------------ forward (HC-wrapped)
-    def _hc_forward(self, streams, infer_state, lw, attn_forward):
+    def _hc_forward(self, streams, infer_state: DeepseekV4InferStateInfo, lw, attn_forward):
         residual = streams
         collapsed, post, comb = hc_pre(
             streams,
@@ -89,25 +90,25 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         f = self._ffn(self._ffn_norm(collapsed, infer_state, lw), infer_state, lw)
         return hc_post(f, residual, post, comb, self.hc_mult, self.hidden)
 
-    def context_forward(self, streams, infer_state, lw):
+    def context_forward(self, streams, infer_state: DeepseekV4InferStateInfo, lw):
         return self._hc_forward(streams, infer_state, lw, self.context_attention_forward)
 
-    def token_forward(self, streams, infer_state, lw):
+    def token_forward(self, streams, infer_state: DeepseekV4InferStateInfo, lw):
         return self._hc_forward(streams, infer_state, lw, self.token_attention_forward)
 
-    def _att_norm(self, x, infer_state, lw):
+    def _att_norm(self, x, infer_state: DeepseekV4InferStateInfo, lw):
         return lw.attn_norm_(x, eps=self.eps_)
 
-    def _ffn_norm(self, x, infer_state, lw):
+    def _ffn_norm(self, x, infer_state: DeepseekV4InferStateInfo, lw):
         return lw.ffn_norm_(x, eps=self.eps_)
 
     # ------------------------------------------------------------------ shared projections / cache
-    def _select_rope(self, infer_state):
+    def _select_rope(self, infer_state: DeepseekV4InferStateInfo):
         if self.compress_ratio:
             return infer_state.position_cos_compress, infer_state.position_sin_compress
         return infer_state.position_cos_sliding, infer_state.position_sin_sliding
 
-    def _get_qkv(self, x, infer_state, lw):
+    def _get_qkv(self, x, infer_state: DeepseekV4InferStateInfo, lw):
         cos_tok, sin_tok = self._select_rope(infer_state)
         T = x.shape[0]
         qa = lw.q_norm_(lw.wq_a_.mm(x), eps=self.eps_)
@@ -130,7 +131,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         return q, kv, qa, cos_tok, sin_tok
 
-    def _get_o(self, o, infer_state, lw):
+    def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, lw):
         # o: [T, tp_q_heads, head_dim] after inverse rope -> grouped low-rank O -> [T, hidden]
         T = o.shape[0]
         o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
@@ -154,7 +155,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             dim=-1,
         )
 
-    def _post_cache_kv(self, cache_kv, infer_state, lw, req_idx=None, start_pos=None, mem_index=None):
+    def _post_cache_kv(
+        self, cache_kv, infer_state: DeepseekV4InferStateInfo, lw, req_idx=None, start_pos=None, mem_index=None
+    ):
         if req_idx is None or start_pos is None or mem_index is None:
             raise RuntimeError("DeepSeek-V4 cache write requires req_idx, start_pos, and mem_index")
         positions = torch.arange(
@@ -172,7 +175,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         return
 
-    def _get_compressor_state(self, infer_state, req):
+    def _get_compressor_state(self, infer_state: DeepseekV4InferStateInfo, req):
         cstate_kv, cstate_score = infer_state.req_manager.get_compress_state_for_req(self.layer_num_, req)
         state = {
             "cstate_kv": cstate_kv,
@@ -184,26 +187,26 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             state["idx_cstate_score"] = idx_state[req, 1]
         return state
 
-    def _write_compressed_kv(self, infer_state, req, entry_start, comp):
+    def _write_compressed_kv(self, infer_state: DeepseekV4InferStateInfo, req, entry_start, comp):
         slots = infer_state.req_manager.ensure_compress_slots(self.layer_num_, req, entry_start, comp.shape[0])
         if comp.shape[0] == 0:
             return slots
         infer_state.mem_manager.pack_compressed_kv_to_cache(self.layer_num_, slots, comp)
         return slots
 
-    def _write_c4_indexer_k(self, infer_state, slots, idx_comp):
+    def _write_c4_indexer_k(self, infer_state: DeepseekV4InferStateInfo, slots, idx_comp):
         if idx_comp is None or idx_comp.shape[0] == 0:
             return
         infer_state.mem_manager.pack_c4_indexer_k_to_cache(self.layer_num_, slots, idx_comp)
         return
 
-    def _dense_kv_from_cache(self, infer_state, req, start_pos, end_pos):
+    def _dense_kv_from_cache(self, infer_state: DeepseekV4InferStateInfo, req, start_pos, end_pos):
         if end_pos <= start_pos:
             return torch.empty((0, self.head_dim), dtype=infer_state.mem_manager.dtype, device="cuda")
         slots = infer_state.req_manager.req_to_token_indexs[req, start_pos:end_pos].long()
         return infer_state.mem_manager.gather_mla_kv(self.layer_num_, slots)
 
-    def _compressed_kv_from_cache(self, infer_state, req, ncomp):
+    def _compressed_kv_from_cache(self, infer_state: DeepseekV4InferStateInfo, req, ncomp):
         if ncomp == 0:
             return torch.empty((0, self.head_dim), dtype=infer_state.mem_manager.dtype, device="cuda")
         if self.compress_ratio == 4:
@@ -212,7 +215,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             slots = infer_state.req_manager.req_to_c128_indexs[req, :ncomp].long()
         return infer_state.mem_manager.gather_compressed_kv(self.layer_num_, slots)
 
-    def _c4_indexer_k_from_cache(self, infer_state, req, ncomp):
+    def _c4_indexer_k_from_cache(self, infer_state: DeepseekV4InferStateInfo, req, ncomp):
         if self.compress_ratio != 4 or ncomp == 0:
             return None
         slots = infer_state.req_manager.req_to_c4_indexs[req, :ncomp].long()
@@ -236,12 +239,12 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         return vllm_sparse_attn_flat(q_flat, kv_flat, sink, topk, self.softmax_scale)
 
     # ------------------------------------------------------------------ attention (prefill)
-    def context_attention_forward(self, x, infer_state, lw):
+    def context_attention_forward(self, x, infer_state: DeepseekV4InferStateInfo, lw):
         q, cache_kv, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, lw)
         o = self._context_attention_wrapper_run(q, cache_kv, q_lora, x, infer_state, lw)
         return self._get_o(self._inv_rope(o, cos_tok, sin_tok), infer_state, lw)
 
-    def _context_attention_wrapper_run(self, q, cache_kv, q_lora, x, infer_state, lw):
+    def _context_attention_wrapper_run(self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, lw):
         if torch.cuda.is_current_stream_capturing():
             q = q.contiguous()
             cache_kv = cache_kv.contiguous()
@@ -260,7 +263,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             o = torch.empty((q.shape[0], self.tp_q_heads, self.head_dim), dtype=q.dtype, device=q.device)
             _o = tensor_to_no_ref_tensor(o)
 
-            def att_func(new_infer_state):
+            def att_func(new_infer_state: DeepseekV4InferStateInfo):
                 tmp_o = self._context_attention_kernel(_q, _cache_kv, _q_lora, _x, new_infer_state, lw)
                 assert tmp_o.shape == _o.shape
                 _o.copy_(tmp_o)
@@ -271,7 +274,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
         return self._context_attention_kernel(q, cache_kv, q_lora, x, infer_state, lw)
 
-    def _context_attention_kernel(self, q, cache_kv, q_lora, x, infer_state, lw):
+    def _context_attention_kernel(self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, lw):
         T = x.shape[0]
         sink = lw.attn_sink_.weight
         o = x.new_empty(T, self.tp_q_heads, self.head_dim)
@@ -338,7 +341,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 out_offset += ln
         return o
 
-    def _gather_prefill(self, x_r, kv_r, req, ready_len, lw, infer_state):
+    def _gather_prefill(self, x_r, kv_r, req, ready_len, lw, infer_state: DeepseekV4InferStateInfo):
         ln = kv_r.shape[0]
         idx_comp = None
         if ready_len > 0:
@@ -393,7 +396,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return torch.cat([kv_r, comp], dim=0), 0, ln, ncomp, idx_comp
         return kv_r, 0, ln, 0, None
 
-    def _gather_prefill_extend(self, x_r, kv_r, req, ready_len, lw, infer_state):
+    def _gather_prefill_extend(self, x_r, kv_r, req, ready_len, lw, infer_state: DeepseekV4InferStateInfo):
         if self.compress_ratio:
             state = self._get_compressor_state(infer_state, req)
             cstate_pool = infer_state.req_manager.get_compress_state_pool_for_req(self.layer_num_, req)
@@ -484,7 +487,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         idx_q,
         idx_comp,
         idx_weight,
-        infer_state,
+        infer_state: DeepseekV4InferStateInfo,
     ):
         t = torch.arange(seqlen, device=device)
         abs_pos = t + base_pos
@@ -505,7 +508,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return torch.cat([win, comp], dim=1).int().unsqueeze(0)
         return win.int().unsqueeze(0)
 
-    def _decode_dense_kv_graph(self, infer_state):
+    def _decode_dense_kv_graph(self, infer_state: DeepseekV4InferStateInfo):
         req = infer_state.b_req_idx.long()
         seq = infer_state.b_seq_len.long()
         B = req.shape[0]
@@ -524,7 +527,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         kv = infer_state.mem_manager.gather_mla_kv_from_swa_slots(self.layer_num_, swa_slots.reshape(-1))
         return kv.view(B, self.window, self.head_dim), valid
 
-    def _decode_all_compressed_kv_graph(self, infer_state, ratio):
+    def _decode_all_compressed_kv_graph(self, infer_state: DeepseekV4InferStateInfo, ratio):
         req = infer_state.b_req_idx.long()
         seq = infer_state.b_seq_len.long()
         B = req.shape[0]
@@ -550,7 +553,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         idx_k = idx_k.view(B, max_comp, self.index_head_dim)
         return kv, idx_k, valid, ncomp
 
-    def _decode_c4_topk_graph(self, idx_q, idx_weight, idx_comp, valid_comp, ncomp, infer_state):
+    def _decode_c4_topk_graph(
+        self, idx_q, idx_weight, idx_comp, valid_comp, ncomp, infer_state: DeepseekV4InferStateInfo
+    ):
         scores = torch.einsum("bhd,bnd->bhn", idx_q.float(), idx_comp.float())
         scores = F.relu(scores) * self.indexer_score_scale
         index_scores = (scores * idx_weight.unsqueeze(-1)).sum(dim=1)
@@ -561,7 +566,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         valid = top < ncomp.unsqueeze(1)
         return torch.where(valid, top, torch.zeros_like(top)), valid
 
-    def _decode_compressed_candidates_graph(self, idx_q, idx_weight, infer_state):
+    def _decode_compressed_candidates_graph(self, idx_q, idx_weight, infer_state: DeepseekV4InferStateInfo):
         if self.compress_ratio == 4:
             _, idx_comp, valid_all, ncomp = self._decode_all_compressed_kv_graph(infer_state, 4)
             top, valid = self._decode_c4_topk_graph(idx_q, idx_weight, idx_comp, valid_all, ncomp, infer_state)
@@ -574,7 +579,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         comp, _, valid, _ = self._decode_all_compressed_kv_graph(infer_state, 128)
         return comp, valid
 
-    def _write_decode_compressed_entry_graph(self, x, infer_state, lw, ratio):
+    def _write_decode_compressed_entry_graph(self, x, infer_state: DeepseekV4InferStateInfo, lw, ratio):
         req = infer_state.b_req_idx
         start_pos = infer_state.b_seq_len.long() - 1
         if ratio == 4:
@@ -630,7 +635,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         return
 
     # ------------------------------------------------------------------ attention (decode)
-    def token_attention_forward(self, x, infer_state, lw):
+    def token_attention_forward(self, x, infer_state: DeepseekV4InferStateInfo, lw):
         q, cache_kv, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, lw)
         if infer_state.is_cuda_graph:
             o = self._token_attention_kernel_cuda_graph(q, cache_kv, q_lora, x, infer_state, lw)
@@ -638,7 +643,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             o = self._token_attention_kernel(q, cache_kv, q_lora, x, infer_state, lw)
         return self._get_o(self._inv_rope(o, cos_tok, sin_tok), infer_state, lw)
 
-    def _token_attention_kernel_cuda_graph(self, q, cache_kv, q_lora, x, infer_state, lw):
+    def _token_attention_kernel_cuda_graph(self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, lw):
         sink = lw.attn_sink_.weight
         infer_state.mem_manager.pack_decode_mla_kv_to_cache(
             self.layer_num_,
@@ -695,7 +700,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             already_compact=True,
         )
 
-    def _token_attention_kernel(self, q, cache_kv, q_lora, x, infer_state, lw):
+    def _token_attention_kernel(self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, lw):
         B = x.shape[0]  # one new token per request
         idx_q, idx_weight = self._indexer_q_weight(
             x,
@@ -828,7 +833,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         idx_weight = lw.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
         return idx_q, idx_weight
 
-    def _indexer_topk(self, idx_q, idx_comp, idx_weight, positions_1based, offset, infer_state):
+    def _indexer_topk(
+        self, idx_q, idx_comp, idx_weight, positions_1based, offset, infer_state: DeepseekV4InferStateInfo
+    ):
         ncomp = idx_comp.shape[0]
         k = min(self.index_topk, ncomp)
         if k == 0:
@@ -896,7 +903,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         idx_weight,
         seq_len,
         device,
-        infer_state,
+        infer_state: DeepseekV4InferStateInfo,
     ):
         win = torch.arange(win_len, device=device, dtype=torch.long)
         if comp_kv is None or comp_kv.shape[0] == 0:
@@ -946,7 +953,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             clamp_limit=float(self.swiglu_limit),
         )
 
-    def _ffn(self, x, infer_state, lw):
+    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, lw):
         gw = lw.gate_weight_.mm_param.weight
         logits = F.linear(x.float(), gw.float()).contiguous()
         weights, indices = self._select_experts(logits, infer_state, lw)
@@ -968,10 +975,10 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             all_reduce(out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return out
 
-    def _select_experts(self, logits, infer_state, lw):
+    def _select_experts(self, logits, infer_state: DeepseekV4InferStateInfo, lw):
         return self._select_experts_vllm(logits, infer_state, lw)
 
-    def _select_experts_vllm(self, logits, infer_state, lw):
+    def _select_experts_vllm(self, logits, infer_state: DeepseekV4InferStateInfo, lw):
         from vllm import _custom_ops as ops
 
         M = logits.shape[0]

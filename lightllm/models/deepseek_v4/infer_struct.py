@@ -1,8 +1,13 @@
 import torch
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.req_manager import DeepseekV4ReqManager
+from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 
 
 class DeepseekV4InferStateInfo(InferStateInfo):
+    req_manager: DeepseekV4ReqManager
+    mem_manager: DeepseekV4MemoryManager
+
     """Per-token interleaved-rope cos/sin for the two rope variants (sliding / compressed), following
     the gemma4 two-variant convention (_cos_cached_* -> position_cos_*). Also exposes the full compressed
     cos/sin tables, which the KV compressor indexes at window positions (not per-token)."""

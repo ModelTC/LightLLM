@@ -1,11 +1,12 @@
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .hyper_connection import hc_head
+from ..infer_struct import DeepseekV4InferStateInfo
 
 
 class DeepseekV4PostLayerInfer(LlamaPostLayerInfer):
     """Collapse the hc_mult residual streams (hc_head) to [T, hidden], then final norm + lm_head."""
 
-    def token_forward(self, input_embdings, infer_state, layer_weight):
+    def token_forward(self, input_embdings, infer_state: DeepseekV4InferStateInfo, layer_weight):
         cfg = layer_weight.network_config_
         collapsed = hc_head(
             input_embdings,

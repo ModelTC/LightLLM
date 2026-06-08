@@ -47,10 +47,10 @@ class DeepseekV4DirectSparseAttBackend(BaseAttBackend):
     `infer_state.prefill_att_state.prefill_att()` / `decode_att()` backend selector.
     """
 
-    def create_att_prefill_state(self, infer_state):
+    def create_att_prefill_state(self, infer_state: DeepseekV4InferStateInfo):
         return DeepseekV4DirectSparsePrefillAttState(backend=self, infer_state=infer_state)
 
-    def create_att_decode_state(self, infer_state):
+    def create_att_decode_state(self, infer_state: DeepseekV4InferStateInfo):
         return DeepseekV4DirectSparseDecodeAttState(backend=self, infer_state=infer_state)
 
 
@@ -72,6 +72,9 @@ class DeepseekV4DirectSparseDecodeAttState(BaseDecodeAttState):
 
 @ModelRegistry("deepseek_v4")
 class DeepseekV4TpPartModel(LlamaTpPartModel):
+    req_manager: DeepseekV4ReqManager
+    mem_manager: DeepseekV4MemoryManager
+
     pre_and_post_weight_class = DeepseekV4PreAndPostLayerWeight
     transformer_weight_class = DeepseekV4TransformerLayerWeight
 
@@ -80,18 +83,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
 
     infer_state_class = DeepseekV4InferStateInfo
-    _logged_prefill_graph_prefix_skip = False
 
     def _verify_params(self):
         assert self.load_way == "HF", "only support HF format weights"
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         assert self.config["o_groups"] % self.tp_world_size_ == 0
         assert self.config["index_n_heads"] % self.tp_world_size_ == 0
-        return
-
-    def _init_some_value(self):
-        super()._init_some_value()
-        self.head_dim_ = self.config["head_dim"]
         return
 
     def _init_req_manager(self):
@@ -115,9 +112,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _get_compress_rates(self, layer_num):
         rates = list(self.config["compress_ratios"])
-        assert (
-            len(rates) >= layer_num
-        ), f"DeepSeek-V4 compress_ratios length {len(rates)} is shorter than layer_num {layer_num}"
         return rates[:layer_num]
 
     def _init_mem_manager(self):
@@ -150,15 +144,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             self.graph_max_len_in_batch = DSV4_DECODE_CUDAGRAPH_MAX_LEN
         return super()._init_cudagraph()
 
-    def _can_run_prefill_cudagraph(self, infer_state, handle_token_num):
+    def _can_run_prefill_cudagraph(self, infer_state: DeepseekV4InferStateInfo, handle_token_num):
         if infer_state.prefix_total_token_num == 0:
             return True
-        if not self._logged_prefill_graph_prefix_skip:
-            logger.info(
-                "DeepSeek-V4 skips prefill cudagraph for prompt-cache extension batches; "
-                "no-prefix prefill batches still use prefill cudagraph."
-            )
-            self._logged_prefill_graph_prefix_skip = True
         return False
 
     def _init_att_backend(self):
