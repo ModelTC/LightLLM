@@ -278,7 +278,6 @@ if __name__ == "__main__":
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
     # static params
-    gqa_group_size = 4
     q_head_dim = 128
     block_batch = 4
     out_dtype = torch.bfloat16
@@ -286,8 +285,11 @@ if __name__ == "__main__":
     batch_sizes = [1, 8, 16, 32, 64, 128]
     decode_lengths = [32, 64, 128, 256, 512, 1024, 2048]
 
-    q_head_num = gqa_group_size
-    k_head_num = q_head_num // gqa_group_size
+    tp_world_size = 2
+    q_head_num = 64 // tp_world_size
+    k_head_num = 8 // tp_world_size
+
+    gqa_group_size = q_head_num // k_head_num
 
     Autotuner.start_autotune_warmup()
     # autotuing kernel
