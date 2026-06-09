@@ -152,7 +152,6 @@ def _init_env(
     rank_in_node,
     node_world_size,
     info_queue,
-    router_lock,
     socket_path,
     success_event,
 ):
@@ -162,11 +161,6 @@ def _init_env(
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
     start_parent_check_thread()
-
-    # 将调度锁注册到全局的共享变量中
-    from lightllm.common.basemodel.infer_lock import g_router_lock
-
-    g_router_lock.obj = router_lock
 
     model_rpc_server = ModelRpcServer(args, rank, rank_in_node, node_world_size, info_queue)
     # Start rpyc server with Unix socket
@@ -183,7 +177,6 @@ async def start_model_process(
     rank_in_node,
     node_world_size,
     info_queue: mp.Queue,
-    router_lock,
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -200,7 +193,6 @@ async def start_model_process(
             rank_in_node,
             node_world_size,
             info_queue,
-            router_lock,
             socket_path,
             success_event,
         ),

@@ -3,7 +3,6 @@ from typing import List
 from ..batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
 from lightllm.server.router.req_queue.dp_balancer import get_dp_balancer
-from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -70,8 +69,7 @@ class DpQueue:
                     current_batch
                 )
                 token_ratio1 = self.router.get_used_tokens(dp_index) / self.router.max_total_token_num
-                with g_router_lock.obj:
-                    self.router.shared_token_load.set_current_load(token_ratio1, dp_index)
-                    self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_count, dp_index)
-                    self.router.shared_token_load.set_dynamic_max_load(dynamic_max_load, dp_index)
+                self.router.shared_token_load.set_current_load(token_ratio1, dp_index)
+                self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_count, dp_index)
+                self.router.shared_token_load.set_dynamic_max_load(dynamic_max_load, dp_index)
         return

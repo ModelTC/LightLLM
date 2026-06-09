@@ -11,7 +11,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock, InferStateLock
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
@@ -123,24 +122,6 @@ class ModeBackend:
         dist_group_manager.create_groups(group_size=group_size)  # set the default group
 
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
-
-        # 为 p d 分离模式添加的全局锁管理，用于做一些同步操作。 一定需要在
-        # init_process_group 之后调用
-        g_infer_state_lock.obj = (
-            InferStateLock(
-                name=get_unique_server_name(),
-                rank_in_dp=self.rank_in_dp,
-                dp_rank_in_node=self.dp_rank_in_node,
-                dp_world_size=self.dp_world_size,
-            )
-            if self.run_mode in ["nixl_prefill", "nixl_decode"]
-            else None
-        )
-        g_infer_state_lock.dp_world_size = self.dp_world_size
-        self.infer_state_lock = g_infer_state_lock
-        # 防止InferStateLock 中的全局共享信息被重复异常初始化,导致同步异常的问题。
-        # 所以做一次barrier等待
-        dist.barrier()
 
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
@@ -500,10 +481,7 @@ class ModeBackend:
         if self.dp_size_in_node != 1:
             dp_rank_in_node = self.dp_rank_in_node
             reqs = [req for req in reqs if req[3] == dp_rank_in_node]
-
-        g_infer_state_lock.acquire()
         g_infer_context.add_reqs(reqs)
-        g_infer_state_lock.release()
         req_ids = [e[0] for e in reqs]
 
         if self.args.enable_cpu_cache:
@@ -513,9 +491,7 @@ class ModeBackend:
 
     def _load_cpu_cache_to_reqs(self, req_ids):
         req_objs: List[InferReq] = [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
-        g_infer_state_lock.acquire()
         self.multi_level_cache_module.load_cpu_cache_to_reqs(reqs=req_objs)
-        g_infer_state_lock.release()
         return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
@@ -533,13 +509,11 @@ class ModeBackend:
             and (self._radix_tree_merge_counter % self._radix_tree_merge_update_delta == 0)
             and self.radix_cache is not None
         ):
-            g_infer_state_lock.acquire()
             start = time.time()
             self.radix_cache.merge_unreferenced_nodes()
             self.logger.info(
                 f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
             )
-            g_infer_state_lock.release()
         return
 
     # 一些可以复用的通用功能函数
@@ -597,9 +571,6 @@ class ModeBackend:
         wait_pause_count = 0
         prefill_tokens = 0
 
-        # 因为会使用到 radix cache 和 mem_manager 的计数信息
-        # 所以需要加锁保护。
-        g_infer_state_lock.acquire()
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
@@ -659,8 +630,6 @@ class ModeBackend:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
-
-        g_infer_state_lock.release()
 
         self._pre_handle_finished_reqs(finished_reqs=finished_reqs)
         # 如果使能了 cpu cache 功能，对于已经完成的请求，进行 gpu kv 卸载到 cpu cache的操作。
@@ -764,9 +733,7 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _filter_reqs(self, reqs: List[InferReq]):
         if reqs:
-            g_infer_state_lock.acquire()
             g_infer_context.filter_reqs(reqs)
-            g_infer_state_lock.release()
         return
 
     # 一些可以复用的通用功能函数

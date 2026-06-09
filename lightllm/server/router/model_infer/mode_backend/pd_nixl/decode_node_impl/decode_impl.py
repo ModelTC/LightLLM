@@ -3,7 +3,7 @@ import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskGroup, NIXLAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
-from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq, g_infer_state_lock
+from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
@@ -31,12 +31,9 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             dp_rank_in_node = self.dp_rank_in_node
             reqs = [req for req in reqs if req[3] == dp_rank_in_node]
 
-        g_infer_state_lock.acquire()
-
         uninit_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         # 匹配radix cache，并更新一些资源的管理。
         self._post_init_reqs(uninit_reqs=uninit_reqs)
-        g_infer_state_lock.release()
 
         # pd nixl 的 decode 节点模式下当前不支持 cpu cache, 未来可能会支持。
         assert not self.args.enable_cpu_cache
@@ -64,7 +61,6 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
         传输没有完成的请求。
         """
-        g_infer_state_lock.acquire()
         ans_list: List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
@@ -108,8 +104,6 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 
             ans_list.append(req_obj)
-
-        g_infer_state_lock.release()
         return ans_list
 
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
