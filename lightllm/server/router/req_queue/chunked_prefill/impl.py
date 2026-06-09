@@ -36,10 +36,7 @@ class ChunkedPrefillQueue(BaseQueue):
         size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
 
         need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
-        ok_token_num = (
-            need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index)
-            < self.max_total_tokens
-        )
+        ok_token_num = need_max_token_num < self.max_total_tokens
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
 
@@ -49,8 +46,7 @@ class ChunkedPrefillQueue(BaseQueue):
         if ok_token_num and ok_req_num and ok_prefill:
             self.router.shared_token_load.set_estimated_peak_token_count(need_max_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
-                (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
-                / self.max_total_tokens,
+                need_max_token_num / self.max_total_tokens,
                 self.dp_index,
             )
             return True, new_batch_first_router_need_tokens
@@ -121,6 +117,5 @@ class ChunkedPrefillQueue(BaseQueue):
 
         return (
             need_max_token_num,
-            (need_max_token_num + self.router.shared_token_load.get_frozened_token_count(self.dp_index))
-            / self.max_total_tokens,
+            need_max_token_num / self.max_total_tokens,
         )
