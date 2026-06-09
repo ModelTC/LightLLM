@@ -28,7 +28,6 @@ from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -97,11 +96,6 @@ class RouterManager:
         self.metric_client = MetricClient(args.metric_port)
         self.is_pd_run_mode = self.args.run_mode in ["nixl_prefill", "nixl_decode"]
         self.is_pd_decode_mode = self.args.run_mode == "nixl_decode"
-        # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
-        # 主要是为了防止调度失误，造成 OOM 等错误
-        self.router_lock = mp.Lock()
-        g_router_lock.obj = self.router_lock
-
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
 
         self.cpu_cache_client = (
@@ -135,7 +129,6 @@ class RouterManager:
                     rank_in_node=rank_in_node,
                     node_world_size=node_world_size,
                     info_queue=self.info_queue,
-                    router_lock=self.router_lock,
                 )
             )
             tasks.append(task)

@@ -7,7 +7,6 @@ from typing import List, Optional, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 
@@ -95,11 +94,9 @@ def padded_prepare_prefill_inputs(
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
     # dynamic prompt cache 准备 token
-    g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0] - padded_req_num)
     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0] - padded_req_num)
-    g_infer_state_lock.release()
 
     if padded_req_num > 0:
         mem_indexes = F.pad(
@@ -202,11 +199,9 @@ def padded_prepare_decode_inputs(
 
     # dynamic prompt cache 准备 token
     padded_mem_indexes_num = padded_req_num * (args_mtp_step + 1)
-    g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0] - padded_mem_indexes_num)
     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0] - padded_mem_indexes_num)
-    g_infer_state_lock.release()
 
     if padded_mem_indexes_num > 0:
         mem_indexes = F.pad(

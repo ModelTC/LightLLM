@@ -2,7 +2,6 @@ from typing import List, Dict
 from lightllm.utils.infer_utils import calculate_time
 from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
-from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.utils.config_utils import get_fixed_kv_len
 from lightllm.server.core.objs import StartArgs
 
@@ -82,8 +81,7 @@ class BaseQueue:
         if self.router.shared_token_load.need_update_dynamic_max_load() or force_update:
             estimated_peak_token_count, dynamic_max_load = self.calcu_batch_token_load(current_batch)
             token_ratio1 = self.router.get_used_tokens(self.dp_index) / self.router.max_total_token_num
-            with g_router_lock.obj:
-                self.router.shared_token_load.set_current_load(token_ratio1, self.dp_index)
-                self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_count, self.dp_index)
-                self.router.shared_token_load.set_dynamic_max_load(dynamic_max_load, self.dp_index)
+            self.router.shared_token_load.set_current_load(token_ratio1, self.dp_index)
+            self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_count, self.dp_index)
+            self.router.shared_token_load.set_dynamic_max_load(dynamic_max_load, self.dp_index)
         return

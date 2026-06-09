@@ -3,7 +3,6 @@ import numpy as np
 from typing import Tuple
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)

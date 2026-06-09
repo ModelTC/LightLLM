@@ -18,7 +18,6 @@ from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
@@ -288,15 +287,12 @@ class InferenceContext:
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
-            g_infer_state_lock.acquire()
             self._filter([req.req_id for req in finished_reqs])
-            g_infer_state_lock.release()
         return
 
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-            g_infer_state_lock.acquire()
 
             free_token_index = []
             for req in pause_reqs:
@@ -314,13 +310,10 @@ class InferenceContext:
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
-
-            g_infer_state_lock.release()
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
-            g_infer_state_lock.acquire()
 
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
@@ -338,8 +331,6 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
-
-            g_infer_state_lock.release()
         return
 
     def get_can_alloc_token_num(self):
