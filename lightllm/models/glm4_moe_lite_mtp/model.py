@@ -1,35 +1,16 @@
-from typing import List
+from lightllm.models.base_mtp_model import BaseMTPModel
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
-from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
-class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
+class Glm4MoeLiteMTPModel(BaseMTPModel, Glm4MoeLiteTpPartModel):
 
     pre_and_post_weight_class = Glm4MoeLiteMTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer
-
-    def __init__(self, kvargs: dict):
-        self._pre_init(kvargs)
-        super().__init__(kvargs)
-
-    def _pre_init(self, kvargs: dict):
-        self.main_model: TpPartBaseModel = kvargs.pop("main_model")
-        self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
-
-    def _init_custom(self):
-        self._cos_cached = self.main_model._cos_cached
-        self._sin_cached = self.main_model._sin_cached
-
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
 
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
