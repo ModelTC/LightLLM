@@ -1,7 +1,7 @@
 # PD decode mode for deepseek R1 (DP+EP) on H200
 # host: the host of the current node
 # pd_master_ip: the ip of the pd master
-# sh pd_decode.sh <host> <pd_master_ip>
+# sh pd_nixl_decode.sh <host> <pd_master_ip>
 export host=$1
 export pd_master_ip=$2
 

@@ -7,9 +7,9 @@ import inspect
 import pickle
 import setproctitle
 
-from typing import Dict, Union
+from typing import Dict
 from dataclasses import asdict
-from lightllm.server.pd_io_struct import UpKVStatus, NixlUpKVStatus
+from lightllm.server.pd_io_struct import NixlUpKVStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
@@ -22,7 +22,7 @@ logger = init_logger(__name__)
 class UpStatusManager:
     def __init__(self, args, task_in_queue: mp.SimpleQueue):
         self.args = args
-        self.task_queue: mp.SimpleQueue[Union[UpKVStatus, NixlUpKVStatus]] = task_in_queue
+        self.task_queue: mp.SimpleQueue[NixlUpKVStatus] = task_in_queue
         self.daemon_thread = threading.Thread(target=self.thread_loop, daemon=True)
         self.daemon_thread.start()
 
@@ -66,7 +66,7 @@ class UpStatusManager:
         while True:
             try:
                 loop = asyncio.get_event_loop()
-                upkv_status: UpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
+                upkv_status: NixlUpKVStatus = await loop.run_in_executor(None, self.task_queue.get)
                 if upkv_status.pd_master_node_id in self.id_to_handle_queue:
                     await self.id_to_handle_queue[upkv_status.pd_master_node_id].put(upkv_status)
                 else:
@@ -89,7 +89,7 @@ class UpStatusManager:
                         try:
                             if pd_master_obj.node_id in self.id_to_handle_queue:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
-                                upkv_status: Union[UpKVStatus, NixlUpKVStatus] = await task_queue.get()
+                                upkv_status: NixlUpKVStatus = await task_queue.get()
                                 await websocket.send(pickle.dumps(upkv_status))
                                 logger.info(f"up kv status: {upkv_status}")
                             else:

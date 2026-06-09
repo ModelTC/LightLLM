@@ -14,7 +14,7 @@ description: >-
 
 # Qwen3-8B **PD 分离（NIXL）**（`pd_master` + `nixl_prefill` + `nixl_decode`）本地 GSM8K 评测
 
-**测试标识**：同一 **`--model_dir`**（Qwen3-8B）下拆 **三条** `api_server` 进程——**调度/入口（`pd_master`）**、**`nixl_prefill` 节点**、**`nixl_decode` 节点**；评测 **`lm_eval`** 只访问 **`pd_master` 的 HTTP 端口（8089）**。与 **NCCL 版 PD**（`prefill` / `decode`）区分之处在于 **`--run_mode`** 与 **prefill/decode 前须配置 UCX/RDMA 环境变量**。
+**测试标识**：同一 **`--model_dir`**（Qwen3-8B）下拆 **三条** `api_server` 进程——**调度/入口（`pd_master`）**、**`nixl_prefill` 节点**、**`nixl_decode` 节点**；评测 **`lm_eval`** 只访问 **`pd_master` 的 HTTP 端口（8089）**。默认使用 NIXL 传输；需要验证 NCCL 数据面时，设置 **`LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl`**，上层仍保持相同的 `nixl_prefill` / `nixl_decode` 管理路径。
 
 **端口约定**：**`pd_master`：`8089`**；**prefill：`8001`**；**decode：`8002`**。启动与就绪探测须覆盖这三处（以及日志中的 PD 注册/报错信息）。
 
@@ -70,7 +70,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 
 ### 显卡分配（`nvidia-smi` + 人工/Agent 决策，不用复杂脚本）
 
-与 **qwen3-8b-pd-nccl** skill 相同：**prefill**、**decode** 各 **2** 张 GPU，共 **4** 张互不重复。
+**nixl_prefill**、**nixl_decode** 各 **2** 张 GPU，共 **4** 张互不重复。需要验证 NCCL 数据面时，额外设置 **`LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl`**。
 
 1. 执行 **`nvidia-smi`**（可选用 `--query-gpu=index,name,memory.used,memory.free --format=csv`）。
 2. 由执行者选定哪 2 张给 prefill、哪 2 张给 decode（不重叠）。

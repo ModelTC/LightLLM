@@ -8,9 +8,7 @@ from typing import List, Optional, Tuple
 class StartArgs:
     run_mode: str = field(
         default="normal",
-        metadata={
-            "choices": ["normal", "prefill", "decode", "pd_master", "nixl_prefill", "nixl_decode", "visual_only"]
-        },
+        metadata={"choices": ["normal", "pd_master", "nixl_prefill", "nixl_decode", "config_server", "visual_only"]},
     )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
