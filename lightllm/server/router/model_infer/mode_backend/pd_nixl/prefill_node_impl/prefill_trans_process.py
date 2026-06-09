@@ -12,7 +12,7 @@ from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
-from ..nixl_kv_transporter import NixlKVTransporter
+from ..kv_transporter import create_kv_transporter
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
 
@@ -101,8 +101,11 @@ class _PrefillTransModule:
             page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
         )
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
-        self.transporter = NixlKVTransporter(
-            node_id=self.args.pd_node_id, tp_idx=device_id, kv_move_buffer=kv_move_buffer
+        self.transporter = create_kv_transporter(
+            args=self.args,
+            node_id=self.args.pd_node_id,
+            tp_idx=device_id,
+            kv_move_buffer=kv_move_buffer,
         )
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}

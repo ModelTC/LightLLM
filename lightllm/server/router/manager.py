@@ -95,8 +95,8 @@ class RouterManager:
             )
 
         self.metric_client = MetricClient(args.metric_port)
-        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]
-        self.is_pd_decode_mode = self.args.run_mode in ["decode", "nixl_decode"]
+        self.is_pd_run_mode = self.args.run_mode in ["nixl_prefill", "nixl_decode"]
+        self.is_pd_decode_mode = self.args.run_mode == "nixl_decode"
         # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
         # 主要是为了防止调度失误，造成 OOM 等错误
         self.router_lock = mp.Lock()
@@ -203,28 +203,12 @@ class RouterManager:
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
 
-        if self.args.run_mode == "prefill":
-            # 启动 prefill kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
-                start_prefill_kv_move_manager_process,
-            )
-
-            start_prefill_kv_move_manager_process(self.args, self.info_queue)
-
         if self.args.run_mode == "nixl_prefill":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
                 start_prefill_kv_move_manager_process,
             )
 
             start_prefill_kv_move_manager_process(self.args, self.info_queue)
-
-        if self.args.run_mode == "decode":
-            # 启动 decode kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
-                start_decode_kv_move_manager_process,
-            )
-
-            start_decode_kv_move_manager_process(self.args, self.info_queue)
 
         if self.args.run_mode == "nixl_decode":
             from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (

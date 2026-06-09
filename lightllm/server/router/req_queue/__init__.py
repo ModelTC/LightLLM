@@ -1,4 +1,3 @@
-from .chunked_prefill.impl_for_pd_decode import QueueForPDDecode
 from .chunked_prefill.impl import ChunkedPrefillQueue
 from .chunked_prefill.beam_impl import ChunkedBeamContinuesBatchQueue
 from .chunked_prefill.impl_for_nixl_pd import NIXLPDQueue
@@ -13,10 +12,6 @@ def _get_req_queue_class(args, router, dp_size_in_node: int):
     if args.output_constraint_mode != "none":
         return ChunkedPrefillQueue
     if args.first_token_constraint_mode:
-        return ChunkedPrefillQueue
-    if args.run_mode in ["decode"]:
-        return QueueForPDDecode
-    if args.run_mode in ["prefill"]:
         return ChunkedPrefillQueue
     if args.run_mode in ["nixl_prefill", "nixl_decode"]:
         return NIXLPDQueue

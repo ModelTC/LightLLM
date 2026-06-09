@@ -231,7 +231,7 @@ async def token_load(request: Request):
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -253,7 +253,7 @@ async def generate(request: Request) -> Response:
 
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -275,7 +275,7 @@ async def generate_stream(request: Request) -> Response:
 
 @app.post("/get_score")
 async def get_score(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -291,7 +291,7 @@ async def get_score(request: Request) -> Response:
 
 @app.post("/")
 async def compat_generate(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -306,7 +306,7 @@ async def compat_generate(request: Request) -> Response:
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -323,7 +323,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -340,7 +340,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
 @app.post("/v1/messages")
 async def anthropic_messages(raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["nixl_prefill", "nixl_decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )

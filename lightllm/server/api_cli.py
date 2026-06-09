@@ -9,8 +9,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         choices=[
             "normal",
-            "prefill",
-            "decode",
             "nixl_prefill",
             "nixl_decode",
             "pd_master",
@@ -18,7 +16,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "visual_only",
         ],
         default="normal",
-        help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
+        help="""set run mode, normal is started for a single server, nixl_prefill/nixl_decode/pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
                 specifically designed for large-scale, high-concurrency scenarios where `pd_master` encounters
                 significant CPU bottlenecks.""",
@@ -47,19 +45,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--pd_master_ip",
         type=str,
         default="0.0.0.0",
-        help="when run_mode set to prefill or decode, you need set this pd_mater_ip",
+        help="when run_mode set to nixl_prefill or nixl_decode, you need set this pd_mater_ip",
     )
     parser.add_argument(
         "--pd_master_port",
         type=int,
         default=1212,
-        help="when run_mode set to prefill or decode, you need set this pd_mater_port",
+        help="when run_mode set to nixl_prefill or nixl_decode, you need set this pd_mater_port",
     )
     parser.add_argument(
         "--pd_decode_rpyc_port",
         type=int,
         default=None,
-        help="p d mode, decode node used for kv move manager rpyc server port",
+        help="p d mode, decode node rpyc server port",
     )
     parser.add_argument(
         "--select_p_d_node_strategy",
