@@ -324,7 +324,7 @@ class NIXLChunckedTransTask:
         return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
-        return f"{self.request_id}_{self.req_idx}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
+        return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
     def to_str(self):
         obj: NIXLChunckedTransTask = copy.copy(self)
