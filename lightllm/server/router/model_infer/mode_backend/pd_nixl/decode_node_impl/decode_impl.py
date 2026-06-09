@@ -150,6 +150,17 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                     req_obj.nixl_trans_kv_start_index += cur_page_size
 
                 req_obj.cur_kv_len += len(mem_indexes)
+
+                # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
+                if g_infer_context.is_linear_att_mixed_model:
+                    self._create_nixl_trans_task(
+                        req_obj=req_obj,
+                        mem_indexes=[],
+                        kv_start_index=input_len,
+                        kv_end_index=input_len,
+                        group=group,
+                        page_kind="linear_att_state",
+                    )
         else:
             assert req_obj.cur_kv_len == input_len - 1
 
@@ -175,6 +186,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         kv_start_index: int,
         kv_end_index: int,
         group: NIXLChunckedTransTaskGroup,
+        page_kind: str = "kv",
     ):
         # 确定传输设备
         if req_obj.nixl_trans_device_id == -1:
@@ -183,6 +195,13 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             req_obj.nixl_trans_device_id = self.nixl_iter_device_id
             # only self.is_master_in_dp will be used.
             self.nixl_iter_device_id = (self.nixl_iter_device_id + 1) % self.node_world_size
+
+        if page_kind == "kv":
+            req_idx = None
+        elif page_kind == "linear_att_state":
+            req_idx = req_obj.req_idx
+        else:
+            raise ValueError(f"unknown NIXL trans page kind {page_kind}")
 
         trans_task = NIXLChunckedTransTask(
             request_id=req_obj.req_id,
@@ -205,6 +224,8 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             decode_page_reg_desc=None,
             first_gen_token_id=None,
             first_gen_token_logprob=None,
+            page_kind=page_kind,
+            req_idx=req_idx,
         )
         group.task_list.append(trans_task)
         req_obj.nixl_pd_task_num += 1

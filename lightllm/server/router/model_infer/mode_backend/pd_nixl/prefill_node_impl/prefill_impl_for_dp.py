@@ -1,5 +1,5 @@
 import torch.multiprocessing as mp
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.utils.log_utils import init_logger
 from .prefill_impl import NIXLChunckedPrefillForPrefillNode, NIXLChunckedTransTask
@@ -31,8 +31,12 @@ class NIXLDPChunkedForPrefillNode(DPChunkedPrefillBackend):
         )
 
     def _create_nixl_trans_task(
-        self, req_obj: InferReq, kv_start_index: int, kv_end_index: int
+        self, req_obj: InferReq, kv_start_index: int, kv_end_index: int, page_kind: str = "kv"
     ) -> NIXLChunckedTransTask:
         return NIXLChunckedPrefillForPrefillNode._create_nixl_trans_task(
-            self, req_obj=req_obj, kv_start_index=kv_start_index, kv_end_index=kv_end_index
+            self,
+            req_obj=req_obj,
+            kv_start_index=kv_start_index,
+            kv_end_index=kv_end_index,
+            page_kind=page_kind,
         )

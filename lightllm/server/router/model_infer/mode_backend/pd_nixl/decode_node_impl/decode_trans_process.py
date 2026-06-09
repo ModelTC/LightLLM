@@ -203,7 +203,7 @@ class _DecodeTransModule:
 
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:
-                    if task.transfer_kv_num() != 0:
+                    if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
                     else:
                         task.start_trans_time = time.time()
@@ -385,6 +385,8 @@ class _DecodeTransModule:
                     dp_index=trans_task.decode_dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
+                    page_kind=trans_task.page_kind,
+                    req_idx=trans_task.req_idx,
                 )
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))

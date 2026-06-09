@@ -2,7 +2,7 @@ import enum
 import time
 import copy
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union, Set
+from typing import Dict, List, Optional
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
@@ -287,13 +287,22 @@ class NIXLChunckedTransTask:
 
     error_info: Optional[str] = None
     transfer_time_out_secs: int = 66
+    page_kind: str = "kv"
+    # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
+    req_idx: Optional[int] = None
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
             error_info = "start_kv_index must >=0 and end_kv_index > start_kv_index"
             logger.error(error_info)
             raise ValueError(error_info)
-        assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
+        if self.page_kind == "kv":
+            assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
+        elif self.page_kind == "linear_att_state":
+            assert self.start_kv_index == self.end_kv_index
+            assert len(self.mem_indexes) == 0
+        else:
+            raise ValueError(f"unknown NIXL trans page kind {self.page_kind}")
         self.create_time = time.time()
         return
 
@@ -315,7 +324,7 @@ class NIXLChunckedTransTask:
         return time.time() - self.start_trans_time
 
     def get_key(self) -> str:
-        return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
+        return f"{self.request_id}_{self.req_idx}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
     def to_str(self):
         obj: NIXLChunckedTransTask = copy.copy(self)
@@ -331,7 +340,12 @@ class NIXLChunckedTransTask:
         return obj.__str__()
 
     def transfer_kv_num(self):
+        if self.page_kind != "kv":
+            return 0
         return self.end_kv_index - self.start_kv_index
+
+    def need_transfer_page(self):
+        return self.page_kind != "kv" or self.transfer_kv_num() != 0
 
     def createRetObj(self) -> "NIXLChunckedTransTaskRet":
         ret = NIXLChunckedTransTaskRet(

@@ -37,6 +37,7 @@ class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
         kv_start_index: int,
         kv_end_index: int,
         group: NIXLChunckedTransTaskGroup,
+        page_kind: str = "kv",
     ):
         return NIXLDecodeNode._create_nixl_trans_task(
             self,
@@ -45,4 +46,5 @@ class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
             kv_start_index=kv_start_index,
             kv_end_index=kv_end_index,
             group=group,
+            page_kind=page_kind,
         )

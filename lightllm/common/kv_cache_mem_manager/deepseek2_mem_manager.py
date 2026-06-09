@@ -56,7 +56,10 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
     ):
+        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
@@ -77,7 +80,10 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
     ):
+        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes

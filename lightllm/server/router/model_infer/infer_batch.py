@@ -372,20 +372,23 @@ class InferenceContext:
                 big_page_buffer_ids.append(-1)
 
         assert len(b_req_idx) == len(big_page_buffer_ids)
-        big_page_buffer_ids = torch.tensor(big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu")
-        big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
+        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
+            big_page_buffer_ids = torch.tensor(
+                big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu"
+            )
+            big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
 
-        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+            from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-        copy_linear_att_state_to_kv_buffer(
-            b_req_idx=b_req_idx,
-            big_page_buffer_ids=big_page_buffer_ids,
-            gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
-            gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
-            cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
-            cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
-            mtp_step=self.args.mtp_step,
-        )
+            copy_linear_att_state_to_kv_buffer(
+                b_req_idx=b_req_idx,
+                big_page_buffer_ids=big_page_buffer_ids,
+                gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
+                gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
+                cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
+                cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
+                mtp_step=self.args.mtp_step,
+            )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
 

@@ -190,6 +190,8 @@ class _PrefillTransModule:
                     dp_index=trans_task.prefill_dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
+                    page_kind=trans_task.page_kind,
+                    req_idx=trans_task.req_idx,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()

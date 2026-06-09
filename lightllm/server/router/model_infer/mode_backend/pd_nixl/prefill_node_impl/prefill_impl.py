@@ -1,6 +1,6 @@
 import torch.multiprocessing as mp
 import random
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import NIXLChunckedTransTask
 from lightllm.utils.log_utils import init_logger
@@ -76,6 +76,15 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                 break
 
         if prefill_finished and len(trans_task_list) != 0 and output_len == 1:
+            if g_infer_context.is_linear_att_mixed_model:
+                trans_task_list.append(
+                    self._create_nixl_trans_task(
+                        req_obj=req_obj,
+                        kv_start_index=input_len,
+                        kv_end_index=input_len,
+                        page_kind="linear_att_state",
+                    )
+                )
             trans_task_list[-1].first_gen_token_id = next_token_id
             trans_task_list[-1].first_gen_token_logprob = next_token_prob
 
@@ -85,7 +94,11 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
         return
 
     def _create_nixl_trans_task(
-        self, req_obj: InferReq, kv_start_index: int, kv_end_index: int
+        self,
+        req_obj: InferReq,
+        kv_start_index: int,
+        kv_end_index: int,
+        page_kind: str = "kv",
     ) -> NIXLChunckedTransTask:
         # 确定传输设备
         if req_obj.nixl_trans_device_id == -1:
@@ -95,12 +108,19 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             self.nixl_iter_device_id = (self.nixl_iter_device_id + 1) % self.node_world_size
 
         nixl_decode_node_info = req_obj.sampling_param.nixl_decode_node
-        mem_indexes = (
-            self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
-            .detach()
-            .cpu()
-            .tolist()
-        )
+        if page_kind == "kv":
+            mem_indexes = (
+                self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
+                .detach()
+                .cpu()
+                .tolist()
+            )
+            req_idx = None
+        elif page_kind == "linear_att_state":
+            mem_indexes = []
+            req_idx = req_obj.req_idx
+        else:
+            raise ValueError(f"unknown NIXL trans page kind {page_kind}")
         trans_task = NIXLChunckedTransTask(
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
@@ -122,6 +142,8 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             decode_page_reg_desc=nixl_decode_node_info.page_reg_desc,
             first_gen_token_id=None,
             first_gen_token_logprob=None,
+            page_kind=page_kind,
+            req_idx=req_idx,
         )
         req_obj.nixl_pd_task_num += 1
         return trans_task

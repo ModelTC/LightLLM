@@ -102,9 +102,6 @@ class MemoryManager:
         return
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
-            raise NotImplementedError("subclass need reimpl this method")
-
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         self.kv_move_buffer = torch.empty(
             (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
@@ -121,7 +118,10 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
     ):
+        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
@@ -150,7 +150,10 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
     ):
+        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
