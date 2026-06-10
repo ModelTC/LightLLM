@@ -46,6 +46,8 @@ def _init_env(
     task_out_queue: mp.Queue,
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
+    import lightllm.utils.rpyc_fix_utils as _
+
     import os
 
     # -------------------------------------------------------------------------

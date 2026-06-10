@@ -30,8 +30,8 @@ def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_bu
             tp_idx=tp_idx,
             kv_move_buffer=kv_move_buffer,
             host_ip=get_hostname_ip() or args.host,
-            store_port_min=port_min,
-            store_port_max=port_max,
+            control_port_min=port_min,
+            control_port_max=port_max,
         )
 
     raise ValueError(f"unsupported LIGHTLLM_PD_KV_TRANSPORT_BACKEND={backend}")
