@@ -568,7 +568,13 @@ class ModeBackend:
         try:
             from .bucketed_weight_transfer import BucketedWeightReceiver, get_zmq_handle
 
-            zmq_handle = get_zmq_handle()
+            zmq_handle = request.ipc_handle
+            if isinstance(zmq_handle, dict):
+                zmq_handle = zmq_handle.get(self.rank_in_node, zmq_handle.get(str(self.rank_in_node)))
+                if zmq_handle is None:
+                    raise ValueError(f"Missing ipc_handle for rank_in_node={self.rank_in_node}")
+            if zmq_handle in (None, "", "auto"):
+                zmq_handle = get_zmq_handle()
             use_shm = request.use_shm
             recv_device = torch.device("cuda", self.current_device_id)
             self.logger.debug(

@@ -94,7 +94,7 @@ class UpdateWeightsFromTensorReq:
 
 @dataclass
 class UpdateWeightsFromIPCReq:
-    ipc_handle: str = None
+    ipc_handle: Optional[Union[str, dict]] = None
     use_shm: bool = False
     flush_cache: bool = True
     abort_all_requests: bool = False
