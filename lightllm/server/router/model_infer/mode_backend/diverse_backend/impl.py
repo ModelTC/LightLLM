@@ -139,7 +139,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                     pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
                     update_func_objs.append(pack)
                     pre_master_req_pack = pack
-                    # TODO 如果 diverse mode 需要支持 nixl pd 分离，则应该每个分块prefill后都进行相关的复制，
+                    # TODO 如果 diverse mode 需要支持 pd 分离，则应该每个分块prefill后都进行相关的复制，
                     # 暂时不支持 diverse mode 和 pd 模式的混合
                     continue
 

@@ -193,7 +193,7 @@ class MemoryManager:
         将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
         """
         if kv_trans_use_p2p():
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.p2p_fix import reduce_tensor
+            from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import reduce_tensor
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 

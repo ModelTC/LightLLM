@@ -20,7 +20,7 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
 
 logger = init_logger(__name__)
 
@@ -115,8 +115,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
                         group_req_id = sampling_params.group_request_id
-                        nixl_pd_event = asyncio.Event()
-                        group_req_id_to_event[group_req_id] = nixl_pd_event
+                        pd_event = asyncio.Event()
+                        group_req_id_to_event[group_req_id] = pd_event
                         asyncio.create_task(
                             _pd_process_generate(
                                 manager=manager,
@@ -124,8 +124,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 sampling_params=sampling_params,
                                 multimodal_params=multimodal_params,
                                 forwarding_queue=forwarding_queue,
-                                nixl_pd_upload_websocket=websocket,
-                                nixl_pd_event=nixl_pd_event,
+                                pd_upload_websocket=websocket,
+                                pd_event=pd_event,
                             )
                         )
                     elif obj[0] == ObjType.ABORT:
@@ -141,14 +141,14 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
                             asyncio.create_task(delayed_abort_task(group_req_id=group_req_id, retry_count=4))
 
-                    elif obj[0] == ObjType.NIXL_REQ_DECODE_NODE_INFO:
+                    elif obj[0] == ObjType.PD_REQ_DECODE_NODE_INFO:
                         _, group_req_id, decode_node_info = obj
-                        nixl_pd_event = group_req_id_to_event.pop(group_req_id, None)
-                        if nixl_pd_event is None:
-                            logger.error(f"error in find nixl_pd_event, info: {obj}")
+                        pd_event = group_req_id_to_event.pop(group_req_id, None)
+                        if pd_event is None:
+                            logger.error(f"error in find pd_event, info: {obj}")
                             continue
-                        nixl_pd_event.decode_node_info = decode_node_info
-                        nixl_pd_event.set()
+                        pd_event.decode_node_info = decode_node_info
+                        pd_event.set()
                     else:
                         logger.error(f"recevie error obj {str(obj)}")
 
@@ -209,8 +209,8 @@ async def _pd_process_generate(
     sampling_params: SamplingParams,
     multimodal_params: Dict,
     forwarding_queue: AsyncQueue,
-    nixl_pd_upload_websocket: ClientConnection,
-    nixl_pd_event: asyncio.Event,
+    pd_upload_websocket: ClientConnection,
+    pd_event: asyncio.Event,
 ):
     try:
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
@@ -218,13 +218,13 @@ async def _pd_process_generate(
             sampling_params=sampling_params,
             multimodal_params=multimodal_params,
             request=None,
-            nixl_pd_upload_websocket=nixl_pd_upload_websocket,
-            nixl_pd_event=nixl_pd_event,
+            pd_upload_websocket=pd_upload_websocket,
+            pd_event=pd_event,
         ):
             metadata["node_mode"] = manager.args.run_mode
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
-    except NixlPrefillNodeStopGenToken as e:
-        logger.info(f"nixl prefill node stop gen token for group_request_id {e.group_request_id}")
+    except PDPrefillNodeStopGenToken as e:
+        logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
     except BaseException as e:
         logger.error(str(e))
 

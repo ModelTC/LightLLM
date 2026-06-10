@@ -3,7 +3,7 @@ import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
-from .nixl_params import NIXLParamObj
+from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
@@ -333,8 +333,8 @@ class SamplingParams(ctypes.Structure):
         ("move_kv_to_decode_node", DecodeNode),  # move kv to deocde node, only used in pd mode
         # in pd split mode, use to keep the id of pd master
         ("pd_master_node_id", NodeUUId),
-        # nixl params object, only used in nixl pd mode, used to build nixl connection in p and d
-        ("nixl_params", NIXLParamObj),
+        # pd params object, only used in pd mode, used to build kv transport connection in prefill and decode
+        ("pd_kv_trans_params", PDKVTransParamObj),
         ("skip_special_tokens", ctypes.c_bool),  # whether to skip special tokens when decoding
         ("add_special_tokens", ctypes.c_bool),  # whether to add special tokens when encoding
         (
@@ -386,8 +386,8 @@ class SamplingParams(ctypes.Structure):
 
         self.move_kv_to_decode_node = DecodeNode()
         self.move_kv_to_decode_node.initialize(kwargs.get("move_kv_to_decode_node", None))
-        self.nixl_params = NIXLParamObj()
-        self.nixl_params.set(kwargs.get("nixl_params", None))
+        self.pd_kv_trans_params = PDKVTransParamObj()
+        self.pd_kv_trans_params.set(kwargs.get("pd_kv_trans_params", None))
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 

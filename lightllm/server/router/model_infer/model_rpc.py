@@ -22,10 +22,10 @@ from lightllm.server.router.model_infer.mode_backend import (
     XgrammarBackend,
     DPChunkedPrefillBackend,
     DiversehBackend,
-    NIXLChunckedPrefillForPrefillNode,
-    NIXLDPChunkedForPrefillNode,
-    NIXLDecodeNode,
-    NIXLDPForDecodeNode,
+    PDChunkedPrefillForPrefillNode,
+    PDDPChunkedForPrefillNode,
+    PDDecodeNode,
+    PDDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -63,20 +63,20 @@ class ModelRpcServer(rpyc.Service):
         is_outlines_constraint_mode = self.args.output_constraint_mode == "outlines"
         is_xgrammar_constraint_mode = self.args.output_constraint_mode == "xgrammar"
         assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
-        is_nixl_prefill_node = self.args.run_mode == "nixl_prefill"
-        is_nixl_decode_node = self.args.run_mode == "nixl_decode"
+        is_prefill_node = self.args.run_mode == "prefill"
+        is_decode_node = self.args.run_mode == "decode"
 
-        if is_nixl_prefill_node:
+        if is_prefill_node:
             if self.args.dp > 1:
-                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue)
+                self.backend = PDDPChunkedForPrefillNode(self.info_queue)
             else:
-                self.backend = NIXLChunckedPrefillForPrefillNode(self.info_queue)
+                self.backend = PDChunkedPrefillForPrefillNode(self.info_queue)
 
-        elif is_nixl_decode_node:
+        elif is_decode_node:
             if self.args.dp > 1:
-                self.backend = NIXLDPForDecodeNode(self.info_queue)
+                self.backend = PDDPForDecodeNode(self.info_queue)
             else:
-                self.backend = NIXLDecodeNode(self.info_queue)
+                self.backend = PDDecodeNode(self.info_queue)
 
         elif self.args.dp > 1:
             self.backend = DPChunkedPrefillBackend()

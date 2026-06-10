@@ -83,7 +83,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "nixl_prefill", "nixl_decode", "visual_only"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -99,7 +99,7 @@ def normal_or_p_d_start(args):
             args.disable_audio = True
 
     # pd 分离模式下，不启动多模态的模块
-    if args.run_mode == "nixl_decode":
+    if args.run_mode == "decode":
         args.disable_audio = True
         args.disable_vision = True
 
@@ -404,7 +404,7 @@ def normal_or_p_d_start(args):
     args.pd_p_allowed_port_max = 30000
 
     # p d 分离模式下，decode节点的调度间隙是0
-    if args.run_mode == "nixl_decode":
+    if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
 
     send_and_receive_node_ip(args)  # 多机用于收发node ip

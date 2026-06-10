@@ -13,8 +13,8 @@ Basic Configuration Parameters
     Set the running mode, optional values:
     
     * ``normal``: Single server mode (default)
-    * ``nixl_prefill``: Prefill mode (for pd disaggregation running mode)
-    * ``nixl_decode``: Decode mode (for pd disaggregation running mode)
+    * ``prefill``: Prefill mode (for pd disaggregation running mode)
+    * ``decode``: Decode mode (for pd disaggregation running mode)
     * ``pd_master``: pd master node mode (for pd disaggregation running mode)
     * ``config_server``: Configuration server mode (for pd disaggregation mode, used to register pd_master nodes and get pd_master node list), specifically designed for large-scale, high-concurrency scenarios, used when `pd_master` encounters significant CPU bottlenecks.
 
@@ -56,13 +56,13 @@ PD disaggregation Mode Parameters
 
     PD master node IP address, default is ``0.0.0.0``
     
-    This parameter needs to be set when run_mode is set to nixl_prefill or nixl_decode
+    This parameter needs to be set when run_mode is set to prefill or decode
 
 .. option:: --pd_master_port
 
     PD master node port, default is ``1212``
     
-    This parameter needs to be set when run_mode is set to nixl_prefill or nixl_decode
+    This parameter needs to be set when run_mode is set to prefill or decode
 
 .. option:: --pd_decode_rpyc_port
 

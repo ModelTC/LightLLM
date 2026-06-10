@@ -13,8 +13,8 @@ APIServer 参数详解
     设置运行模式，可选值：
     
     * ``normal``: 单服务器模式（默认）
-    * ``nixl_prefill``: 预填充模式（用于 pd 分离运行模式）
-    * ``nixl_decode``: 解码模式（用于 pd 分离运行模式）
+    * ``prefill``: 预填充模式（用于 pd 分离运行模式）
+    * ``decode``: 解码模式（用于 pd 分离运行模式）
     * ``pd_master``: pd 主节点模式（用于 pd 分离运行模式）
     * ``config_server``: 配置服务器模式（用于 pd 分离模式，用于注册 pd_master 节点并获取 pd_master 节点列表）,专门为大规模、高并发场景设计，当 `pd_master` 遇到显著的 CPU 瓶颈时使用。
 
@@ -56,13 +56,13 @@ PD 分离模式参数
 
     PD 主节点 IP 地址，默认为 ``0.0.0.0``
     
-    当 run_mode 设置为 nixl_prefill 或 nixl_decode 时需要设置此参数
+    当 run_mode 设置为 prefill 或 decode 时需要设置此参数
 
 .. option:: --pd_master_port
 
     PD 主节点端口，默认为 ``1212``
     
-    当 run_mode 设置为 nixl_prefill 或 nixl_decode 时需要设置此参数
+    当 run_mode 设置为 prefill 或 decode 时需要设置此参数
 
 .. option:: --pd_decode_rpyc_port
 
