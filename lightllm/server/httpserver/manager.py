@@ -468,7 +468,7 @@ class HttpServerManager:
                 yield sub_req_id, request_output, metadata, finish_status
 
         except (ClientDisconnected, Exception) as e:
-            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
 
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {group_request_id} {e.reason}")
