@@ -1,6 +1,6 @@
 import random
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NIXLChunckedTransTaskGroup, NIXLAbortReq
+from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
@@ -11,7 +11,7 @@ from lightllm.utils.device_utils import kv_trans_use_p2p
 logger = init_logger(__name__)
 
 
-class NIXLDecodeNode(ChunkedPrefillBackend):
+class PDDecodeNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
@@ -65,13 +65,13 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
-            if self.is_master_in_dp and req_obj.infer_aborted and req_obj.nixl_pd_task_num != 0:
-                self.info_queue.put(NIXLAbortReq(request_id=req_obj.req_id, device_id=req_obj.nixl_trans_device_id))
+            if self.is_master_in_dp and req_obj.infer_aborted and req_obj.pd_task_num != 0:
+                self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
 
-            if req_obj.nixl_pd_task_num != (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+            if req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                 continue
 
-            if req_obj.nixl_pd_task_failed_num > 0:
+            if req_obj.pd_task_failed_num > 0:
                 # 强制停止
                 if not req_obj.finish_status.is_finished():
                     req_obj.cur_output_len += 1
@@ -110,12 +110,12 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         """
         decode node 生成所有的传输任务对象。
         """
-        group = NIXLChunckedTransTaskGroup()
+        group = PDChunckedTransTaskGroup()
         input_len = req_obj.shm_req.input_len
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
         if input_len - req_obj.cur_kv_len > 1:
-            page_size = self.args.nixl_pd_kv_page_size
-            req_obj.nixl_trans_kv_start_index = req_obj.cur_kv_len
+            page_size = self.args.pd_kv_page_size
+            req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
             need_mem_size = input_len - req_obj.cur_kv_len
 
             if need_mem_size > 0:
@@ -127,13 +127,13 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                     req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
                 ] = mem_indexes
 
-                while req_obj.nixl_trans_kv_start_index < input_len:
-                    cur_page_size = min(page_size, input_len - req_obj.nixl_trans_kv_start_index)
+                while req_obj.pd_trans_kv_start_index < input_len:
+                    cur_page_size = min(page_size, input_len - req_obj.pd_trans_kv_start_index)
                     # 生成页面传输任务， 放入kv move manager 的处理队列中
-                    start_index = req_obj.nixl_trans_kv_start_index
-                    end_index = req_obj.nixl_trans_kv_start_index + cur_page_size
+                    start_index = req_obj.pd_trans_kv_start_index
+                    end_index = req_obj.pd_trans_kv_start_index + cur_page_size
                     page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
-                    self._create_nixl_trans_task(
+                    self._create_pd_trans_task(
                         req_obj=req_obj,
                         mem_indexes=page_mem_indexes.tolist(),
                         kv_start_index=start_index,
@@ -141,13 +141,13 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
                         group=group,
                     )
                     # update
-                    req_obj.nixl_trans_kv_start_index += cur_page_size
+                    req_obj.pd_trans_kv_start_index += cur_page_size
 
                 req_obj.cur_kv_len += len(mem_indexes)
 
                 # 如果当前是linear att 混合模型，则需要创建一个linear att 状态的传输任务
                 if g_infer_context.is_linear_att_mixed_model:
-                    self._create_nixl_trans_task(
+                    self._create_pd_trans_task(
                         req_obj=req_obj,
                         mem_indexes=[],
                         kv_start_index=input_len,
@@ -161,7 +161,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
         if not group.task_list:
             # 需要上报一个包含 0 长度的trans task，触发 kv move manager 给 pd master 上报
             # upkv_status 状态，使推理流程完整。
-            self._create_nixl_trans_task(
+            self._create_pd_trans_task(
                 req_obj=req_obj,
                 mem_indexes=[],
                 kv_start_index=req_obj.cur_kv_len,
@@ -173,31 +173,31 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             self.info_queue.put(group)
         return
 
-    def _create_nixl_trans_task(
+    def _create_pd_trans_task(
         self,
         req_obj: InferReq,
         mem_indexes: List[int],
         kv_start_index: int,
         kv_end_index: int,
-        group: NIXLChunckedTransTaskGroup,
+        group: PDChunckedTransTaskGroup,
         page_kind: str = "kv",
     ):
         # 确定传输设备
-        if req_obj.nixl_trans_device_id == -1:
-            if not hasattr(self, "nixl_iter_device_id"):
-                self.nixl_iter_device_id = 0
-            req_obj.nixl_trans_device_id = self.nixl_iter_device_id
+        if req_obj.pd_trans_device_id == -1:
+            if not hasattr(self, "pd_iter_device_id"):
+                self.pd_iter_device_id = 0
+            req_obj.pd_trans_device_id = self.pd_iter_device_id
             # only self.is_master_in_dp will be used.
-            self.nixl_iter_device_id = (self.nixl_iter_device_id + 1) % self.node_world_size
+            self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
         if page_kind == "kv":
             req_idx = None
         elif page_kind == "linear_att_state":
             req_idx = req_obj.req_idx
         else:
-            raise ValueError(f"unknown NIXL trans page kind {page_kind}")
+            raise ValueError(f"unknown PD trans page kind {page_kind}")
 
-        trans_task = NIXLChunckedTransTask(
+        trans_task = PDChunckedTransTask(
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
@@ -206,7 +206,7 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             prefill_dp_index=None,
             decode_dp_index=self.dp_rank_in_node,
             src_device_id=None,
-            dst_device_id=req_obj.nixl_trans_device_id,
+            dst_device_id=req_obj.pd_trans_device_id,
             mem_indexes=mem_indexes,
             prefill_agent_name=None,
             prefill_agent_metadata=None,
@@ -222,5 +222,5 @@ class NIXLDecodeNode(ChunkedPrefillBackend):
             req_idx=req_idx,
         )
         group.task_list.append(trans_task)
-        req_obj.nixl_pd_task_num += 1
+        req_obj.pd_task_num += 1
         return

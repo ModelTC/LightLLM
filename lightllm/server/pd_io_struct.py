@@ -12,23 +12,16 @@ logger = init_logger(__name__)
 
 # 节点的行为
 class NodeRole(enum.Enum):
-    NP = "nixl_prefill"
-    ND = "nixl_decode"
-
+    P = "prefill"
+    D = "decode"
     NORMAL = "normal"
     PD_MASTER = "pd_master"
 
     def is_D(self):
-        return self == NodeRole.ND
+        return self == NodeRole.D
 
     def is_P(self):
-        return self == NodeRole.NP
-
-    def is_NP(self):
-        return self == NodeRole.NP
-
-    def is_ND(self):
-        return self == NodeRole.ND
+        return self == NodeRole.P
 
     def is_normal(self):
         return self == NodeRole.NORMAL
@@ -39,16 +32,13 @@ class NodeRole(enum.Enum):
     def is_P_or_D(self):
         return self.is_P() or self.is_D()
 
-    def is_NP_or_ND(self):
-        return self == NodeRole.NP or self == NodeRole.ND
-
 
 class ObjType(enum.Enum):
     ABORT = 1
     REQ = 2
     TOKEN_PACKS = 3
-    NIXL_UPLOAD_NP_PROMPT_IDS = 4  # nixl p 节点上报生成的 prompt ids 信息。
-    NIXL_REQ_DECODE_NODE_INFO = 5  # nixl pd master 节点下发给 nixl p 节点的对应请求对应的 d 节点的信息。
+    PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
+    PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
 
 
 @dataclass
@@ -60,14 +50,14 @@ class _PD_Client_RunStatus:
 class PD_Client_Obj:
     node_id: int
     client_ip_port: str
-    mode: str  # 只能是 nixl_prefill 或者 nixl_decode 节点
+    mode: str  # 只能是 prefill 或者 decode 节点
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
 
     def __post_init__(self):
-        if self.mode not in ["nixl_prefill", "nixl_decode"]:
-            error_info = f"""mode must in ["nixl_prefill", "nixl_decode"], but get {self.mode}"""
+        if self.mode not in ["prefill", "decode"]:
+            error_info = f"""mode must in ["prefill", "decode"], but get {self.mode}"""
             logger.error(error_info)
             raise ValueError(error_info)
         return
@@ -85,14 +75,14 @@ class PD_Master_Obj:
         return f"PD_MASTER host_ip_port: {self.host_ip_port} node_id: {self.node_id}"
 
 
-####### 下边是 NIXL模式下使用的特定对象 ########
+####### 下边是 pd kv 传输使用的对象 ########
 
 
 @dataclass
-class NixlUpKVStatus:
+class PDUpKVStatus:
     group_request_id: int
     pd_master_node_id: int
-    nixl_params: bytes  # nixl 建立连接所使用的元数据对象
+    pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
 
@@ -110,11 +100,11 @@ class NixlUpKVStatus:
     def __str__(self):
         req_id = self.group_request_id
         pd_m_id = self.pd_master_node_id
-        return f"group_request_id: {req_id} pd_master_node_id: {pd_m_id} nixl_params_len: {len(self.nixl_params)}"
+        return f"group_request_id: {req_id} pd_master_node_id: {pd_m_id} pd_kv_trans_params_len: {len(self.pd_kv_trans_params)}"
 
 
 @dataclass
-class NIXLDecodeNodeInfo:
+class PDDecodeNodeInfo:
     decode_node_id: int
     pd_master_node_id: int
 
@@ -128,7 +118,7 @@ class NIXLDecodeNodeInfo:
 
 
 @dataclass
-class NixlAgentMetadata:
+class PDAgentMetadata:
     agent_name: str
     agent_metadata: bytes
     num_pages: int
@@ -137,7 +127,7 @@ class NixlAgentMetadata:
 
 
 @dataclass
-class NIXLChunckedTransTask:
+class PDChunckedTransTask:
     request_id: int
     start_kv_index: int
     end_kv_index: int
@@ -164,11 +154,11 @@ class NIXLChunckedTransTask:
     first_gen_token_id: Optional[int]
     first_gen_token_logprob: Optional[float]
 
-    nixl_write_stage: Optional[str] = None
+    write_stage: Optional[str] = None
 
     # transfer params
-    nixl_src_page_index: Optional[int] = None
-    nixl_dst_page_index: Optional[int] = None
+    src_page_index: Optional[int] = None
+    dst_page_index: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None
@@ -193,7 +183,7 @@ class NIXLChunckedTransTask:
             assert self.start_kv_index == self.end_kv_index
             assert len(self.mem_indexes) == 0
         else:
-            raise ValueError(f"unknown NIXL trans page kind {self.page_kind}")
+            raise ValueError(f"unknown PD trans page kind {self.page_kind}")
         self.create_time = time.time()
         return
 
@@ -218,7 +208,7 @@ class NIXLChunckedTransTask:
         return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
     def to_str(self):
-        obj: NIXLChunckedTransTask = copy.copy(self)
+        obj: PDChunckedTransTask = copy.copy(self)
         obj.mem_indexes = None
         if obj.decode_agent_metadata is not None:
             obj.decode_agent_metadata = b"xxx"
@@ -238,8 +228,8 @@ class NIXLChunckedTransTask:
     def need_transfer_page(self):
         return self.page_kind != "kv" or self.transfer_kv_num() != 0
 
-    def createRetObj(self) -> "NIXLChunckedTransTaskRet":
-        ret = NIXLChunckedTransTaskRet(
+    def createRetObj(self) -> "PDChunckedTransTaskRet":
+        ret = PDChunckedTransTaskRet(
             request_id=self.request_id,
             start_kv_index=self.start_kv_index,
             end_kv_index=self.end_kv_index,
@@ -250,16 +240,16 @@ class NIXLChunckedTransTask:
         )
         return ret
 
-    def create_prefill_agent_obj(self) -> NixlAgentMetadata:
-        return NixlAgentMetadata(
+    def create_prefill_agent_obj(self) -> PDAgentMetadata:
+        return PDAgentMetadata(
             agent_name=self.prefill_agent_name,
             agent_metadata=self.prefill_agent_metadata,
             num_pages=self.prefill_num_pages,
             page_reg_desc=self.prefill_page_reg_desc,
         )
 
-    def create_decode_agent_obj(self) -> NixlAgentMetadata:
-        return NixlAgentMetadata(
+    def create_decode_agent_obj(self) -> PDAgentMetadata:
+        return PDAgentMetadata(
             agent_name=self.decode_agent_name,
             agent_metadata=self.decode_agent_metadata,
             num_pages=self.decode_num_pages,
@@ -268,7 +258,7 @@ class NIXLChunckedTransTask:
 
 
 @dataclass
-class NIXLChunckedTransTaskRet:
+class PDChunckedTransTaskRet:
     request_id: int
     start_kv_index: int
     end_kv_index: int
@@ -282,11 +272,11 @@ class NIXLChunckedTransTaskRet:
 
 
 @dataclass
-class NIXLChunckedTransTaskGroup:
-    task_list: List[NIXLChunckedTransTask] = field(default_factory=list)
+class PDChunckedTransTaskGroup:
+    task_list: List[PDChunckedTransTask] = field(default_factory=list)
 
 
 @dataclass
-class NIXLAbortReq:
+class PDAbortReq:
     request_id: int
     device_id: int

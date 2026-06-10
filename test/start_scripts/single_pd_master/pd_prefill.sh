@@ -1,7 +1,7 @@
 # PD prefill mode for deepseek R1 (DP+EP) on H200
 # host: the host of the current node
 # pd_master_ip: the ip of the pd master
-# sh pd_nixl_prefill.sh <host> <pd_master_ip>
+# sh pd_prefill.sh <host> <pd_master_ip>
 
 ### nixl pd mode used
 export UCX_NET_DEVICES=$(ibv_devinfo | grep 'hca_id:' | grep -v -E 'mlx5_8|mlx5_9' | awk '{print $2":1"}' | paste -sd, -)
@@ -13,7 +13,7 @@ export pd_master_ip=$2
 nvidia-cuda-mps-control -d 
 LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
---run_mode "nixl_prefill" \
+--run_mode "prefill" \
 --tp 8 \
 --dp 8 \
 --host $host \

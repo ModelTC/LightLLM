@@ -10,7 +10,7 @@ from .dp_backend.impl import DPChunkedPrefillBackend
 from .diverse_backend.impl import DiversehBackend
 
 # pd mode backend
-from .pd_nixl.prefill_node_impl.prefill_impl import NIXLChunckedPrefillForPrefillNode
-from .pd_nixl.prefill_node_impl.prefill_impl_for_dp import NIXLDPChunkedForPrefillNode
-from .pd_nixl.decode_node_impl.decode_impl import NIXLDecodeNode
-from .pd_nixl.decode_node_impl.decode_impl_for_dp import NIXLDPForDecodeNode
+from .pd.prefill_node_impl.prefill_impl import PDChunkedPrefillForPrefillNode
+from .pd.prefill_node_impl.prefill_impl_for_dp import PDDPChunkedForPrefillNode
+from .pd.decode_node_impl.decode_impl import PDDecodeNode
+from .pd.decode_node_impl.decode_impl_for_dp import PDDPForDecodeNode

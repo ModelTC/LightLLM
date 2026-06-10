@@ -2,9 +2,9 @@
 name: test-model-qwen3.5-0.8b-pd-nixl
 description: >-
   LightLLM Qwen3.5-0.8B PD disaggregation over NIXL gsm8k: pd_master on 8089,
-  nixl_prefill on 8001, nixl_decode on 8002. Supports TP1 and TP2 runs by setting
+  prefill on 8001, decode on 8002. Supports TP1 and TP2 runs by setting
   TP / PREFILL_CUDA_DEVICES / DECODE_CUDA_DEVICES. Qwen3.5 has linear-attention
-  state transfer; use --nixl_pd_kv_page_size 2048 and a large enough page_num
+  state transfer; use --pd_kv_page_size 2048 and a large enough page_num
   such as 256. lm_eval hits pd_master URL. Requires UCX/RDMA env, nvidia_peermem
   check, curl warmup before lm_eval, registration wait in pd_master.log, and
   summary.txt. Includes optional repeated-prompt decode cache probe for linear-att
@@ -14,7 +14,7 @@ description: >-
 # Qwen3.5-0.8B **PD 分离（NIXL）** 本地 GSM8K 评测
 
 **测试标识**：同一 **`MODEL_DIR`（Qwen3.5-0.8B）** 下拆三条 `api_server` 进程：
-**`pd_master`**、**`nixl_prefill`**、**`nixl_decode`**。评测和 warmup 只访问
+**`pd_master`**、**`prefill`**、**`decode`**。评测和 warmup 只访问
 **`pd_master` 的 HTTP 端口 `8089`**。
 
 Qwen3.5 与 Qwen3-8B 的关键差异：
@@ -22,8 +22,8 @@ Qwen3.5 与 Qwen3-8B 的关键差异：
 | 项 | Qwen3.5-0.8B NIXL PD 要点 |
 |---|---|
 | linear-att 状态 | PD 传输除了 KV page，还会传 `linear_att_state` 特殊页 |
-| NIXL page size | 建议固定 **`--nixl_pd_kv_page_size 2048`**；`1024` 可能不足以容纳 linear-att 状态 |
-| page num | 建议 **`--nixl_pd_kv_page_num 256`** 起步，避免 page 池过小干扰评测 |
+| NIXL page size | 建议固定 **`--pd_kv_page_size 2048`**；`1024` 可能不足以容纳 linear-att 状态 |
+| page num | 建议 **`--pd_kv_page_num 256`** 起步，避免 page 池过小干扰评测 |
 | cache 判断 | repeated prompt 可能只在 prefill 侧命中，decode 侧不一定 decode-only 命中 |
 
 ## 日志目录
@@ -40,7 +40,7 @@ Qwen3.5 与 Qwen3-8B 的关键差异：
 建议命名：
 
 ```bash
-export LOG_DIR="/mtc/wzj/lightllm_dev2/LightLLM/test/benchmark/static_inference/log/qwen35_pd_nixl_$(date +%Y%m%d_%H%M%S)"
+export LOG_DIR="/mtc/wzj/lightllm_dev2/LightLLM/test/benchmark/static_inference/log/qwen35_pd_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
 ```
 
@@ -64,8 +64,8 @@ export MODEL_NAME='qwen/Qwen3.5-0.8B'
 export TP=2
 export PREFILL_CUDA_DEVICES='0,1'
 export DECODE_CUDA_DEVICES='2,3'
-export NIXL_PD_KV_PAGE_SIZE=2048
-export NIXL_PD_KV_PAGE_NUM=256
+export PD_KV_PAGE_SIZE=2048
+export PD_KV_PAGE_NUM=256
 export PD_MASTER_IP="$(hostname -I | awk '{print $1}')"
 export HOST="${PD_MASTER_IP}"
 ```
@@ -78,8 +78,8 @@ export MODEL_NAME='qwen/Qwen3.5-0.8B'
 export TP=1
 export PREFILL_CUDA_DEVICES='4'
 export DECODE_CUDA_DEVICES='5'
-export NIXL_PD_KV_PAGE_SIZE=2048
-export NIXL_PD_KV_PAGE_NUM=256
+export PD_KV_PAGE_SIZE=2048
+export PD_KV_PAGE_NUM=256
 export PD_MASTER_IP="$(hostname -I | awk '{print $1}')"
 export HOST="${PD_MASTER_IP}"
 ```
@@ -108,8 +108,8 @@ export no_proxy=localhost,127.0.0.1,0.0.0.0,::1,${PD_MASTER_IP}
   echo "TP=${TP}"
   echo "PREFILL_CUDA_DEVICES=${PREFILL_CUDA_DEVICES}"
   echo "DECODE_CUDA_DEVICES=${DECODE_CUDA_DEVICES}"
-  echo "NIXL_PD_KV_PAGE_SIZE=${NIXL_PD_KV_PAGE_SIZE}"
-  echo "NIXL_PD_KV_PAGE_NUM=${NIXL_PD_KV_PAGE_NUM}"
+  echo "PD_KV_PAGE_SIZE=${PD_KV_PAGE_SIZE}"
+  echo "PD_KV_PAGE_NUM=${PD_KV_PAGE_NUM}"
   echo "PD_MASTER_IP=${PD_MASTER_IP}"
   echo "HOST=${HOST}"
   echo "UCX_NET_DEVICES=${UCX_NET_DEVICES-}"
@@ -132,13 +132,13 @@ nohup python -m lightllm.server.api_server \
 
 等待 `8089` listen 后再启动节点。
 
-### 2. 启动 `nixl_prefill`
+### 2. 启动 `prefill`
 
 ```bash
 LOADWORKER=18 CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
-  --run_mode nixl_prefill \
+  --run_mode prefill \
   --tp "${TP}" \
   --dp 1 \
   --host "${HOST}" \
@@ -146,26 +146,26 @@ nohup python -m lightllm.server.api_server \
   --disable_cudagraph \
   --pd_master_ip "${PD_MASTER_IP}" \
   --pd_master_port 8089 \
-  --nixl_pd_kv_page_size "${NIXL_PD_KV_PAGE_SIZE}" \
-  --nixl_pd_kv_page_num "${NIXL_PD_KV_PAGE_NUM}" \
+  --pd_kv_page_size "${PD_KV_PAGE_SIZE}" \
+  --pd_kv_page_num "${PD_KV_PAGE_NUM}" \
   >> "${LOG_DIR}/prefill.log" 2>&1 &
 ```
 
-### 3. 启动 `nixl_decode`
+### 3. 启动 `decode`
 
 ```bash
 LOADWORKER=18 CUDA_VISIBLE_DEVICES="${DECODE_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
-  --run_mode nixl_decode \
+  --run_mode decode \
   --tp "${TP}" \
   --dp 1 \
   --host "${HOST}" \
   --port 8002 \
   --pd_master_ip "${PD_MASTER_IP}" \
   --pd_master_port 8089 \
-  --nixl_pd_kv_page_size "${NIXL_PD_KV_PAGE_SIZE}" \
-  --nixl_pd_kv_page_num "${NIXL_PD_KV_PAGE_NUM}" \
+  --pd_kv_page_size "${PD_KV_PAGE_SIZE}" \
+  --pd_kv_page_num "${PD_KV_PAGE_NUM}" \
   >> "${LOG_DIR}/decode.log" 2>&1 &
 ```
 
@@ -174,14 +174,14 @@ nohup python -m lightllm.server.api_server \
 不要只看端口。必须等待 `pd_master.log` 同时出现：
 
 ```text
-mode: nixl_prefill ... registed
-mode: nixl_decode ... registed
+mode: prefill ... registed
+mode: decode ... registed
 ```
 
 可用命令：
 
 ```bash
-rg 'mode: nixl_prefill .* registed|mode: nixl_decode .* registed|ERROR|Traceback|Exception' "${LOG_DIR}/pd_master.log" "${LOG_DIR}/prefill.log" "${LOG_DIR}/decode.log"
+rg 'mode: prefill .* registed|mode: decode .* registed|ERROR|Traceback|Exception' "${LOG_DIR}/pd_master.log" "${LOG_DIR}/prefill.log" "${LOG_DIR}/decode.log"
 ```
 
 ## Warmup
@@ -293,7 +293,7 @@ decode-only 全命中的期望信号：
 | `NIXL_ERR_BACKEND` / `uct_iface_open(rc_verbs/mlx5_8:1) failed: Address not valid` | 显式设置可用 `UCX_NET_DEVICES`，例如避开 `mlx5_8/9` |
 | `digest sent was rejected` | 多为快速重启后的共享内存 / multiprocessing authkey 残留；清理端口和残留 `lightllm::...` worker 后重启 |
 | `can not find waiting WRITE task` | 检查 NIXL notify key、abort 日志、以及 `pd_io_struct.py` 中 key 是否包含进程本地 `req_idx` |
-| 1024 page size 失败 | Qwen3.5 linear-att state 页可能放不下；使用 `--nixl_pd_kv_page_size 2048` |
+| 1024 page size 失败 | Qwen3.5 linear-att state 页可能放不下；使用 `--pd_kv_page_size 2048` |
 | 第二次同 prompt 仍走 WRITE | 可能是 decode 侧没有建立可复用 cache，或 linear-att 尾块状态无法全命中 |
 
 ## 收尾

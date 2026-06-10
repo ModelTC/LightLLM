@@ -6,7 +6,7 @@ import queue
 import torch.multiprocessing as mp
 from typing import List, Dict, Union, Callable, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import NIXLChunckedTransTaskRet
+from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from .trans_process_obj import KVTransProcess
@@ -47,7 +47,7 @@ class BaseKVMoveManager:
             threading.Thread(target=self.task_ret_handle_loop, args=(trans_process,), daemon=True).start()
 
         # 通过 io buffer 将命令写入到推理进程中
-        self.shm_nixl_trans_io_buffer = ShmObjsIOBuffer(tail_str="nixl")
+        self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
         for func in [self.task_dispatcher_loop, self.task_ret_upload_loop, self.check_trans_process_loop]:
             threading.Thread(target=func, daemon=True).start()
@@ -66,15 +66,15 @@ class BaseKVMoveManager:
     @log_exception
     def task_ret_upload_loop(self):
         while True:
-            ret_obj: NIXLChunckedTransTaskRet = self.ret_obj_queue.get()
-            ret_objs: List[NIXLChunckedTransTaskRet] = [ret_obj]
+            ret_obj: PDChunckedTransTaskRet = self.ret_obj_queue.get()
+            ret_objs: List[PDChunckedTransTaskRet] = [ret_obj]
             ret_objs.extend(self._collect_return_objects())
 
             while True:
-                if self.shm_nixl_trans_io_buffer.is_empty():
+                if self.shm_pd_trans_io_buffer.is_empty():
                     # to do, 这里写入的数量，可能会超过共享管道的大小。
-                    self.shm_nixl_trans_io_buffer.write_obj(ret_objs)
-                    self.shm_nixl_trans_io_buffer.set_ready()
+                    self.shm_pd_trans_io_buffer.write_obj(ret_objs)
+                    self.shm_pd_trans_io_buffer.set_ready()
                     break
                 else:
                     time.sleep(0.01)
@@ -97,7 +97,7 @@ class BaseKVMoveManager:
     @log_exception
     def task_ret_handle_loop(self, trans_process: KVTransProcess):
         while True:
-            ret_obj: NIXLChunckedTransTaskRet = trans_process.task_out_queue.get()
+            ret_obj: PDChunckedTransTaskRet = trans_process.task_out_queue.get()
             self.ret_obj_queue.put(ret_obj)
 
     # ==================================================================================

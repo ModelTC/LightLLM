@@ -95,7 +95,7 @@ def reduce_tensor(tensor):
     storage = tensor._typed_storage()
 
     if storage._untyped_storage.device.type == "cuda":
-        from lightllm.server.router.model_infer.mode_backend.pd_nixl.p2p_fix import p2p_fix_rebuild_cuda_tensor
+        from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import p2p_fix_rebuild_cuda_tensor
 
         (
             device,

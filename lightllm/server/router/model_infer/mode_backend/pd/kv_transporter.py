@@ -19,7 +19,7 @@ def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_bu
     if backend == "nccl":
         from .nccl_kv_transporter import NcclKVTransporter
 
-        logger.info("Use NCCL as pd_nixl KV transporter backend")
+        logger.info("Use NCCL as pd KV transporter backend")
         port_min = args.pd_p_allowed_port_min + tp_idx * 100
         port_max = min(args.pd_p_allowed_port_max, port_min + 99)
         if port_min > args.pd_p_allowed_port_max:

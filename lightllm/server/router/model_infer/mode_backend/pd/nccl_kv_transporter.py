@@ -13,7 +13,7 @@ from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
 
 from lightllm.distributed.pynccl import PyNcclCommunicator, StatelessP2PProcessGroup
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask, NixlAgentMetadata
+from lightllm.server.pd_io_struct import PDChunckedTransTask, PDAgentMetadata
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_hostname_ip
@@ -31,12 +31,12 @@ class NcclAgentMetadata:
 
 class NcclKVTransporter:
     """
-    NIXL-compatible transporter backed by NCCL point-to-point operations.
+    PD KV transporter backed by NCCL point-to-point operations.
 
-    NIXL provides remote notifications and one-sided WRITE. NCCL does not, so this
-    class uses a small TCP control channel for notifications and communicator
-    bootstrap while preserving the same request/ready/done/error interface used by
-    pd_nixl trans-process management.
+    NCCL does not provide remote notifications or one-sided WRITE, so this class
+    uses a small RPyC control channel for notifications and communicator bootstrap
+    while preserving the same request/ready/done/error interface used by pd
+    trans-process management.
     """
 
     def __init__(
@@ -52,8 +52,8 @@ class NcclKVTransporter:
         self.tp_idx = tp_idx
         self.kv_move_buffer = kv_move_buffer
         args = get_env_start_args()
-        assert args.run_mode in ["nixl_prefill", "nixl_decode"], args.run_mode
-        self.is_prefill_node = args.run_mode == "nixl_prefill"
+        assert args.run_mode in ["prefill", "decode"], args.run_mode
+        self.is_prefill_node = args.run_mode == "prefill"
         self.capture_telemetry = False
         self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
 
@@ -65,7 +65,7 @@ class NcclKVTransporter:
             port_min=control_port_min,
             port_max=control_port_max,
         )
-        self.remote_agents: Dict[str, NixlAgentMetadata] = {}
+        self.remote_agents: Dict[str, PDAgentMetadata] = {}
         self._peers: Dict[str, "_NcclPeer"] = {}
         self._peer_lock = threading.Lock()
         return
@@ -104,7 +104,7 @@ class NcclKVTransporter:
             notifs.setdefault(self._get_notify_source_agent_name(notify), []).append(notify)
         return notifs
 
-    def connect_add_remote_agent(self, remote_agent: NixlAgentMetadata):
+    def connect_add_remote_agent(self, remote_agent: PDAgentMetadata):
         if remote_agent.agent_name in self.remote_agents:
             return
 
@@ -130,9 +130,9 @@ class NcclKVTransporter:
             logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")
         return
 
-    def send_write_done_task_to_decode_node(self, trans_task: NIXLChunckedTransTask):
+    def send_write_done_task_to_decode_node(self, trans_task: PDChunckedTransTask):
         new_trans_task = self._copy_notify_task(trans_task)
-        new_trans_task.nixl_write_stage = "done"
+        new_trans_task.write_stage = "done"
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
         new_trans_task.prefill_num_pages = self.num_pages
@@ -140,9 +140,9 @@ class NcclKVTransporter:
         self._send_task_notif(trans_task.decode_agent_name, new_trans_task)
         return
 
-    def send_write_request_task_to_decode_node(self, trans_task: NIXLChunckedTransTask):
+    def send_write_request_task_to_decode_node(self, trans_task: PDChunckedTransTask):
         new_trans_task = self._copy_notify_task(trans_task)
-        new_trans_task.nixl_write_stage = "request"
+        new_trans_task.write_stage = "request"
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
         new_trans_task.prefill_num_pages = self.num_pages
@@ -150,14 +150,14 @@ class NcclKVTransporter:
         self._send_task_notif(trans_task.decode_agent_name, new_trans_task)
         return
 
-    def send_write_ready_task_to_prefill_node(self, trans_task: NIXLChunckedTransTask):
+    def send_write_ready_task_to_prefill_node(self, trans_task: PDChunckedTransTask):
         if trans_task.prefill_agent_name not in self.remote_agents:
             self.connect_add_remote_agent(trans_task.create_prefill_agent_obj())
 
         self._get_peer(trans_task.prefill_agent_name).start_recv(trans_task)
 
         new_trans_task = self._copy_notify_task(trans_task)
-        new_trans_task.nixl_write_stage = "ready"
+        new_trans_task.write_stage = "ready"
         new_trans_task.decode_agent_name = self.agent_name
         new_trans_task.decode_agent_metadata = self.agent_metadata
         new_trans_task.decode_num_pages = self.num_pages
@@ -165,11 +165,11 @@ class NcclKVTransporter:
         self._send_task_notif(trans_task.prefill_agent_name, new_trans_task)
         return
 
-    def send_error_info_to_prefill_node(self, trans_task: NIXLChunckedTransTask):
+    def send_error_info_to_prefill_node(self, trans_task: PDChunckedTransTask):
         if trans_task.prefill_agent_name is None:
             return
         new_trans_task = self._copy_notify_task(trans_task)
-        new_trans_task.nixl_write_stage = "error"
+        new_trans_task.write_stage = "error"
         new_trans_task.decode_agent_name = self.agent_name
         new_trans_task.decode_agent_metadata = self.agent_metadata
         new_trans_task.decode_num_pages = self.num_pages
@@ -177,9 +177,9 @@ class NcclKVTransporter:
         self._send_task_notif(trans_task.prefill_agent_name, new_trans_task)
         return
 
-    def send_error_info_to_decode_node(self, trans_task: NIXLChunckedTransTask):
+    def send_error_info_to_decode_node(self, trans_task: PDChunckedTransTask):
         new_trans_task = self._copy_notify_task(trans_task)
-        new_trans_task.nixl_write_stage = "error"
+        new_trans_task.write_stage = "error"
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
         new_trans_task.prefill_num_pages = self.num_pages
@@ -187,15 +187,15 @@ class NcclKVTransporter:
         self._send_task_notif(trans_task.decode_agent_name, new_trans_task)
         return
 
-    def write_blocks_paged(self, trans_task: NIXLChunckedTransTask) -> "_NcclXferHandle":
-        assert trans_task.nixl_src_page_index is not None and trans_task.nixl_dst_page_index is not None
+    def write_blocks_paged(self, trans_task: PDChunckedTransTask) -> "_NcclXferHandle":
+        assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
         decode_agent_name = trans_task.decode_agent_name
         if decode_agent_name not in self.remote_agents:
             self.connect_add_remote_agent(trans_task.create_decode_agent_obj())
 
         return self._get_peer(decode_agent_name).send_page(trans_task)
 
-    def check_task_status(self, trans_task: NIXLChunckedTransTask) -> str:
+    def check_task_status(self, trans_task: PDChunckedTransTask) -> str:
         assert trans_task.xfer_handle is not None
         return trans_task.xfer_handle.check_status()
 
@@ -220,7 +220,7 @@ class NcclKVTransporter:
                 self._peers[peer_name] = peer
             return peer
 
-    def _send_task_notif(self, remote_agent_name: str, trans_task: NIXLChunckedTransTask):
+    def _send_task_notif(self, remote_agent_name: str, trans_task: PDChunckedTransTask):
         if remote_agent_name not in self.remote_agents:
             if remote_agent_name == trans_task.decode_agent_name:
                 self.connect_add_remote_agent(trans_task.create_decode_agent_obj())
@@ -240,15 +240,15 @@ class NcclKVTransporter:
         remote_agent = self.remote_agents[remote_agent_name]
         return pickle.loads(remote_agent.agent_metadata)
 
-    def _copy_notify_task(self, trans_task: NIXLChunckedTransTask) -> NIXLChunckedTransTask:
-        new_trans_task: NIXLChunckedTransTask = copy.copy(trans_task)
+    def _copy_notify_task(self, trans_task: PDChunckedTransTask) -> PDChunckedTransTask:
+        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
         new_trans_task.mem_indexes = None
         new_trans_task.xfer_handle = None
         return new_trans_task
 
     def _get_notify_source_agent_name(self, notify: bytes) -> str:
         notify_obj = pickle.loads(notify)
-        assert isinstance(notify_obj, NIXLChunckedTransTask), type(notify_obj)
+        assert isinstance(notify_obj, PDChunckedTransTask), type(notify_obj)
 
         if notify_obj.error_info is not None:
             if self.is_prefill_node:
@@ -258,15 +258,15 @@ class NcclKVTransporter:
                 assert notify_obj.prefill_agent_name is not None
                 return notify_obj.prefill_agent_name
 
-        if notify_obj.nixl_write_stage == "request":
+        if notify_obj.write_stage == "request":
             assert notify_obj.prefill_agent_name is not None
             return notify_obj.prefill_agent_name
 
-        if notify_obj.nixl_write_stage in ["ready", "done"]:
+        if notify_obj.write_stage in ["ready", "done"]:
             assert notify_obj.decode_agent_name is not None
             return notify_obj.decode_agent_name
 
-        raise AssertionError(f"unexpected notify stage: {notify_obj.nixl_write_stage}")
+        raise AssertionError(f"unexpected notify stage: {notify_obj.write_stage}")
 
 
 @dataclass
@@ -295,12 +295,12 @@ class _NcclPeer:
         self.peer_name = peer_name
         self.comm: Optional[PyNcclCommunicator] = None
         self.stream: Optional[torch.cuda.Stream] = None
-        self.recv_queue: Optional["queue.Queue[Optional[NIXLChunckedTransTask]]"] = None
+        self.recv_queue: Optional["queue.Queue[Optional[PDChunckedTransTask]]"] = None
         self._lock = threading.Lock()
 
-    def send_page(self, trans_task: NIXLChunckedTransTask) -> _NcclXferHandle:
-        assert trans_task.nixl_src_page_index is not None and trans_task.nixl_dst_page_index is not None
-        page_tensor = self.transporter.kv_move_buffer[trans_task.nixl_src_page_index]
+    def send_page(self, trans_task: PDChunckedTransTask) -> _NcclXferHandle:
+        assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
+        page_tensor = self.transporter.kv_move_buffer[trans_task.src_page_index]
         comm = self._ensure_comm(is_server=True)
         stream = self._get_stream()
 
@@ -310,11 +310,11 @@ class _NcclPeer:
 
         logger.info(
             f"NCCL send page posted request_id={trans_task.request_id} "
-            f"src_page={trans_task.nixl_src_page_index} dst_agent={self.peer_name}"
+            f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
         )
         return _NcclXferHandle(peer_name=self.peer_name, event=event)
 
-    def start_recv(self, trans_task: NIXLChunckedTransTask):
+    def start_recv(self, trans_task: PDChunckedTransTask):
         self._get_recv_queue().put(copy.copy(trans_task))
         return
 
@@ -339,7 +339,7 @@ class _NcclPeer:
                 self.stream = torch.cuda.Stream()
             return self.stream
 
-    def _get_recv_queue(self) -> "queue.Queue[Optional[NIXLChunckedTransTask]]":
+    def _get_recv_queue(self) -> "queue.Queue[Optional[PDChunckedTransTask]]":
         with self._lock:
             if self.recv_queue is not None:
                 return self.recv_queue
@@ -348,7 +348,7 @@ class _NcclPeer:
             threading.Thread(target=self._recv_page_loop, args=(self.recv_queue,), daemon=True).start()
             return self.recv_queue
 
-    def _recv_page_loop(self, recv_queue: "queue.Queue[Optional[NIXLChunckedTransTask]]"):
+    def _recv_page_loop(self, recv_queue: "queue.Queue[Optional[PDChunckedTransTask]]"):
         torch.cuda.set_device(self.transporter.tp_idx)
         while True:
             trans_task = recv_queue.get()
@@ -356,15 +356,15 @@ class _NcclPeer:
                 return
             self._recv_page(trans_task)
 
-    def _recv_page(self, trans_task: NIXLChunckedTransTask):
+    def _recv_page(self, trans_task: PDChunckedTransTask):
         try:
-            page_tensor = self.transporter.kv_move_buffer[trans_task.nixl_dst_page_index]
+            page_tensor = self.transporter.kv_move_buffer[trans_task.dst_page_index]
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
             logger.info(
                 f"NCCL recv page done request_id={trans_task.request_id} "
-                f"dst_page={trans_task.nixl_dst_page_index}"
+                f"dst_page={trans_task.dst_page_index}"
             )
         except BaseException as e:
             trans_task.error_info = str(e)

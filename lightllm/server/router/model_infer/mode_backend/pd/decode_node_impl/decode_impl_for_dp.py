@@ -3,12 +3,12 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context, Infe
 from lightllm.utils.log_utils import init_logger
 from typing import List, Tuple
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
-from .decode_impl import NIXLDecodeNode, NIXLChunckedTransTaskGroup
+from .decode_impl import PDDecodeNode, PDChunckedTransTaskGroup
 
 logger = init_logger(__name__)
 
 
-class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
+class PDDPForDecodeNode(DPChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
         self.info_queue: mp.Queue = info_queue
@@ -16,30 +16,30 @@ class NIXLDPForDecodeNode(DPChunkedPrefillBackend):
         return
 
     def init_custom(self):
-        return NIXLDecodeNode.init_custom(self)
+        return PDDecodeNode.init_custom(self)
 
     def _init_reqs(self, reqs: List[Tuple]):
-        return NIXLDecodeNode._init_reqs(self, reqs=reqs)
+        return PDDecodeNode._init_reqs(self, reqs=reqs)
 
     def _post_init_reqs(self, uninit_reqs: List[InferReq]):
-        return NIXLDecodeNode._post_init_reqs(self, uninit_reqs=uninit_reqs)
+        return PDDecodeNode._post_init_reqs(self, uninit_reqs=uninit_reqs)
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
-        return NIXLDecodeNode._filter_not_ready_reqs(self, req_ids=req_ids)
+        return PDDecodeNode._filter_not_ready_reqs(self, req_ids=req_ids)
 
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
-        return NIXLDecodeNode._decode_node_gen_trans_tasks(self, req_obj=req_obj)
+        return PDDecodeNode._decode_node_gen_trans_tasks(self, req_obj=req_obj)
 
-    def _create_nixl_trans_task(
+    def _create_pd_trans_task(
         self,
         req_obj: InferReq,
         mem_indexes: List[int],
         kv_start_index: int,
         kv_end_index: int,
-        group: NIXLChunckedTransTaskGroup,
+        group: PDChunckedTransTaskGroup,
         page_kind: str = "kv",
     ):
-        return NIXLDecodeNode._create_nixl_trans_task(
+        return PDDecodeNode._create_pd_trans_task(
             self,
             req_obj=req_obj,
             mem_indexes=mem_indexes,

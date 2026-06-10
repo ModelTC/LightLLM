@@ -93,8 +93,8 @@ class RouterManager:
             )
 
         self.metric_client = MetricClient(args.metric_port)
-        self.is_pd_run_mode = self.args.run_mode in ["nixl_prefill", "nixl_decode"]
-        self.is_pd_decode_mode = self.args.run_mode == "nixl_decode"
+        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
+        self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
 
         self.cpu_cache_client = (
@@ -195,15 +195,15 @@ class RouterManager:
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
 
-        if self.args.run_mode == "nixl_prefill":
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
+        if self.args.run_mode == "prefill":
+            from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import (
                 start_prefill_kv_move_manager_process,
             )
 
             start_prefill_kv_move_manager_process(self.args, self.info_queue)
 
-        if self.args.run_mode == "nixl_decode":
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
+        if self.args.run_mode == "decode":
+            from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import (
                 start_decode_kv_move_manager_process,
             )
 

@@ -17,7 +17,7 @@ from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole, ObjType, NIXLDecodeNodeInfo
+from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
@@ -34,7 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -112,7 +112,7 @@ class HttpServerManager:
         self.metric_client = MetricClient(args.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.NORMAL, NodeRole.NP, NodeRole.ND]
+        assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -196,7 +196,7 @@ class HttpServerManager:
         return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        # 只有 prefill 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             items, md5sums, tokens_nums, datas = [], [], [], []
             for img in multimodal_params.images:
@@ -226,7 +226,7 @@ class HttpServerManager:
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        # 只有 prefill 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             if multimodal_params is not None:
                 ids_to_release = []
@@ -312,10 +312,10 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-        # 该参数只会在 nixl pd mode 中使用，用于上报一些信息给 pd_master
-        nixl_pd_upload_websocket: ClientConnection = None,
+        # 该参数只会在 pd mode 中使用，用于上报一些信息给 pd_master
+        pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
-        nixl_pd_event: asyncio.Event = None,
+        pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
@@ -370,28 +370,26 @@ class HttpServerManager:
                 "check_and_repair_length_done",
             )
 
-            if nixl_pd_upload_websocket is not None and self.pd_mode.is_NP():
-                # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
-                # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
-                logger.info(
-                    f"nixl prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
-                )
-                await nixl_pd_upload_websocket.send(
-                    pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
+            if pd_upload_websocket is not None and self.pd_mode.is_P():
+                # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
+                # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
+                logger.info(f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}")
+                await pd_upload_websocket.send(
+                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, prompt_ids))
                 )
                 try:
-                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=180)
+                    await asyncio.wait_for(pd_event.wait(), timeout=180)
                 except asyncio.TimeoutError:
-                    logger.error(f"nixl np node wait nixl_pd_event 180s time out, group_req_id {group_request_id}")
-                    raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
+                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
+                    raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
 
-                decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
-                sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
+                decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
+                sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
                 if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
-                    # 直接 raise NixlPrefillNodeStopGenToken
-                    raise NixlPrefillNodeStopGenToken(group_request_id=group_request_id)
+                    # 直接 raise PDPrefillNodeStopGenToken
+                    raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
             alloced_req_indexes = []

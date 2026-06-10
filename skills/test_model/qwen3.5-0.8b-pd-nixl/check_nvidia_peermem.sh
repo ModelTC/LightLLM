@@ -35,7 +35,7 @@ if [[ "$FAIL" -ne 0 ]]; then
 Enable GPUDirect RDMA:
   sudo modprobe nvidia_peermem
   lsmod | grep nvidia_peermem
-  # cross-node: run on every host; then restart nixl_prefill / nixl_decode
+  # cross-node: run on every host; then restart prefill / decode
 EOF
   exit 1
 fi

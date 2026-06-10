@@ -4,7 +4,7 @@ import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
+from lightllm.server.pd_io_struct import PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..trans_process_obj import KVTransProcess
@@ -30,7 +30,7 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_prefill_kv_move_manager")
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_kv_move_manager")
 
     from .prefill_trans_process import start_prefill_trans_process
 
@@ -56,7 +56,7 @@ class PrefillKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task: NIXLChunckedTransTask = self.info_queue.get()
+            task: PDChunckedTransTask = self.info_queue.get()
 
             device_id = task.src_device_id
             try:

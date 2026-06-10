@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 class StartArgs:
     run_mode: str = field(
         default="normal",
-        metadata={"choices": ["normal", "pd_master", "nixl_prefill", "nixl_decode", "config_server", "visual_only"]},
+        metadata={"choices": ["normal", "pd_master", "prefill", "decode", "config_server", "visual_only"]},
     )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
@@ -171,8 +171,8 @@ class StartArgs:
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
-    nixl_pd_kv_page_num: int = field(default=16)
-    nixl_pd_kv_page_size: int = field(default=1024)
+    pd_kv_page_num: int = field(default=16)
+    pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)

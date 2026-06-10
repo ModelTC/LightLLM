@@ -5,7 +5,7 @@ import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Optional, Tuple, Union, Callable
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.pd_io_struct import NIXLChunckedTransTaskGroup, NIXLAbortReq
+from lightllm.server.pd_io_struct import PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
 from ..trans_process_obj import KVTransProcess
@@ -31,7 +31,7 @@ def _init_env(args, info_queue: mp.Queue, event: mp.Event):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_decode_kv_move_manager")
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_kv_move_manager")
 
     from .up_status import start_up_kv_status_process
 
@@ -76,11 +76,11 @@ class DecodeKVMoveManager(BaseKVMoveManager):
     def task_dispatcher_loop(self):
         # 获取任务，并分发给相关卡的处理队列
         while True:
-            task_group: Union[NIXLChunckedTransTaskGroup, NIXLAbortReq] = self.info_queue.get()
+            task_group: Union[PDChunckedTransTaskGroup, PDAbortReq] = self.info_queue.get()
 
-            if isinstance(task_group, NIXLChunckedTransTaskGroup):
+            if isinstance(task_group, PDChunckedTransTaskGroup):
                 device_id = task_group.task_list[0].dst_device_id
-            elif isinstance(task_group, NIXLAbortReq):
+            elif isinstance(task_group, PDAbortReq):
                 device_id = task_group.device_id
             else:
                 assert False, f"error obj {task_group}"
@@ -88,7 +88,7 @@ class DecodeKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
-                if isinstance(task_group, NIXLChunckedTransTaskGroup):
+                if isinstance(task_group, PDChunckedTransTaskGroup):
                     logger.info(
                         f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
                     )
