@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
-    node_uuid = uuid.uuid1().hex[0:8]
+    node_uuid = uuid.uuid4().hex[0:16]
 
     if args.run_mode == "pd_master":
         os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(node_uuid) + "_pd_master"
