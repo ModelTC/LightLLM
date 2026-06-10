@@ -441,12 +441,6 @@ class InferSamplingParams:
         # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
         self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
 
-        # p d mode use params
-        if self.shm_param.move_kv_to_decode_node.exists:
-            self.move_kv_to_decode_node = self.shm_param.move_kv_to_decode_node.to_dict()
-        else:
-            self.move_kv_to_decode_node = None
-
         # this check is not very good to placed here. to do...
         if self.allowed_token_ids is not None:
             if not all(e < vocab_size for e in self.allowed_token_ids):
