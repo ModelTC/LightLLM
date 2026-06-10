@@ -373,7 +373,9 @@ class HttpServerManager:
             if pd_upload_websocket is not None and self.pd_mode.is_P():
                 # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
                 # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
-                logger.info(f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}")
+                logger.info(
+                    f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
+                )
                 await pd_upload_websocket.send(
                     pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, prompt_ids))
                 )

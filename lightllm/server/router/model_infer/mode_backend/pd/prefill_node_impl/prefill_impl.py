@@ -39,9 +39,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                     ans_list.append(req_obj)
             else:
                 if req_obj.infer_aborted:
-                    if req_obj.pd_task_num == (
-                        req_obj.pd_task_failed_num + req_obj.pd_task_success_num
-                    ):
+                    if req_obj.pd_task_num == (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                         ans_list.append(req_obj)
                     else:
                         continue

@@ -114,9 +114,7 @@ class NcclKVTransporter:
         ), f"Peer name {metadata.agent_name} does not match remote name {remote_agent.agent_name}"
 
         self.remote_agents[remote_agent.agent_name] = remote_agent
-        logger.info(
-            f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}"
-        )
+        logger.info(f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}")
         return
 
     def remove_remote_agent(self, peer_name: str):
@@ -363,8 +361,7 @@ class _NcclPeer:
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
             logger.info(
-                f"NCCL recv page done request_id={trans_task.request_id} "
-                f"dst_page={trans_task.dst_page_index}"
+                f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
             )
         except BaseException as e:
             trans_task.error_info = str(e)

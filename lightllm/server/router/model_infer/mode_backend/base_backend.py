@@ -218,9 +218,7 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
-        if (
-            self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch
-        ):
+        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
             # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
             # 读取
             self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
