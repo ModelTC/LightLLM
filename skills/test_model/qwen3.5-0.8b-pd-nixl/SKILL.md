@@ -4,8 +4,8 @@ description: >-
   LightLLM Qwen3.5-0.8B PD disaggregation over NIXL gsm8k: pd_master on 8089,
   prefill on 8001, decode on 8002. Supports TP1 and TP2 runs by setting
   TP / PREFILL_CUDA_DEVICES / DECODE_CUDA_DEVICES. Qwen3.5 has linear-attention
-  state transfer; use --pd_kv_page_size 2048 and a large enough page_num
-  such as 256. lm_eval hits pd_master URL. Requires UCX/RDMA env, nvidia_peermem
+  state transfer; use --pd_kv_page_size 2048 and --pd_kv_page_num 16.
+  lm_eval hits pd_master URL. Requires UCX/RDMA env, nvidia_peermem
   check, curl warmup before lm_eval, registration wait in pd_master.log, and
   summary.txt. Includes optional repeated-prompt decode cache probe for linear-att
   page-boundary behavior.
@@ -23,7 +23,7 @@ Qwen3.5 与 Qwen3-8B 的关键差异：
 |---|---|
 | linear-att 状态 | PD 传输除了 KV page，还会传 `linear_att_state` 特殊页 |
 | NIXL page size | 建议固定 **`--pd_kv_page_size 2048`**；`1024` 可能不足以容纳 linear-att 状态 |
-| page num | 建议 **`--pd_kv_page_num 256`** 起步，避免 page 池过小干扰评测 |
+| page num | 建议 **`--pd_kv_page_num 16`** 起步，避免 page 池过大导致显存压力 |
 | cache 判断 | repeated prompt 可能只在 prefill 侧命中，decode 侧不一定 decode-only 命中 |
 
 ## 日志目录
@@ -65,7 +65,7 @@ export TP=2
 export PREFILL_CUDA_DEVICES='0,1'
 export DECODE_CUDA_DEVICES='2,3'
 export PD_KV_PAGE_SIZE=2048
-export PD_KV_PAGE_NUM=256
+export PD_KV_PAGE_NUM=16
 export PD_MASTER_IP="$(hostname -I | awk '{print $1}')"
 export HOST="${PD_MASTER_IP}"
 ```
@@ -79,7 +79,7 @@ export TP=1
 export PREFILL_CUDA_DEVICES='4'
 export DECODE_CUDA_DEVICES='5'
 export PD_KV_PAGE_SIZE=2048
-export PD_KV_PAGE_NUM=256
+export PD_KV_PAGE_NUM=16
 export PD_MASTER_IP="$(hostname -I | awk '{print $1}')"
 export HOST="${PD_MASTER_IP}"
 ```
