@@ -3,7 +3,7 @@
 # pd_master_ip: the ip of the pd master
 # sh pd_prefill.sh <host> <pd_master_ip>
 
-### nixl pd mode used
+### PD mode using the default KV transport
 export UCX_NET_DEVICES=$(ibv_devinfo | grep 'hca_id:' | grep -v -E 'mlx5_8|mlx5_9' | awk '{print $2":1"}' | paste -sd, -)
 export UCX_LOG_LEVEL=info
 export UCX_TLS=rc,cuda,gdr_copy

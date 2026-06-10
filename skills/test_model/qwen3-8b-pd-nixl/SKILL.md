@@ -1,18 +1,18 @@
 ---
 name: test-model-qwen3-8b-pd-nixl
 description: >-
-  LightLLM Qwen3-8b PD disaggregation over NIXL gsm8k: pd_master on 8089, prefill on 8001,
+  LightLLM Qwen3-8b PD disaggregation gsm8k: pd_master on 8089, prefill on 8001,
   decode on 8002, tp 2 each. Assign four GPUs via nvidia-smi then export
   PREFILL_CUDA_DEVICES / DECODE_CUDA_DEVICES (no fixed card IDs; no complex shell automation).
   UCX_NET_DEVICES and TLS for RDMA per cluster. lm_eval hits pd_master URL. HOST vs
   PD_MASTER_IP when co-located. Before lm_eval, must POST one completion via curl to
   pd_master for warmup verification. Requires LOG_DIR, MODEL_DIR, proxy cleared, no_proxy,
-  summary.txt. Same-GPU model_infer + nixl_*_trans need NVIDIA MPS for best KV copy perf;
+  summary.txt. Same-GPU model_infer + pd_*_trans need NVIDIA MPS for best KV copy perf;
   record MPS on/off in summary. Run check_nvidia_peermem.sh in this skill dir; record in summary.txt.
-  Use for PD NIXL-style separation tests.
+  Use for PD separation tests with either the default NIXL transport or NCCL transport.
 ---
 
-# Qwen3-8B **PD 分离（NIXL）**（`pd_master` + `prefill` + `decode`）本地 GSM8K 评测
+# Qwen3-8B **PD 分离**（`pd_master` + `prefill` + `decode`）本地 GSM8K 评测
 
 **测试标识**：同一 **`--model_dir`**（Qwen3-8B）下拆 **三条** `api_server` 进程——**调度/入口（`pd_master`）**、**`prefill` 节点**、**`decode` 节点**；评测 **`lm_eval`** 只访问 **`pd_master` 的 HTTP 端口（8089）**。默认使用 NIXL 传输；需要验证 NCCL 数据面时，设置 **`LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl`**，上层仍保持相同的 `prefill` / `decode` 管理路径。
 
@@ -41,7 +41,7 @@ description: >-
 4. **代理**：启动 **任一 server 前**将 **`http_proxy` / `https_proxy` 置空**；评测使用 **`no_proxy`**（见评测命令）。
 5. **RDMA / UCX**：prefill 与 decode 进程在启动 Python 前须设置 **`UCX_NET_DEVICES`**（及可选 **`UCX_LOG_LEVEL`**、**`UCX_TLS`**），取值依赖本机 **`ibv_devinfo`** 与机房拓扑（见「UCX / RDMA」）；**不要**默认照抄他机上的设备名或排除列表。
 6. **`nvidia_peermem`**：`bash skills/test_model/qwen3-8b-pd-nixl/check_nvidia_peermem.sh >> "${LOG_DIR}/summary.txt"`；失败按脚本提示 `modprobe` 后重启服务（跨机各节点都要做）。
-7. **CUDA MPS（强烈建议，见下节）**：**要达到 NIXL PD 最优 KV 拷贝与 batch 评测性能，须在启动 `api_server` 之前在本机启用 NVIDIA MPS**。未开 MPS 时功能通常仍可用，但易出现 **`read_page_gpu_time` 数十秒级毛刺**、**`lm_eval` 单 batch 近百秒**；**`summary.txt` 须写明 MPS 是否已开启及验证方式**。
+7. **CUDA MPS（强烈建议，见下节）**：**要达到 PD KV 拷贝与 batch 评测最佳性能，须在启动 `api_server` 之前在本机启用 NVIDIA MPS**。未开 MPS 时功能通常仍可用，但易出现 **`read_page_gpu_time` 数十秒级毛刺**、**`lm_eval` 单 batch 近百秒**；**`summary.txt` 须写明 MPS 是否已开启及验证方式**。
 
 ### 启动服务的命令模板（可变项）
 
@@ -79,7 +79,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 
 **禁止**：为选卡编写 **awk / mapfile / 长段 bash** 自动化；以 **`nvidia-smi` 事实 + 明确决策**为准。
 
-### UCX / RDMA（NIXL 传输）
+### UCX / RDMA（默认 NIXL 传输）
 
 - **`UCX_NET_DEVICES`**：须覆盖本进程要用的 **RDMA 设备**；是否排除某些 HCA（例如数据面网卡）由**本机拓扑**决定，在 **`summary.txt`** 中写明依据。
 - **`UCX_TLS`**：常见 **`rc,cuda,gdr_copy`**；若环境不支持再按报错调整。
@@ -167,7 +167,7 @@ nohup python -m lightllm.server.api_server \
 
 ### 测试前 curl warmup（**须执行**，再走 `lm_eval`）
 
-NIXL PD 链路在首次真实推理前易出现冷启动与传输路径问题。**在跑 `lm_eval` 正式评测之前**，必须先对 **`pd_master`** 的 **`/v1/completions`** 发 **至少一次** HTTP 请求，确认返回 **2xx** 且响应体含正常 completion（再走长评测）。
+PD 链路在首次真实推理前易出现冷启动与传输路径问题。**在跑 `lm_eval` 正式评测之前**，必须先对 **`pd_master`** 的 **`/v1/completions`** 发 **至少一次** HTTP 请求，确认返回 **2xx** 且响应体含正常 completion（再走长评测）。
 
 1. **时机**：**`prefill` 与 `decode` 均已启动**，且日志显示已与 **`pd_master`** 建立 PD 链路后再执行（可与端口 listen、日志轮询结合判断）。
 2. **代理**：执行 **`curl` 前**同样 **`export http_proxy=` / `export https_proxy=`**；若评测机对 **`PD_MASTER_IP`** 走代理会失败，可对本次 shell 设置 **`no_proxy`**（与下文 `lm_eval` 一致，须包含 **`${PD_MASTER_IP}`**）。
