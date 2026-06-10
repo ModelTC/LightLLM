@@ -22,7 +22,10 @@ class PDKVTransParamObj(ctypes.Structure):
 
         assert (
             len(obj_bytes) <= LIGHTLLM_PD_KV_TRANS_PARAM_OBJ_MAX_BYTES
-        ), f"PD_KV_TRANS_PARAM_OBJ bytes len {len(obj_bytes)} exceeds length of {LIGHTLLM_PD_KV_TRANS_PARAM_OBJ_MAX_BYTES} bytes."
+        ), (
+            f"PD_KV_TRANS_PARAM_OBJ bytes len {len(obj_bytes)} exceeds length of "
+            f"{LIGHTLLM_PD_KV_TRANS_PARAM_OBJ_MAX_BYTES} bytes."
+        )
         ctypes.memmove(self.data, obj_bytes, len(obj_bytes))
         self.data_len = len(obj_bytes)
         return

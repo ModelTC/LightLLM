@@ -100,7 +100,10 @@ class PDUpKVStatus:
     def __str__(self):
         req_id = self.group_request_id
         pd_m_id = self.pd_master_node_id
-        return f"group_request_id: {req_id} pd_master_node_id: {pd_m_id} pd_kv_trans_params_len: {len(self.pd_kv_trans_params)}"
+        return (
+            f"group_request_id: {req_id} pd_master_node_id: {pd_m_id} "
+            f"pd_kv_trans_params_len: {len(self.pd_kv_trans_params)}"
+        )
 
 
 @dataclass
