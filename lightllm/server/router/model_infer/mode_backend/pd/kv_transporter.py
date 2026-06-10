@@ -8,6 +8,9 @@ from lightllm.utils.net_utils import get_hostname_ip
 
 logger = init_logger(__name__)
 
+_NCCL_CONTROL_PORT_MIN = 20000
+_NCCL_CONTROL_PORT_MAX = 30000
+
 
 def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
     backend = os.getenv("LIGHTLLM_PD_KV_TRANSPORT_BACKEND", "nixl").lower()
@@ -20,11 +23,11 @@ def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_bu
         from .nccl_kv_transporter import NcclKVTransporter
 
         logger.info("Use NCCL as pd KV transporter backend")
-        port_min = args.pd_p_allowed_port_min + tp_idx * 100
-        port_max = min(args.pd_p_allowed_port_max, port_min + 99)
-        if port_min > args.pd_p_allowed_port_max:
-            port_min = args.pd_p_allowed_port_min
-            port_max = args.pd_p_allowed_port_max
+        port_min = _NCCL_CONTROL_PORT_MIN + tp_idx * 100
+        port_max = min(_NCCL_CONTROL_PORT_MAX, port_min + 99)
+        if port_min > _NCCL_CONTROL_PORT_MAX:
+            port_min = _NCCL_CONTROL_PORT_MIN
+            port_max = _NCCL_CONTROL_PORT_MAX
         return NcclKVTransporter(
             node_id=node_id,
             tp_idx=tp_idx,

@@ -23,7 +23,6 @@ class StartArgs:
     config_server_visual_redis_port: int = field(default=None)
     afs_image_embed_dir: str = field(default=None)
     afs_embed_capacity: int = field(default=250000)
-    pd_decode_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(default=None)
     model_name: str = field(default="default_model_name")
     model_dir: Optional[str] = field(default=None)

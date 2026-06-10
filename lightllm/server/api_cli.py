@@ -54,12 +54,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
     parser.add_argument(
-        "--pd_decode_rpyc_port",
-        type=int,
-        default=None,
-        help="p d mode, decode node rpyc server port",
-    )
-    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="round_robin",
