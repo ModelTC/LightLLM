@@ -8,7 +8,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-class NIXLPDQueue(BaseQueue):
+class PDQueue(BaseQueue):
     def __init__(self, args, router, dp_index, dp_size_in_node) -> None:
         super().__init__(args, router, dp_index, dp_size_in_node)
 

@@ -20,8 +20,8 @@ This directory contains various startup scripts for deploying DeepSeek models wi
 
 #### Single PD Master Mode
 - `single_pd_master/pd_master.sh` - PD Master service
-- `single_pd_master/pd_nixl_prefill.sh` - Prefill service
-- `single_pd_master/pd_nixl_decode.sh` - Decode service
+- `single_pd_master/pd_prefill.sh` - Prefill service
+- `single_pd_master/pd_decode.sh` - Decode service
 
 #### Multi PD Master Mode
 - `multi_pd_master/config_server.sh` - Configuration server
@@ -71,10 +71,10 @@ sh multi_node_ep_node1.sh <master_ip>
 sh single_pd_master/pd_master.sh <pd_master_ip>
 
 # Step 2: Start Prefill service
-sh single_pd_master/pd_nixl_prefill.sh <host_ip> <pd_master_ip>
+sh single_pd_master/pd_prefill.sh <host_ip> <pd_master_ip>
 
 # Step 3: Start Decode service
-sh single_pd_master/pd_nixl_decode.sh <host_ip> <pd_master_ip>
+sh single_pd_master/pd_decode.sh <host_ip> <pd_master_ip>
 ```
 
 ### 6. Multi PD Master Mode
@@ -87,7 +87,7 @@ sh multi_pd_master/config_server.sh <config_server_host>
 sh multi_pd_master/pd_master_1.sh <host> <config_server_host>
 sh multi_pd_master/pd_master_2.sh <host> <config_server_host>
 
-# Step 3: Start Prefill and Decode services with the nixl_prefill/nixl_decode run modes.
+# Step 3: Start Prefill and Decode services with the prefill/decode run modes.
 # Multi-PD startup scripts for these nodes are not provided in this directory.
 ```
 

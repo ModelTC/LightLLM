@@ -2,7 +2,7 @@ import torch.multiprocessing as mp
 import random
 from typing import List, Tuple, Optional
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.pd_io_struct import NIXLChunckedTransTask
+from lightllm.server.pd_io_struct import PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -11,13 +11,13 @@ from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import
 logger = init_logger(__name__)
 
 
-class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
+class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
         self.support_overlap = False
         self.info_queue: mp.Queue = info_queue
         self.classed_req_no_decode = True
-        self.nixl_prefill_chuncked_handle_func = self._prefill_chuncked_handle_func
+        self.pd_prefill_chunked_handle_func = self._prefill_chuncked_handle_func
 
     def init_custom(self):
         assert kv_trans_use_p2p()
@@ -26,7 +26,7 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
         """
         将错误请求从 req_ids 中过滤出来, 然后让 _get_classed_reqs 进行处理。 该函数
-        主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
+        主要用于在 pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
         传输没有完成的请求。
         """
         ans_list: List[InferReq] = []
@@ -35,12 +35,12 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             prefill_finished = req_obj.shm_req.input_len <= req_obj.cur_kv_len
             if prefill_finished:
                 # 等待所有传输任务都已经完成。
-                if req_obj.nixl_pd_task_num == (req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num):
+                if req_obj.pd_task_num == (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                     ans_list.append(req_obj)
             else:
                 if req_obj.infer_aborted:
-                    if req_obj.nixl_pd_task_num == (
-                        req_obj.nixl_pd_task_failed_num + req_obj.nixl_pd_task_sunccess_num
+                    if req_obj.pd_task_num == (
+                        req_obj.pd_task_failed_num + req_obj.pd_task_success_num
                     ):
                         ans_list.append(req_obj)
                     else:
@@ -58,19 +58,19 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         assert req_obj.cur_kv_len <= req_obj.shm_req.input_len
         input_len = req_obj.shm_req.input_len
-        page_size = self.args.nixl_pd_kv_page_size
+        page_size = self.args.pd_kv_page_size
         prefill_finished = req_obj.cur_kv_len == input_len
-        trans_task_list: List[NIXLChunckedTransTask] = []
-        while req_obj.nixl_trans_kv_start_index < req_obj.cur_kv_len:
-            cur_page_size = min(page_size, req_obj.cur_kv_len - req_obj.nixl_trans_kv_start_index)
+        trans_task_list: List[PDChunckedTransTask] = []
+        while req_obj.pd_trans_kv_start_index < req_obj.cur_kv_len:
+            cur_page_size = min(page_size, req_obj.cur_kv_len - req_obj.pd_trans_kv_start_index)
             # 生成页面传输任务， 放入kv move manager 的处理队列中
             if cur_page_size == page_size or prefill_finished:
-                trans_task = self._create_nixl_trans_task(
+                trans_task = self._create_pd_trans_task(
                     req_obj=req_obj,
-                    kv_start_index=req_obj.nixl_trans_kv_start_index,
-                    kv_end_index=req_obj.nixl_trans_kv_start_index + cur_page_size,
+                    kv_start_index=req_obj.pd_trans_kv_start_index,
+                    kv_end_index=req_obj.pd_trans_kv_start_index + cur_page_size,
                 )
-                req_obj.nixl_trans_kv_start_index += cur_page_size
+                req_obj.pd_trans_kv_start_index += cur_page_size
                 trans_task_list.append(trans_task)
             else:
                 break
@@ -84,24 +84,24 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
                 self.info_queue.put(trans_task)
         return
 
-    def _create_nixl_trans_task(
+    def _create_pd_trans_task(
         self, req_obj: InferReq, kv_start_index: int, kv_end_index: int
-    ) -> NIXLChunckedTransTask:
+    ) -> PDChunckedTransTask:
         # 确定传输设备
-        if req_obj.nixl_trans_device_id == -1:
-            if not hasattr(self, "nixl_iter_device_id"):
-                self.nixl_iter_device_id = 0
-            req_obj.nixl_trans_device_id = self.nixl_iter_device_id
-            self.nixl_iter_device_id = (self.nixl_iter_device_id + 1) % self.node_world_size
+        if req_obj.pd_trans_device_id == -1:
+            if not hasattr(self, "pd_iter_device_id"):
+                self.pd_iter_device_id = 0
+            req_obj.pd_trans_device_id = self.pd_iter_device_id
+            self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
-        nixl_decode_node_info = req_obj.sampling_param.nixl_decode_node
+        pd_decode_node_info = req_obj.sampling_param.pd_decode_node
         mem_indexes = (
             self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
             .detach()
             .cpu()
             .tolist()
         )
-        trans_task = NIXLChunckedTransTask(
+        trans_task = PDChunckedTransTask(
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
@@ -109,19 +109,19 @@ class NIXLChunckedPrefillForPrefillNode(ChunkedPrefillBackend):
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=self.dp_rank_in_node,
             decode_dp_index=None,
-            src_device_id=req_obj.nixl_trans_device_id,
+            src_device_id=req_obj.pd_trans_device_id,
             dst_device_id=None,
             mem_indexes=mem_indexes,
             prefill_agent_name=None,
             prefill_agent_metadata=None,
             prefill_num_pages=None,
             prefill_page_reg_desc=None,
-            decode_agent_name=nixl_decode_node_info.agent_name,
-            decode_agent_metadata=nixl_decode_node_info.agent_metadata,
-            decode_num_pages=nixl_decode_node_info.num_pages,
-            decode_page_reg_desc=nixl_decode_node_info.page_reg_desc,
+            decode_agent_name=pd_decode_node_info.agent_name,
+            decode_agent_metadata=pd_decode_node_info.agent_metadata,
+            decode_num_pages=pd_decode_node_info.num_pages,
+            decode_page_reg_desc=pd_decode_node_info.page_reg_desc,
             first_gen_token_id=None,
             first_gen_token_logprob=None,
         )
-        req_obj.nixl_pd_task_num += 1
+        req_obj.pd_task_num += 1
         return trans_task

@@ -10,12 +10,12 @@ from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import (
-    NIXLChunckedTransTask,
-    NIXLChunckedTransTaskGroup,
-    NixlUpKVStatus,
-    NIXLAbortReq,
+    PDChunckedTransTask,
+    PDChunckedTransTaskGroup,
+    PDUpKVStatus,
+    PDAbortReq,
 )
-from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
+from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
@@ -51,9 +51,9 @@ def _init_env(
     import os
 
     # -------------------------------------------------------------------------
-    # 问题背景（PD NIXL + 同卡多进程）：
+    # 问题背景（PD + 同卡多进程）：
     #   decode 物理 GPU 上至少有两个独立 CUDA 进程：model_infer（解码推理）与
-    #   nixl_decode_trans（把 prefill 侧 KV page 拷入 decode KV cache）。
+    #   pd_decode_trans（把 prefill 侧 KV page 拷入 decode KV cache）。
     #   lm_eval batch=64 时会在短时间内并发大量 read_page；拷贝在 copy_cuda_stream
     #   上排队，而推理在另一进程的 stream 上执行，彼此无法 cudaStreamWaitEvent
     #   协调。日志里的 read_page_gpu_time（event 差值）会把「等 GPU 时间片 /
@@ -72,7 +72,7 @@ def _init_env(
     os.environ["CUDA_MPS_CLIENT_PRIORITY"] = "0"
 
     torch.backends.cudnn.enabled = False
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::nixl_decode_trans:Device{device_id}")
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::pd_decode_trans:Device{device_id}")
 
     try:
         torch.cuda.set_device(device_id)
@@ -126,7 +126,7 @@ class _DecodeTransModule:
         self.up_status_in_queue = up_status_in_queue
         cur_mem_manager: MemoryManager = self.mem_managers[device_id]
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
-            page_num=self.args.nixl_pd_kv_page_num, page_size=self.args.nixl_pd_kv_page_size
+            page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
@@ -137,14 +137,14 @@ class _DecodeTransModule:
         )
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
-        self.waiting_dict: Dict[str, NIXLChunckedTransTask] = {}
+        self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
         self.request_page_task_queue = queue.Queue()
         self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
         self.failed_queue = queue.Queue()
 
         self.page_index_queue = queue.Queue()
-        for page_index in range(self.args.nixl_pd_kv_page_num):
+        for page_index in range(self.args.pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
         # warmup 预先加载一次kv 数据到 mem manager，避免第一次拷贝时出现卡顿。
@@ -179,10 +179,10 @@ class _DecodeTransModule:
     @log_exception
     def recv_task_loop(self):
         while True:
-            obj: Union[NIXLChunckedTransTaskGroup, NIXLAbortReq] = self.task_in_queue.get()
-            if isinstance(obj, NIXLChunckedTransTaskGroup):
+            obj: Union[PDChunckedTransTaskGroup, PDAbortReq] = self.task_in_queue.get()
+            if isinstance(obj, PDChunckedTransTaskGroup):
                 self.recv_task_group_queue.put(obj)
-            elif isinstance(obj, NIXLAbortReq):
+            elif isinstance(obj, PDAbortReq):
                 self._abort(request_id=obj.request_id)
             else:
                 assert False, f"recv error obj {obj}"
@@ -191,7 +191,7 @@ class _DecodeTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id and trans_task.nixl_dst_page_index is None:
+                if trans_task.request_id == request_id and trans_task.dst_page_index is None:
                     # 对于 已经分配了page index 的任务，不能直接失败，需要两边走完正常流程再失败，不然可能
                     # 出现复杂的异步协同问题。
                     aborted_tasks.append(self.waiting_dict.pop(key))
@@ -204,7 +204,7 @@ class _DecodeTransModule:
     @log_exception
     def dispatch_task_loop(self):
         while True:
-            trans_task_group: NIXLChunckedTransTaskGroup = self.recv_task_group_queue.get()
+            trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:
@@ -217,7 +217,7 @@ class _DecodeTransModule:
             # up status
             task = trans_task_group.task_list[0]
 
-            decode_node_info = NIXLDecodeNodeInfo(
+            decode_node_info = PDDecodeNodeInfo(
                 decode_node_id=self.args.pd_node_id,
                 pd_master_node_id=task.pd_master_node_id,
                 agent_name=self.transporter.agent_name,
@@ -228,10 +228,10 @@ class _DecodeTransModule:
                 ready_kv_len=task.start_kv_index,
             )
 
-            up_status = NixlUpKVStatus(
+            up_status = PDUpKVStatus(
                 group_request_id=task.request_id,
                 pd_master_node_id=task.pd_master_node_id,
-                nixl_params=pickle.dumps(decode_node_info),
+                pd_kv_trans_params=pickle.dumps(decode_node_info),
             )
 
             self.up_status_in_queue.put(up_status)
@@ -258,7 +258,7 @@ class _DecodeTransModule:
                         except:
                             notify_obj = None
 
-                        if not isinstance(notify_obj, NIXLChunckedTransTask):
+                        if not isinstance(notify_obj, PDChunckedTransTask):
                             continue
 
                         # 请求有错误
@@ -281,7 +281,7 @@ class _DecodeTransModule:
 
                         # 到了请求页面的阶段
                         remote_trans_task = notify_obj
-                        if remote_trans_task.nixl_write_stage == "request":
+                        if remote_trans_task.write_stage == "request":
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
@@ -294,7 +294,7 @@ class _DecodeTransModule:
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
-                                # request and removed its waiting task, while prefill's NIXL WRITE request
+                                # request and removed its waiting task, while prefill's WRITE request
                                 # notify arrives later. Keep the original cleanup/error path so true
                                 # missing-task bugs are still visible, but make the log explicit enough
                                 # to avoid misclassifying abort-after-cleanup as a transfer failure.
@@ -310,7 +310,7 @@ class _DecodeTransModule:
                             continue
 
                         # prefill 写完数据到了 done 阶段
-                        if remote_trans_task.nixl_write_stage == "done":
+                        if remote_trans_task.write_stage == "done":
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
@@ -354,8 +354,8 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             dst_page_index = self.page_index_queue.get()
-            trans_task: NIXLChunckedTransTask = self.request_page_task_queue.get()
-            trans_task.nixl_dst_page_index = dst_page_index
+            trans_task: PDChunckedTransTask = self.request_page_task_queue.get()
+            trans_task.dst_page_index = dst_page_index
             trans_task.start_trans_time = time.time()
             key = trans_task.get_key()
             try:
@@ -378,7 +378,7 @@ class _DecodeTransModule:
     def read_page_to_mems_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            trans_task: NIXLChunckedTransTask = self.ready_page_task_queue.get()
+            trans_task: PDChunckedTransTask = self.ready_page_task_queue.get()
             copy_start_event = torch.cuda.Event(enable_timing=True)
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
@@ -386,7 +386,7 @@ class _DecodeTransModule:
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
                     trans_task.mem_indexes,
-                    page_index=trans_task.nixl_dst_page_index,
+                    page_index=trans_task.dst_page_index,
                     dp_index=trans_task.decode_dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
@@ -399,7 +399,7 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             copy_end_event, copy_start_event, trans_task = self.success_queue.get()
-            trans_task: NIXLChunckedTransTask = trans_task
+            trans_task: PDChunckedTransTask = trans_task
             copy_end_event: Optional[torch.cuda.Event] = copy_end_event
             copy_start_event: Optional[torch.cuda.Event] = copy_start_event
             read_page_gpu_time_ms = -1.0
@@ -407,8 +407,8 @@ class _DecodeTransModule:
                 copy_end_event.synchronize()
                 read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
-            if trans_task.nixl_dst_page_index is not None:
-                self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            if trans_task.dst_page_index is not None:
+                self.page_index_queue.put(trans_task.dst_page_index)
 
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
@@ -428,11 +428,11 @@ class _DecodeTransModule:
     def fail_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            trans_task: NIXLChunckedTransTask = self.failed_queue.get()
+            trans_task: PDChunckedTransTask = self.failed_queue.get()
 
             # 回收页面
-            if trans_task.nixl_dst_page_index is not None:
-                self.page_index_queue.put(trans_task.nixl_dst_page_index)
+            if trans_task.dst_page_index is not None:
+                self.page_index_queue.put(trans_task.dst_page_index)
 
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
