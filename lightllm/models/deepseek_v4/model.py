@@ -22,7 +22,7 @@ from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import (
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
-from lightllm.common.basemodel.attention.create_utils import nsa_data_type_to_backend
+from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
@@ -125,11 +125,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         args = get_env_start_args()
         if args.llm_kv_type == "None":
             args.llm_kv_type = "fp8kv_dsa"
+        # TODO: 支持其他 kv type
         if args.llm_kv_type != "fp8kv_dsa":
             raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        backend_cls = nsa_data_type_to_backend["fp8kv_dsa"]["flashmla_sparse"]
-        self.prefill_att_backend = backend_cls(model=self)
-        self.decode_att_backend = backend_cls(model=self)
+        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
+        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)
         return
 
     def _init_custom(self):
@@ -146,36 +146,36 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
         # gemma4 two-variant convention; the fused sglang q kernel consumes them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the kv rope,
-        # inverse rope and compressor paths (apply_rotary_emb: interleaved, NOT the NeoX
-        # rotary_emb_fwd). Sliding-window layers use base rope_theta (no YaRN); compressed (CSA/HCA)
-        # layers use compress_rope_theta with YaRN. Kept fp32 for accuracy (the apply upcasts anyway).
+        # inverse rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
+        # Sliding-window layers use base rope_theta (no YaRN);
+        # compressed (CSA/HCA) layers use compress_rope_theta with configured rope_scaling.
+        # Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
         dim = cfg["qk_rope_head_dim"]
-        beta_fast = rs.get("beta_fast", 32)
-        beta_slow = rs.get("beta_slow", 1)
         max_seq = max(int(self.max_seq_length), int(cfg.get("max_position_embeddings", 8192)))
         max_seq = min(max_seq, 1 << 18)  # cap table size (256K) for correctness-first
+        freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
+        positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
 
-        def build(base, factor, orig_max):
-            freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim))
-            if orig_max > 0:
-                low, high = find_correction_range(beta_fast, beta_slow, dim, base, orig_max)
-                smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
-                freqs = freqs / factor * (1 - smooth) + freqs * smooth
-            f = torch.outer(torch.arange(max_seq, dtype=torch.float32, device="cuda"), freqs)  # [max_seq, dim//2]
-            return torch.complex(f.cos(), f.sin())
+        sliding_freqs = 1.0 / (cfg["rope_theta"] ** freq_exponents)
+        f = torch.outer(positions, sliding_freqs)  # [max_seq, dim//2]
+        self._freqs_cis_sliding = torch.complex(f.cos(), f.sin())
 
-        self._freqs_cis_sliding = build(
-            cfg["rope_theta"],
-            rs.get("factor", 16),
-            rs.get("original_max_position_embeddings", 65536),
-        )
-        self._freqs_cis_compress = build(
-            cfg["compress_rope_theta"],
-            rs.get("factor", 16),
-            rs.get("original_max_position_embeddings", 65536),
-        )
+        compress_freqs = 1.0 / (cfg["compress_rope_theta"] ** freq_exponents)
+        rope_type = rs.get("rope_type", rs.get("type", "default"))
+        orig_max = rs.get("original_max_position_embeddings", 0)
+        if rope_type == "yarn" and orig_max > 0:
+            beta_fast = rs.get("beta_fast", 32)
+            beta_slow = rs.get("beta_slow", 1)
+            factor = rs.get("factor", 1)
+            if factor is None:
+                factor = cfg.get("max_position_embeddings", max_seq) / orig_max
+            low, high = find_correction_range(beta_fast, beta_slow, dim, cfg["compress_rope_theta"], orig_max)
+            smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
+            compress_freqs = compress_freqs / factor * (1 - smooth) + compress_freqs * smooth
+        f = torch.outer(positions, compress_freqs)  # [max_seq, dim//2]
+        self._freqs_cis_compress = torch.complex(f.cos(), f.sin())
         self._cos_cached_sliding = self._freqs_cis_sliding.real
         self._sin_cached_sliding = self._freqs_cis_sliding.imag
         self._cos_cached_compress = self._freqs_cis_compress.real

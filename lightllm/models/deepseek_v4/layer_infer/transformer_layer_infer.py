@@ -17,7 +17,7 @@ from .compressor import (
     paged_prefill_compress_data,
     paged_decode_state_slots,
 )
-from ..triton_kernel.rotary_emb import apply_rotary_emb
+from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
 
 
@@ -184,18 +184,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         return self._tpsp_reduce(input=o, infer_state=infer_state)
 
     def _inv_rope(self, o, cos_tok, sin_tok):
-        return torch.cat(
-            [
-                o[..., : -self.rope_dim],
-                apply_rotary_emb(
-                    o[..., -self.rope_dim :],
-                    cos_tok.unsqueeze(1),
-                    sin_tok.unsqueeze(1),
-                    inverse=True,
-                ),
-            ],
-            dim=-1,
-        )
+        # in-place; 单张量路径只需要旋转 rope 切片。
+        rotary_emb_fwd(o[..., -self.rope_dim :], None, cos_tok, sin_tok, inverse=True)
+        return o
 
     # ------------------------------------------------------------------ compressor / indexer
     def _indexer_q_weight(
@@ -206,13 +197,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         cos_tok = infer_state.position_cos_compress
         sin_tok = infer_state.position_sin_compress
         idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.tp_index_heads, self.index_head_dim)
-        idx_q = torch.cat(
-            [
-                idx_q[..., : -self.rope_dim],
-                apply_rotary_emb(idx_q[..., -self.rope_dim :], cos_tok.unsqueeze(1), sin_tok.unsqueeze(1)),
-            ],
-            dim=-1,
-        )
+        rotary_emb_fwd(idx_q[..., -self.rope_dim :], None, cos_tok, sin_tok)
         idx_weight = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
         return idx_q, idx_weight
 
