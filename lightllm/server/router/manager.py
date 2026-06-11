@@ -33,7 +33,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
-from .stats import RouterStatics, SystemStatusReporter
+from .stats import RouterStatics
 
 logger = init_logger(__name__)
 
@@ -102,7 +102,6 @@ class RouterManager:
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
         self.router_statics = RouterStatics(self.args)
-        self.status_reporter: SystemStatusReporter = None
         return
 
     async def wait_to_model_ready(self):
@@ -194,7 +193,6 @@ class RouterManager:
             )
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
-        self.status_reporter = SystemStatusReporter(args=self.args, metric_client=self.metric_client)
 
         if self.args.run_mode == "prefill":
             from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import (
@@ -224,8 +222,6 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
-                # 统计 decode 阶段输出 token 数（每个 running req 每步约产出 1 个 token）
-                self.status_reporter.count_output_tokens(len(self.running_batch.reqs))
                 if counter_count % 100 == 0:
                     for dp_index in range(self.dp_size_in_node):
                         token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
@@ -248,6 +244,7 @@ class RouterManager:
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
+                self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
                 self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
                 self.metric_client.gauge_set(
                     "lightllm_batch_current_max_tokens",
@@ -260,6 +257,7 @@ class RouterManager:
                 self.req_queue.update_token_load(self.running_batch, force_update=True)
                 if counter_count % 300 == 0:
                     self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
+                    self.metric_client.gauge_set("lightllm_num_running_reqs", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
                     self.metric_client.gauge_set("lightllm_queue_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
@@ -268,8 +266,6 @@ class RouterManager:
                         for dp_i in range(self.dp_size_in_node):
                             estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(dp_i)
                             logger.debug(f"dp_i {dp_i} estimated_peak_token_count: {estimated_peak_token_count} \n")
-
-            self.status_reporter.maybe_report(self.running_batch)
 
             await asyncio.sleep(self._get_schedule_time_interval())
 
@@ -299,7 +295,6 @@ class RouterManager:
 
     async def _add_batch(self, batch: Batch):
         # 添加新请求
-        self.status_reporter.count_prompt_tokens(batch.input_tokens())
         reqs = [r.to_router_rpc_obj() for r in batch.reqs]
         while not self.shm_reqs_io_buffer.is_empty():
             await asyncio.sleep(0.001)
@@ -333,13 +328,6 @@ class RouterManager:
 
     def _filter_reqs_from_running_batch(self):
         if self.running_batch is not None:
-            # 在过滤前，捕获已完成请求的统计信息，用于计算 cache 命中率
-            for req in self.running_batch.reqs:
-                if req.shm_infer_released:
-                    self.status_reporter.on_request_completed(
-                        input_len=req.input_len,
-                        gpu_cache_len=req.prompt_cache_len,
-                    )
             self.running_batch.filter_out_finished_req(self.shm_req_manager, self.router_statics)
             if self.running_batch.is_clear():
                 self.running_batch = None

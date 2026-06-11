@@ -706,10 +706,10 @@ class HttpServerManager:
                     if self.pd_mode.is_P() and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
-                    prompt_cache_len = metadata.pop("prompt_cache_len", 0)
+                    gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
-                    metadata["prompt_cache_len"] = prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                    metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
 
                     if is_first_token:
@@ -733,9 +733,12 @@ class HttpServerManager:
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        gpu_prompt_cache_ratio = gpu_prompt_cache_len / prompt_tokens
                         cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
                         disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
+                        prompt_cache_len = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
                         mtp_avg_token_per_step = out_token_counter / max(
                             (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
@@ -748,9 +751,9 @@ class HttpServerManager:
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
-                            f"gpu cache hit: {prompt_cache_len > 0} "
-                            f"gpu_prompt_cache_len:{prompt_cache_len} "
-                            f"gpu_prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
+                            f"gpu_prompt_cache_len:{gpu_prompt_cache_len} "
+                            f"gpu_prompt_cache_ratio:{gpu_prompt_cache_ratio} "
                             f"cpu cache hit: {cpu_prompt_cache_len > 0} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
                             f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
@@ -759,8 +762,13 @@ class HttpServerManager:
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
+
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
                         self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
+                        self.metric_client.counter_inc_by("lightllm_prompt_tokens_total", prompt_tokens)
+                        self.metric_client.counter_inc_by("lightllm_generation_tokens_total", out_token_counter)
+                        self.metric_client.gauge_set("lightllm_cache_hit_rate", prompt_cache_ratio)
+                        self.metric_client.gauge_set("lightllm_gen_throughput", generation_throughput)
                         self.metric_client.histogram_observe(
                             "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
                         )

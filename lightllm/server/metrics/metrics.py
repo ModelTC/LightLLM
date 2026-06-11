@@ -29,8 +29,8 @@ MONITOR_INFO = {
     "lightllm_request_mtp_avg_token_per_step": "Average number of tokens per step",
     "lightllm_prompt_tokens_total": "Total number of prefill tokens processed",
     "lightllm_generation_tokens_total": "Total number of generation tokens processed",
-    "lightllm_cache_hit_rate": "Prefix cache hit rate",
-    "lightllm_gen_throughput": "Generation throughput (tokens/s)",
+    "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
+    "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
     "lightllm_num_running_reqs": "Number of running requests",
 }
 
