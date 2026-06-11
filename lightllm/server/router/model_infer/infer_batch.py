@@ -124,40 +124,19 @@ class InferenceContext:
 
         return req_objs
 
-    def free_a_req_mem(
-        self,
-        free_token_index: List,
-        req: "InferReq",
-        free_c4_index: Optional[List] = None,
-        free_c128_index: Optional[List] = None,
-    ):
+    def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         is_dsv4_req_manager = hasattr(self.req_manager, "build_prompt_cache_payload")
-        if hasattr(self.req_manager, "pop_compress_indices_for_req") and not is_dsv4_req_manager:
-            c4, c128 = self.req_manager.pop_compress_indices_for_req(req.req_idx)
-            if c4 is not None and free_c4_index is not None:
-                free_c4_index.append(c4)
-            if c128 is not None and free_c128_index is not None:
-                free_c128_index.append(c128)
-            self.req_manager.clear_runtime_state(req.req_idx)
-
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
             if is_dsv4_req_manager:
-                c4, c128 = self.req_manager.pop_compress_indices_for_req(req.req_idx)
-                if c4 is not None and free_c4_index is not None:
-                    free_c4_index.append(c4)
-                if c128 is not None and free_c128_index is not None:
-                    free_c128_index.append(c128)
-                self.req_manager.clear_runtime_state(req.req_idx)
+                # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx,
+                # 必须在此复位出窗水位线 + 清 c128 在途状态(恢复命中走 extend,不会再有
+                # restore/zero 时机;c4 状态随 swa 页生灭,无需处理)。
+                self.req_manager.init_compress_state(req.req_idx)
         else:
             if not self.is_linear_att_mixed_model:
                 if is_dsv4_req_manager:
-                    self._dsv4_full_att_free_req(
-                        free_token_index=free_token_index,
-                        req=req,
-                        free_c4_index=free_c4_index,
-                        free_c128_index=free_c128_index,
-                    )
+                    self._dsv4_full_att_free_req(free_token_index=free_token_index, req=req)
                 else:
                     self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
@@ -187,79 +166,60 @@ class InferenceContext:
             req.shared_kv_node = None
         return
 
-    def _dsv4_full_att_free_req(
-        self,
-        free_token_index: List,
-        req: "InferReq",
-        free_c4_index: Optional[List] = None,
-        free_c128_index: Optional[List] = None,
-    ):
+    def _dsv4_full_att_free_req(self, free_token_index: List, req: "InferReq"):
         if req.cur_kv_len == 0:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0:0])
             return
 
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        cache_len = self.radix_cache.align_len(req.cur_kv_len)
         inserted_len = old_prefix_len
         duplicate_prefix_len = old_prefix_len
-        inserted_payload = None
-        pending_payload = getattr(req, "prompt_cache_snapshot_payload", None)
-        pending_cache_len = getattr(req, "prompt_cache_snapshot_len", 0)
 
-        # The current V4 runtime state is only guaranteed to describe the current
-        # sequence end. Cache aligned current ends; leave unaligned tails uncached.
-        if pending_payload is not None and pending_cache_len > old_prefix_len:
-            cache_len = pending_cache_len
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
-            duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value, extra_value=pending_payload)
-            inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
-            if inserted_len == cache_len:
-                inserted_payload = pending_payload
-            else:
-                self.req_manager.release_prompt_cache_detached_swa(pending_payload)
-                pending_payload = None
-                inserted_len = old_prefix_len
-                duplicate_prefix_len = old_prefix_len
-        elif cache_len == req.cur_kv_len and cache_len > old_prefix_len:
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
+        # 载荷只剩按页 bitmap(compressor 状态随 swa 页生灭/边界自然归零,不进载荷),
+        # 任意 128 对齐前缀皆可插入——含生成段(floor(cur_kv_len) 边界,回收保留尾页保证其驻留)。
+        cache_len = self.radix_cache.align_len(req.cur_kv_len)
+        if cache_len > old_prefix_len:
             payload = self.req_manager.build_prompt_cache_payload(req.req_idx, cache_len)
-            duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value, extra_value=payload)
-            inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
-            if inserted_len == cache_len:
-                inserted_payload = payload
-                self.req_manager.detach_prompt_cache_payload_from_req(req.req_idx, inserted_payload)
-            else:
-                inserted_len = old_prefix_len
-                duplicate_prefix_len = old_prefix_len
+            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
+            # 按页有效性 bitmap 用插入时刻的映射写定(此后只会被阀清 0,不会复活)。水位线
+            # 纯 CPU 推导,避免 router 关键路径上的 GPU gather 同步(每插入一次要等全部在途
+            # decode kernel)。插入门: 截掉结尾的 invalid 页 —— 它们生来不可命中,还会永久
+            # 挡住后续更长前缀复用同一段 token(全量重插会因前缀已存在而保留旧 bitmap)。
+            page_size = self.req_manager.get_prompt_cache_page_size()
+            bitmap = self.req_manager.swa_page_valid_from_watermark(req.req_idx, cache_len)
+            n_pages = int(bitmap.numel())
+            while n_pages > 0 and not bool(bitmap[n_pages - 1]):
+                n_pages -= 1
+            gated_len = n_pages * page_size
+            if gated_len < cache_len:
+                logger.info(
+                    f"DeepSeek-V4 prompt cache insert gate: trailing swa pages already evicted, "
+                    f"shrink insert {cache_len} -> {gated_len}"
+                )
+                cache_len = gated_len
+                payload.cache_len = cache_len
+            payload.swa_page_valid = bitmap[:n_pages].clone()
 
-        if (
-            pending_payload is not None
-            and inserted_payload is not pending_payload
-            and pending_cache_len <= old_prefix_len
-        ):
-            self.req_manager.release_prompt_cache_detached_swa(pending_payload)
-        req.prompt_cache_snapshot_payload = None
-        req.prompt_cache_snapshot_len = 0
+            if cache_len > old_prefix_len:
+                input_token_ids = req.get_input_token_ids()
+                key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
+                duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value[:cache_len], extra_value=payload)
+                inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
+                if inserted_len != cache_len:
+                    inserted_len = old_prefix_len
+                    duplicate_prefix_len = old_prefix_len
+
         dense_row = self.req_manager.req_to_token_indexs[req.req_idx]
         self._append_free_token_index(free_token_index, dense_row[old_prefix_len:duplicate_prefix_len])
         self._append_free_token_index(free_token_index, dense_row[inserted_len : req.cur_kv_len])
         if len(free_token_index) == 0:
             free_token_index.append(dense_row[0:0])
+        # 释放的 full 槽经 mem_manager.free 级联回收 swa/c4/c128(映射键控,无需收集槽位)。
 
-        c4, c128 = self.req_manager.pop_prompt_cache_free_compress_indices(
-            req.req_idx,
-            keep_len=inserted_len,
-            duplicate_start_len=old_prefix_len,
-            duplicate_end_len=duplicate_prefix_len,
-        )
-        if c4 is not None and free_c4_index is not None:
-            free_c4_index.append(c4)
-        if c128 is not None and free_c128_index is not None:
-            free_c128_index.append(c128)
+        # pause 路径不会走 req_manager.free/init: 复位出窗水位线(残留水位线会破坏下一次
+        # prefill 的共享前缀保护)并清 c128 在途状态(恢复命中走 extend 续算,若残留暂停前的
+        # 半窗聚合会算错;c128 状态在 128 对齐命中边界本应为零)。
+        self.req_manager.init_compress_state(req.req_idx)
 
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= max(inserted_len, old_prefix_len)
@@ -375,13 +335,11 @@ class InferenceContext:
 
         free_req_index = []
         free_token_index = []
-        free_c4_index = []
-        free_c128_index = []
         for request_id in finished_request_ids:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-            self.free_a_req_mem(free_token_index, req, free_c4_index, free_c128_index)
+            self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
@@ -389,17 +347,7 @@ class InferenceContext:
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         free_token_index = custom_cat(free_token_index)
-        if hasattr(self.req_manager, "free_compress_indices"):
-            free_c4_index = custom_cat(free_c4_index) if free_c4_index else None
-            free_c128_index = custom_cat(free_c128_index) if free_c128_index else None
-            self.req_manager.free(
-                free_req_index,
-                free_token_index,
-                free_c4_index=free_c4_index,
-                free_c128_index=free_c128_index,
-            )
-        else:
-            self.req_manager.free(free_req_index, free_token_index)
+        self.req_manager.free(free_req_index, free_token_index)
 
         finished_req_ids_set = set(finished_request_ids)
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
@@ -428,13 +376,11 @@ class InferenceContext:
             g_infer_state_lock.acquire()
 
             free_token_index = []
-            free_c4_index = []
-            free_c128_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
                     # 发生暂停的时候，需要清除 diverse 模式下的主从关系
                     req.clear_master_slave_state()
-                self.free_a_req_mem(free_token_index, req, free_c4_index, free_c128_index)
+                self.free_a_req_mem(free_token_index, req)
                 assert req.wait_pause is True
                 req.wait_pause = False
                 req.paused = True
@@ -445,13 +391,6 @@ class InferenceContext:
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
-            if hasattr(self.req_manager, "free_compress_indices"):
-                free_c4_index = custom_cat(free_c4_index) if free_c4_index else None
-                free_c128_index = custom_cat(free_c128_index) if free_c128_index else None
-                self.req_manager.free_compress_indices(
-                    free_c4_index=free_c4_index,
-                    free_c128_index=free_c128_index,
-                )
 
             g_infer_state_lock.release()
         return self
@@ -738,8 +677,6 @@ class InferReq:
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
         if hasattr(g_infer_context.req_manager, "init_compress_state"):
             g_infer_context.req_manager.init_compress_state(req_idx=self.req_idx)
-        self.prompt_cache_snapshot_len = 0
-        self.prompt_cache_snapshot_payload = None
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
         # token healing mode 才被使用的管理对象
@@ -775,11 +712,9 @@ class InferReq:
                 ready_cache_len = share_node.node_prefix_total_len
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                if hasattr(g_infer_context.req_manager, "restore_prompt_cache_payload"):
-                    payload = g_infer_context.radix_cache.get_extra_value_by_node(share_node)
-                    if payload is None:
-                        raise RuntimeError("DeepSeek-V4 radix cache hit is missing prompt-cache payload")
-                    g_infer_context.req_manager.restore_prompt_cache_payload(self.req_idx, payload)
+                # DeepSeek-V4 命中无需任何恢复: 槽位由 full_to_* 映射键控(radix 持有 full 槽即有效,
+                # 命中长度已在 match_prefix 内按 bitmap 裁剪),c4 compressor 状态随 swa 页常驻
+                # (零拷贝续算),c128 状态在 128 对齐边界自然归零(init_compress_state 已清)。
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 

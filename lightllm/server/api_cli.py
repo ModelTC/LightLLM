@@ -625,8 +625,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         choices=["fp8", "fp4"],
-        help="""Expert quantization dtype for EP MoE. Supported values are
-            fp8 and fp4. Note that fp4 is only supported on SM100 GPUs.""",
+        help="""Requested dtype for MoE expert weights, fp8 or fp4. Resolves the fused_moe
+            quant method: fp8 -> deepgemm-fp8w8a8-b128; fp4 -> deepgemm-fp4fp8-b32 (online
+            quantization) on SM100 GPUs, or marlin-mxfp4w4a16-b32 (Marlin W4A16, TP only) on other GPUs.
+            Defaults to `expert_dtype` in config.json if present. Per-layer override:
+            --quant_cfg mix_bits with name `fused_moe`.""",
     )
     parser.add_argument(
         "--vit_quant_type",

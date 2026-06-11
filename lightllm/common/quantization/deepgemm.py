@@ -198,6 +198,84 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
+@QUANTMETHODS.register(["marlin-mxfp4w4a16-b32"], platform="cuda")
+class MXFP4MoEQuantizationMethod(QuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.weight_suffix = "weight"
+        self.weight_zero_point_suffix = None
+        self.weight_scale_suffix = "scale"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
+
+    @property
+    def method_name(self):
+        return "marlin-mxfp4w4a16-b32"
+
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
+        raise NotImplementedError("marlin-mxfp4w4a16-b32 only loads pre-packed MXFP4 expert weights")
+
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "WeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("marlin-mxfp4w4a16-b32 is only implemented for fused MoE expert weights")
+
+    def _create_weight(
+        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
+        assert in_dim % 2 == 0, "MXFP4 packed weight requires even input dimension"
+        assert in_dim % self.block_size == 0, "MXFP4 scale dimension must be divisible by block_size"
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8, device="cpu")
+        weight_scale = torch.empty(
+            expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.float8_e8m0fnu, device="cpu"
+        )
+        mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=out_dims,
+            weight_scale_split_dim=-2,
+        )
+        return mm_param, mm_param_list
+
+    def finalize_moe_weight(self, moe_weight):
+        try:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+                prepare_moe_mxfp4_layer_for_marlin,
+            )
+        except Exception as e:
+            raise RuntimeError(f"marlin-mxfp4w4a16-b32 requires vLLM MXFP4 packing utilities, error={repr(e)}") from e
+
+        class _MXFP4Layer:
+            pass
+
+        device = torch.device("cuda", moe_weight.device_id_)
+        layer = _MXFP4Layer()
+        layer.params_dtype = moe_weight.data_type_
+        w13 = moe_weight.w13.weight.view(torch.uint8).to(device=device, non_blocking=True).contiguous()
+        w2 = moe_weight.w2.weight.view(torch.uint8).to(device=device, non_blocking=True).contiguous()
+        w13_scale = moe_weight.w13.weight_scale.to(device=device, non_blocking=True).contiguous()
+        w2_scale = moe_weight.w2.weight_scale.to(device=device, non_blocking=True).contiguous()
+        (
+            moe_weight.w13.weight,
+            moe_weight.w2.weight,
+            moe_weight.w13.weight_scale,
+            moe_weight.w2.weight_scale,
+            _,
+            _,
+        ) = prepare_moe_mxfp4_layer_for_marlin(layer, w13, w2, w13_scale, w2_scale, None, None)
+
+
 def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "gemm_fp8_fp8_bf16_nt"):

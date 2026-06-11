@@ -49,7 +49,7 @@ def check_ep_expert_dtype(quant_method: Any):
             "EP MoE requires --expert_dtype to be one of ['fp8', 'fp4'], "
             f"but the resolved fused_moe quant method is `{expert_dtype}`. "
             "Please start with --expert_dtype fp8 or --expert_dtype fp4. "
-            "Note that --expert_dtype fp4 is only supported on SM100 GPUs."
+            "Note that --expert_dtype fp4 with EP MoE is only supported on SM100 GPUs."
         )
     if expert_dtype == "deepgemm-fp4fp8-b32" and not is_sm100_gpu():
         raise RuntimeError(

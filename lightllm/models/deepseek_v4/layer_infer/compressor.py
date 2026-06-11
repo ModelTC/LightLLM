@@ -1,121 +1,37 @@
-import importlib.util
-import logging
-import sys
-import types
-from pathlib import Path
-
 import torch
-import torch.nn.functional as F
-from ..triton_kernel.rotary_emb import apply_rotary_emb
 
-logger = logging.getLogger(__name__)
 
-_SGLANG_COMPRESS_MOD = None
 _SGLANG_COMPRESS_ERR = None
-_SGLANG_COMPRESS_WARNED = False
+_SGLANG_COMPRESS_MOD = None
+_SGLANG_LINEAR_BF16_FP32 = None
 _FREQ_CIS_CACHE = {}
-
-# KV compressor: pools every `ratio` consecutive tokens into one compressed KV entry via gated
-# (softmax) pooling + a learned absolute-position bias (ape), RMSNorm, and rope on the trailing
-# rope_dim. ratio==4 uses overlapping windows (two-series Ca/Cb scheme). Pure-torch transcription of
-# the bundled reference inference/model.py Compressor.forward for the prefill (start_pos==0) path.
-# NOTE: the reference also applies an FP8/FP4 QAT activation sim to the compressed entry; omitted here
-# for the correctness-first prefill path (negligible vs argmax; revisit if e2e diverges).
-
-
-def _overlap_transform(tensor, ratio, d, value):
-    # tensor: [nwin, ratio, 2*d] -> [nwin, 2*ratio, d]; slots [ratio:]=Cb(current), [:ratio]=Ca(previous window)
-    nwin = tensor.shape[0]
-    out = tensor.new_full((nwin, 2 * ratio, d), value)
-    out[:, ratio:] = tensor[:, :, d:]
-    out[1:, :ratio] = tensor[:-1, :, :d]
-    return out
-
-
-def _rmsnorm(x, weight, eps):
-    xf = x.float()
-    xf = xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + eps)
-    return (xf * weight.float()).to(x.dtype)
-
-
-def _load_file_module(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _load_sglang_compressor():
-    global _SGLANG_COMPRESS_MOD, _SGLANG_COMPRESS_ERR
+    global _SGLANG_COMPRESS_ERR, _SGLANG_COMPRESS_MOD, _SGLANG_LINEAR_BF16_FP32
     if _SGLANG_COMPRESS_MOD is not None:
-        return _SGLANG_COMPRESS_MOD
+        return _SGLANG_COMPRESS_MOD, _SGLANG_LINEAR_BF16_FP32
     if _SGLANG_COMPRESS_ERR is not None:
         raise _SGLANG_COMPRESS_ERR
     try:
-        from sglang.jit_kernel.dsv4 import compress_old as mod
-
-        _SGLANG_COMPRESS_MOD = mod
-        return mod
-    except Exception as first_exc:
-        root = Path("/data/wanzihao/sglang/python/sglang")
-        try:
-            if not root.exists():
-                raise first_exc
-            if "sglang" not in sys.modules:
-                sglang_mod = types.ModuleType("sglang")
-                sglang_mod.__path__ = [str(root)]
-                sys.modules["sglang"] = sglang_mod
-            if "sglang.utils" not in sys.modules:
-                utils_mod = types.ModuleType("sglang.utils")
-                utils_mod.is_in_ci = lambda: False
-                sys.modules["sglang.utils"] = utils_mod
-            if "sglang.jit_kernel" not in sys.modules:
-                jit_mod = types.ModuleType("sglang.jit_kernel")
-                jit_mod.__path__ = [str(root / "jit_kernel")]
-                sys.modules["sglang.jit_kernel"] = jit_mod
-            if "sglang.jit_kernel.dsv4" not in sys.modules:
-                dsv4_mod = types.ModuleType("sglang.jit_kernel.dsv4")
-                dsv4_mod.__path__ = [str(root / "jit_kernel" / "dsv4")]
-                sys.modules["sglang.jit_kernel.dsv4"] = dsv4_mod
-            if "sglang.srt" not in sys.modules:
-                srt_mod = types.ModuleType("sglang.srt")
-                srt_mod.__path__ = [str(root / "srt")]
-                sys.modules["sglang.srt"] = srt_mod
-            if "sglang.srt.environ" not in sys.modules:
-                env_mod = types.ModuleType("sglang.srt.environ")
-
-                class _FalseEnv:
-                    def get(self):
-                        return False
-
-                class _Envs:
-                    SGLANG_OPT_USE_ONLINE_COMPRESS = _FalseEnv()
-
-                env_mod.envs = _Envs()
-                sys.modules["sglang.srt.environ"] = env_mod
-            if "sglang.jit_kernel.utils" not in sys.modules:
-                _load_file_module("sglang.jit_kernel.utils", root / "jit_kernel" / "utils.py")
-            if "sglang.jit_kernel.dsv4.utils" not in sys.modules:
-                _load_file_module(
-                    "sglang.jit_kernel.dsv4.utils",
-                    root / "jit_kernel" / "dsv4" / "utils.py",
-                )
-            _SGLANG_COMPRESS_MOD = _load_file_module(
-                "sglang.jit_kernel.dsv4.compress_old",
-                root / "jit_kernel" / "dsv4" / "compress_old.py",
-            )
-            return _SGLANG_COMPRESS_MOD
-        except Exception as exc:
-            _SGLANG_COMPRESS_ERR = exc
-            raise exc
+        from sglang.jit_kernel.dsv4 import linear_bf16_fp32
+        from sglang.jit_kernel.dsv4 import compress_old as compress_mod
+    except Exception as exc:
+        _SGLANG_COMPRESS_ERR = RuntimeError(
+            "DeepSeek-V4 fused compressor requires sglang.jit_kernel.dsv4 "
+            "(linear_bf16_fp32 + compress_old). Install/export the SGLang package "
+            "or vendor the DSv4 compressor JIT into LightLLM."
+        )
+        raise _SGLANG_COMPRESS_ERR from exc
+    _SGLANG_COMPRESS_MOD = compress_mod
+    _SGLANG_LINEAR_BF16_FP32 = linear_bf16_fp32
+    return compress_mod, linear_bf16_fp32
 
 
-def _warn_sglang_fallback(exc):
-    global _SGLANG_COMPRESS_WARNED
-    if not _SGLANG_COMPRESS_WARNED:
-        logger.warning("DeepSeek-V4 SGLang compressor JIT unavailable, fallback to torch: %s", exc)
-        _SGLANG_COMPRESS_WARNED = True
+def _load_paged_compress_data_fn():
+    from sglang.jit_kernel.dsv4 import triton_create_paged_compress_data
+
+    return triton_create_paged_compress_data
 
 
 def _freq_cis(cos_table, sin_table):
@@ -139,172 +55,21 @@ def _sglang_ape(ape, ratio, head_dim):
     return ape.contiguous()
 
 
-def _pack_kv_score(kv, score, ratio, head_dim):
-    if ratio == 4:
-        return torch.cat(
-            [
-                kv[:, :head_dim],
-                kv[:, head_dim:],
-                score[:, :head_dim],
-                score[:, head_dim:],
-            ],
-            dim=1,
-        ).contiguous()
-    return torch.cat([kv, score], dim=1).contiguous()
+def _compressor_weight(wkv_w, wgate_w):
+    return torch.cat([wkv_w, wgate_w], dim=0).contiguous()
 
 
-def _build_state_from_kv_score(kv, score, ape, ratio, head_dim):
-    overlap = ratio == 4
-    kv_state, score_state = new_compressor_state(ratio, head_dim, kv.device)
-    s = kv.shape[0]
-    remainder = s % ratio
-    cutoff = s - remainder
-    offset = ratio if overlap else 0
-    if overlap and cutoff >= ratio:
-        kv_state[:ratio] = kv[cutoff - ratio : cutoff]
-        score_state[:ratio] = score[cutoff - ratio : cutoff] + ape.float()
-    if remainder > 0:
-        kv_state[offset : offset + remainder] = kv[cutoff:]
-        score_state[offset : offset + remainder] = score[cutoff:] + ape.float()[:remainder]
-    return kv_state, score_state
+def _project_kv_score(x, wkv_w, wgate_w):
+    _, linear_bf16_fp32 = _load_sglang_compressor()
+    return linear_bf16_fp32(x, _compressor_weight(wkv_w, wgate_w))
 
 
-def _sglang_prefill_from_kv_score(
-    kv,
-    score,
-    norm_w,
-    ape,
-    ratio,
-    head_dim,
-    cos_table,
-    sin_table,
-    eps,
-    dtype,
-    state_pool=None,
-):
-    if not kv.is_cuda or head_dim % 128 != 0 or ratio not in (4, 128):
-        return None, None
-    mod = _load_sglang_compressor()
-    kv_score = _pack_kv_score(kv, score, ratio, head_dim)
-    ape_sglang = _sglang_ape(ape.float(), ratio, head_dim)
-    slots = 8 if ratio == 4 else ratio
+def _state_pool_view(state_pool):
     if state_pool is None:
-        state_pool = torch.zeros((1, slots, kv_score.shape[1]), device=kv.device, dtype=kv_score.dtype)
-    else:
-        state_pool.zero_()
-    seq_len = kv.shape[0]
-    plan = mod.CompressorPrefillPlan.generate(
-        ratio,
-        seq_len,
-        torch.tensor([seq_len], dtype=torch.int64),
-        torch.tensor([seq_len], dtype=torch.int64),
-        kv.device,
-    )
-    indices = torch.zeros((1,), device=kv.device, dtype=torch.int32)
-    out = mod.compress_forward(
-        state_pool,
-        kv_score,
-        ape_sglang,
-        indices,
-        plan,
-        head_dim=head_dim,
-        compress_ratio=ratio,
-    )
-    ncomp = seq_len // ratio
-    if ncomp:
-        mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
-        ragged_ids = plan.compress_plan.view(torch.int32)[:ncomp, 0].long()
-        out = out.index_select(0, ragged_ids).to(dtype)
-    else:
-        out = kv.new_zeros(0, head_dim).to(dtype)
-    return out, state_pool
-
-
-def _sglang_decode_step_from_state_pool(
-    x_new,
-    wkv_w,
-    wgate_w,
-    norm_w,
-    ape,
-    ratio,
-    head_dim,
-    cos_table,
-    sin_table,
-    eps,
-    start_pos,
-    state_pool,
-):
-    if state_pool is None or not x_new.is_cuda or head_dim % 128 != 0 or ratio not in (4, 128):
-        return None, False
-    mod = _load_sglang_compressor()
-    xf = x_new.float().view(1, -1)
-    kv = F.linear(xf, wkv_w.float())
-    score = F.linear(xf, wgate_w.float())
-    kv_score = _pack_kv_score(kv, score, ratio, head_dim)
-    ape_sglang = _sglang_ape(ape.float(), ratio, head_dim)
-    seq_len = start_pos + 1
-    plan = mod.CompressorDecodePlan(
-        ratio,
-        torch.tensor([seq_len], device=x_new.device, dtype=torch.int32),
-    )
-    indices = torch.zeros((1,), device=x_new.device, dtype=torch.int32)
-    out = mod.compress_forward(
-        state_pool,
-        kv_score,
-        ape_sglang,
-        indices,
-        plan,
-        head_dim=head_dim,
-        compress_ratio=ratio,
-    )
-    if seq_len % ratio != 0:
-        return None, True
-    mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
-    return out[0].to(x_new.dtype), True
-
-
-def compress_prefill(x, wkv_w, wgate_w, norm_w, ape, ratio, head_dim, rope_dim, cos_table, sin_table, eps):
-    """x:[s,dim] (one request, start_pos=0) -> compressed kv [nwin, head_dim] (rope applied to last rope_dim).
-
-    nwin = s // ratio (remainder tokens are decode-state, handled in the decode path). wkv_w/wgate_w:
-    [coff*head_dim, dim]; norm_w:[head_dim]; ape:[ratio, coff*head_dim]; cos_table/sin_table: compress rope tables.
-    """
-    overlap = ratio == 4
-    coff = 2 if overlap else 1
-    d = head_dim
-    s = x.shape[0]
-    nwin = s // ratio
-    if nwin == 0:
-        # fewer than `ratio` tokens -> no completed window -> no compressed entry (matches reference)
-        return x.new_zeros(0, head_dim)
-    cutoff = nwin * ratio
-    xf = x.float()
-    kv = F.linear(xf, wkv_w.float())[:cutoff].view(nwin, ratio, coff * d)
-    score = F.linear(xf, wgate_w.float())[:cutoff].view(nwin, ratio, coff * d) + ape.float()
-    if overlap:
-        kv = _overlap_transform(kv, ratio, d, 0.0)
-        score = _overlap_transform(score, ratio, d, float("-inf"))
-    kv = (kv * torch.softmax(score, dim=1)).sum(dim=1)  # [nwin, d] fp32
-    kv = _rmsnorm(kv.to(x.dtype), norm_w, eps)  # [nwin, d]
-    pos = torch.arange(nwin, device=x.device) * ratio
-    kv_rope = apply_rotary_emb(kv[:, -rope_dim:], cos_table[pos], sin_table[pos])  # cos/sin: [nwin, rope_dim//2]
-    return torch.cat([kv[:, :-rope_dim], kv_rope], dim=1)
-
-
-def new_compressor_state(ratio, head_dim, device, dtype=torch.float32):
-    """Per-request compressor running state (matches reference Compressor.kv_state/score_state)."""
-    coff = 2 if ratio == 4 else 1
-    kv_state = torch.zeros(coff * ratio, coff * head_dim, device=device, dtype=dtype)
-    score_state = torch.full((coff * ratio, coff * head_dim), float("-inf"), device=device, dtype=dtype)
-    return kv_state, score_state
-
-
-def _finish_entry(kv, norm_w, ape_unused, rope_dim, cos_table, sin_table, position, eps, dtype):
-    kv = _rmsnorm(kv.to(dtype), norm_w, eps)  # [d]
-    cos = cos_table[position : position + 1]  # [1, rope_dim//2]
-    sin = sin_table[position : position + 1]
-    kv_rope = apply_rotary_emb(kv[-rope_dim:].unsqueeze(0), cos, sin)[0]
-    return torch.cat([kv[:-rope_dim], kv_rope], dim=0)
+        raise RuntimeError("DeepSeek-V4 fused compressor requires a persistent state_pool")
+    if state_pool.dim() == 4 and state_pool.shape[1] == 1:
+        return state_pool.squeeze(1)
+    return state_pool
 
 
 def compressor_prefill_state(
@@ -315,77 +80,45 @@ def compressor_prefill_state(
     ape,
     ratio,
     head_dim,
-    rope_dim,
     cos_table,
     sin_table,
     eps,
-    return_state_pool=False,
-    state_pool=None,
+    state_pool,
 ):
-    """Faithful reference start_pos==0 path (incl. remainder). Returns (entries[ncomp,d], kv_state, score_state).
-
-    entries have rope applied; kv_state/score_state carry the partial window for the decode path.
-    """
-    overlap = ratio == 4
-    coff = 2 if overlap else 1
-    d = head_dim
-    s = x.shape[0]
-    dtype = x.dtype
-    xf = x.float()
-    kv = F.linear(xf, wkv_w.float())  # [s, coff*d]
-    score = F.linear(xf, wgate_w.float())  # [s, coff*d]
-    ape = ape.float()
-    kv_state, score_state = _build_state_from_kv_score(kv, score, ape, ratio, head_dim)
-    sglang_state_pool = state_pool
-    try:
-        comp, sglang_state_pool = _sglang_prefill_from_kv_score(
-            kv,
-            score,
-            norm_w,
-            ape,
-            ratio,
-            head_dim,
-            cos_table,
-            sin_table,
-            eps,
-            dtype,
-            state_pool=sglang_state_pool,
-        )
-        if comp is not None:
-            if return_state_pool:
-                return comp, kv_state, score_state, sglang_state_pool
-            return comp, kv_state, score_state
-    except Exception as exc:
-        _warn_sglang_fallback(exc)
-
-    should_compress = s >= ratio
-    remainder = s % ratio
-    cutoff = s - remainder
-    if remainder > 0:
-        kv = kv[:cutoff]
-        score = score[:cutoff]
-    if not should_compress:
-        comp = x.new_zeros(0, head_dim)
-        if return_state_pool:
-            return comp, kv_state, score_state, sglang_state_pool
-        return comp, kv_state, score_state
-    nwin = cutoff // ratio
-    kvw = kv.view(nwin, ratio, coff * d)
-    scw = score.view(nwin, ratio, coff * d) + ape
-    if overlap:
-        kvw = _overlap_transform(kvw, ratio, d, 0.0)
-        scw = _overlap_transform(scw, ratio, d, float("-inf"))
-    comp = (kvw * torch.softmax(scw, dim=1)).sum(dim=1)  # [nwin, d] fp32
-    comp = _rmsnorm(comp.to(dtype), norm_w, eps)
-    pos = torch.arange(nwin, device=x.device) * ratio
-    comp_rope = apply_rotary_emb(comp[:, -rope_dim:], cos_table[pos], sin_table[pos])
-    comp = torch.cat([comp[:, :-rope_dim], comp_rope], dim=1)
-    if return_state_pool:
-        return comp, kv_state, score_state, sglang_state_pool
-    return comp, kv_state, score_state
+    """start_pos==0 prefill for ONE request: x [s, dim] -> compressed entries [s//ratio, head_dim]
+    (rope applied). state_pool is the request's persistent jit state slice [1, slots, coff*2*head_dim];
+    it is rebuilt in place so the decode path can continue from the trailing partial window."""
+    mod, _ = _load_sglang_compressor()
+    kv_score = _project_kv_score(x, wkv_w, wgate_w)
+    pool = _state_pool_view(state_pool)
+    pool.zero_()
+    seq_len = x.shape[0]
+    plan = mod.CompressorPrefillPlan.generate(
+        ratio,
+        seq_len,
+        torch.tensor([seq_len], dtype=torch.int64),
+        torch.tensor([seq_len], dtype=torch.int64),
+        x.device,
+    )
+    indices = torch.zeros((1,), device=x.device, dtype=torch.int32)
+    out = mod.compress_forward(
+        pool,
+        kv_score,
+        _sglang_ape(ape.float(), ratio, head_dim),
+        indices,
+        plan,
+        head_dim=head_dim,
+        compress_ratio=ratio,
+    )
+    ncomp = seq_len // ratio
+    if ncomp == 0:
+        return x.new_zeros(0, head_dim)
+    mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
+    ragged_ids = plan.compress_plan.view(torch.int32)[:ncomp, 0].long()
+    return out.index_select(0, ragged_ids).to(x.dtype)
 
 
-def compressor_decode_step(
+def compressor_decode_step_single(
     x_new,
     wkv_w,
     wgate_w,
@@ -393,72 +126,36 @@ def compressor_decode_step(
     ape,
     ratio,
     head_dim,
-    rope_dim,
     cos_table,
     sin_table,
     eps,
-    kv_state,
-    score_state,
+    state_pool,
     start_pos,
-    state_pool=None,
 ):
-    """Faithful reference start_pos>0 path for one new token. Mutates kv_state/score_state in place.
-    Returns the new compressed entry [d] (rope applied) when a window completes, else None.
-    """
-    overlap = ratio == 4
-    d = head_dim
-    dtype = x_new.dtype
-    try:
-        entry, handled = _sglang_decode_step_from_state_pool(
-            x_new,
-            wkv_w,
-            wgate_w,
-            norm_w,
-            ape,
-            ratio,
-            head_dim,
-            cos_table,
-            sin_table,
-            eps,
-            start_pos,
-            state_pool,
-        )
-        if handled:
-            return entry
-    except Exception as exc:
-        _warn_sglang_fallback(exc)
-
-    xf = x_new.float().view(-1)  # [dim]
-    kv = F.linear(xf, wkv_w.float())  # [coff*d]
-    score = F.linear(xf, wgate_w.float()) + ape.float()[start_pos % ratio]  # [coff*d]
-    should_compress = (start_pos + 1) % ratio == 0
-    if overlap:
-        kv_state[ratio + start_pos % ratio] = kv
-        score_state[ratio + start_pos % ratio] = score
-        if should_compress:
-            kv_cat = torch.cat([kv_state[:ratio, :d], kv_state[ratio:, d:]], dim=0)  # [2*ratio, d]
-            sc_cat = torch.cat([score_state[:ratio, :d], score_state[ratio:, d:]], dim=0)
-            entry = (kv_cat * torch.softmax(sc_cat, dim=0)).sum(dim=0)  # [d]
-            kv_state[:ratio] = kv_state[ratio:]
-            score_state[:ratio] = score_state[ratio:]
-    else:
-        kv_state[start_pos % ratio] = kv
-        score_state[start_pos % ratio] = score
-        if should_compress:
-            entry = (kv_state * torch.softmax(score_state, dim=0)).sum(dim=0)  # [d]
-    if not should_compress:
-        return None
-    return _finish_entry(
-        entry,
-        norm_w,
-        ape,
-        rope_dim,
-        cos_table,
-        sin_table,
-        start_pos + 1 - ratio,
-        eps,
-        dtype,
+    """One token for ONE request (chunked-prefill extend path). Returns the finished compressed
+    entry [head_dim] when (start_pos+1) % ratio == 0, else None. Mutates state_pool in place."""
+    mod, _ = _load_sglang_compressor()
+    kv_score = _project_kv_score(x_new.view(1, -1), wkv_w, wgate_w)
+    pool = _state_pool_view(state_pool)
+    seq_len = start_pos + 1
+    plan = mod.CompressorDecodePlan(
+        ratio,
+        torch.tensor([seq_len], device=x_new.device, dtype=torch.int32),
     )
+    indices = torch.zeros((1,), device=x_new.device, dtype=torch.int32)
+    out = mod.compress_forward(
+        pool,
+        kv_score,
+        _sglang_ape(ape.float(), ratio, head_dim),
+        indices,
+        plan,
+        head_dim=head_dim,
+        compress_ratio=ratio,
+    )
+    if seq_len % ratio != 0:
+        return None
+    mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
+    return out[0].to(x_new.dtype)
 
 
 def compressor_decode_step_batch(
@@ -473,53 +170,193 @@ def compressor_decode_step_batch(
     cos_table,
     sin_table,
     eps,
-    state_all,
+    state_pool,
     b_req_idx,
     start_pos,
 ):
-    """Graph-safe batch decode compressor step.
+    mod, _ = _load_sglang_compressor()
+    kv_score = _project_kv_score(x_new, wkv_w, wgate_w)
+    pool = _state_pool_view(state_pool)
+    seq_lens = (start_pos + 1).to(torch.int32).contiguous()
+    plan = mod.CompressorDecodePlan(ratio, seq_lens)
+    out = mod.compress_forward(
+        pool,
+        kv_score,
+        _sglang_ape(ape.float(), ratio, head_dim),
+        b_req_idx.to(torch.int32).contiguous(),
+        plan,
+        head_dim=head_dim,
+        compress_ratio=ratio,
+    )
+    should_compress = (seq_lens % ratio) == 0
+    mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
+    return out.to(x_new.dtype), should_compress
 
-    Mutates ``state_all`` for the selected request rows and returns one candidate
-    entry per batch row plus a boolean mask telling which rows closed a
-    compression window.
-    """
-    overlap = ratio == 4
-    d = head_dim
-    dtype = x_new.dtype
-    req = b_req_idx.long()
-    pos = start_pos.long()
-    pos_mod = pos % ratio
 
-    xf = x_new.float()
-    kv = F.linear(xf, wkv_w.float())
-    score = F.linear(xf, wgate_w.float()) + ape.float().index_select(0, pos_mod)
+# ---------------------------------------------------------------------------- paged state (c4)
+# 与 sglang srt compressor 的 paged 路径同构(compress_old 内核 + 分组槽 indices + overlap
+# extra_data): state 槽位由 swa 槽位算术派生(翻译③ state_loc = page*ring + swa_loc%ring,
+# 分组槽 = state_loc//ratio),state 随 swa 页生灭,radix 命中零拷贝续算。
 
-    kv_state = state_all[req, 0].clone()
-    score_state = state_all[req, 1].clone()
-    row = pos_mod + (ratio if overlap else 0)
-    batch_ids = torch.arange(x_new.shape[0], device=x_new.device)
-    kv_state[batch_ids, row] = kv
-    score_state[batch_ids, row] = score
 
-    should_compress = ((pos + 1) % ratio) == 0
-    if overlap:
-        kv_cat = torch.cat([kv_state[:, :ratio, :d], kv_state[:, ratio:, d:]], dim=1)
-        score_cat = torch.cat([score_state[:, :ratio, :d], score_state[:, ratio:, d:]], dim=1)
-        entry = (kv_cat * torch.softmax(score_cat, dim=1)).sum(dim=1)
-        shifted_kv_state = kv_state.clone()
-        shifted_score_state = score_state.clone()
-        shifted_kv_state[:, :ratio] = kv_state[:, ratio:]
-        shifted_score_state[:, :ratio] = score_state[:, ratio:]
-        kv_state = torch.where(should_compress.view(-1, 1, 1), shifted_kv_state, kv_state)
-        score_state = torch.where(should_compress.view(-1, 1, 1), shifted_score_state, score_state)
-    else:
-        entry = (kv_state * torch.softmax(score_state, dim=1)).sum(dim=1)
+def paged_state_rows(num_swa_pages: int, ring: int, ratio: int) -> int:
+    """state 池行数 = 页数*ring + ring(HOLD 页) + 1(哨兵行),向上取整到 ratio 整除
+    (分组视图 [-1, ratio, last_dim] 需要)。与 sglang CompressStatePool 的 _size 公式一致。"""
+    rows = num_swa_pages * ring + ring + 1
+    return (rows + ratio - 1) // ratio * ratio
 
-    state_all[req, 0] = kv_state
-    state_all[req, 1] = score_state
 
-    entry = _rmsnorm(entry.to(dtype), norm_w, eps)
-    comp_pos = torch.clamp(pos + 1 - ratio, min=0)
-    entry_rope = apply_rotary_emb(entry[:, -rope_dim:], cos_table[comp_pos], sin_table[comp_pos])
-    entry = torch.cat([entry[:, :-rope_dim], entry_rope], dim=1)
-    return entry, should_compress
+def init_paged_state_pool(buffer: torch.Tensor) -> None:
+    """末行为哨兵: kv 半边置 0、score 半边置 -inf(KVAndScore.clear 语义)。其余行无需初始化
+    (内核在组起点覆写)。buffer: [rows, 2*coff*head_dim] fp32。"""
+    half = buffer.shape[-1] // 2
+    buffer[-1, :half].zero_()
+    buffer[-1, half:].fill_(float("-inf"))
+    return
+
+
+def _paged_state_group_slot(req_to_token, full_to_swa, b_req_idx, positions, page_size, ring, ratio):
+    """位置 -> state 分组槽(= sglang create_paged_compressor_data.get_raw_loc):
+    state_loc = (swa_loc//page)*ring + swa_loc%ring; 分组槽 = state_loc//ratio。
+    负位置按 sglang 语义 mask 到 0;已出窗(swa_loc<0)的位置落到 -1(哨兵行,score=-inf)。"""
+    positions = positions.masked_fill(positions < 0, 0)
+    full = req_to_token[b_req_idx.long(), positions]
+    swa_loc = full_to_swa[full.long()].long()
+    state_loc = torch.div(swa_loc, page_size, rounding_mode="floor") * ring + swa_loc % ring
+    state_loc = torch.where(swa_loc < 0, torch.full_like(state_loc, -1), state_loc)
+    return torch.div(state_loc, ratio, rounding_mode="floor").to(torch.int32)
+
+
+def paged_decode_state_slots(
+    req_to_token,
+    full_to_swa,
+    b_req_idx,
+    b_seq_len,
+    page_size: int,
+    ring: int,
+    ratio: int,
+    hold_req_id: int,
+    num_swa_pages: int,
+):
+    """decode 步的 state 分组槽(写槽 = 当前组 clip_down(seq-1) 的槽,overlap 伙伴 = 前一组)。
+    纯张量算术(prep 已写本步 req_to_token),图安全。padding(HOLD)行重定向到 HOLD 页的
+    state 槽,隔离其垃圾累加。"""
+    seq = b_seq_len.long()
+    write_positions = torch.div(seq - 1, ratio, rounding_mode="floor") * ratio
+    write_slot = _paged_state_group_slot(req_to_token, full_to_swa, b_req_idx, write_positions, page_size, ring, ratio)
+    overlap_slot = _paged_state_group_slot(
+        req_to_token, full_to_swa, b_req_idx, write_positions - ratio, page_size, ring, ratio
+    )
+    hold_slot = num_swa_pages * ring // ratio  # HOLD 页区域([pages*ring, pages*ring+ring))的首个分组槽
+    is_hold = b_req_idx.long() == hold_req_id
+    write_slot = torch.where(is_hold, torch.full_like(write_slot, hold_slot), write_slot)
+    overlap_slot = torch.where(is_hold, torch.full_like(overlap_slot, hold_slot), overlap_slot)
+    return write_slot, overlap_slot
+
+
+def paged_prefill_compress_data(req_to_token, full_to_swa, req_idx: int, ready_len: int, seq_len: int, ring: int):
+    """单请求 prefill chunk 的 (indices, extra_data, plan): 与 sglang 同走
+    triton_create_paged_compress_data(按请求产出,内核经 plan 逐 token 步进)。仅 c4(overlap)。
+    三者都与层无关,同一 forward 内可跨全部 c4 层复用。"""
+    mod, _ = _load_sglang_compressor()
+    fn = _load_paged_compress_data_fn()
+    device = req_to_token.device
+    n_new = seq_len - ready_len
+    write_loc, extra_data = fn(
+        compress_ratio=4,
+        is_overlap=True,
+        swa_page_size=128,
+        ring_size=ring,
+        req_pool_indices=torch.tensor([req_idx], device=device, dtype=torch.int64),
+        seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int64),
+        extend_seq_lens=torch.tensor([n_new], device=device, dtype=torch.int64),
+        req_to_token=req_to_token,
+        full_to_swa_index_mapping=full_to_swa,
+    )
+    plan = mod.CompressorPrefillPlan.generate(
+        4,
+        n_new,
+        torch.tensor([seq_len], dtype=torch.int64),
+        torch.tensor([n_new], dtype=torch.int64),
+        device,
+    )
+    return write_loc, extra_data, plan
+
+
+def compressor_paged_prefill(
+    x,
+    wkv_w,
+    wgate_w,
+    norm_w,
+    ape,
+    head_dim,
+    cos_table,
+    sin_table,
+    eps,
+    state_buffer,
+    compress_data,
+    ready_len,
+    seq_len,
+):
+    """单请求 prefill/extend chunk(c4 paged): x [n_new, dim] 为位置 [ready, seq) 的 hidden,
+    state 写到 swa 派生的分组槽(compress_data 来自 paged_prefill_compress_data,跨层复用)。
+    返回本 chunk 完结组的压缩条目 [seq//4 - ready//4, head_dim](rope 已施加)。"""
+    mod, _ = _load_sglang_compressor()
+    ratio = 4
+    kv_score = _project_kv_score(x, wkv_w, wgate_w)
+    pool = state_buffer.view(-1, ratio, state_buffer.shape[-1])
+    write_loc, extra_data, plan = compress_data
+    out = mod.compress_forward(
+        pool,
+        kv_score,
+        _sglang_ape(ape.float(), ratio, head_dim),
+        write_loc,
+        plan,
+        head_dim=head_dim,
+        compress_ratio=ratio,
+        extra_data=extra_data,
+    )
+    ncomp = seq_len // ratio - ready_len // ratio
+    if ncomp == 0:
+        return x.new_zeros(0, head_dim)
+    mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
+    ragged_ids = plan.compress_plan.view(torch.int32)[:ncomp, 0].long()
+    return out.index_select(0, ragged_ids).to(x.dtype)
+
+
+def compressor_paged_decode_batch(
+    x_new,
+    wkv_w,
+    wgate_w,
+    norm_w,
+    ape,
+    head_dim,
+    cos_table,
+    sin_table,
+    eps,
+    state_buffer,
+    write_slot,
+    overlap_slot,
+    b_seq_len,
+):
+    """批量 decode 一步(c4 paged): state 槽位为 swa 派生分组槽(paged_decode_state_slots,
+    可跨层复用)。返回 (entries [bs, head_dim], should_compress [bs])。"""
+    mod, _ = _load_sglang_compressor()
+    ratio = 4
+    kv_score = _project_kv_score(x_new, wkv_w, wgate_w)
+    pool = state_buffer.view(-1, ratio, state_buffer.shape[-1])
+    seq_lens = b_seq_len.to(torch.int32).contiguous()
+    plan = mod.CompressorDecodePlan(ratio, seq_lens)
+    out = mod.compress_forward(
+        pool,
+        kv_score,
+        _sglang_ape(ape.float(), ratio, head_dim),
+        write_slot,
+        plan,
+        head_dim=head_dim,
+        compress_ratio=ratio,
+        extra_data=overlap_slot.view(-1, 1),
+    )
+    should_compress = (seq_lens % ratio) == 0
+    mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)
+    return out.to(x_new.dtype), should_compress

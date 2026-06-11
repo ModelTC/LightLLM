@@ -1,5 +1,3 @@
-import threading
-
 import torch
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import (
@@ -9,202 +7,16 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     RMSNormWeight,
     ParameterWeight,
     TpAttSinkWeight,
+    FusedMoeWeight,
 )
-from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
-from lightllm.common.quantization.registry import QUANTMETHODS
-from lightllm.utils.log_utils import init_logger
 from ..triton_kernel.quant_convert import dequant_fp8_block_to_bf16
-
-
-logger = init_logger(__name__)
-
-
-class DeepseekV4FP4ExpertsWeight(BaseWeightTpl):
-    _marlin_pack_lock = threading.Lock()
-
-    def __init__(self, weight_prefix, n_routed_experts, hidden_size, moe_intermediate_size, data_type):
-        super().__init__(data_type=data_type)
-        self.weight_prefix = weight_prefix
-        self.n_routed_experts = n_routed_experts
-        self.hidden_size = hidden_size
-        self.moe_intermediate_size = moe_intermediate_size
-        self.split_inter_size = moe_intermediate_size // self.tp_world_size_
-        self.local_expert_ids = list(range(n_routed_experts))
-        self.expert_idx_to_local_idx = {expert_idx: expert_idx for expert_idx in self.local_expert_ids}
-        self.moe_backend = None
-        self.moe_backend_error = None
-        self._marlin_checked = False
-        self._load_lock = threading.Lock()
-        self.load_ok = {
-            name: [False] * n_routed_experts for name in ("w1", "w1_scale", "w2", "w2_scale", "w3", "w3_scale")
-        }
-
-    def _create_weight(self):
-        self._ensure_raw_fp4_weight()
-
-    def _ensure_raw_fp4_weight(self):
-        if hasattr(self, "w1"):
-            return
-        device = "cpu"
-        n = self.n_routed_experts
-        h = self.hidden_size
-        inter = self.split_inter_size
-        self.w1 = torch.empty((n, inter, h // 2), dtype=torch.int8, device=device)
-        self.w3 = torch.empty((n, inter, h // 2), dtype=torch.int8, device=device)
-        self.w2 = torch.empty((n, h, inter // 2), dtype=torch.int8, device=device)
-        self.w1_scale = torch.empty((n, inter, h // 32), dtype=torch.float8_e8m0fnu, device=device)
-        self.w3_scale = torch.empty((n, inter, h // 32), dtype=torch.float8_e8m0fnu, device=device)
-        self.w2_scale = torch.empty((n, h, inter // 32), dtype=torch.float8_e8m0fnu, device=device)
-
-    def _copy_expert_weight(self, dst, weight, expert_idx, name, is_down=False):
-        if is_down:
-            start = self.tp_rank_ * self.split_inter_size // 2
-            end = (self.tp_rank_ + 1) * self.split_inter_size // 2
-            src = weight[:, start:end]
-        else:
-            start = self.tp_rank_ * self.split_inter_size
-            end = (self.tp_rank_ + 1) * self.split_inter_size
-            src = weight[start:end, :]
-        dst[expert_idx].copy_(src)
-        self.load_ok[name][expert_idx] = True
-
-    def _copy_expert_scale(self, dst, scale, expert_idx, name, is_down=False):
-        if is_down:
-            start = self.tp_rank_ * self.split_inter_size // 32
-            end = (self.tp_rank_ + 1) * self.split_inter_size // 32
-            src = scale[:, start:end]
-        else:
-            start = self.tp_rank_ * self.split_inter_size
-            end = (self.tp_rank_ + 1) * self.split_inter_size
-            src = scale[start:end, :]
-        dst[expert_idx].copy_(src)
-        self.load_ok[name][expert_idx] = True
-
-    def load_hf_weights(self, weights):
-        if self._marlin_checked:
-            return
-        has_weight = False
-        for expert_idx in self.local_expert_ids:
-            prefix = f"{self.weight_prefix}.{expert_idx}"
-            if (
-                f"{prefix}.w1.weight" in weights
-                or f"{prefix}.w1.scale" in weights
-                or f"{prefix}.w2.weight" in weights
-                or f"{prefix}.w2.scale" in weights
-                or f"{prefix}.w3.weight" in weights
-                or f"{prefix}.w3.scale" in weights
-            ):
-                has_weight = True
-                break
-        if not has_weight:
-            return
-
-        with self._load_lock:
-            if self._marlin_checked:
-                return
-            self._ensure_raw_fp4_weight()
-            for expert_idx in self.local_expert_ids:
-                prefix = f"{self.weight_prefix}.{expert_idx}"
-                w1 = f"{prefix}.w1.weight"
-                w1_scale = f"{prefix}.w1.scale"
-                w2 = f"{prefix}.w2.weight"
-                w2_scale = f"{prefix}.w2.scale"
-                w3 = f"{prefix}.w3.weight"
-                w3_scale = f"{prefix}.w3.scale"
-                if w1 in weights:
-                    self._copy_expert_weight(self.w1, weights[w1], expert_idx, "w1")
-                if w1_scale in weights:
-                    self._copy_expert_scale(self.w1_scale, weights[w1_scale], expert_idx, "w1_scale")
-                if w3 in weights:
-                    self._copy_expert_weight(self.w3, weights[w3], expert_idx, "w3")
-                if w3_scale in weights:
-                    self._copy_expert_scale(self.w3_scale, weights[w3_scale], expert_idx, "w3_scale")
-                if w2 in weights:
-                    self._copy_expert_weight(self.w2, weights[w2], expert_idx, "w2", is_down=True)
-                if w2_scale in weights:
-                    self._copy_expert_scale(self.w2_scale, weights[w2_scale], expert_idx, "w2_scale", is_down=True)
-            if self._raw_load_complete():
-                self._try_init_marlin()
-
-    def verify_load(self):
-        with self._load_lock:
-            ok = self._raw_load_complete()
-            if ok and not self._marlin_checked:
-                self._try_init_marlin()
-            return ok
-
-    def _raw_load_complete(self):
-        return all(all(ok_list) for ok_list in self.load_ok.values())
-
-    def _try_init_marlin(self):
-        try:
-            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-                prepare_moe_mxfp4_layer_for_marlin,
-            )
-
-            class _MarlinLayer:
-                pass
-
-            with self._marlin_pack_lock:
-                torch.cuda.set_device(self.device_id_)
-                device = torch.device("cuda", self.device_id_)
-                layer = _MarlinLayer()
-                layer.params_dtype = self.data_type_
-                w13_cpu, w13_scale_cpu = self._build_w13_weight()
-                w13 = w13_cpu.to(device=device, non_blocking=True).contiguous()
-                w2 = self.w2.view(torch.uint8).to(device=device, non_blocking=True).contiguous()
-                w13_scale = w13_scale_cpu.to(device=device, non_blocking=True).contiguous()
-                w2_scale = self.w2_scale.to(device=device, non_blocking=True).contiguous()
-                (
-                    self.marlin_w13,
-                    self.marlin_w2,
-                    self.marlin_w13_scale,
-                    self.marlin_w2_scale,
-                    _,
-                    _,
-                ) = prepare_moe_mxfp4_layer_for_marlin(layer, w13, w2, w13_scale, w2_scale, None, None)
-                del w13_cpu, w13_scale_cpu, w13, w2, w13_scale, w2_scale
-                self.moe_backend = "marlin"
-                self._marlin_checked = True
-                self._release_raw_fp4_weight()
-                torch.cuda.empty_cache()
-            logger.info(
-                "DeepSeek-V4 FP4 experts use vLLM Marlin backend, prefix=%s, rank=%s",
-                self.weight_prefix,
-                self.tp_rank_,
-            )
-        except Exception as e:
-            self.moe_backend_error = repr(e)
-            raise RuntimeError(
-                "DeepSeek-V4 FP4 experts require vLLM Marlin backend, "
-                f"prefix={self.weight_prefix}, rank={self.tp_rank_}, error={self.moe_backend_error}"
-            ) from e
-
-    def _build_w13_weight(self):
-        n = self.n_routed_experts
-        h = self.hidden_size
-        inter = self.split_inter_size
-        w13 = torch.empty((n, 2 * inter, h // 2), dtype=torch.uint8, device=self.w1.device)
-        w13[:, :inter, :].copy_(self.w1.view(torch.uint8))
-        w13[:, inter:, :].copy_(self.w3.view(torch.uint8))
-        w13_scale = torch.empty((n, 2 * inter, h // 32), dtype=self.w1_scale.dtype, device=self.w1_scale.device)
-        w13_scale[:, :inter, :].copy_(self.w1_scale)
-        w13_scale[:, inter:, :].copy_(self.w3_scale)
-        return w13.contiguous(), w13_scale.contiguous()
-
-    def _release_raw_fp4_weight(self):
-        for name in ("w1", "w1_scale", "w2", "w2_scale", "w3", "w3_scale"):
-            if hasattr(self, name):
-                delattr(self, name)
 
 
 class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     """Per-layer weights for DeepSeek-V4-Flash.
 
-    The checkpoint stores most linears in FP8 (e4m3 + block-128 ue8m0 scale) and the routed
-    experts in FP4 (int8-packed e2m1 + group-32 ue8m0 scale). Hopper does not use the SM100
-    MegaMoE path here, so routed experts are kept in packed FP4 and temporarily de-quantized only
-    for selected experts in the correctness-first torch MoE path.
+    DS4 does not share DS2/DS3.2's ``model.layers.*.self_attn/mlp`` layout. Its attention is
+    HC + CSA, and routed experts are checkpointed as MXFP4.
     """
 
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
@@ -213,7 +25,6 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
 
     def _parse_config(self):
         cfg = self.network_config_
-        self.fp8_quant = QUANTMETHODS.get("deepgemm-fp8w8a8-b128")
         self.hidden = cfg["hidden_size"]
         self.n_heads = cfg["num_attention_heads"]
         self.head_dim = cfg["head_dim"]
@@ -238,13 +49,10 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         assert self.index_n_heads % self.tp_world_size_ == 0
         self.prefix = f"layers.{self.layer_num_}"
 
-    def _init_weight_names(self):
-        return
-
     def _init_weight(self):
-        self._init_attn()
+        self._init_qkvo()
         if self.has_compressor:
-            self._init_compressor(f"{self.prefix}.attn.compressor", self.head_dim, self.compress_ratio)
+            self._init_compressor()
         if self.has_indexer:
             self._init_indexer()
         self._init_moe()
@@ -252,7 +60,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self._init_hyper_connection()
 
     # ------------------------------------------------------------------ attention
-    def _init_attn(self):
+    def _init_qkvo(self):
         p = f"{self.prefix}.attn"
         # q low-rank (a replicated, b column-parallel over heads), kv single head (replicated)
         self.wq_a_ = ROWMMWeight(
@@ -260,7 +68,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             out_dims=[self.q_lora_rank],
             weight_names=f"{p}.wq_a.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("wq_a"),
             tp_rank=0,
             tp_world_size=1,
         )
@@ -269,14 +77,14 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             out_dims=[self.n_heads * self.head_dim],
             weight_names=f"{p}.wq_b.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("wq_b"),
         )
         self.wkv_ = ROWMMWeight(
             in_dim=self.hidden,
             out_dims=[self.head_dim],
             weight_names=f"{p}.wkv.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("wkv"),
             tp_rank=0,
             tp_world_size=1,
         )
@@ -301,11 +109,15 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             out_dims=[self.hidden],
             weight_names=f"{p}.wo_b.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("wo_b"),
         )
 
     # ------------------------------------------------------------------ compressor / indexer
-    def _init_compressor(self, prefix, head_dim, ratio):
+    def _init_compressor(self):
+        prefix = f"{self.prefix}.attn.compressor"
+        head_dim = self.head_dim
+        ratio = self.compress_ratio
+
         coff = 2 if ratio == 4 else 1
         # wkv/wgate are bf16 (no scale) and replicated (single KV head).
         self.compressor_wkv_ = ROWMMWeight(
@@ -341,7 +153,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             out_dims=[self.index_n_heads * self.index_head_dim],
             weight_names=f"{p}.wq_b.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("idx_wq_b"),
         )
         self.idx_weights_proj_ = ROWMMWeight(
             in_dim=self.hidden,
@@ -406,28 +218,35 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             out_dims=[self.moe_inter],
             weight_names=f"{sp}.w1.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("shared_gate"),
         )
         self.shared_up_ = ROWMMWeight(
             in_dim=self.hidden,
             out_dims=[self.moe_inter],
             weight_names=f"{sp}.w3.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("shared_up"),
         )
         self.shared_down_ = COLMMWeight(
             in_dim=self.moe_inter,
             out_dims=[self.hidden],
             weight_names=f"{sp}.w2.weight",
             data_type=self.data_type_,
-            quant_method=self.fp8_quant,
+            quant_method=self.get_quant_method("shared_down"),
         )
-        self.experts_ = DeepseekV4FP4ExpertsWeight(
+        self.experts_ = FusedMoeWeight(
+            gate_proj_name="w1",
+            down_proj_name="w2",
+            up_proj_name="w3",
+            e_score_correction_bias_name="",
             weight_prefix=f"{p}.experts",
             n_routed_experts=self.n_routed_experts,
             hidden_size=self.hidden,
             moe_intermediate_size=self.moe_inter,
             data_type=self.data_type_,
+            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
+            layer_num=self.layer_num_,
+            network_config=self.network_config_,
         )
 
     def _init_norm(self):
@@ -439,62 +258,68 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         )
 
     def _init_hyper_connection(self):
-        for which in ["attn", "ffn"]:
-            setattr(
-                self,
-                f"hc_{which}_fn_",
-                ParameterWeight(
-                    weight_name=f"{self.prefix}.hc_{which}_fn",
-                    data_type=torch.float32,
-                    weight_shape=(self.mix_hc, self.hc_mult * self.hidden),
-                ),
-            )
-            setattr(
-                self,
-                f"hc_{which}_base_",
-                ParameterWeight(
-                    weight_name=f"{self.prefix}.hc_{which}_base", data_type=torch.float32, weight_shape=(self.mix_hc,)
-                ),
-            )
-            setattr(
-                self,
-                f"hc_{which}_scale_",
-                ParameterWeight(
-                    weight_name=f"{self.prefix}.hc_{which}_scale", data_type=torch.float32, weight_shape=(3,)
-                ),
-            )
+        p = self.prefix
+        self.hc_attn_fn_ = ParameterWeight(
+            weight_name=f"{p}.hc_attn_fn",
+            data_type=torch.float32,
+            weight_shape=(self.mix_hc, self.hc_mult * self.hidden),
+        )
+        self.hc_attn_base_ = ParameterWeight(
+            weight_name=f"{p}.hc_attn_base", data_type=torch.float32, weight_shape=(self.mix_hc,)
+        )
+        self.hc_attn_scale_ = ParameterWeight(
+            weight_name=f"{p}.hc_attn_scale", data_type=torch.float32, weight_shape=(3,)
+        )
+        self.hc_ffn_fn_ = ParameterWeight(
+            weight_name=f"{p}.hc_ffn_fn",
+            data_type=torch.float32,
+            weight_shape=(self.mix_hc, self.hc_mult * self.hidden),
+        )
+        self.hc_ffn_base_ = ParameterWeight(
+            weight_name=f"{p}.hc_ffn_base", data_type=torch.float32, weight_shape=(self.mix_hc,)
+        )
+        self.hc_ffn_scale_ = ParameterWeight(
+            weight_name=f"{p}.hc_ffn_scale", data_type=torch.float32, weight_shape=(3,)
+        )
 
     # ------------------------------------------------------------------ loading
     def load_hf_weights(self, weights):
         self._dequant_in_place(weights)
         return super().load_hf_weights(weights)
 
-    def _direct_fp8_weight_names(self):
-        names = set()
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name, None)
-            quant_method = getattr(attr, "quant_method", None)
-            if getattr(quant_method, "method_name", None) == "deepgemm-fp8w8a8-b128":
-                names.update(getattr(attr, "weight_names", []))
-        return names
+    def _fp8_scale_renames(self):
+        """Map weight name -> the scale name its quant method loads (e.g. `weight_scale_inv`
+        for DeepGEMM). Read from each MM weight's own `weight_scale_names`, so the rename
+        target always matches what that weight will look up; no-quant weights have None
+        entries and are skipped."""
+        renames = {}
+        for attr in self.__dict__.values():
+            weight_names = getattr(attr, "weight_names", ())
+            scale_names = getattr(attr, "weight_scale_names", ())
+            for weight_name, scale_name in zip(weight_names, scale_names):
+                if scale_name is not None:
+                    renames[weight_name] = scale_name
+        return renames
 
     def _dequant_in_place(self, weights):
         p = self.prefix + "."
-        direct_fp8_names = self._direct_fp8_weight_names()
-        # Convert every (weight, scale) pair belonging to this layer. Existing FP8 matmul
-        # weights stay quantized; bmm-only weights are expanded; routed FP4 experts stay packed.
-        for k in [k for k in list(weights.keys()) if k.startswith(p) and k.endswith(".weight")]:
-            scale_k = k[: -len(".weight")] + ".scale"
-            if scale_k not in weights:
+        scale_renames = self._fp8_scale_renames()
+        # Convert every `.scale` belonging to this layer. Weights are loaded incrementally
+        # per safetensors shard, so the paired weight may live in another shard:
+        # - routed FP4 experts keep `.scale` as-is (matches marlin-mxfp4w4a16-b32's suffix);
+        # - FP8 matmul scales only need renaming for DeepGEMM, no weight required;
+        # - FP8 pairs on no-quant paths (wo_a's ROWBMMWeight) are expanded to bf16,
+        #   the only case that truly requires weight and scale in the same shard.
+        for scale_k in [k for k in list(weights.keys()) if k.startswith(p) and k.endswith(".scale")]:
+            if scale_k.startswith(f"{p}ffn.experts."):
                 continue
-            w, s = weights[k], weights[scale_k]
-            if w.dtype == torch.int8:  # FP4 routed experts stay packed for DeepseekV4FP4ExpertsWeight.
-                continue
-            elif k in direct_fp8_names:  # FP8 e4m3, block-128 scale, run by DeepGEMM directly
-                weights[k.replace("weight", "weight_scale_inv")] = s.to(torch.float32)
+            k = scale_k[: -len(".scale")] + ".weight"
+            target = scale_renames.get(k)
+            if target is not None:  # FP8 e4m3, block-128 scale, run by DeepGEMM directly
+                weights[target] = weights[scale_k].to(torch.float32)
                 del weights[scale_k]
-            else:  # FP8 e4m3 for no-quant paths such as ROWBMMWeight
-                weights[k] = dequant_fp8_block_to_bf16(w, s).to(self.data_type_)
+            else:
+                weights[k] = dequant_fp8_block_to_bf16(weights[k], weights[scale_k]).to(self.data_type_)
                 del weights[scale_k]
         # grouped-O: reshape [groups*o_lora, in] -> [groups, in, o_lora] for the batched matmul
         woa = f"{self.prefix}.attn.wo_a.weight"

@@ -114,6 +114,25 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         )
         return input_tensor
 
+    def fused_experts_with_topk(
+        self,
+        input_tensor: torch.Tensor,
+        w13: WeightPack,
+        w2: WeightPack,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
+    ):
+        return self._fused_experts(
+            input_tensor=input_tensor,
+            w13=w13,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+        )
+
     def __call__(
         self,
         input_tensor: torch.Tensor,

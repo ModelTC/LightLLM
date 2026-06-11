@@ -212,6 +212,9 @@ class ModeBackend:
                     page_size=radix_page_size,
                     extra_value_ops=radix_extra_value_ops,
                 )
+                if radix_extra_value_ops is not None and hasattr(self.model.mem_manager, "set_swa_pressure_valve"):
+                    # swa 页 allocator 触底时让 radix 对 ref==0 节点回收 swa 页(DeepSeek-V4)。
+                    self.model.mem_manager.set_swa_pressure_valve(self.radix_cache.reclaim_unreferenced_swa_pages)
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -713,31 +716,6 @@ class ModeBackend:
         """
         pass
 
-    def _maybe_capture_prompt_cache_payload(self, req_obj: InferReq):
-        if self.radix_cache is None:
-            return
-        req_manager = g_infer_context.req_manager
-        if not hasattr(req_manager, "build_prompt_cache_payload"):
-            return
-        if req_obj.sampling_param.disable_prompt_cache:
-            return
-        page_size = getattr(self.args, "dynamic_prompt_cache_page_size", 1)
-        cache_len = int(req_obj.cur_kv_len)
-        if page_size <= 1 or cache_len <= 0 or cache_len % page_size != 0:
-            return
-        if cache_len > req_obj.shm_req.input_len:
-            return
-        if getattr(req_obj, "prompt_cache_snapshot_len", 0) >= cache_len:
-            return
-
-        payload = req_manager.build_prompt_cache_payload(req_obj.req_idx, cache_len, clone_swa=True)
-        old_payload = getattr(req_obj, "prompt_cache_snapshot_payload", None)
-        if old_payload is not None:
-            req_manager.release_prompt_cache_detached_swa(old_payload, keep_payload=payload)
-        req_obj.prompt_cache_snapshot_len = cache_len
-        req_obj.prompt_cache_snapshot_payload = payload
-        return
-
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
@@ -785,7 +763,6 @@ class ModeBackend:
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
-            self._maybe_capture_prompt_cache_payload(req_obj)
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,

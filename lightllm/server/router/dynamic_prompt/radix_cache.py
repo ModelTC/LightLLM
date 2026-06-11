@@ -318,6 +318,9 @@ class RadixCache:
         key = key[: self._align_len(len(key))]
         if len(key) == 0:
             return None, 0, None
+        key = self._trim_key_by_extra_value_validity(key)
+        if len(key) == 0:
+            return None, 0, None
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
         if tree_node != self.root_node:
@@ -330,6 +333,30 @@ class RadixCache:
             if update_refs:
                 self.dec_node_ref_counter(self.root_node)
             return None, 0, None
+
+    def _trim_key_by_extra_value_validity(self, key: torch.Tensor) -> torch.Tensor:
+        """命中有效性裁剪(extra_value_ops 提供 valid_match_length 时启用,如 DeepSeek-V4 的
+        swa 按页 bitmap): 先做一次只读探测遍历得到自然命中与沿路 extra_value,按其有效边界截短
+        key,随后的正常遍历(加引用/分裂)只走截短后的前缀 —— 引用计数与最终返回值在同一次遍历
+        内保持一致,不存在事后裁剪导致的漏减/多减。
+
+        探测遍历可能分裂部分命中的节点(与正常遍历同语义,树不变式不受影响)。裁剪只会缩短命中,
+        没有任何失败路径。"""
+        if self.extra_value_ops is None:
+            return key
+        valid_match_length = getattr(self.extra_value_ops, "valid_match_length", None)
+        if valid_match_length is None:
+            return key
+        probe_values = []
+        probe_node = self._match_prefix_helper(self.root_node, key, probe_values, update_refs=False)
+        if probe_node == self.root_node or len(probe_values) == 0:
+            return key
+        natural_len = sum(len(v) for v in probe_values)
+        extra_value = self.get_extra_value_by_node(probe_node)
+        valid_len = int(valid_match_length(extra_value, natural_len))
+        if valid_len < natural_len:
+            return key[:valid_len]
+        return key
 
     def _match_prefix_helper(
         self, node: TreeNode, key: torch.Tensor, ans_value_list: list, update_refs=False
@@ -593,6 +620,36 @@ class RadixCache:
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
+        return
+
+    def reclaim_unreferenced_swa_pages(self, need_pages: int) -> None:
+        """DeepSeek-V4 swa 压力阀: 页 allocator 触底时，沿 LRU 序(evict_tree_set)只对
+        ref_count==0 的节点链回收其 swa 页(full 槽与压缩条目保留——节点仍可服务更长前缀的
+        中段命中)，并清载荷 bitmap 位使后续命中按缩短语义裁剪。所有权判定直接复用 radix
+        引用计数: 节点被任何活跃请求借用即 ref>0，其页不可达。不够时由 allocator 的 assert
+        兜底(最后防线)。"""
+        if self.mem_manager is None or self.extra_value_ops is None:
+            return
+        invalidate = getattr(self.extra_value_ops, "invalidate_swa_pages", None)
+        if invalidate is None:
+            return
+        allocator = self.mem_manager.swa_page_allocator
+        target = allocator.can_use_mem_size + int(need_pages)
+        for leaf in list(self.evict_tree_set):
+            if allocator.can_use_mem_size >= target:
+                break
+            node = leaf
+            # 叶子起步沿父链回收: 引用计数向上累加(add_node_ref_counter 走父链)，
+            # 因此 ref==0 的祖先必无任何活跃借用方。重复访问无害(evict_swa/-1 跳过)。
+            # 每回收一个节点就复查目标,避免多回收(无谓削减命中可用性)。
+            while node is not None and node is not self.root_node and node.ref_counter == 0:
+                if len(node.token_mem_index_value) > 0:
+                    self.mem_manager.evict_swa(node.token_mem_index_value)
+                    if node.token_extra_value is not None:
+                        invalidate(node.token_extra_value)
+                    if allocator.can_use_mem_size >= target:
+                        return
+                node = node.parent
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):

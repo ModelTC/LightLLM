@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 EXPERT_DTYPE_TO_QUANT_TYPE = {
     "fp8": "deepgemm-fp8w8a8-b128",
     "fp4": "deepgemm-fp4fp8-b32",
+    "mxfp4": "marlin-mxfp4w4a16-b32",
 }
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
@@ -64,13 +65,13 @@ class Quantcfg:
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
 
             # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
-            # 按其值给 fused_moe 选用对应的 deepgemm 量化方法。
+            # 按其值给 fused_moe 选用对应的量化方法。
             expert_dtype = self.expert_dtype or self.network_config_.get("expert_dtype", None)
             if expert_dtype is None:
                 return
-            if expert_dtype == "fp4" and self.network_config_.get("model_type") == "deepseek_v4" and not is_sm100_gpu():
-                logger.info("skip generic fused_moe quant mapping for DeepSeek-V4 fp4 experts on non-SM100 GPUs")
-                return
+            # DeepSeek-V4 的 fp4 发布版自带预打包 MXFP4 专家。
+            if expert_dtype == "fp4" and self.network_config_.get("model_type") == "deepseek_v4":
+                expert_dtype = "mxfp4"
             target = self._get_expert_quant_type(expert_dtype)
             for layer_num in range(self.layer_num):
                 if self.expert_dtype is not None:

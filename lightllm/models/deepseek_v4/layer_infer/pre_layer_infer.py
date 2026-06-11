@@ -8,16 +8,17 @@ from ..infer_struct import DeepseekV4InferStateInfo
 class DeepseekV4PreLayerInfer(LlamaPreLayerInfer):
     """Token embedding, then expand to the hc_mult parallel residual streams [T, hc_mult*hidden]."""
 
-    def _embed_and_expand(self, input_ids, infer_state: DeepseekV4InferStateInfo, layer_weight):
-        emb = layer_weight.wte_weight_(input_ids=input_ids, alloc_func=self.alloc_tensor)  # [T, hidden]
-        if self.tp_world_size_ > 1:
-            all_reduce(emb, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        hc_mult = layer_weight.network_config_["hc_mult"]
-        t, hidden = emb.shape
-        return emb.unsqueeze(1).expand(t, hc_mult, hidden).reshape(t, hc_mult * hidden).contiguous()
+    def __init__(self, network_config):
+        super().__init__(network_config)
+        self.hc_mult = network_config["hc_mult"]
+        return
 
     def context_forward(self, input_ids, infer_state: DeepseekV4InferStateInfo, layer_weight):
-        return self._embed_and_expand(input_ids, infer_state, layer_weight)
+        input_embdings = super().context_forward(input_ids, infer_state, layer_weight)
+        t, hidden = input_embdings.shape
+        return input_embdings.unsqueeze(1).expand(t, self.hc_mult, hidden).reshape(t, self.hc_mult * hidden)
 
     def token_forward(self, input_ids, infer_state: DeepseekV4InferStateInfo, layer_weight):
-        return self._embed_and_expand(input_ids, infer_state, layer_weight)
+        input_embdings = super().token_forward(input_ids, infer_state, layer_weight)
+        t, hidden = input_embdings.shape
+        return input_embdings.unsqueeze(1).expand(t, self.hc_mult, hidden).reshape(t, self.hc_mult * hidden)

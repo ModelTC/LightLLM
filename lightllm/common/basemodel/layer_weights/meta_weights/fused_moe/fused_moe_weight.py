@@ -68,12 +68,13 @@ class FusedMoeWeight(BaseWeightTpl):
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
         self.lock = threading.Lock()
+        self._moe_weight_finalized = False
         self._create_weight()
 
     def _init_config(self, network_config: Dict[str, Any]):
         self.n_group = network_config.get("n_group", 0)
         self.use_grouped_topk = self.n_group > 0
-        self.norm_topk_prob = network_config["norm_topk_prob"]
+        self.norm_topk_prob = network_config.get("norm_topk_prob", False)
         self.topk_group = network_config.get("topk_group", 0)
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
@@ -136,6 +137,7 @@ class FusedMoeWeight(BaseWeightTpl):
         is_prefill: Optional[bool] = None,
     ) -> torch.Tensor:
         """Backward compatible method that routes to platform-specific implementation."""
+        self._finalize_moe_weight()
         return self.fuse_moe_impl(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -150,6 +152,25 @@ class FusedMoeWeight(BaseWeightTpl):
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
             per_expert_scale=self.per_expert_scale,
+        )
+
+    def experts_with_preselected(
+        self,
+        input_tensor: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
+    ) -> torch.Tensor:
+        self._finalize_moe_weight()
+        return self.fuse_moe_impl.fused_experts_with_topk(
+            input_tensor=input_tensor,
+            w13=self.w13,
+            w2=self.w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+            clamp_limit=clamp_limit,
         )
 
     def low_latency_dispatch(
@@ -280,7 +301,18 @@ class FusedMoeWeight(BaseWeightTpl):
         e_score_correction_bias_load_ok = (
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
-        return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        load_ok = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        if load_ok:
+            self._finalize_moe_weight()
+        return load_ok
+
+    def _finalize_moe_weight(self):
+        if self._moe_weight_finalized:
+            return
+        finalize = getattr(self.quant_method, "finalize_moe_weight", None)
+        if finalize is not None:
+            finalize(self)
+        self._moe_weight_finalized = True
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size

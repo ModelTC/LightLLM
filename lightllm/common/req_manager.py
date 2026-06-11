@@ -26,14 +26,18 @@ logger = init_logger(__name__)
 
 @dataclass
 class DeepseekV4PromptCachePayload:
+    """prompt cache 载荷: 只剩 swa 按页有效性 bitmap。
+
+    槽位与 compressor 状态都不进载荷: full_to_swa/full_to_c4/full_to_c128 以 full token 槽位
+    为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4 compressor 状态以 swa 页派生
+    寻址(随 swa 页生灭,命中零拷贝续算);c128 状态在 128 边界自然归零,无需恢复。
+
+    * ``swa_page_valid``: cpu bool [cache_len // page]，插入时按当下 full_to_swa 映射写定
+      (页内 128 个映射全有效才为 True)。匹配层据此把命中裁剪到"结尾页有效"的 128 边界,
+      swa 压力阀回收节点页时清零。"""
+
     cache_len: int
-    c4_slots: Optional[torch.Tensor] = None
-    c128_slots: Optional[torch.Tensor] = None
-    c4_state: Optional[torch.Tensor] = None
-    c4_state_pool: Optional[torch.Tensor] = None
-    c4_indexer_state: Optional[torch.Tensor] = None
-    c4_indexer_state_pool: Optional[torch.Tensor] = None
-    swa: Optional[dict] = None
+    swa_page_valid: Optional[torch.Tensor] = None
 
 
 class DeepseekV4PromptCacheValueOps:
@@ -47,8 +51,28 @@ class DeepseekV4PromptCacheValueOps:
         return self.req_manager.concat_prompt_cache_payloads(payloads)
 
     def free(self, payload: DeepseekV4PromptCachePayload):
-        self.req_manager.free_prompt_cache_payload(payload)
+        # 槽位资源全部由 mem_manager.free(full_slots) 级联回收，载荷本身没有需要释放的资源。
         return
+
+    def invalidate_swa_pages(self, payload: DeepseekV4PromptCachePayload) -> None:
+        """swa 压力阀回收了该节点的 swa 页后清 bitmap: 后续命中按缩短语义裁剪,不会复活。"""
+        if payload is not None and payload.swa_page_valid is not None:
+            payload.swa_page_valid.fill_(False)
+        return
+
+    def valid_match_length(self, payload: Optional[DeepseekV4PromptCachePayload], natural_len: int) -> int:
+        """radix 匹配裁剪: 返回 <= natural_len 的最大 128 边界 L'，使结尾页(bitmap[L'/128-1])有效。
+
+        有效性可能非单调(owner 生前从左驱逐、后续阀从尾回收)，按候选边界回查 bitmap;
+        中段 invalid 页不挡更靠后的有效命中(注意力只回看最后一个窗口)。"""
+        page = self.req_manager.get_prompt_cache_page_size()
+        if payload is None or payload.swa_page_valid is None:
+            return 0
+        n_pages = min(natural_len // page, int(payload.swa_page_valid.numel()))
+        valid_idx = torch.nonzero(payload.swa_page_valid[:n_pages])
+        if valid_idx.numel() == 0:
+            return 0
+        return (int(valid_idx[-1]) + 1) * page
 
 
 class _ReqNode:
@@ -334,21 +358,23 @@ class ReqManagerForMamba(ReqManager):
 
 
 class DeepseekV4ReqManager(ReqManager):
-    """DeepSeek-V4 的请求级管理(锁定决策: SWA 全历史 + 不分页)。
+    """DeepSeek-V4 的请求级管理。
 
-    在基类 ReqManager 之上补三类 V4 专有的 per-request 结构。该对象在 mem manager profile 前创建，
-    所以初始化只依赖 config 派生出的 compress_rates/head_dim/indexer_head_dim；真实 mem_manager
-    会在 `_init_mem_manager()` 后通过 `bind_mem_manager()` 接入。
+    在基类 ReqManager 之上补 V4 专有的 per-request 结构。该对象在 mem manager profile 前创建，
+    所以初始化只依赖 config 派生出的 compress_rates/head_dim/indexer_head_dim/sliding_window；
+    真实 mem_manager 会在 `_init_mem_manager()` 后通过 `bind_mem_manager()` 接入。
 
-      * ``req_to_c4_indexs`` / ``req_to_c128_indexs`` —— (req, 窗口下标) -> 压缩池槽位。
-        窗口下标 = position // compress_rate;窗口关闭时由 layer-infer 写入,attention 读取前
-        n_windows 列即该 req 的全部压缩条目槽。未填充列为 0(不会被读到,语义同 req_to_token_indexs)。
-      * ``req_to_c4_state`` / ``req_to_c128_state`` / ``req_to_c4_indexer_state`` —— compressor 的
-        “在途窗口”累加状态(per req、per 压缩层),fp32。形状为
-        ``(kv_or_score, coff * ratio, coff * dim)``; c4 因 Ca/Cb overlap 取 ``coff=2``,
-        c128 取 ``coff=1``。score 初始化为 ``-inf``，与官方 reference compressor 的
-        ``kv_state``/``score_state`` 对齐。
-      * entry_count 不另存:= position // compress_rate,可由序列长度推出。
+      * 压缩槽位不在本类: ``full_to_c4/c128_indexs``(mem manager)以组末 token 的 full 槽位为键。
+        本类只负责 prep 阶段的分配与 scatter(``prepare_prefill_compress_slots`` /
+        ``prepare_decode_compress_slots``)——必须先于 attention metadata 构建/图捕获;
+        条目内容由 layer-infer 的 compressor 前向写入。
+      * ``req_to_c128_state_pool`` —— c128 compressor 的在途状态(per req、per c128 层)。
+        c128 在线聚合在 128 边界自然归零(命中边界必 128 对齐),无缓存常驻需求,保持 req 键控。
+        c4 状态(跨边界 overlap)在 mem manager 的 swa 页派生池,随页生灭,命中零拷贝续算。
+      * SWA 槽位分配/出窗回收(``prepare_prefill_swa`` / ``prepare_decode_swa``): 每步 prep 阶段
+        为新 token 调 mem_manager.alloc_swa，并按 per-req 水位线(``_swa_evict_marks``)惰性回收
+        已出窗位置的 swa 槽。水位线首次置为该请求首个 chunk 的 ready_cache_len(radix 共享前缀
+        的边界)，因此共享前缀的 swa 槽永远不会被本请求回收(归 radix 经 mem_manager.free 级联释放)。
     """
 
     def __init__(
@@ -359,10 +385,24 @@ class DeepseekV4ReqManager(ReqManager):
         compress_rates: Optional[List[int]] = None,
         head_dim: Optional[int] = None,
         indexer_head_dim: Optional[int] = None,
+        sliding_window: Optional[int] = None,
     ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
 
         self.mem_manager = mem_manager
+        if mem_manager is not None:
+            if compress_rates is None:
+                compress_rates = mem_manager.compress_rates
+            if head_dim is None:
+                head_dim = mem_manager.head_dim
+            if indexer_head_dim is None:
+                indexer_head_dim = mem_manager.indexer_head_dim
+            if sliding_window is None:
+                sliding_window = mem_manager.sliding_window
+        self.sliding_window = sliding_window
+        # 出窗回收水位线: -1 表示该 req 尚未见过 prefill chunk(首个 chunk 的 ready_cache_len
+        # 即共享前缀边界，作为永不下探的回收下界)。
+        self._swa_evict_marks = [-1 for _ in range(max_request_num + 1)]
         self.compress_rates = list(compress_rates)
         self.n_c4 = sum(1 for r in self.compress_rates if r == 4)
         self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
@@ -379,60 +419,16 @@ class DeepseekV4ReqManager(ReqManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        # (req, 窗口) -> 压缩槽。列数取 ceil(max_seq / ratio) 留足余量。
-        c4_windows = (max_sequence_length + 4 - 1) // 4
-        c128_windows = (max_sequence_length + 128 - 1) // 128
-        self.req_to_c4_indexs = torch.zeros((max_request_num + 1, c4_windows), dtype=torch.int32, device="cuda")
-        self.req_to_c128_indexs = torch.zeros((max_request_num + 1, c128_windows), dtype=torch.int32, device="cuda")
-        self._c4_entry_counts = [0 for _ in range(max_request_num + 1)]
-        self._c128_entry_counts = [0 for _ in range(max_request_num + 1)]
-
-        # compressor 在途窗口累加状态(fp32): [kv_or_score, coff * ratio, coff * dim].
-        state_dtype = torch.float32
-        self.req_to_c4_state = LayerCache(
-            size=max_request_num + 1,
-            dtype=state_dtype,
-            shape=(2, 8, 2 * head_dim),
-            layer_num=self.n_c4,
-            device="cuda",
-        )
-        self.req_to_c128_state = LayerCache(
-            size=max_request_num + 1,
-            dtype=state_dtype,
-            shape=(2, 128, head_dim),
-            layer_num=self.n_c128,
-            device="cuda",
-        )
-        self.req_to_c4_indexer_state = LayerCache(
-            size=max_request_num + 1,
-            dtype=state_dtype,
-            shape=(2, 8, 2 * indexer_head_dim),
-            layer_num=self.n_c4,
-            device="cuda",
-        )
-        self.req_to_c4_state_pool = LayerCache(
-            size=max_request_num + 1,
-            dtype=state_dtype,
-            shape=(1, 8, 4 * head_dim),
-            layer_num=self.n_c4,
-            device="cuda",
-        )
+        # c128 compressor 在途状态(fp32): 在线聚合在 128 边界自然归零(命中边界必 128 对齐),
+        # 无缓存常驻需求,保持 req 键控。c4 状态(有跨边界 overlap)在 mem manager 的
+        # swa 页派生池(c4_state_buffer / c4_indexer_state_buffer)。
         self.req_to_c128_state_pool = LayerCache(
             size=max_request_num + 1,
-            dtype=state_dtype,
+            dtype=torch.float32,
             shape=(1, 128, 2 * head_dim),
             layer_num=self.n_c128,
             device="cuda",
         )
-        self.req_to_c4_indexer_state_pool = LayerCache(
-            size=max_request_num + 1,
-            dtype=state_dtype,
-            shape=(1, 8, 4 * indexer_head_dim),
-            layer_num=self.n_c4,
-            device="cuda",
-        )
-        self._runtime_states = [{} for _ in range(max_request_num + 1)]
-        self._init_all_score_state()
         return
 
     def bind_mem_manager(self, mem_manager: DeepseekV4MemoryManager):
@@ -440,22 +436,92 @@ class DeepseekV4ReqManager(ReqManager):
         assert self.compress_rates == mem_manager.compress_rates
         assert self.head_dim == mem_manager.head_dim
         assert self.indexer_head_dim == mem_manager.indexer_head_dim
+        if self.sliding_window is None:
+            self.sliding_window = mem_manager.sliding_window
+        else:
+            assert mem_manager.sliding_window is None or self.sliding_window == mem_manager.sliding_window
         self.mem_manager = mem_manager
         return
 
-    def _init_all_score_state(self):
-        if self.n_c4 > 0:
-            self.req_to_c4_state.buffer[:, :, 1, ...].fill_(float("-inf"))
-            self.req_to_c4_indexer_state.buffer[:, :, 1, ...].fill_(float("-inf"))
-        if self.n_c128 > 0:
-            self.req_to_c128_state.buffer[:, :, 1, ...].fill_(float("-inf"))
+    # ------------------------------------------------------------------ swa slot prep (per step)
+    def _swa_retain_len(self) -> int:
+        """出窗回收的保留长度 = window + 一个 radix 页。
+
+        多留一页使「最近一个完成的 128 边界」的结尾页恒驻留: prompt cache 只能在 floor(cur/128)
+        边界入树(radix page=128)，若回收只留 window，则任何非对齐时刻该边界的结尾页都已被
+        部分回收，插入门会把所有插入裁到 0(prompt cache 形同虚设)。预算即 v5 §2 的每请求
+        「活跃窗口跨页 ≤2」。驻留证明要求 window >= page-1(DSV4 实际 window == page == 128)。"""
+        return int(self.sliding_window) + self.get_prompt_cache_page_size()
+
+    def prepare_prefill_swa(
+        self,
+        b_req_idx: torch.Tensor,
+        b_ready_cache_len: torch.Tensor,
+        b_seq_len: torch.Tensor,
+    ) -> None:
+        """prefill prep: 为本 chunk 全部新 token(位置 [ready, seq))分配位置对齐的 swa 槽，
+        并回收已出窗位置的槽。
+
+        本 chunk 起点 L = ready_cache_len，首个新 token(位置 L)的窗口是 [L-W+1, L]；回收
+        边界再额外保留一个 radix 页(_swa_retain_len)，即位置 < L-retain+1。先回收再分配。
+        必须在 init_req_to_token_indexes 之后调用(位置对齐分配经 req_to_token 行派生/scatter)。"""
+        assert self.mem_manager is not None
+        if self.sliding_window is not None:
+            retain = self._swa_retain_len()
+            evict_slots = []
+            req_list = b_req_idx.detach().cpu().tolist()
+            ready_list = b_ready_cache_len.detach().cpu().tolist()
+            for req_idx, ready_len in zip(req_list, ready_list):
+                req_idx = int(req_idx)
+                if req_idx == self.HOLD_REQUEST_ID:
+                    continue
+                ready_len = int(ready_len)
+                mark = self._swa_evict_marks[req_idx]
+                if mark < 0:
+                    # 首个 chunk: [0, ready_len) 是 radix 共享前缀，其 swa 槽归 radix 所有，不可回收。
+                    self._swa_evict_marks[req_idx] = ready_len
+                    continue
+                evict_end = ready_len - retain + 1
+                if evict_end > mark:
+                    evict_slots.append(self.req_to_token_indexs[req_idx, mark:evict_end])
+                    self._swa_evict_marks[req_idx] = evict_end
+            if evict_slots:
+                self.mem_manager.evict_swa(torch.cat(evict_slots))
+        self.mem_manager.alloc_swa_prefill(b_req_idx, b_ready_cache_len, b_seq_len, self.req_to_token_indexs)
         return
 
-    def _reset_compress_cache_req(self, cache: LayerCache, req_idx: int):
-        if cache.layer_num == 0:
-            return
-        cache.buffer[:, req_idx, 0, ...].fill_(0)
-        cache.buffer[:, req_idx, 1, ...].fill_(float("-inf"))
+    def prepare_decode_swa(
+        self,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        mem_indexes: torch.Tensor,
+    ) -> None:
+        """decode prep: 回收出窗槽并为本步新 token 分配位置对齐的 swa 槽。当前 query 位置
+        seq_len-1 的窗口是 [seq_len-W, seq_len-1]；回收边界额外保留一个 radix 页
+        (_swa_retain_len)，即位置 < seq_len-retain。先回收再分配。"""
+        assert self.mem_manager is not None
+        if self.sliding_window is not None:
+            retain = self._swa_retain_len()
+            evict_slots = []
+            req_list = b_req_idx.detach().cpu().tolist()
+            seq_list = b_seq_len.detach().cpu().tolist()
+            for req_idx, seq_len in zip(req_list, seq_list):
+                req_idx = int(req_idx)
+                if req_idx == self.HOLD_REQUEST_ID:
+                    continue
+                seq_len = int(seq_len)
+                mark = self._swa_evict_marks[req_idx]
+                if mark < 0:
+                    # 未经过 prefill prep 的保守路径: 不回收旧位置，仅推进水位线。
+                    self._swa_evict_marks[req_idx] = max(0, seq_len - retain)
+                    continue
+                evict_end = seq_len - retain
+                if evict_end > mark:
+                    evict_slots.append(self.req_to_token_indexs[req_idx, mark:evict_end])
+                    self._swa_evict_marks[req_idx] = evict_end
+            if evict_slots:
+                self.mem_manager.evict_swa(torch.cat(evict_slots))
+        self.mem_manager.alloc_swa_decode(b_req_idx, b_seq_len, mem_indexes, self.req_to_token_indexs)
         return
 
     def _reset_state_pool_req(self, cache: LayerCache, req_idx: int):
@@ -465,105 +531,90 @@ class DeepseekV4ReqManager(ReqManager):
         return
 
     def init_compress_state(self, req_idx: int):
-        """新请求开始时重置其 compressor 在途状态(对应 mamba 的 init_linear_att_state)。"""
+        """新请求开始时重置其 compressor 在途状态(对应 mamba 的 init_linear_att_state)。
+
+        只有 c128 状态是 req 键控的(c4 状态随 swa 页生灭,内核组起点覆写,无需重置;
+        压缩槽位以 full 槽位为键,随请求 full 槽的释放级联回收)。"""
         self.clear_runtime_state(req_idx)
-        c4, c128 = self.pop_compress_indices_for_req(req_idx)
-        self.free_compress_indices(free_c4_index=c4, free_c128_index=c128)
-        if self.n_c4 > 0:
-            self._reset_compress_cache_req(self.req_to_c4_state, req_idx)
-            self._reset_compress_cache_req(self.req_to_c4_indexer_state, req_idx)
-            self._reset_state_pool_req(self.req_to_c4_state_pool, req_idx)
-            self._reset_state_pool_req(self.req_to_c4_indexer_state_pool, req_idx)
         if self.n_c128 > 0:
-            self._reset_compress_cache_req(self.req_to_c128_state, req_idx)
             self._reset_state_pool_req(self.req_to_c128_state_pool, req_idx)
         return
 
-    def _ensure_compress_slots(self, req_idx: int, ratio: int, entry_start: int, entry_count: int) -> torch.Tensor:
-        if entry_count == 0:
-            return torch.empty((0,), dtype=torch.int32, device="cuda")
-        assert entry_start >= 0 and entry_count >= 0
+    # ------------------------------------------------------------------ compress slot prep (per step)
+    def _compress_mapping_alloc(self, ratio: int):
         assert self.mem_manager is not None, "DeepSeek-V4 mem manager is not bound yet"
         if ratio == 4:
-            table = self.req_to_c4_indexs
-            counts = self._c4_entry_counts
-            alloc = self.mem_manager.alloc_c4
-        elif ratio == 128:
-            table = self.req_to_c128_indexs
-            counts = self._c128_entry_counts
-            alloc = self.mem_manager.alloc_c128
-        else:
-            raise AssertionError(f"invalid DeepSeek-V4 compress ratio {ratio}")
-
-        required_count = entry_start + entry_count
-        assert required_count <= table.shape[1], (
-            f"DeepSeek-V4 compressed slot table overflow: req={req_idx} "
-            f"ratio={ratio} required={required_count} capacity={table.shape[1]}"
-        )
-        old_count = counts[req_idx]
-        if required_count > old_count:
-            new_slots_cpu = alloc(required_count - old_count)
-            table[req_idx, old_count:required_count] = new_slots_cpu.cuda(non_blocking=True)
-            counts[req_idx] = required_count
-        return table[req_idx, entry_start:required_count]
-
-    def ensure_c4_slots(self, req_idx: int, entry_start: int, entry_count: int) -> torch.Tensor:
-        return self._ensure_compress_slots(req_idx, 4, entry_start, entry_count)
-
-    def ensure_c128_slots(self, req_idx: int, entry_start: int, entry_count: int) -> torch.Tensor:
-        return self._ensure_compress_slots(req_idx, 128, entry_start, entry_count)
-
-    def ensure_compress_slots(self, layer_index: int, req_idx: int, entry_start: int, entry_count: int) -> torch.Tensor:
-        ratio = self.compress_rates[layer_index]
-        if ratio == 4:
-            return self.ensure_c4_slots(req_idx, entry_start, entry_count)
+            return self.mem_manager.full_to_c4_indexs, self.mem_manager.alloc_c4
         if ratio == 128:
-            return self.ensure_c128_slots(req_idx, entry_start, entry_count)
-        raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
+            return self.mem_manager.full_to_c128_indexs, self.mem_manager.alloc_c128
+        raise AssertionError(f"invalid DeepSeek-V4 compress ratio {ratio}")
 
-    def prepare_decode_compress_slots(self, b_req_idx: torch.Tensor, b_seq_len: torch.Tensor) -> None:
-        req_list = b_req_idx.detach().cpu().tolist()
-        seq_list = b_seq_len.detach().cpu().tolist()
-        for req_idx, seq_len in zip(req_list, seq_list):
-            req_idx = int(req_idx)
-            if req_idx == self.HOLD_REQUEST_ID:
-                continue
-            seq_len = int(seq_len)
-            if self.n_c4 > 0:
-                required_c4 = seq_len // 4
-                old_c4 = self._c4_entry_counts[req_idx]
-                if required_c4 > old_c4:
-                    self.ensure_c4_slots(req_idx, old_c4, required_c4 - old_c4)
-            if self.n_c128 > 0:
-                required_c128 = seq_len // 128
-                old_c128 = self._c128_entry_counts[req_idx]
-                if required_c128 > old_c128:
-                    self.ensure_c128_slots(req_idx, old_c128, required_c128 - old_c128)
+    def _scatter_compress_slots(self, ratio: int, full_slots: torch.Tensor) -> None:
+        """为组末 full 槽位分配压缩槽并写入映射。已映射(>=0)的行跳过——重复 prep 幂等。"""
+        if full_slots.numel() == 0:
+            return
+        mapping, alloc = self._compress_mapping_alloc(ratio)
+        full_slots = full_slots.cuda().long().reshape(-1)
+        # 去重: 同批重复键会让后写覆盖先写,先分配的压缩槽成为孤儿(allocator 泄漏)。
+        need = torch.unique(full_slots[mapping[full_slots] < 0])
+        if need.numel() == 0:
+            return
+        new_slots = alloc(need.numel()).cuda(non_blocking=True).to(torch.int32)
+        mapping[need] = new_slots
         return
 
-    def pop_compress_indices_for_req(self, req_idx: int):
-        c4_count = self._c4_entry_counts[req_idx]
-        if c4_count > 0:
-            c4 = self.req_to_c4_indexs[req_idx, :c4_count].clone()
-            self.req_to_c4_indexs[req_idx, :c4_count].fill_(0)
-            self._c4_entry_counts[req_idx] = 0
-        else:
-            c4 = None
+    def prepare_prefill_compress_slots(
+        self,
+        b_req_idx: torch.Tensor,
+        b_ready_cache_len: torch.Tensor,
+        b_seq_len: torch.Tensor,
+    ) -> None:
+        """prefill prep: 为本 chunk 内的组末 token(位置 (g+1)*ratio-1 ∈ [ready, seq))分配压缩槽，
+        scatter 进 full_to_c4/c128_indexs。必须在 init_req_to_token_indexes 之后(组末 full 槽
+        从 req_to_token_indexs 取)、attention metadata 构建之前调用。"""
+        if self.n_c4 == 0 and self.n_c128 == 0:
+            return
+        req_list = b_req_idx.detach().cpu().tolist()
+        ready_list = b_ready_cache_len.detach().cpu().tolist()
+        seq_list = b_seq_len.detach().cpu().tolist()
+        for ratio, n_layers in ((4, self.n_c4), (128, self.n_c128)):
+            if n_layers == 0:
+                continue
+            end_slots = []
+            for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
+                req_idx = int(req_idx)
+                if req_idx == self.HOLD_REQUEST_ID:
+                    continue
+                first, last = int(ready_len) // ratio, int(seq_len) // ratio
+                if last > first:
+                    ends = self.req_to_token_indexs[req_idx, ratio - 1 : last * ratio : ratio]
+                    end_slots.append(ends[first:])
+            if end_slots:
+                self._scatter_compress_slots(ratio, torch.cat(end_slots))
+        return
 
-        c128_count = self._c128_entry_counts[req_idx]
-        if c128_count > 0:
-            c128 = self.req_to_c128_indexs[req_idx, :c128_count].clone()
-            self.req_to_c128_indexs[req_idx, :c128_count].fill_(0)
-            self._c128_entry_counts[req_idx] = 0
-        else:
-            c128 = None
-        return c4, c128
-
-    def free_compress_indices(self, free_c4_index=None, free_c128_index=None):
-        if free_c4_index is not None and len(free_c4_index) > 0:
-            self.mem_manager.free_c4(free_c4_index)
-        if free_c128_index is not None and len(free_c128_index) > 0:
-            self.mem_manager.free_c128(free_c128_index)
+    def prepare_decode_compress_slots(
+        self,
+        b_req_idx: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        mem_indexes: torch.Tensor,
+    ) -> None:
+        """decode prep: 本步 token 关闭一个组(seq_len % ratio == 0)时为其分配压缩槽并 scatter。
+        组末 full 槽即本步的 mem_index(此刻 req_to_token_indexs 尚未写入本步槽位)。"""
+        if self.n_c4 == 0 and self.n_c128 == 0:
+            return
+        req_list = b_req_idx.detach().cpu().tolist()
+        seq_list = b_seq_len.detach().cpu().tolist()
+        for ratio, n_layers in ((4, self.n_c4), (128, self.n_c128)):
+            if n_layers == 0:
+                continue
+            rows = [
+                i
+                for i, (req_idx, seq_len) in enumerate(zip(req_list, seq_list))
+                if int(req_idx) != self.HOLD_REQUEST_ID and int(seq_len) > 0 and int(seq_len) % ratio == 0
+            ]
+            if rows:
+                self._scatter_compress_slots(ratio, mem_indexes.reshape(-1)[rows])
         return
 
     def alloc(self):
@@ -573,53 +624,17 @@ class DeepseekV4ReqManager(ReqManager):
         return req_idx
 
     def clear_runtime_state(self, req_idx: int):
-        self._runtime_states[req_idx].clear()
-        if self.mem_manager is not None and hasattr(self.mem_manager, "free_swa_for_req"):
-            self.mem_manager.free_swa_for_req(req_idx)
+        # swa 槽位本身由 mem_manager.free 级联回收(随 full 槽位)，这里只复位出窗水位线。
+        self._swa_evict_marks[req_idx] = -1
         return
-
-    def set_runtime_state(self, req_idx: int, layer_index: int, state: dict):
-        self._runtime_states[req_idx][layer_index] = state
-        return
-
-    def get_runtime_state(self, req_idx: int, layer_index: int):
-        return self._runtime_states[req_idx][layer_index]
-
-    def get_compress_state_for_req(self, layer_index: int, req_idx: int):
-        if self.compress_rates[layer_index] == 4:
-            state = self.get_c4_compress_state(layer_index)
-        elif self.compress_rates[layer_index] == 128:
-            state = self.get_c128_compress_state(layer_index)
-        else:
-            raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
-        return state[req_idx, 0], state[req_idx, 1]
 
     def get_compress_state_pool_for_req(self, layer_index: int, req_idx: int):
-        if self.compress_rates[layer_index] == 4:
-            cache = self.req_to_c4_state_pool
-            local = self.layer_to_c4_idx[layer_index]
-        elif self.compress_rates[layer_index] == 128:
-            cache = self.req_to_c128_state_pool
-            local = self.layer_to_c128_idx[layer_index]
-        else:
-            raise AssertionError(f"layer {layer_index} is not a compressed attention layer")
-        return cache.buffer[local, req_idx]
+        assert self.compress_rates[layer_index] == 128, "c4 state 在 mem manager 的 swa 页派生池"
+        return self.req_to_c128_state_pool.buffer[self.layer_to_c128_idx[layer_index], req_idx]
 
-    def get_c4_compress_state(self, layer_index: int) -> torch.Tensor:
-        local = self.layer_to_c4_idx[layer_index]
-        return self.req_to_c4_state.buffer[local]
-
-    def get_c128_compress_state(self, layer_index: int) -> torch.Tensor:
-        local = self.layer_to_c128_idx[layer_index]
-        return self.req_to_c128_state.buffer[local]
-
-    def get_c4_indexer_compress_state(self, layer_index: int) -> torch.Tensor:
-        local = self.layer_to_c4_idx[layer_index]
-        return self.req_to_c4_indexer_state.buffer[local]
-
-    def get_c4_indexer_state_pool_for_req(self, layer_index: int, req_idx: int) -> torch.Tensor:
-        local = self.layer_to_c4_idx[layer_index]
-        return self.req_to_c4_indexer_state_pool.buffer[local, req_idx]
+    def get_compress_state_pool(self, layer_index: int):
+        assert self.compress_rates[layer_index] == 128, "c4 state 在 mem manager 的 swa 页派生池"
+        return self.req_to_c128_state_pool.buffer[self.layer_to_c128_idx[layer_index]]
 
     def get_prompt_cache_value_ops(self):
         return DeepseekV4PromptCacheValueOps(self)
@@ -627,262 +642,76 @@ class DeepseekV4ReqManager(ReqManager):
     def get_prompt_cache_page_size(self):
         return 128
 
-    def _slice_cpu_slots(self, slots: Optional[torch.Tensor], start: int, end: int, ratio: int):
-        if slots is None:
-            return None
-        return slots[start // ratio : end // ratio].clone()
+    def compute_swa_page_valid(self, full_slots: torch.Tensor) -> torch.Tensor:
+        """按当下 full_to_swa 映射给出按页有效性: full_slots [L](L 为 page 整数倍) ->
+        cpu bool [L/page]，页内全部映射有效才为 True。GPU gather + 同步,测试/校验用;
+        插入热路径用 swa_page_valid_from_watermark(纯 CPU,免同步)。"""
+        page = self.get_prompt_cache_page_size()
+        assert full_slots.numel() % page == 0
+        if full_slots.numel() == 0:
+            return torch.zeros((0,), dtype=torch.bool)
+        swa = self.mem_manager.full_to_swa_indexs[full_slots.cuda().long().reshape(-1)]
+        return (swa.view(-1, page) >= 0).all(dim=1).cpu()
 
-    def _slice_swa_payload(self, swa_payload, start: int, end: int):
-        if swa_payload is None:
-            return None
-        positions = swa_payload["positions"]
-        mask = (positions >= start) & (positions < end)
-        if not bool(mask.any()):
-            return None
-        return {
-            "positions": positions[mask].clone(),
-            "full_slots": swa_payload["full_slots"][mask].clone(),
-            "swa_slots": swa_payload["swa_slots"][mask].clone(),
-        }
+    def swa_page_valid_from_watermark(self, req_idx: int, cache_len: int) -> torch.Tensor:
+        """插入时的按页有效性,纯 CPU: 请求自有 token 的 swa 映射只被出窗水位线回收
+        (阀不触活跃请求,级联只在 free 时),页 p 全驻留 ⟺ 页起点 128p >= 水位线。
+
+        与 compute_swa_page_valid 在插入时刻对自有 token 等价,但不做 GPU gather/同步——
+        router 关键路径上每次插入省一次对全部在途 kernel 的等待。bitmap 中借入前缀
+        ([0, ready) 的页)的行在 radix insert 切片时被丢弃(既有节点保留自己的 bitmap),
+        其取值无影响。"""
+        page = self.get_prompt_cache_page_size()
+        mark = max(0, self._swa_evict_marks[req_idx])
+        n_pages = int(cache_len) // page
+        return torch.arange(n_pages, dtype=torch.long) * page >= mark
 
     def slice_prompt_cache_payload(self, payload: DeepseekV4PromptCachePayload, start: int, end: int):
         start = int(start)
         end = int(end)
-        # c4/c128/indexer-K slots are true historical KV and can be sliced by ratio.
-        # compressor running state only describes the payload end boundary; it is valid
-        # for a slice only when that slice keeps the original end boundary.
-        keep_end_state = end == payload.cache_len
+        page = self.get_prompt_cache_page_size()
+        # radix page=128 保证分裂点页对齐，bitmap 可整页切分。
         return DeepseekV4PromptCachePayload(
             cache_len=end - start,
-            c4_slots=self._slice_cpu_slots(payload.c4_slots, start, end, 4),
-            c128_slots=self._slice_cpu_slots(payload.c128_slots, start, end, 128),
-            c4_state=payload.c4_state.clone() if keep_end_state and payload.c4_state is not None else None,
-            c4_state_pool=payload.c4_state_pool.clone()
-            if keep_end_state and payload.c4_state_pool is not None
+            swa_page_valid=payload.swa_page_valid[start // page : end // page].clone()
+            if payload.swa_page_valid is not None
             else None,
-            c4_indexer_state=payload.c4_indexer_state.clone()
-            if keep_end_state and payload.c4_indexer_state is not None
-            else None,
-            c4_indexer_state_pool=payload.c4_indexer_state_pool.clone()
-            if keep_end_state and payload.c4_indexer_state_pool is not None
-            else None,
-            swa=self._slice_swa_payload(payload.swa, start, end),
         )
 
     def concat_prompt_cache_payloads(self, payloads: List[DeepseekV4PromptCachePayload]):
         if len(payloads) == 0:
             return None
-        c4_slots = [p.c4_slots for p in payloads if p.c4_slots is not None and len(p.c4_slots) > 0]
-        c128_slots = [p.c128_slots for p in payloads if p.c128_slots is not None and len(p.c128_slots) > 0]
-        last = payloads[-1]
+        bitmaps = [p.swa_page_valid for p in payloads]
         return DeepseekV4PromptCachePayload(
             cache_len=sum(p.cache_len for p in payloads),
-            c4_slots=torch.cat(c4_slots, dim=0) if c4_slots else None,
-            c128_slots=torch.cat(c128_slots, dim=0) if c128_slots else None,
-            c4_state=last.c4_state,
-            c4_state_pool=last.c4_state_pool,
-            c4_indexer_state=last.c4_indexer_state,
-            c4_indexer_state_pool=last.c4_indexer_state_pool,
-            swa=last.swa,
+            swa_page_valid=torch.cat(bitmaps, dim=0) if all(b is not None for b in bitmaps) else None,
         )
 
     def build_prompt_cache_payload(
         self,
         req_idx: int,
         cache_len: int,
-        clone_swa: bool = False,
     ) -> DeepseekV4PromptCachePayload:
+        """构造插入载荷。compressor 状态不进载荷(c4 随 swa 页生灭、c128 边界自然归零),
+        cache_len 不再受序列末端约束——任意 128 对齐前缀皆可插入。
+        swa_page_valid 不在此填: 它必须用插入时刻的映射(infer batch 在 insert 前补)。"""
         assert self.mem_manager is not None
-        cache_len = int(cache_len)
-        full_slots = self.req_to_token_indexs[req_idx, :cache_len].detach().cpu()
-        c4_count = cache_len // 4
-        c128_count = cache_len // 128
-        c4_slots = self.req_to_c4_indexs[req_idx, :c4_count].detach().cpu().clone() if c4_count > 0 else None
-        c128_slots = self.req_to_c128_indexs[req_idx, :c128_count].detach().cpu().clone() if c128_count > 0 else None
-        if clone_swa:
-            swa_payload = self.mem_manager.clone_swa_for_prompt_cache(req_idx, cache_len, full_slots)
-        else:
-            swa_payload = self.mem_manager.snapshot_swa_for_prompt_cache(req_idx, cache_len, full_slots)
-        return DeepseekV4PromptCachePayload(
-            cache_len=cache_len,
-            c4_slots=c4_slots,
-            c128_slots=c128_slots,
-            c4_state=self.req_to_c4_state.buffer[:, req_idx].detach().clone() if self.n_c4 > 0 else None,
-            c4_state_pool=self.req_to_c4_state_pool.buffer[:, req_idx].detach().clone() if self.n_c4 > 0 else None,
-            c4_indexer_state=self.req_to_c4_indexer_state.buffer[:, req_idx].detach().clone()
-            if self.n_c4 > 0
-            else None,
-            c4_indexer_state_pool=self.req_to_c4_indexer_state_pool.buffer[:, req_idx].detach().clone()
-            if self.n_c4 > 0
-            else None,
-            swa=swa_payload,
-        )
+        return DeepseekV4PromptCachePayload(cache_len=int(cache_len))
 
-    def detach_prompt_cache_payload_from_req(self, req_idx: int, payload: DeepseekV4PromptCachePayload):
-        if payload is not None and self.mem_manager is not None:
-            self.mem_manager.detach_swa_for_prompt_cache(req_idx, payload.swa)
-        return
-
-    def free_prompt_cache_payload(self, payload: DeepseekV4PromptCachePayload):
-        if payload is None or self.mem_manager is None:
-            return
-        if payload.c4_slots is not None and len(payload.c4_slots) > 0:
-            self.mem_manager.free_c4(payload.c4_slots)
-        if payload.c128_slots is not None and len(payload.c128_slots) > 0:
-            self.mem_manager.free_c128(payload.c128_slots)
-        self.mem_manager.free_swa_prompt_cache(payload.swa)
-        return
-
-    def release_prompt_cache_detached_swa(
-        self,
-        payload: DeepseekV4PromptCachePayload,
-        keep_payload: Optional[DeepseekV4PromptCachePayload] = None,
-    ):
-        if payload is None or payload.swa is None or self.mem_manager is None:
-            return
-        old_swa = payload.swa
-        if keep_payload is None or keep_payload.swa is None:
-            self.mem_manager.free_swa_prompt_cache(old_swa)
-            return
-
-        old_slots = old_swa["swa_slots"].long()
-        keep_slots = keep_payload.swa["swa_slots"].long()
-        if old_slots.numel() == 0:
-            return
-        if keep_slots.numel() == 0:
-            self.mem_manager.free_swa_prompt_cache(old_swa)
-            return
-
-        release_mask = ~torch.isin(old_slots, keep_slots)
-        if not release_mask.any():
-            return
-        release_payload = {
-            "full_slots": old_swa["full_slots"][release_mask].clone(),
-            "swa_slots": old_swa["swa_slots"][release_mask].clone(),
-        }
-        self.mem_manager.free_swa_prompt_cache(release_payload)
-        return
-
-    def _reset_c128_for_prompt_cache(self, req_idx: int):
-        if self.n_c128 > 0:
-            self._reset_compress_cache_req(self.req_to_c128_state, req_idx)
-            self._reset_state_pool_req(self.req_to_c128_state_pool, req_idx)
-        return
-
-    def rebuild_runtime_state_for_req(self, req_idx: int):
-        state_map = self._runtime_states[req_idx]
-        state_map.clear()
-        for layer_index, ratio in enumerate(self.compress_rates):
-            if ratio == 4:
-                cstate_kv, cstate_score = self.get_compress_state_for_req(layer_index, req_idx)
-                idx_state = self.get_c4_indexer_compress_state(layer_index)
-                state_map[layer_index] = {
-                    "cstate_kv": cstate_kv,
-                    "cstate_score": cstate_score,
-                    "idx_cstate_kv": idx_state[req_idx, 0],
-                    "idx_cstate_score": idx_state[req_idx, 1],
-                }
-            elif ratio == 128:
-                cstate_kv, cstate_score = self.get_compress_state_for_req(layer_index, req_idx)
-                state_map[layer_index] = {
-                    "cstate_kv": cstate_kv,
-                    "cstate_score": cstate_score,
-                }
-        return
-
-    def restore_prompt_cache_payload(self, req_idx: int, payload: DeepseekV4PromptCachePayload):
-        assert self.mem_manager is not None
-        cache_len = int(payload.cache_len)
-        c4_count = cache_len // 4
-        c128_count = cache_len // 128
-        if c4_count > 0:
-            assert payload.c4_slots is not None and len(payload.c4_slots) == c4_count
-            self.req_to_c4_indexs[req_idx, :c4_count] = payload.c4_slots.cuda(non_blocking=True)
-        if c128_count > 0:
-            assert payload.c128_slots is not None and len(payload.c128_slots) == c128_count
-            self.req_to_c128_indexs[req_idx, :c128_count] = payload.c128_slots.cuda(non_blocking=True)
-        self._c4_entry_counts[req_idx] = c4_count
-        self._c128_entry_counts[req_idx] = c128_count
-
-        if self.n_c4 > 0:
-            if payload.c4_state is None or payload.c4_indexer_state is None:
-                raise RuntimeError("DeepSeek-V4 prompt cache hit is missing c4 running state")
-            self.req_to_c4_state.buffer[:, req_idx].copy_(payload.c4_state)
-            self.req_to_c4_indexer_state.buffer[:, req_idx].copy_(payload.c4_indexer_state)
-            if payload.c4_state_pool is not None:
-                self.req_to_c4_state_pool.buffer[:, req_idx].copy_(payload.c4_state_pool)
-            if payload.c4_indexer_state_pool is not None:
-                self.req_to_c4_indexer_state_pool.buffer[:, req_idx].copy_(payload.c4_indexer_state_pool)
-        self._reset_c128_for_prompt_cache(req_idx)
-        self.mem_manager.restore_swa_from_prompt_cache(payload.swa)
-        self.rebuild_runtime_state_for_req(req_idx)
-        return
-
-    def pop_prompt_cache_free_compress_indices(
-        self,
-        req_idx: int,
-        keep_len: int,
-        duplicate_start_len: Optional[int] = None,
-        duplicate_end_len: Optional[int] = None,
-    ):
-        def collect(table, cur_count, ratio):
-            ranges = []
-            if duplicate_start_len is not None and duplicate_end_len is not None:
-                dup_start = duplicate_start_len // ratio
-                dup_end = duplicate_end_len // ratio
-                if dup_end > dup_start:
-                    ranges.append((dup_start, dup_end))
-            keep_count = keep_len // ratio
-            if cur_count > keep_count:
-                ranges.append((keep_count, cur_count))
-            parts = [table[req_idx, s:e].clone() for s, e in ranges if e > s]
-            return torch.cat(parts, dim=0) if parts else None
-
-        c4 = collect(self.req_to_c4_indexs, self._c4_entry_counts[req_idx], 4)
-        c128 = collect(self.req_to_c128_indexs, self._c128_entry_counts[req_idx], 128)
-        if self._c4_entry_counts[req_idx] > 0:
-            self.req_to_c4_indexs[req_idx, : self._c4_entry_counts[req_idx]].fill_(0)
-        if self._c128_entry_counts[req_idx] > 0:
-            self.req_to_c128_indexs[req_idx, : self._c128_entry_counts[req_idx]].fill_(0)
-        self._c4_entry_counts[req_idx] = 0
-        self._c128_entry_counts[req_idx] = 0
-        return c4, c128
-
-    def free(
-        self,
-        free_req_indexes,
-        free_token_index,
-        free_c4_index=None,
-        free_c128_index=None,
-    ):
-        """释放 dense 槽(基类)+ 压缩槽。压缩槽由调用方(infer batch)从 req_to_c*_indexs 收集后传入,
-        与基类用 free_token_index 传 dense 槽的方式一致。"""
+    def free(self, free_req_indexes, free_token_index):
+        """dense/swa/压缩槽全部经 mem_manager.free(free_token_index) 级联回收。"""
         for req_index in free_req_indexes:
             self.clear_runtime_state(req_index)
         super().free(free_req_indexes, free_token_index)
-        self.free_compress_indices(free_c4_index=free_c4_index, free_c128_index=free_c128_index)
         return
 
     def free_req(self, free_req_index: int):
         self.clear_runtime_state(free_req_index)
-        c4, c128 = self.pop_compress_indices_for_req(free_req_index)
-        self.free_compress_indices(free_c4_index=c4, free_c128_index=c128)
         return super().free_req(free_req_index)
 
     def free_all(self):
         super().free_all()
-        self._runtime_states = [{} for _ in range(self.max_request_num + 1)]
-        self._c4_entry_counts = [0 for _ in range(self.max_request_num + 1)]
-        self._c128_entry_counts = [0 for _ in range(self.max_request_num + 1)]
-        if self.n_c4 > 0:
-            self.req_to_c4_indexs.fill_(0)
-            self.req_to_c4_state.buffer.fill_(0)
-            self.req_to_c4_indexer_state.buffer.fill_(0)
-            self.req_to_c4_state_pool.buffer.fill_(0)
-            self.req_to_c4_indexer_state_pool.buffer.fill_(0)
+        self._swa_evict_marks = [-1 for _ in range(self.max_request_num + 1)]
         if self.n_c128 > 0:
-            self.req_to_c128_indexs.fill_(0)
-            self.req_to_c128_state.buffer.fill_(0)
             self.req_to_c128_state_pool.buffer.fill_(0)
-        self._init_all_score_state()
         return

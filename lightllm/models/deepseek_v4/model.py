@@ -7,11 +7,6 @@ from lightllm.models.registry import ModelRegistry
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.basemodel.attention.base_att import (
-    BaseAttBackend,
-    BasePrefillAttState,
-    BaseDecodeAttState,
-)
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -27,47 +22,18 @@ from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import (
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
+from lightllm.common.basemodel.attention.create_utils import nsa_data_type_to_backend
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
 )
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
 DSV4_DECODE_CUDAGRAPH_MAX_LEN = 8192
-
-
-class DeepseekV4DirectSparseAttBackend(BaseAttBackend):
-    """Lifecycle placeholder for V4 direct attention.
-
-    V4 attention is currently driven inside the layer, not by the generic
-    `infer_state.prefill_att_state.prefill_att()` / `decode_att()` backend selector.
-    """
-
-    def create_att_prefill_state(self, infer_state: DeepseekV4InferStateInfo):
-        return DeepseekV4DirectSparsePrefillAttState(backend=self, infer_state=infer_state)
-
-    def create_att_decode_state(self, infer_state: DeepseekV4InferStateInfo):
-        return DeepseekV4DirectSparseDecodeAttState(backend=self, infer_state=infer_state)
-
-
-class DeepseekV4DirectSparsePrefillAttState(BasePrefillAttState):
-    def init_state(self):
-        return
-
-    def prefill_att(self, *args, **kwargs):
-        raise RuntimeError("DeepSeek-V4 attention is executed directly in layer_infer.")
-
-
-class DeepseekV4DirectSparseDecodeAttState(BaseDecodeAttState):
-    def init_state(self):
-        return
-
-    def decode_att(self, *args, **kwargs):
-        raise RuntimeError("DeepSeek-V4 attention is executed directly in layer_infer.")
 
 
 @ModelRegistry("deepseek_v4")
@@ -107,6 +73,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             compress_rates=self._dsv4_compress_rates,
             head_dim=self.config["head_dim"],
             indexer_head_dim=self.config["index_head_dim"],
+            sliding_window=self.config["sliding_window"],
         )
         return
 
@@ -117,6 +84,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         compress_rates = getattr(self, "_dsv4_compress_rates", self._get_compress_rates(layer_num))
+        sliding_window = int(self.config["sliding_window"])
+        # 活跃窗口之外的 swa 余量: 在途 prefill chunk 的瞬时占用(出窗槽位到下一次 prep 才回收)
+        # + radix cache 持有的窗口尾部(每条缓存序列约一个 window)。
+        swa_extra_token_num = int(self.batch_max_tokens or 0) + self.max_req_num * sliding_window
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
@@ -126,7 +97,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             compress_rates=compress_rates,
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
-            sliding_window=self.config["sliding_window"],
+            sliding_window=sliding_window,
+            swa_extra_token_num=swa_extra_token_num,
             mem_fraction=self.mem_fraction,
         )
         assert isinstance(self.req_manager, DeepseekV4ReqManager)
@@ -137,7 +109,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if not self.disable_cudagraph and self.graph_max_len_in_batch > DSV4_DECODE_CUDAGRAPH_MAX_LEN:
             logger.info(
                 "DeepSeek-V4 caps decode cudagraph max_len_in_batch from %s to %s for the current "
-                "graph-safe sparse-attention fallback; longer decode batches run eager.",
+                "graph-safe sparse-attention path; longer decode batches run eager.",
                 self.graph_max_len_in_batch,
                 DSV4_DECODE_CUDAGRAPH_MAX_LEN,
             )
@@ -150,8 +122,14 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return False
 
     def _init_att_backend(self):
-        self.prefill_att_backend = DeepseekV4DirectSparseAttBackend(model=self)
-        self.decode_att_backend = DeepseekV4DirectSparseAttBackend(model=self)
+        args = get_env_start_args()
+        if args.llm_kv_type == "None":
+            args.llm_kv_type = "fp8kv_dsa"
+        if args.llm_kv_type != "fp8kv_dsa":
+            raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
+        backend_cls = nsa_data_type_to_backend["fp8kv_dsa"]["flashmla_sparse"]
+        self.prefill_att_backend = backend_cls(model=self)
+        self.decode_att_backend = backend_cls(model=self)
         return
 
     def _init_custom(self):
@@ -165,11 +143,12 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return
 
     def _init_to_get_rotary(self):
-        # Interleaved (GPT-J) rope. Build real cos/sin tables (_cos_cached_*/_sin_cached_*) following the
-        # gemma4 two-variant convention; the infer-struct slices them into position_cos_*/position_sin_*
-        # and apply_rotary_emb (interleaved, NOT the NeoX rotary_emb_fwd) applies them. Sliding-window
-        # layers use base rope_theta (no YaRN); compressed (CSA/HCA) layers use compress_rope_theta with
-        # YaRN. Tables kept fp32 for accuracy (the apply upcasts anyway).
+        # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
+        # gemma4 two-variant convention; the fused sglang q kernel consumes them directly, while
+        # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the kv rope,
+        # inverse rope and compressor paths (apply_rotary_emb: interleaved, NOT the NeoX
+        # rotary_emb_fwd). Sliding-window layers use base rope_theta (no YaRN); compressed (CSA/HCA)
+        # layers use compress_rope_theta with YaRN. Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
         dim = cfg["qk_rope_head_dim"]
@@ -185,18 +164,29 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth
             f = torch.outer(torch.arange(max_seq, dtype=torch.float32, device="cuda"), freqs)  # [max_seq, dim//2]
-            return f.cos(), f.sin()
+            return torch.complex(f.cos(), f.sin())
 
-        self._cos_cached_sliding, self._sin_cached_sliding = build(
+        self._freqs_cis_sliding = build(
             cfg["rope_theta"],
             rs.get("factor", 16),
             rs.get("original_max_position_embeddings", 65536),
         )
-        self._cos_cached_compress, self._sin_cached_compress = build(
+        self._freqs_cis_compress = build(
             cfg["compress_rope_theta"],
             rs.get("factor", 16),
             rs.get("original_max_position_embeddings", 65536),
         )
+        self._cos_cached_sliding = self._freqs_cis_sliding.real
+        self._sin_cached_sliding = self._freqs_cis_sliding.imag
+        self._cos_cached_compress = self._freqs_cis_compress.real
+        self._sin_cached_compress = self._freqs_cis_compress.imag
+        # Each layer uses exactly one rope variant; wire its table once here (layers are already
+        # built: _init_infer_layer runs before _init_custom) instead of relaying via infer_state.
+        # The compressor needs the full compress tables (entry rope positions != token positions).
+        for layer in self.layers_infer:
+            layer.freqs_cis = self._freqs_cis_compress if layer.compress_ratio else self._freqs_cis_sliding
+            layer.cos_compress_table = self._cos_cached_compress
+            layer.sin_compress_table = self._sin_cached_compress
         return
 
 

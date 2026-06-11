@@ -527,13 +527,17 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
-        if hasattr(self.mem_manager, "prepare_prefill_swa_slots"):
-            self.mem_manager.prepare_prefill_swa_slots(
+        if hasattr(self.req_manager, "prepare_prefill_swa"):
+            self.req_manager.prepare_prefill_swa(
                 b_req_idx=infer_state.b_req_idx,
-                b_seq_len=infer_state.b_seq_len,
                 b_ready_cache_len=infer_state.b_ready_cache_len,
-                b_start_loc=model_input.b_prefill_start_loc,
-                mem_index=infer_state.mem_index,
+                b_seq_len=infer_state.b_seq_len,
+            )
+        if hasattr(self.req_manager, "prepare_prefill_compress_slots"):
+            self.req_manager.prepare_prefill_compress_slots(
+                b_req_idx=infer_state.b_req_idx,
+                b_ready_cache_len=infer_state.b_ready_cache_len,
+                b_seq_len=infer_state.b_seq_len,
             )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -541,8 +545,6 @@ class TpPartBaseModel:
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
         model_output = self._context_forward(infer_state)
-        if hasattr(self.mem_manager, "commit_prefill_swa_slots"):
-            self.mem_manager.commit_prefill_swa_slots()
 
         model_output = self._create_unpad_prefill_model_output(
             padded_model_output=model_output,
@@ -577,12 +579,14 @@ class TpPartBaseModel:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
-            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
-                self.mem_manager.prepare_decode_swa_slots(
+            if hasattr(self.req_manager, "prepare_decode_swa"):
+                self.req_manager.prepare_decode_swa(
                     model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
                 )
             if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(model_input.b_req_idx, model_input.b_seq_len)
+                self.req_manager.prepare_decode_compress_slots(
+                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
+                )
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -604,12 +608,14 @@ class TpPartBaseModel:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
-            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
-                self.mem_manager.prepare_decode_swa_slots(
+            if hasattr(self.req_manager, "prepare_decode_swa"):
+                self.req_manager.prepare_decode_swa(
                     model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
                 )
             if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(model_input.b_req_idx, model_input.b_seq_len)
+                self.req_manager.prepare_decode_compress_slots(
+                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
+                )
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -775,13 +781,17 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state0.mem_index,
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
-        if hasattr(self.mem_manager, "prepare_prefill_swa_slots"):
-            self.mem_manager.prepare_prefill_swa_slots(
+        if hasattr(self.req_manager, "prepare_prefill_swa"):
+            self.req_manager.prepare_prefill_swa(
                 b_req_idx=infer_state0.b_req_idx,
-                b_seq_len=infer_state0.b_seq_len,
                 b_ready_cache_len=infer_state0.b_ready_cache_len,
-                b_start_loc=model_input0.b_prefill_start_loc,
-                mem_index=infer_state0.mem_index,
+                b_seq_len=infer_state0.b_seq_len,
+            )
+        if hasattr(self.req_manager, "prepare_prefill_compress_slots"):
+            self.req_manager.prepare_prefill_compress_slots(
+                b_req_idx=infer_state0.b_req_idx,
+                b_ready_cache_len=infer_state0.b_ready_cache_len,
+                b_seq_len=infer_state0.b_seq_len,
             )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
@@ -796,13 +806,17 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state1.mem_index,
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
-        if hasattr(self.mem_manager, "prepare_prefill_swa_slots"):
-            self.mem_manager.prepare_prefill_swa_slots(
+        if hasattr(self.req_manager, "prepare_prefill_swa"):
+            self.req_manager.prepare_prefill_swa(
                 b_req_idx=infer_state1.b_req_idx,
-                b_seq_len=infer_state1.b_seq_len,
                 b_ready_cache_len=infer_state1.b_ready_cache_len,
-                b_start_loc=model_input1.b_prefill_start_loc,
-                mem_index=infer_state1.mem_index,
+                b_seq_len=infer_state1.b_seq_len,
+            )
+        if hasattr(self.req_manager, "prepare_prefill_compress_slots"):
+            self.req_manager.prepare_prefill_compress_slots(
+                b_req_idx=infer_state1.b_req_idx,
+                b_ready_cache_len=infer_state1.b_ready_cache_len,
+                b_seq_len=infer_state1.b_seq_len,
             )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
@@ -811,8 +825,6 @@ class TpPartBaseModel:
         prefill_mem_indexes_ready_event.record()
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
-        if hasattr(self.mem_manager, "commit_prefill_swa_slots"):
-            self.mem_manager.commit_prefill_swa_slots()
 
         model_output0 = self._create_unpad_prefill_model_output(
             padded_model_output=model_output0,
@@ -864,19 +876,19 @@ class TpPartBaseModel:
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
-                self.mem_manager.prepare_decode_swa_slots(
+            if hasattr(self.req_manager, "prepare_decode_swa"):
+                self.req_manager.prepare_decode_swa(
                     padded_model_input0.b_req_idx, padded_model_input0.b_seq_len, padded_model_input0.mem_indexes
                 )
-                self.mem_manager.prepare_decode_swa_slots(
+                self.req_manager.prepare_decode_swa(
                     padded_model_input1.b_req_idx, padded_model_input1.b_seq_len, padded_model_input1.mem_indexes
                 )
             if hasattr(self.req_manager, "prepare_decode_compress_slots"):
                 self.req_manager.prepare_decode_compress_slots(
-                    padded_model_input0.b_req_idx, padded_model_input0.b_seq_len
+                    padded_model_input0.b_req_idx, padded_model_input0.b_seq_len, padded_model_input0.mem_indexes
                 )
                 self.req_manager.prepare_decode_compress_slots(
-                    padded_model_input1.b_req_idx, padded_model_input1.b_seq_len
+                    padded_model_input1.b_req_idx, padded_model_input1.b_seq_len, padded_model_input1.mem_indexes
                 )
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             copy_kv_index_to_req(
@@ -919,16 +931,20 @@ class TpPartBaseModel:
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            if hasattr(self.mem_manager, "prepare_decode_swa_slots"):
-                self.mem_manager.prepare_decode_swa_slots(
+            if hasattr(self.req_manager, "prepare_decode_swa"):
+                self.req_manager.prepare_decode_swa(
                     model_input0.b_req_idx, model_input0.b_seq_len, model_input0.mem_indexes
                 )
-                self.mem_manager.prepare_decode_swa_slots(
+                self.req_manager.prepare_decode_swa(
                     model_input1.b_req_idx, model_input1.b_seq_len, model_input1.mem_indexes
                 )
             if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(model_input0.b_req_idx, model_input0.b_seq_len)
-                self.req_manager.prepare_decode_compress_slots(model_input1.b_req_idx, model_input1.b_seq_len)
+                self.req_manager.prepare_decode_compress_slots(
+                    model_input0.b_req_idx, model_input0.b_seq_len, model_input0.mem_indexes
+                )
+                self.req_manager.prepare_decode_compress_slots(
+                    model_input1.b_req_idx, model_input1.b_seq_len, model_input1.mem_indexes
+                )
             infer_state0 = self._create_inferstate(model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
