@@ -34,11 +34,10 @@ DSV4_C128_PAGE_SIZE = 2
 # c4 compressor state ring(overlap 对: 每页 2 个分组槽 × ratio 4 行)。c128 state 在 128 边界
 # 自然归零(在线聚合),无缓存常驻需求,保持 req 键控,不进 swa 派生池。
 DSV4_C4_STATE_RING = 8
-# swa 池占 full token 空间的比例下限(sglang swa_full_tokens_ratio=0.1 的对应物)。
-# lightllm 的调度准入只看 full 池,prefill 优先的波次会让"已 prefill 未 decode"的请求整段
-# prompt 占住 swa 槽(首次 decode prep 才批量出窗回收),峰值≈准入波次 prompt 总和。在
-# v5 的 swa 压力阀/准入耦合落地前,用比 sglang 更宽的 0.3 兜住该瞬时峰值。
-DSV4_SWA_FULL_TOKENS_RATIO = 0.3
+# swa 池占 full token 空间的比例下限(sglang swa_full_tokens_ratio=0.1 同值)。
+# v5 的 swa 压力阀(借页/驱逐)已覆盖 radix 树与准入波次的瞬时增长,结构性预算
+# (max_req×window + batch_max_tokens 余量)另行叠加,0.1 仅作 full 池比例下限。
+DSV4_SWA_FULL_TOKENS_RATIO = 0.1
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -699,6 +698,40 @@ class DeepseekV4MemoryManager(MemoryManager):
             swa_slots,
             self.swa_pool.get_layer_buffer(layer_index),
             self.swa_pool.page_size,
+        )
+        return
+
+    def pack_mla_kv_to_cache_fused_norm_rope(
+        self,
+        layer_index: int,
+        mem_index: torch.Tensor,
+        kv: torch.Tensor,
+        kv_weight: torch.Tensor,
+        eps: float,
+        freqs_cis: torch.Tensor,
+        positions: torch.Tensor,
+    ):
+        """同 pack_mla_kv_to_cache，但 rmsnorm + 尾部交错 rope 融合进写入 kernel
+        (sglang fused_k_norm_rope_flashmla，即 sglang _compute_kv_to_cache 的池侧)，
+        省掉 bf16 kv 中间量。kv 为 wkv 投影原始输出 [T, head_dim+rope_dim]。"""
+        if kv.shape[0] == 0:
+            return
+        from sglang.jit_kernel.dsv4 import fused_k_norm_rope_flashmla
+
+        swa_slots = self.full_to_swa_indexs[mem_index.cuda().long().reshape(-1)]
+        # 未映射槽位(-1, 如 decode 图 warmup 的 HOLD 行: prep 跳过 alloc_swa)对老 triton
+        # 写入核是显式 no-op;sglang fused 核无负槽位防护(负页偏移=非法访存),mask 到
+        # swa HOLD 槽(垃圾桶语义,与 padding 行写入一致)。
+        swa_slots = torch.where(swa_slots < 0, torch.full_like(swa_slots, self.swa_pool.HOLD_TOKEN_MEMINDEX), swa_slots)
+        fused_k_norm_rope_flashmla(
+            kv=kv,
+            kv_weight=kv_weight,
+            eps=eps,
+            freqs_cis=freqs_cis,
+            positions=positions,
+            out_loc=swa_slots,
+            kvcache=self.swa_pool.get_layer_buffer(layer_index),
+            page_size=self.swa_pool.page_size,
         )
         return
 

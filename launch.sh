@@ -7,6 +7,9 @@
 #   LOADWORKER=16      - parallel weight loading (~5x faster startup).
 #   PYTHONPATH sglang  - _get_qkv / compressor reuse sglang.jit_kernel.dsv4 (fused_q_norm_rope, compress_old).
 #   --batch_max_tokens 8192        - FlashMLA get_decoding_sched_meta rejects >8192 rows per call (probed: 8192 OK, 12288 fails).
+#   kv pool sizing: auto-profiled from mem_fraction. The fp4 marlin MoE weights materialize their
+#     CUDA marlin-layout buffers at construction (MXFP4MoEQuantizationMethod._create_weight), so the
+#     profile sees the true weight footprint on any GPU/config. --max_total_token_num overrides.
 #   decode cudagraph ENABLED - the v5 decode path is graph-safe: slot alloc/scatter in prep (outside
 #     graph), forward is pure gathers, HOLD padding rows redirect to HOLD slots. CORRECTNESS NOTE:
 #     FlashMLASchedMeta is lazily planned at first kernel call and written back onto the (shared)
