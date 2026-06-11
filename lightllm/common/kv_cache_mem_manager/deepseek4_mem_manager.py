@@ -34,7 +34,6 @@ DSV4_C128_PAGE_SIZE = 2
 # c4 compressor state ring(overlap 对: 每页 2 个分组槽 × ratio 4 行)。c128 state 在 128 边界
 # 自然归零(在线聚合),无缓存常驻需求,保持 req 键控,不进 swa 派生池。
 DSV4_C4_STATE_RING = 8
-DSV4_PROFILE_MAX_FULL_TOKENS = 1_500_000
 # swa 池占 full token 空间的比例下限(sglang swa_full_tokens_ratio=0.1 的对应物)。
 # lightllm 的调度准入只看 full 池,prefill 优先的波次会让"已 prefill 未 decode"的请求整段
 # prompt 占住 swa 槽(首次 decode prep 才批量出窗回收),峰值≈准入波次 prompt 总和。在
@@ -275,13 +274,6 @@ class DeepseekV4MemoryManager(MemoryManager):
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
             self.size = tensor.item()
-
-        if self.size > DSV4_PROFILE_MAX_FULL_TOKENS:
-            logger.info(
-                f"DeepseekV4MemoryManager cap profiled max_total_token_num from "
-                f"{self.size} to {DSV4_PROFILE_MAX_FULL_TOKENS} to keep runtime headroom"
-            )
-            self.size = DSV4_PROFILE_MAX_FULL_TOKENS
 
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"

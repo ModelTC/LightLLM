@@ -58,9 +58,9 @@ def hc_post(x, residual, post_mix, res_mix):
     return torch.ops.vllm.mhc_post_tilelang(x, residual, post_mix, res_mix)
 
 
-def hc_head(streams, hc_fn, hc_scale, hc_base, hc_mult, dim, rms_eps, hc_eps):
+def hc_head(streams, hc_fn, hc_scale, hc_base, hc_mult, dim, rms_eps, hc_eps, alloc_func):
     """Final stream collapse before the lm_head. streams:[N, hc*dim] -> [N, dim]."""
-    out = torch.empty(streams.shape[0], dim, device=streams.device, dtype=streams.dtype)
+    out = alloc_func((streams.shape[0], dim), dtype=streams.dtype, device=streams.device)
     torch.ops.vllm.hc_head_fused_kernel_tilelang(
         streams.view(-1, hc_mult, dim).contiguous(),
         hc_fn,

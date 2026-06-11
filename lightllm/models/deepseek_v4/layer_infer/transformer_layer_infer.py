@@ -4,6 +4,7 @@ import torch.distributed as dist
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
@@ -66,7 +67,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
 
     # ------------------------------------------------------------------ forward (HC-threaded)
-    def _hc_attn_in(self, input_embdings, layer_weight):
+    def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
         """Layer input -> attention input (attn_norm fused). First layer gets the raw streams
         and runs a standalone hc_pre; later layers get (x, residual, post_mix, res_mix) and fuse
         the previous layer's ffn hc_post with this layer's attn hc_pre."""
@@ -99,7 +100,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             self.eps_,
         )
 
-    def _hc_ffn_in(self, x, residual, post_mix, res_mix, layer_weight):
+    def _hc_ffn_in(self, x, residual, post_mix, res_mix, layer_weight: DeepseekV4TransformerLayerWeight):
         """Attention output -> ffn input (ffn_norm fused): fused attn hc_post + ffn hc_pre."""
         return hc_fused_post_pre(
             x,
@@ -124,14 +125,18 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         streams = hc_post(x, residual, post_mix, res_mix)
         return streams.reshape(streams.shape[0], -1)
 
-    def context_forward(self, input_embdings, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def context_forward(
+        self, input_embdings, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         x, residual, post_mix, res_mix = self._hc_attn_in(input_embdings, layer_weight)
         x = self.context_attention_forward(x, infer_state, layer_weight)
         x, residual, post_mix, res_mix = self._hc_ffn_in(x, residual, post_mix, res_mix, layer_weight)
         x = self._ffn(x, infer_state, layer_weight)
         return self._hc_ffn_out(x, residual, post_mix, res_mix)
 
-    def token_forward(self, input_embdings, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def token_forward(
+        self, input_embdings, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         x, residual, post_mix, res_mix = self._hc_attn_in(input_embdings, layer_weight)
         x = self.token_attention_forward(x, infer_state, layer_weight)
         x, residual, post_mix, res_mix = self._hc_ffn_in(x, residual, post_mix, res_mix, layer_weight)
@@ -144,36 +149,39 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return infer_state.position_cos_compress, infer_state.position_sin_compress
         return infer_state.position_cos_sliding, infer_state.position_sin_sliding
 
-    def _get_qkv(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _get_qkv(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         from sglang.jit_kernel.dsv4 import fused_q_norm_rope
 
+        x = self._tpsp_allgather(input=x, infer_state=infer_state)
         cos_tok, sin_tok = self._select_rope(infer_state)
         T = x.shape[0]
         qa = layer_weight.q_norm_(layer_weight.wq_a_.mm(x), eps=self.eps_)
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_heads, self.head_dim)
         # per-(token, head) weightless self-RMSNorm + interleaved rope on the last rope_dim dims,
         # fused in one sglang dsv4 jit kernel (fp32 norm/rotation, bf16 in between -- same as eager).
-        q = torch.empty_like(q_in)
+        q = self.alloc_tensor(q_in.shape, dtype=q_in.dtype, device=q_in.device)
         fused_q_norm_rope(q_in, q, self.eps_, self.freqs_cis, infer_state.position_ids)
-        kv = layer_weight.kv_norm_(layer_weight.wkv_.mm(x), eps=self.eps_)
-        kv = torch.cat(
-            [
-                kv[:, : -self.rope_dim],
-                apply_rotary_emb(kv[:, -self.rope_dim :], cos_tok, sin_tok),
-            ],
-            dim=1,
+        # kv: rmsnorm + rope + fp8 pack + scatter 进 swa 池,一个 sglang jit kernel 完成
+        # (同 sglang _compute_kv_to_cache),替代 eager norm/rope/cat + _post_cache_kv。
+        # bf16 kv 中间量没有其他消费者: flashmla 路径注意力读 cache,压缩器/indexer 取 x。
+        infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
+            layer_index=self.layer_num_,
+            mem_index=infer_state.mem_index,
+            kv=layer_weight.wkv_.mm(x),
+            kv_weight=layer_weight.kv_norm_.weight,
+            eps=self.eps_,
+            freqs_cis=self.freqs_cis,
+            positions=infer_state.position_ids,
         )
-        return q, kv, qa, cos_tok, sin_tok
+        return q, qa, cos_tok, sin_tok
 
-    def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         # o: [T, tp_q_heads, head_dim] after inverse rope -> grouped low-rank O -> [T, hidden]
         T = o.shape[0]
         o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
         o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
         o = layer_weight.wo_b_.mm(o)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return o
+        return self._tpsp_reduce(input=o, infer_state=infer_state)
 
     def _inv_rope(self, o, cos_tok, sin_tok):
         return torch.cat(
@@ -190,7 +198,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     # ------------------------------------------------------------------ compressor / indexer
-    def _indexer_q_weight(self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _indexer_q_weight(
+        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         if self.compress_ratio != 4:
             return None, None
         cos_tok = infer_state.position_cos_compress
@@ -222,7 +232,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.mem_manager.pack_compressed_kv_to_cache(self.layer_num_, slots, comp)
         return slots
 
-    def _compressor_weights(self, layer_weight, for_indexer: bool):
+    def _compressor_weights(self, layer_weight: DeepseekV4TransformerLayerWeight, for_indexer: bool):
         if for_indexer:
             return (
                 layer_weight.idx_cmp_wkv_.mm_param.weight,
@@ -239,7 +249,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             self.head_dim,
         )
 
-    def _run_compressor_prefill(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _run_compressor_prefill(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         """Per-request compressor for the prefill chunk. Runs as part of the deferred attention
         func, before the attention metadata gathers the slot mappings.
 
@@ -255,7 +267,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             self._run_c128_compressor_prefill(x, infer_state, layer_weight)
         return
 
-    def _run_c4_compressor_prefill(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _run_c4_compressor_prefill(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         rm = infer_state.req_manager
         mem = infer_state.mem_manager
         wkv, wgate, norm, ape, _ = self._compressor_weights(layer_weight, for_indexer=False)
@@ -316,7 +330,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 infer_state.mem_manager.pack_indexer_k_to_cache(self.layer_num_, slots, idx_comp)
         return
 
-    def _run_c128_compressor_prefill(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _run_c128_compressor_prefill(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         rm = infer_state.req_manager
         wkv, wgate, norm, ape, _ = self._compressor_weights(layer_weight, for_indexer=False)
         b_req = infer_state.b_req_idx.tolist()
@@ -365,7 +381,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                         self._write_compressed_kv(infer_state, req, entry_start, entry.unsqueeze(0))
         return
 
-    def _run_compressor_decode(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _run_compressor_decode(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         """Batched decode compressor (cuda-graph safe): state update for every request, cache write
         masked to the pool HOLD slot unless this token completes a window. Compressed-cache slots
         were pre-allocated by prepare_decode_compress_slots in the prep phase.
@@ -460,24 +478,24 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         return
 
     # ------------------------------------------------------------------ attention (prefill)
-    def context_attention_forward(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
-        q, cache_kv, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, layer_weight)
-        # template hook: write the chunk's packed latent into the swa pool before attention
-        # reads it back via full_to_swa indices (this custom forward bypasses the tpl path).
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_wrapper_run(q, cache_kv, q_lora, x, infer_state, layer_weight)
+    def context_attention_forward(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
+        # _get_qkv writes the chunk's packed latent into the swa pool (fused kernel) before
+        # attention reads it back via full_to_swa indices (this custom forward bypasses the
+        # tpl _post_cache_kv path).
+        q, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, layer_weight)
+        o = self._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
         return self._get_o(self._inv_rope(o, cos_tok, sin_tok), infer_state, layer_weight)
 
     def _context_attention_wrapper_run(
-        self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight
+        self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
         if torch.cuda.is_current_stream_capturing():
             q = q.contiguous()
-            cache_kv = cache_kv.contiguous()
             q_lora = q_lora.contiguous()
             x = x.contiguous()
             _q = tensor_to_no_ref_tensor(q)
-            _cache_kv = tensor_to_no_ref_tensor(cache_kv)
             _q_lora = tensor_to_no_ref_tensor(q_lora)
             _x = tensor_to_no_ref_tensor(x)
 
@@ -486,11 +504,13 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
             infer_state.prefill_cuda_graph_create_graph_obj()
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            o = torch.empty((q.shape[0], self.tp_q_heads, self.head_dim), dtype=q.dtype, device=q.device)
+            # Same graph-split output handoff as the template, but avoid its dry-run because
+            # DSV4 attention mutates compressor/cache state before returning.
+            o = self.alloc_tensor((q.shape[0], self.tp_q_heads, self.head_dim), dtype=q.dtype, device=q.device)
             _o = tensor_to_no_ref_tensor(o)
 
             def att_func(new_infer_state: DeepseekV4InferStateInfo):
-                tmp_o = self._context_attention_kernel(_q, _cache_kv, _q_lora, _x, new_infer_state, layer_weight)
+                tmp_o = self._context_attention_kernel(_q, _q_lora, _x, new_infer_state, layer_weight)
                 assert tmp_o.shape == _o.shape
                 _o.copy_(tmp_o)
                 return
@@ -498,9 +518,11 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
             return o
 
-        return self._context_attention_kernel(q, cache_kv, q_lora, x, infer_state, layer_weight)
+        return self._context_attention_kernel(q, q_lora, x, infer_state, layer_weight)
 
-    def _context_attention_kernel(self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _context_attention_kernel(
+        self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         self._run_compressor_prefill(x, infer_state, layer_weight)
         idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
@@ -511,7 +533,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 "compress_ratio": self.compress_ratio,
                 "head_dim_v": self.head_dim,
                 "softmax_scale": self.softmax_scale,
-                "cache_kv": cache_kv,
                 "q_lora": q_lora,
                 "hidden_states": x,
                 "attn_sink": layer_weight.attn_sink_.weight,
@@ -530,13 +551,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     # ------------------------------------------------------------------ attention (decode)
-    def token_attention_forward(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
-        q, cache_kv, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, layer_weight)
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._token_attention_kernel(q, cache_kv, q_lora, x, infer_state, layer_weight)
+    def token_attention_forward(
+        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
+        q, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, layer_weight)
+        o = self._token_attention_kernel(q, q_lora, x, infer_state, layer_weight)
         return self._get_o(self._inv_rope(o, cos_tok, sin_tok), infer_state, layer_weight)
 
-    def _token_attention_kernel(self, q, cache_kv, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _token_attention_kernel(
+        self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         self._run_compressor_decode(x, infer_state, layer_weight)
         idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
@@ -547,7 +571,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 "compress_ratio": self.compress_ratio,
                 "head_dim_v": self.head_dim,
                 "softmax_scale": self.softmax_scale,
-                "cache_kv": cache_kv,
                 "q_lora": q_lora,
                 "hidden_states": x,
                 "attn_sink": layer_weight.attn_sink_.weight,
@@ -566,7 +589,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     # ------------------------------------------------------------------ moe
-    def _routed_experts(self, x, weights, indices, layer_weight):
+    def _routed_experts(self, x, weights, indices, layer_weight: DeepseekV4TransformerLayerWeight):
         return layer_weight.experts_.experts_with_preselected(
             input_tensor=x,
             topk_weights=weights,
@@ -574,7 +597,11 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             clamp_limit=float(self.swiglu_limit),
         )
 
-    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+        x = x.view(-1, self.hidden)
+        if not self.enable_ep_moe:
+            x = self._tpsp_allgather(input=x, infer_state=infer_state)
+
         gw = layer_weight.gate_weight_.mm_param.weight
         logits = F.linear(x.float(), gw.float()).contiguous()
         weights, indices = self._select_experts(logits, infer_state, layer_weight)
@@ -582,7 +609,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         g = layer_weight.shared_gate_.mm(x).float().clamp(max=self.swiglu_limit)
         u = layer_weight.shared_up_.mm(x).float().clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
         shared = layer_weight.shared_down_.mm((F.silu(g) * u).to(x.dtype))
-        if self.enable_ep_moe and getattr(layer_weight.experts_, "is_ep", False):
+        if self.enable_ep_moe:
             if self.tp_world_size_ > 1:
                 all_reduce(
                     shared,
@@ -592,14 +619,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 )
             return routed + shared
         out = routed + shared
-        if self.tp_world_size_ > 1:
-            all_reduce(out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        return out
+        return self._tpsp_reduce(input=out, infer_state=infer_state)
 
-    def _select_experts(self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _select_experts(
+        self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         return self._select_experts_vllm(logits, infer_state, layer_weight)
 
-    def _select_experts_vllm(self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _select_experts_vllm(
+        self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+    ):
         from vllm import _custom_ops as ops
 
         M = logits.shape[0]
@@ -616,9 +645,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         else:
             bias = layer_weight.gate_bias_.weight
 
-        weights = torch.empty((M, self.topk), dtype=torch.float32, device=logits.device)
-        indices = torch.empty((M, self.topk), dtype=indices_dtype, device=logits.device)
-        token_expert_indices = torch.empty((M, self.topk), dtype=torch.int32, device=logits.device)
+        weights = self.alloc_tensor((M, self.topk), dtype=torch.float32, device=logits.device)
+        indices = self.alloc_tensor((M, self.topk), dtype=indices_dtype, device=logits.device)
+        token_expert_indices = self.alloc_tensor((M, self.topk), dtype=torch.int32, device=logits.device)
         ops.topk_hash_softplus_sqrt(
             weights,
             indices,
