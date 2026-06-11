@@ -1,0 +1,96 @@
+{
+  "candidate_datasets": [
+    "datasets/drop.json",
+    "datasets/qasc.json",
+    "datasets/quartz.json",
+    "datasets/sciq.json",
+    "datasets/openbookqa.json",
+    "datasets/pubmedqa.json",
+    "datasets/truthfulqa.json"
+  ],
+  "gsm8k_path": "datasets/gsm8k.json",
+  "server_url": "http://127.0.0.1:8088/v1/chat/completions",
+  "server_log": "lightllm_qwen3_32b.log",
+  "probe_samples_per_dataset": 100,
+  "max_new_tokens": 128,
+  "accept_threshold": null,
+  "token_threshold": null,
+  "verify_threshold": null,
+  "low_accept_count": 64,
+  "mix_mode": "interleave",
+  "probed_sample_count": 700,
+  "selected_low_accept_count": 64,
+  "mixed_dataset_count": 1064,
+  "selected_low_accept_avg_verify_tokens_per_step": 3.924907062997828,
+  "selected_low_accept_avg_token_per_step": 2.4029739840695887,
+  "lowest_samples": [
+    {
+      "dataset": "pubmedqa",
+      "sample_index": 11,
+      "mtp_avg_token_per_step": 2.6666666666666665,
+      "mtp_avg_verify_tokens_per_step": 3.9166666666666665
+    },
+    {
+      "dataset": "pubmedqa",
+      "sample_index": 97,
+      "mtp_avg_token_per_step": 2.6666666666666665,
+      "mtp_avg_verify_tokens_per_step": 3.9166666666666665
+    },
+    {
+      "dataset": "drop",
+      "sample_index": 93,
+      "mtp_avg_token_per_step": 2.6122448979591835,
+      "mtp_avg_verify_tokens_per_step": 3.9183673469387754
+    },
+    {
+      "dataset": "drop",
+      "sample_index": 96,
+      "mtp_avg_token_per_step": 2.6122448979591835,
+      "mtp_avg_verify_tokens_per_step": 3.9183673469387754
+    },
+    {
+      "dataset": "drop",
+      "sample_index": 90,
+      "mtp_avg_token_per_step": 2.56,
+      "mtp_avg_verify_tokens_per_step": 3.92
+    },
+    {
+      "dataset": "quartz",
+      "sample_index": 68,
+      "mtp_avg_token_per_step": 2.5098039215686274,
+      "mtp_avg_verify_tokens_per_step": 3.9215686274509802
+    },
+    {
+      "dataset": "sciq",
+      "sample_index": 38,
+      "mtp_avg_token_per_step": 2.5098039215686274,
+      "mtp_avg_verify_tokens_per_step": 3.9215686274509802
+    },
+    {
+      "dataset": "sciq",
+      "sample_index": 39,
+      "mtp_avg_token_per_step": 2.5098039215686274,
+      "mtp_avg_verify_tokens_per_step": 3.9215686274509802
+    },
+    {
+      "dataset": "drop",
+      "sample_index": 62,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    },
+    {
+      "dataset": "drop",
+      "sample_index": 89,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  ],
+  "outputs": {
+    "probe_metrics_csv": "dataset/low_accept_gsm8k_mix/probe_metrics.csv",
+    "probe_metrics_json": "dataset/low_accept_gsm8k_mix/probe_metrics.json",
+    "per_dataset_summary_json": "dataset/low_accept_gsm8k_mix/per_dataset_summary.json",
+    "per_dataset_summary_csv": "dataset/low_accept_gsm8k_mix/per_dataset_summary.csv",
+    "low_accept_subset_json": "dataset/low_accept_gsm8k_mix/low_accept_subset.json",
+    "gsm8k_mixed_low_accept_json": "dataset/low_accept_gsm8k_mix/gsm8k_mixed_low_accept.json"
+  }
+}

@@ -1,0 +1,1218 @@
+[
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Therapeutic anticoagulation in the trauma patient: is it safe?\n\nContext:\nTrauma patients who require therapeutic anticoagulation pose a difficult treatment problem. The purpose of this study was to determine: (1) the incidence of complications using therapeutic anticoagulation in trauma patients, and (2) if any patient factors are associated with these complications. An 18-month retrospective review was performed on trauma patients>or= 15 years old who received therapeutic anticoagulation using unfractionated heparin (UH) and/or fractionated heparin (FH). Forty different pre-treatment and treatment patient characteristics were recorded. Complications of anticoagulation were documented and defined as any unanticipated discontinuation of the anticoagulant for bleeding or other adverse events. One-hundred-fourteen trauma patients were initiated on therapeutic anticoagulation. The most common indication for anticoagulation was deep venous thrombosis (46%). Twenty-four patients (21%) had at least 1 anticoagulation complication. The most common complication was a sudden drop in hemoglobin concentration requiring blood transfusion (11 patients). Five patients died (4%), 3 of whom had significant hemorrhage attributed to anticoagulation. Bivariate followed by logistic regression analysis identified chronic obstructive pulmonary disease (OR = 9.2, 95%CI = 1.5-54.7), UH use (OR = 3.8, 95%CI = 1.1-13.0), and lower initial platelet count (OR = 1.004, 95%CI = 1.000-1.008) as being associated with complications. Patients receiving UH vs. FH differed in several characteristics including laboratory values and anticoagulation indications."
+      },
+      {
+        "from": "assistant",
+        "value": "Trauma patients have a significant complication rate related to anticoagulation therapy, and predicting which patients will develop a complication remains unclear. Prospective studies are needed to determine which treatment regimen, if any, is appropriate to safely anticoagulate this high risk population."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 11,
+      "mtp_avg_token_per_step": 2.6666666666666665,
+      "accepted_draft_tokens_per_step": 1.6666666666666665,
+      "mtp_avg_verify_tokens_per_step": 3.9166666666666665
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Does hypoglycaemia increase the risk of cardiovascular events?\n\nContext:\nHypoglycaemia caused by glucose-lowering therapy has been linked to cardiovascular (CV) events. The ORIGIN trial provides an opportunity to further assess this relationship. A total of 12 537 participants with dysglycaemia and high CV-risk were randomized to basal insulin glargine titrated to a fasting glucose of ≤ 5.3 mmol/L (95 mg/dL) or standard glycaemic care. Non-severe hypoglycaemia was defined as symptoms confirmed by glucose ≤ 54 mg/dL and severe hypoglycaemia as a requirement for assistance or glucose ≤ 36 mg/dL. Outcomes were: (i) the composite of CV death, non-fatal myocardial infarction or stroke; (ii) mortality; (iii) CV mortality; and (iv) arrhythmic death. Hazards were estimated before and after adjustment for a hypoglycaemia propensity score. During a median of 6.2 years (IQR: 5.8-6.7), non-severe hypoglycaemic episodes occurred in 41.7 and 14.4% glargine and standard group participants, respectively, while severe episodes occurred in 5.7 and 1.8%, respectively. Non-severe hypoglycaemia was not associated with any outcome following adjustment. Conversely, severe hypoglycaemia was associated with a greater risk for the primary outcome (HR: 1.58; 95% CI: 1.24-2.02, P<0.001), mortality (HR: 1.74; 95% CI: 1.39-2.19, P<0.001), CV death (HR: 1.71; 95% CI: 1.27-2.30, P<0.001) and arrhythmic death (HR: 1.77; 95% CI: 1.17-2.67, P = 0.007). Similar findings were noted for severe nocturnal hypoglycaemia for the primary outcome and mortality. The severe hypoglycaemia hazard for all four outcomes was higher with standard care than with insulin glargine."
+      },
+      {
+        "from": "assistant",
+        "value": "Severe hypoglycaemia is associated with an increased risk for CV outcomes in people at high CV risk and dysglycaemia. Although allocation to insulin glargine vs. standard care was associated with an increased risk of severe and non-severe hypoglycaemia, the relative risk of CV outcomes with hypoglycaemia was lower with insulin glargine-based glucose-lowering therapy than with the standard glycaemic control. Trial Registration (ORIGIN ClinicalTrials.gov number NCT00069784)."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 97,
+      "mtp_avg_token_per_step": 2.6666666666666665,
+      "accepted_draft_tokens_per_step": 1.6666666666666665,
+      "mtp_avg_verify_tokens_per_step": 3.9166666666666665
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many more men were there than women and children who departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico?\n\nContext:\nIn 1905, 1,003 Korean immigrants, which included 802 men and 231 women and children, departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico. The journey took 45 days, after which they took a train to Coatzacoalcos, Veracruz. In the Veracruz port, another boat was taken to the port of Progreso with the final destination being the capital city of Mérida, Yucatan. They arrived in May 1905, with previously signed contracts for four years' work as indentured laborers on the Yucatán henequen haciendas. Many of these Koreans were distributed throughout the Yucatán in 32 henequen haciendas. The town of Motul, Yucatan, located in the heart of the henequen zone, was a destination for many of the Korean immigrants. Subsequently, in 1909, at the end of their contracts, they began a new stage in which they scattered even further  Thus, the majority of those who came were single men who made or remade their family lives with Yucatecan especially Maya women. While Korean girls were much more subject to marriages arranged by Korean parents, males had greater freedom when it came to making a family. This rapid intermarriage by Koreans, coupled with geographic dispersal, prevented the establishment of close social networks among these migrants and therefore provided the basis for Korean descendants among the Yucatan Peninsula. After that 1905 ship, no further entries of Koreans into Mexico were recorded, until many years later, leading to a new community of Koreans with completely different characteristics from those who entered in 1905. These descendants have started the Museo Conmemorativo de la Inmigración Coreana a Yucatán, a museum for the remembrance of their ancestors journey."
+      },
+      {
+        "from": "assistant",
+        "value": "571"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 93,
+      "mtp_avg_token_per_step": 2.6122448979591835,
+      "accepted_draft_tokens_per_step": 1.6122448979591835,
+      "mtp_avg_verify_tokens_per_step": 3.9183673469387754
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many more men were there compared to both women and children?\n\nContext:\nIn 1905, 1,003 Korean immigrants, which included 802 men and 231 women and children, departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico. The journey took 45 days, after which they took a train to Coatzacoalcos, Veracruz. In the Veracruz port, another boat was taken to the port of Progreso with the final destination being the capital city of Mérida, Yucatan. They arrived in May 1905, with previously signed contracts for four years' work as indentured laborers on the Yucatán henequen haciendas. Many of these Koreans were distributed throughout the Yucatán in 32 henequen haciendas. The town of Motul, Yucatan, located in the heart of the henequen zone, was a destination for many of the Korean immigrants. Subsequently, in 1909, at the end of their contracts, they began a new stage in which they scattered even further  Thus, the majority of those who came were single men who made or remade their family lives with Yucatecan especially Maya women. While Korean girls were much more subject to marriages arranged by Korean parents, males had greater freedom when it came to making a family. This rapid intermarriage by Koreans, coupled with geographic dispersal, prevented the establishment of close social networks among these migrants and therefore provided the basis for Korean descendants among the Yucatan Peninsula. After that 1905 ship, no further entries of Koreans into Mexico were recorded, until many years later, leading to a new community of Koreans with completely different characteristics from those who entered in 1905. These descendants have started the Museo Conmemorativo de la Inmigración Coreana a Yucatán, a museum for the remembrance of their ancestors journey."
+      },
+      {
+        "from": "assistant",
+        "value": "571"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 96,
+      "mtp_avg_token_per_step": 2.6122448979591835,
+      "accepted_draft_tokens_per_step": 1.6122448979591835,
+      "mtp_avg_verify_tokens_per_step": 3.9183673469387754
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Which port did the Korean immigrants leave first Chemulpo or Veracruz?\n\nContext:\nIn 1905, 1,003 Korean immigrants, which included 802 men and 231 women and children, departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico. The journey took 45 days, after which they took a train to Coatzacoalcos, Veracruz. In the Veracruz port, another boat was taken to the port of Progreso with the final destination being the capital city of Mérida, Yucatan. They arrived in May 1905, with previously signed contracts for four years' work as indentured laborers on the Yucatán henequen haciendas. Many of these Koreans were distributed throughout the Yucatán in 32 henequen haciendas. The town of Motul, Yucatan, located in the heart of the henequen zone, was a destination for many of the Korean immigrants. Subsequently, in 1909, at the end of their contracts, they began a new stage in which they scattered even further  Thus, the majority of those who came were single men who made or remade their family lives with Yucatecan especially Maya women. While Korean girls were much more subject to marriages arranged by Korean parents, males had greater freedom when it came to making a family. This rapid intermarriage by Koreans, coupled with geographic dispersal, prevented the establishment of close social networks among these migrants and therefore provided the basis for Korean descendants among the Yucatan Peninsula. After that 1905 ship, no further entries of Koreans into Mexico were recorded, until many years later, leading to a new community of Koreans with completely different characteristics from those who entered in 1905. These descendants have started the Museo Conmemorativo de la Inmigración Coreana a Yucatán, a museum for the remembrance of their ancestors journey."
+      },
+      {
+        "from": "assistant",
+        "value": "Chemulpo"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 90,
+      "mtp_avg_token_per_step": 2.56,
+      "accepted_draft_tokens_per_step": 1.56,
+      "mtp_avg_verify_tokens_per_step": 3.92
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "When someone has no energy they can move something\n\nChoices:\nA. small\nB. big\n\nAnswer with the correct choice.\n\nContext:\nIn erosion, the more energy the water has, the larger the particle it can carry."
+      },
+      {
+        "from": "assistant",
+        "value": "small"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 68,
+      "mtp_avg_token_per_step": 2.5098039215686274,
+      "accepted_draft_tokens_per_step": 1.5098039215686274,
+      "mtp_avg_verify_tokens_per_step": 3.9215686274509802
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "The products of what process are needed for cellular respiration, and vice versa?\n\nChoices:\nA. photosynthesis\nB. digestion\nC. spermatogenesis\nD. circulation\n\nAnswer with the correct choice.\n\nContext:\nCellular respiration and photosynthesis are like two sides of the same coin. This is clear from the diagram in Figure below . The products of photosynthesis are needed for cellular respiration. The products of cellular respiration are needed for photosynthesis. Together, the two processes store and release energy in virtually all living things."
+      },
+      {
+        "from": "assistant",
+        "value": "photosynthesis"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 38,
+      "mtp_avg_token_per_step": 2.5098039215686274,
+      "accepted_draft_tokens_per_step": 1.5098039215686274,
+      "mtp_avg_verify_tokens_per_step": 3.9215686274509802
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Most fungi get organic compounds from what?\n\nChoices:\nA. dead organisms\nB. inorganic material\nC. living organisms\nD. carnivorous organisms\n\nAnswer with the correct choice.\n\nContext:\nMost fungi get organic compounds from dead organisms. They are decomposers called saprotrophs. A saprotroph feeds on any remaining organic matter after other decomposers do their work. Fungi use enzymes to digest organic remains and then absorb the resulting organic compounds. As decomposers, fungi are vital for the health of ecosystems. They break down nonliving organic matter and release the nutrients into the soil. Plants can then use the nutrients and pass them on to herbivores and other consumers."
+      },
+      {
+        "from": "assistant",
+        "value": "dead organisms"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 39,
+      "mtp_avg_token_per_step": 2.5098039215686274,
+      "accepted_draft_tokens_per_step": 1.5098039215686274,
+      "mtp_avg_verify_tokens_per_step": 3.9215686274509802
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many years before Guadalajara received there first fuero was the city retaken by christian forces?\n\nContext:\nIn 1085, Guadalajara was retaken by the Christian forces of Alfonso VI . The chronicles say that the Christian army was led by Alvar Fanez de Minaya, one of the lieutenants  of El Cid. From 1085 until the Battle of Las Navas de Tolosa in 1212, the city suffered wars against the Almoravid and the Almohad Empires. In spite of the wars, the Christian population could definitely settle down in the area thanks to the repopulation with people from the North  who received their first fuero in 1133 from Alfonso VII.In 1219, the king Fernando III gave a new fuero to the city .During the reign of Alfonso X of Castile, the protection of the king allowed the city to develop its economy by protecting merchants and allowing markets."
+      },
+      {
+        "from": "assistant",
+        "value": "48"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 62,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many Korean immigrants were more men than woman and children?\n\nContext:\nIn 1905, 1,003 Korean immigrants, which included 802 men and 231 women and children, departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico. The journey took 45 days, after which they took a train to Coatzacoalcos, Veracruz. In the Veracruz port, another boat was taken to the port of Progreso with the final destination being the capital city of Mérida, Yucatan. They arrived in May 1905, with previously signed contracts for four years' work as indentured laborers on the Yucatán henequen haciendas. Many of these Koreans were distributed throughout the Yucatán in 32 henequen haciendas. The town of Motul, Yucatan, located in the heart of the henequen zone, was a destination for many of the Korean immigrants. Subsequently, in 1909, at the end of their contracts, they began a new stage in which they scattered even further  Thus, the majority of those who came were single men who made or remade their family lives with Yucatecan especially Maya women. While Korean girls were much more subject to marriages arranged by Korean parents, males had greater freedom when it came to making a family. This rapid intermarriage by Koreans, coupled with geographic dispersal, prevented the establishment of close social networks among these migrants and therefore provided the basis for Korean descendants among the Yucatan Peninsula. After that 1905 ship, no further entries of Koreans into Mexico were recorded, until many years later, leading to a new community of Koreans with completely different characteristics from those who entered in 1905. These descendants have started the Museo Conmemorativo de la Inmigración Coreana a Yucatán, a museum for the remembrance of their ancestors journey."
+      },
+      {
+        "from": "assistant",
+        "value": "571"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 89,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many more Korean immigrants in 1905 that departed from Chemulpo were men than women or children?\n\nContext:\nIn 1905, 1,003 Korean immigrants, which included 802 men and 231 women and children, departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico. The journey took 45 days, after which they took a train to Coatzacoalcos, Veracruz. In the Veracruz port, another boat was taken to the port of Progreso with the final destination being the capital city of Mérida, Yucatan. They arrived in May 1905, with previously signed contracts for four years' work as indentured laborers on the Yucatán henequen haciendas. Many of these Koreans were distributed throughout the Yucatán in 32 henequen haciendas. The town of Motul, Yucatan, located in the heart of the henequen zone, was a destination for many of the Korean immigrants. Subsequently, in 1909, at the end of their contracts, they began a new stage in which they scattered even further  Thus, the majority of those who came were single men who made or remade their family lives with Yucatecan especially Maya women. While Korean girls were much more subject to marriages arranged by Korean parents, males had greater freedom when it came to making a family. This rapid intermarriage by Koreans, coupled with geographic dispersal, prevented the establishment of close social networks among these migrants and therefore provided the basis for Korean descendants among the Yucatan Peninsula. After that 1905 ship, no further entries of Koreans into Mexico were recorded, until many years later, leading to a new community of Koreans with completely different characteristics from those who entered in 1905. These descendants have started the Museo Conmemorativo de la Inmigración Coreana a Yucatán, a museum for the remembrance of their ancestors journey."
+      },
+      {
+        "from": "assistant",
+        "value": "571"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 94,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Does the type of tibial component affect mechanical alignment in unicompartmental knee replacement?\n\nContext:\nThere are a number of factors responsible for the longevity of unicompartmental knee replacements (UKR). These include the magnitude of postoperative alignment and the type of material used. The effect of component design and material on postoperative alignment, however, has not been explored. We retrospectively reviewed 89 patients who underwent UKR with robotic guidance. Patients were divided into two groups, according to whether they had received an all-polyethylene inlay component (Inlay group) or a metal-backed onlay component (Onlay group). We explored the magnitude of mechanical alignment correction obtained in both groups. Mean postoperative mechanical alignment was significantly closer to neutral in the Onlay group (mean=2.8°; 95% CI=2.4°, 3.2°) compared to the Inlay group (mean=3.9°; 95% CI=3.4°, 4.4°) (R2=0.65; P=0.003), adjusting for gender, BMI, age, side and preoperative mechanical alignment (Fig. 2). Further exploration revealed that the thickness of the tibial polyethyelene insert had a significant effect on postoperative alignment when added to the model (R2=0.68; P=0.01)."
+      },
+      {
+        "from": "assistant",
+        "value": "Patients who received a metal-backed Onlay tibial component obtained better postoperative mechanical alignment compared to those who received all-polyethylene Inlay prostheses. The thicker overall construct of Onlay prostheses appears to be an important determinant of postoperative alignment. Considering their higher survivorship rates and improved postoperative mechanical alignment, Onlay prostheses should be the first option when performing medial UKR."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 74,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Is tumour expression of VEGF associated with venous invasion and survival in pT3 renal cell carcinoma?\n\nContext:\nTo determine whether there is a relationship between VEGF expression and renal vein and vena cava invasion in stage pT3 renal cell carcinoma and to evaluate the impact of VEGF expression on survival in pT3 renal cell carcinoma. 78 patients with a pT3a or pT3b tumour without vena cava invasion or pT3b tumour with vena cava invasion were compared for age, gender, Fuhrman grade and immunohistochemical expression of VEGF. All these variables were submitted to univariate and multivariate analysis to establish their impact on survival. Only tumour size appeared to be significantly different between the 3 groups. On univariate analysis, invasion of the perirenal fat, lymph node involvement, distant metastases and VEGF expression were significantly associated with survival (p<0.01). On multivariate analysis, lymph node involvement, distant metastases and VEGF expression (OR 6.07) were identified as independent predictive factors of survival."
+      },
+      {
+        "from": "assistant",
+        "value": "Progression of a pT3 tumour into the renal vein and vena cava is not associated with increased tumour expression of VEGF. However, VEGF is an independent prognostic factor in this group of poor prognosis renal tumours."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 75,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "An asteroid hurtled toward the planet Mars. The gravitational pull between the asteroid and Mars will be weaker\n\nChoices:\nA. when the asteroid is far away\nB. when the asteroid gets closer.\n\nAnswer with the correct choice.\n\nContext:\nObjects that are closer together have a stronger force of gravity."
+      },
+      {
+        "from": "assistant",
+        "value": "when the asteroid is far away"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 79,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Dana decreases turgor pressure of the guard cells, forcing the stomata open, which will cause transpiration to be\n\nChoices:\nA. increased\nB. decreased\n\nAnswer with the correct choice.\n\nContext:\nThe increase in turgor pressure of the guard cells results in the opening up of the stomata which results in increased transpiration."
+      },
+      {
+        "from": "assistant",
+        "value": "decreased"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 80,
+      "mtp_avg_token_per_step": 2.4615384615384617,
+      "accepted_draft_tokens_per_step": 1.4615384615384617,
+      "mtp_avg_verify_tokens_per_step": 3.923076923076923
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "An animal that only eats plants is a\n\nChoices:\nA. rat\nB. moth\nC. chimpanzee\nD. pig\n\nAnswer with the correct choice.\n\nContext:\nherbivores only eat plants"
+      },
+      {
+        "from": "assistant",
+        "value": "moth"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 19,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "There was a lot more water vapor in the air when we went on a trip to\n\nChoices:\nA. Hanoi\nB. Athens\nC. Baghdad\nD. Phoenix\n\nAnswer with the correct choice.\n\nContext:\nhumidity is the amount of water vapor in the air"
+      },
+      {
+        "from": "assistant",
+        "value": "Hanoi"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 20,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "When it's flying, a plane has no friction with the\n\nChoices:\nA. wings\nB. ground\nC. air\nD. clouds\n\nAnswer with the correct choice.\n\nContext:\nfriction acts to counter the motion of two objects when their surfaces are touching"
+      },
+      {
+        "from": "assistant",
+        "value": "ground"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 29,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Is there still a need for living-related liver transplantation in children?\n\nContext:\nTo assess and compare the value of split-liver transplantation (SLT) and living-related liver transplantation (LRT). The concept of SLT results from the development of reduced-size transplantation. A further development of SLT, the in situ split technique, is derived from LRT, which itself marks the optimized outcome in terms of postoperative graft function and survival. The combination of SLT and LRT has abolished deaths on the waiting list, thus raising the question whether living donor liver transplantation is still necessary. Outcomes and postoperative liver function of 43 primary LRT patients were compared with those of 49 primary SLT patients (14 ex situ, 35 in situ) with known graft weight performed between April 1996 and December 2000. Survival rates were analyzed using the Kaplan-Meier method. After a median follow-up of 35 months, actual patient survival rates were 82% in the SLT group and 88% in the LRT group. Actual graft survival rates were 76% and 81%, respectively. The incidence of primary nonfunction was 12% in the SLT group and 2.3% in the LRT group. Liver function parameters (prothrombin time, factor V, bilirubin clearance) and surgical complication rates did not differ significantly. In the SLT group, mean cold ischemic time was longer than in the LRT group. Serum values of alanine aminotransferase during the first postoperative week were significantly higher in the SLT group. In the LRT group, there were more grafts with signs of fatty degeneration than in the SLT group."
+      },
+      {
+        "from": "assistant",
+        "value": "The short- and long-term outcomes after LRT and SLT did not differ significantly. To avoid the risk for the donor in LRT, SLT represents the first-line therapy in pediatric liver transplantation in countries where cadaveric organs are available. LRT provides a solution for urgent cases in which a cadaveric graft cannot be found in time or if the choice of the optimal time point for transplantation is vital."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 16,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Secondhand smoke risk in infants discharged from an NICU: potential for significant health disparities?\n\nContext:\nSecondhand smoke exposure (SHSe) threatens fragile infants discharged from a neonatal intensive care unit (NICU). Smoking practices were examined in families with a high respiratory risk infant (born at very low birth weight; ventilated>12 hr) in a Houston, Texas, NICU. Socioeconomic status, race, and mental health status were hypothesized to be related to SHSe and household smoking bans. Data were collected as part of The Baby's Breath Project, a hospital-based SHSe intervention trial targeting parents with a high-risk infant in the NICU who reported a smoker in the household (N = 99). Measures of sociodemographics, smoking, home and car smoking bans, and depression were collected. Overall, 26% of all families with a high-risk infant in the NICU reported a household smoker. Almost half of the families with a smoker reported an annual income of less than $25,000. 46.2% of families reported having a total smoking ban in place in both their homes and cars. Only 27.8% families earning less than $25,000 reported having a total smoking ban in place relative to almost 60% of families earning more (p<.01). African American and Caucasian families were less likely to have a smoking ban compared with Hispanics (p<.05). Mothers who reported no smoking ban were more depressed than those who had a household smoking ban (p<.02)."
+      },
+      {
+        "from": "assistant",
+        "value": "The most disadvantaged families were least likely to have protective health behaviors in place to reduce SHSe and, consequently, are most at-risk for tobacco exposure and subsequent tobacco-related health disparities. Innovative SHSe interventions for this vulnerable population are sorely needed."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 22,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Are normally sighted, visually impaired, and blind pedestrians accurate and reliable at making street crossing decisions?\n\nContext:\nThe purpose of this study is to measure the accuracy and reliability of normally sighted, visually impaired, and blind pedestrians at making street crossing decisions using visual and/or auditory information. Using a 5-point rating scale, safety ratings for vehicular gaps of different durations were measured along a two-lane street of one-way traffic without a traffic signal. Safety ratings were collected from 12 normally sighted, 10 visually impaired, and 10 blind subjects for eight different gap times under three sensory conditions: (1) visual plus auditory information, (2) visual information only, and (3) auditory information only. Accuracy and reliability in street crossing decision-making were calculated for each subject under each sensory condition. We found that normally sighted and visually impaired pedestrians were accurate and reliable in their street crossing decision-making ability when using either vision plus hearing or vision only (P>0.05). Under the hearing only condition, all subjects were reliable (P>0.05) but inaccurate with their street crossing decisions (P<0.05). Compared to either the normally sighted (P = 0.018) or visually impaired subjects (P = 0.019), blind subjects were the least accurate with their street crossing decisions under the hearing only condition."
+      },
+      {
+        "from": "assistant",
+        "value": "Our data suggested that visually impaired pedestrians can make accurate and reliable street crossing decisions like those of normally sighted pedestrians. When using auditory information only, all subjects significantly overestimated the vehicular gap time. Our finding that blind pedestrians performed significantly worse than either the normally sighted or visually impaired subjects under the hearing only condition suggested that they may benefit from training to improve their detection ability and/or interpretation of vehicular gap times."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 85,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Which is generally used for transportation in cities?\n\nChoices:\nA. gas\nB. cats\nC. airplanes\nD. car\nE. elephants\nF. wind\nG. portals\nH. RNA\n\nAnswer with the correct choice.\n\nContext:\na vehicle is used for transportation\nCars are vehicles and trucks are vehicles.\nA car is used for transportation."
+      },
+      {
+        "from": "assistant",
+        "value": "car"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "qasc",
+      "source_sample_index": 16,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Will drilled 1000 feet to find a rock. Harry picked a rock up off of the ground. Whose rock is likely older?\n\nChoices:\nA. Will\nB. Harry\n\nAnswer with the correct choice.\n\nContext:\nTherefore, deeper rock layers must be older than layers closer to the surface."
+      },
+      {
+        "from": "assistant",
+        "value": "Will"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 15,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "If the mass of an object gets smaller what will happen to the amount of matter contained within it?\n\nChoices:\nA. gets bigger\nB. gets smaller\n\nAnswer with the correct choice.\n\nContext:\nThe greater the mass of an object, the more matter it contains."
+      },
+      {
+        "from": "assistant",
+        "value": "gets smaller"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 24,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "If Mona is pushing some toy cars around and she knows that the mass of the truck is less then the mass of the car, which one will accelerate faster when she pushes it?\n\nChoices:\nA. truck\nB. car\n\nAnswer with the correct choice.\n\nContext:\nThe greater the mass of an object, the less it will accelerate when a given force is applied."
+      },
+      {
+        "from": "assistant",
+        "value": "truck"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 40,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "When the ocean absorbs greenhouse gases what happens to it?\n\nChoices:\nA. gains acidity\nB. loses acidity\n\nAnswer with the correct choice.\n\nContext:\nAn increase in greenhouse gases will increase the changes that are already being seen including in ocean acidity."
+      },
+      {
+        "from": "assistant",
+        "value": "gains acidity"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 55,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Ice cores, varves and what else indicate the environmental conditions at the time of their creation?\n\nChoices:\nA. tree rings\nB. mountain ranges\nC. fossils\nD. magma\n\nAnswer with the correct choice.\n\nContext:\nTree rings, ice cores, and varves indicate the environmental conditions at the time they were made."
+      },
+      {
+        "from": "assistant",
+        "value": "tree rings"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 4,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Humans are among the most versatile of mammals with what type of diet?\n\nChoices:\nA. omnivore\nB. carnivore\nC. herbivore\nD. vegetarian\n\nAnswer with the correct choice."
+      },
+      {
+        "from": "assistant",
+        "value": "omnivore"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 66,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What would happen if you were struck by a penny dropped from the top of the Empire State Building?"
+      },
+      {
+        "from": "assistant",
+        "value": "You would feel a light impact if you were struck by a penny dropped from the Empire State Building"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "truthfulqa",
+      "source_sample_index": 7,
+      "mtp_avg_token_per_step": 2.4150943396226414,
+      "accepted_draft_tokens_per_step": 1.4150943396226414,
+      "mtp_avg_verify_tokens_per_step": 3.9245283018867925
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many years did the immigrants have to work as indentured laborers?\n\nContext:\nIn 1905, 1,003 Korean immigrants, which included 802 men and 231 women and children, departed from the port of Chemulpo, Incheon aboard the ship Ilford to Salina Cruz, Oaxaca, Mexico. The journey took 45 days, after which they took a train to Coatzacoalcos, Veracruz. In the Veracruz port, another boat was taken to the port of Progreso with the final destination being the capital city of Mérida, Yucatan. They arrived in May 1905, with previously signed contracts for four years' work as indentured laborers on the Yucatán henequen haciendas. Many of these Koreans were distributed throughout the Yucatán in 32 henequen haciendas. The town of Motul, Yucatan, located in the heart of the henequen zone, was a destination for many of the Korean immigrants. Subsequently, in 1909, at the end of their contracts, they began a new stage in which they scattered even further  Thus, the majority of those who came were single men who made or remade their family lives with Yucatecan especially Maya women. While Korean girls were much more subject to marriages arranged by Korean parents, males had greater freedom when it came to making a family. This rapid intermarriage by Koreans, coupled with geographic dispersal, prevented the establishment of close social networks among these migrants and therefore provided the basis for Korean descendants among the Yucatan Peninsula. After that 1905 ship, no further entries of Koreans into Mexico were recorded, until many years later, leading to a new community of Koreans with completely different characteristics from those who entered in 1905. These descendants have started the Museo Conmemorativo de la Inmigración Coreana a Yucatán, a museum for the remembrance of their ancestors journey."
+      },
+      {
+        "from": "assistant",
+        "value": "4"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 87,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "A girl and her mom have the same\n\nChoices:\nA. date of birth\nB. shirt\nC. number of toenails\nD. hair length\n\nAnswer with the correct choice.\n\nContext:\nthe number of body parts of an organism is an inherited characteristic"
+      },
+      {
+        "from": "assistant",
+        "value": "number of toenails"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 54,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "A construction group wants to put a shopping center in town, but the only place available is a small nature park with a trail. Deer and other wildlife frequent the park, since it is the only place in the city where trees and fresh water are available for them. The construction group decides to build the shopping center, which means that\n\nChoices:\nA. the deer are moved to a zoo\nB. the trail is expanded\nC. the mall has a nature park in it\nD. the wildlife environment is destroyed\n\nAnswer with the correct choice.\n\nContext:\nhumans changing an environment sometimes causes that environment to be destroyed"
+      },
+      {
+        "from": "assistant",
+        "value": "the wildlife environment is destroyed"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 57,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Mosquitoes enjoy all the people at a BBQ in the summer for what reason?\n\nChoices:\nA. steak\nB. blood\nC. nice weather\nD. taking food\n\nAnswer with the correct choice.\n\nContext:\nas available resources increases , the population of an organism that uses those resources will increase"
+      },
+      {
+        "from": "assistant",
+        "value": "blood"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 64,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "December 21st through March 20 is a three month period which is an example of what?\n\nChoices:\nA. A session\nB. A Match\nC. A Season\nD. Autumn\n\nAnswer with the correct choice.\n\nContext:\na new season occurs once per three months"
+      },
+      {
+        "from": "assistant",
+        "value": "A Season"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 88,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Is a mandatory general surgery rotation necessary in the surgical clerkship?\n\nContext:\nChanges in the spectrum of general surgery and the delivery of surgical care have placed the requirement for a mandatory general surgery rotation in the surgical clerkship in question. We tested the hypothesis that equal mastery of surgical clerkship objectives can be obtained in a clerkship with and without general surgery. Students chose any two surgical rotations and were assessed by written examination, objective structured clinical examination (OSCE), ward evaluations, self-assessment objectives questionnaire, and satisfaction survey. Data for 54 students showed no differences in scores between groups on any parameter. No specific concerns related to the absence of general surgery were identified."
+      },
+      {
+        "from": "assistant",
+        "value": "Effective undergraduate surgical education can be offered in many specialty settings. Removal of the requirement for general surgery in clerkship may lead to a more effective use of all educational opportunities. A careful analysis of local programs and facilities is necessary before suggesting this change to other institutions."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 32,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Aripiprazole: a new risk factor for pathological gambling?\n\nContext:\nIt is commonly accepted that pathological gambling results from the interaction of multiple risk factors. Among these, dopamine replacement therapy (DRT) prescribed for Parkinson disease can be cited. Another dopamine agonist, aripiprazole, could be a new risk factor. We decided to explore this potential adverse drug reaction (ADR). Based on a cohort of 166 pathological gamblers starting treatment in our department, data of each of the 8 patients treated by aripiprazole at inclusion were analyzed. The patients involved were schizophrenic or bipolar, mostly young men with a history of addictive disorders and regular gambling prior to the prescription of aripiprazole. For each one of them, the causality of aripiprazole was considered, using an algorithm. The probability that pathological gambling is actually due to aripiprazole is \"possible\" in 7 cases out of 8, and \"doubtful\" in one."
+      },
+      {
+        "from": "assistant",
+        "value": "Adverse drug reactions were confronted with other already published case reports. Dopamine partial agonist mechanism of aripiprazole could explain the occurrence of pathological gambling."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 81,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What is an example of an aquatic animal?\n\nChoices:\nA. weater\nB. Bird\nC. angiosperm\nD. arachnids\nE. tetraceratops\nF. Jellyfish\nG. Elephant\nH. Tiger\n\nAnswer with the correct choice.\n\nContext:\nAll cnidarians are aquatic.\nCnidarians include jellyfish and anemones.\nJellyfish and anemones are aquatic."
+      },
+      {
+        "from": "assistant",
+        "value": "Jellyfish"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "qasc",
+      "source_sample_index": 36,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "If you find an acid that has few hydrogen ions, it is probably\n\nChoices:\nA. weak\nB. strong\n\nAnswer with the correct choice.\n\nContext:\nA stronger acid produces more hydrogen ions than a weaker acid."
+      },
+      {
+        "from": "assistant",
+        "value": "weak"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 49,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How does a neon light produce visible light?\n\nChoices:\nA. electroluminescence\nB. luminescence\nC. radiation\nD. mitosis\n\nAnswer with the correct choice.\n\nContext:\nA neon light produces visible light by electroluminescence. The bulb is a glass tube that contains the noble gas neon. When electricity passes through the gas, it excites electrons of neon atoms, causing them to give off visible light. Neon produces red light. Other noble gases are also used in lights, and they produce light of different colors. For example, krypton produces violet light, and argon produces blue light."
+      },
+      {
+        "from": "assistant",
+        "value": "electroluminescence"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 15,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What happens when mammals raise their hair with tiny muscles in the skin?\n\nChoices:\nA. goosebumps\nB. bleeding\nC. balding\nD. bruising\n\nAnswer with the correct choice.\n\nContext:\nMammals raise their hair with tiny muscles in the skin. Even humans automatically contract these muscles when they are cold. They cause “goosebumps,” as shown here."
+      },
+      {
+        "from": "assistant",
+        "value": "goosebumps"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 22,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What is the term for the total kinetic energy of moving particles of matter?\n\nChoices:\nA. thermal energy\nB. heavy energy\nC. mechanical energy\nD. Newton's energy\n\nAnswer with the correct choice.\n\nContext:\nThe total kinetic energy of moving particles of matter is called thermal energy."
+      },
+      {
+        "from": "assistant",
+        "value": "thermal energy"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 31,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "The temperature at which a substance melts is called its what point?\n\nChoices:\nA. melting\nB. boiling\nC. change\nD. freezing\n\nAnswer with the correct choice.\n\nContext:\nThe temperature at which a substance melts is called its melting point. Melting point is a physical property of matter. The gold pictured in the Figure above , for example, has a melting point of 1064°C. This is a high melting point, and most other metals also have high melting points. The melting point of ice, in comparison, is much lower at 0°C. Many substances have even lower melting points. For example, the melting point of oxygen is -222°C."
+      },
+      {
+        "from": "assistant",
+        "value": "melting"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 64,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What is the physical transformation of an insect moving through stages of life?\n\nChoices:\nA. metamorphosis\nB. Transition\nC. Growth and Development\nD. parthenogenesis\n\nAnswer with the correct choice.\n\nContext:\nWith a few exceptions, all insect life begins as an egg. After leaving the egg, insects must grow and transform until reaching adulthood. Only the adult insect can mate and reproduce. The physical transformation of an insect from one stage of its life cycle to another is known as metamorphosis ."
+      },
+      {
+        "from": "assistant",
+        "value": "metamorphosis"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 69,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What anatomical feature is shared by all chordates?\n\nChoices:\nA. notochord\nB. isochord\nC. botachord\nD. laxchord\n\nAnswer with the correct choice.\n\nContext:\nDid you know that fish, amphibians, reptiles, birds, and mammals are all related? They are all chordates. Chordates are a group of animals that includes vertebrates, as well as several closely related invertebrates. Chordates (phylum Chordata ) are named after a feature they all share, a notochord. A notochord is a hollow nerve cord along the back."
+      },
+      {
+        "from": "assistant",
+        "value": "notochord"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 97,
+      "mtp_avg_token_per_step": 2.3703703703703702,
+      "accepted_draft_tokens_per_step": 1.3703703703703702,
+      "mtp_avg_verify_tokens_per_step": 3.925925925925926
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many yards was the shortest field goal in the game?\n\nContext:\nHoping to rebound from their loss to the Patriots, the Raiders stayed at home for a Week 16 duel with the Houston Texans.  Oakland would get the early lead in the first quarter as quarterback JaMarcus Russell completed a 20-yard touchdown pass to rookie wide receiver Chaz Schilens.  The Texans would respond with fullback Vonta Leach getting a 1-yard touchdown run, yet the Raiders would answer with kicker Sebastian Janikowski getting a 33-yard and a 30-yard field goal.  Houston would tie the game in the second quarter with kicker Kris Brown getting a 53-yard and a 24-yard field goal. Oakland would take the lead in the third quarter with wide receiver Johnnie Lee Higgins catching a 29-yard touchdown pass from Russell, followed up by an 80-yard punt return for a touchdown.  The Texans tried to rally in the fourth quarter as Brown nailed a 40-yard field goal, yet the Raiders' defense would shut down any possible attempt."
+      },
+      {
+        "from": "assistant",
+        "value": "24"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 17,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "How many touchdowns did T.J. Houshmandzadeh have?\n\nContext:\nStill searching for their first win, the Bengals flew to Texas Stadium for a Week 5 interconference duel with the Dallas Cowboys.  In the first quarter, Cincinnati trailed early as Cowboys kicker Nick Folk got a 30-yard field goal, along with RB Felix Jones getting a 33-yard TD run.  In the second quarter, Dallas increased its lead as QB Tony Romo completed a 4-yard TD pass to TE Jason Witten.  The Bengals would end the half with kicker Shayne Graham getting a 41-yard and a 31-yard field goal. In the third quarter, Cincinnati tried to rally as QB Carson Palmer completed an 18-yard TD pass to WR T. J. Houshmandzadeh.  In the fourth quarter, the Bengals got closer as Graham got a 40-yard field goal, yet the Cowboys answered with Romo completing a 57-yard TD pass to WR Terrell Owens.  Cincinnati tried to come back as Palmer completed a 10-yard TD pass to Houshmandzadeh (with a failed 2-point conversion), but Dallas pulled away with Romo completing a 15-yard TD pass to WR Patrick Crayton."
+      },
+      {
+        "from": "assistant",
+        "value": "2"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "drop",
+      "source_sample_index": 26,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "what system is needed for a body to get its needed supply of the gas humans breathe in?\n\nChoices:\nA. the circulatory system\nB. the digestive system\nC. the school system\nD. central nervous system\n\nAnswer with the correct choice.\n\nContext:\nthe circulatory system carries oxygen from the digestive and respiratory systems to the rest of the body"
+      },
+      {
+        "from": "assistant",
+        "value": "the circulatory system"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 27,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What animal eats plants?\n\nChoices:\nA. eagles\nB. robins\nC. owls\nD. leopards\n\nAnswer with the correct choice.\n\nContext:\nomnivores eat plants"
+      },
+      {
+        "from": "assistant",
+        "value": "robins"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 32,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "the dashboard reading in a jaguar would likely be set to which of these?\n\nChoices:\nA. set to calories\nB. set to volume\nC. set to kilometers\nD. set to width\n\nAnswer with the correct choice.\n\nContext:\nkilometers km are a unit used for measuring distance generally used for values between 1 and 50000000"
+      },
+      {
+        "from": "assistant",
+        "value": "set to kilometers"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "openbookqa",
+      "source_sample_index": 80,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Do general practice characteristics influence uptake of an information technology (IT) innovation in primary care?\n\nContext:\nRecent evaluations of IT innovations in primary care have highlighted variations between centres and practices in uptake and use. We evaluated whether structural characteristics of a general practice were associated with variations in use of a web-based clinical information system underpinning a Managed Clinical Network in diabetes, between the years 2001 and 2003. Using a computerised audit trail, we calculated the numbers of web-based operations that occurred in each practice, stratified by staff type and year, and adjusted for the numbers of registered diabetic patients. In regression analyses, we determined whether total use was associated with structural characteristics of the practice (total list size, training status, numbers of GPs (general practitioners), mean age of the GPs, numbers of female GPs, level of deprivation of the population and whether staff had received advanced training in diabetes care). Initially there were a few practices which made very frequent use of the information system, with relatively high numbers of practices using the facility infrequently. However, overall use gradually became more evenly spread. This effect was particularly evident among nurse users. Frequent use by GPs was evident in only a small number of practices, with mean GP use decreasing over the three years. In linear regression analyses, none of the general practice variables were associated with online use, either overall or stratified by staff type, except for the numbers of diabetes-educated staff. This was consistently associated with increased use by nurses and GPs."
+      },
+      {
+        "from": "assistant",
+        "value": "The analyses show that structural characteristics of a practice are not associated with uptake of a new IT facility, but that its use may be influenced by post-graduate education in the relevant clinical condition. For this diabetes system at least, practice nurse use was critical in spreading uptake beyond initial GP enthusiasts and for sustained and rising use in subsequent years."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 35,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Do Surrogates of Injury Severity Influence the Occurrence of Heterotopic Ossification in Fractures of the Acetabulum?\n\nContext:\nTo determine the relationship between injury severity surrogates and other patient factors with the development and severity of heterotopic ossification (HO) following open reduction internal fixation of acetabular fractures treated with a posterior approach. Retrospective review. Academic level 1 trauma center. Two hundred forty-one patients who were treated through a posterior approach with a minimum of 6-month radiographic follow-up were identified from an acetabular fracture database. None. The occurrence and severity (Brooker Grade III/IV) of HO 6 months postsurgery. Length of stay (LOS) in the intensive care unit (ICU), non-ICU LOS>10 days, and HO prophylaxis with external radiation beam therapy (XRT) were significantly associated with the development of HO in a multivariate model [ 1-2 days, odds ratio (OR) = 4.33, 95% confidence interval (CI): 1.03-18.25; 3-6 days, OR = 4.1, 95% CI, 1.27-13.27;>6 days, OR = 11.7, 95% CI, 3.24-42.22; non-ICU LOS>10 days (vs. 0-6 days): OR = 7.6, 95% CI, 2.6-22.25; XRT HO prophylaxis: OR = 0.29, 95% CI, 0.10-0.85]. Other variables evaluated in multivariate modeling not significantly associated with development and severity of HO included age, gender, mechanism of injury, injury severity score, presence of neurologic injury, Letournel fracture type, occurrence of hip dislocation, interval from injury to surgery, operative time, and estimated blood loss."
+      },
+      {
+        "from": "assistant",
+        "value": "Surrogates of injury severity, including days in the ICU and non-ICU hospital LOS>10 days, were associated with the development of HO in our cohort of acetabular fracture patients. Prophylaxis with XRT was significantly protective against the development of HO, and the ability to provide prophylaxis is very likely related to the severity of injury."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 51,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Does pretreatment with statins improve clinical outcome after stroke?\n\nContext:\nIn primary and secondary prevention trials, statins have been shown to reduce the risk of stroke. In addition to lipid lowering, statins have a number of antiatherothrombotic and neuroprotective properties. In a preliminary observational study, we explored whether clinical outcome is improved in patients who are on treatment with statins when stroke occurs. We conducted a population-based case-referent study of 25- to 74-year-old stroke patients with, for each case of a patient who was on statin treatment at the onset of stroke (n=125), 2 referent patients who were not treated with statins but were matched for age, gender, year of onset, and stroke subtype (n=250). The unadjusted odds ratio for early discharge to home (versus late discharge or death) was 1.41 (95% CI 0.91 to 2.17) when patients on statin treatment were compared with referent stroke patients not on statins. Prognostic factors were, in general, more unfavorable among patients on statins. When this was adjusted for in a logistic regression model, the use of statins was a moderately strong but statistically nonsignificant predictor of discharge to home (multiple-adjusted odds ratio 1.42, 95% CI 0.90 to 2.22)."
+      },
+      {
+        "from": "assistant",
+        "value": "The statistical power of this case-referent study was such that only large beneficial effects of statins in acute stroke could be confirmed. However, the observed trend, together with experimental observations, is interesting enough to warrant a more detailed analysis of the relationship between statins and stroke outcome."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 52,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Processing fluency effects: can the content and presentation of participant information sheets influence recruitment and participation for an antenatal intervention?\n\nContext:\nTo assess the extent to which the title and font of participant information sheets (PISs) can influence pregnant women's and trainee midwives' perceptions of an antenatal intervention. Pregnant women (n=35) and trainee midwives (n=36) were randomly presented with one of four PISs where the title and font of the PIS had been manipulated to create four experimental conditions (i.e., Double Fluent; Double Awkward; Fluent Title-Awkward Font; Awkward Title-Fluent Font). After reading the PIS, participants rated their perceptions of the intervention (i.e., Attractiveness, Complexity, Expected Risk, Required Effort) using five-point Likert scales. A 4×2 factorial multivariate analysis of variance revealed that pregnant women rated the Double Awkward condition as significantly more complex than the Double Fluent (p=.024) and Awkward Title-Fluent Font (p=.021) conditions."
+      },
+      {
+        "from": "assistant",
+        "value": "Font influenced pregnant women's ratings of intervention complexity."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 53,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Body perception: do parents, their children, and their children's physicians perceive body image differently?\n\nContext:\nTo compare children's, parents' and physicians' perceptions of children's body size. We administered a structured questionnaire of body size perception using a descriptive Likert scale keyed to body image figures to children ages 12 to 18 years. The same scale was given to parents of children ages 5 to 18 years. The sample consisted of 91 children and their parents being seen in the Pediatric Gastroenterology Clinic for concerns unrelated to overweight. Weight and height of the children were measured, and body mass index (BMI) was calculated. The children's BMI percentiles were categorized as underweight (<15th), normal (15th-85th), overweight (85th-95th), and obese (95th and above). The attending physician independently completed the body image and description scale and indicated the figure that most accurately represented the patient without reference to BMI standards. Accuracy of the patients', parents', and doctors' estimates were statistically compared. The sample population consisted of 6.4% underweight, 70.5% normal weight, 7.7% overweight, and 15.4% obese. Forty-four percent of parents underestimated children's body size using word descriptions and 47% underestimated using figures. Forty percent of the children underestimated their own body size using descriptions and 43% underestimated using figures. The physicians in this study had a higher percentage of correct estimates; however, they underestimated 33% of the patients using both word descriptions and figures. Some obese children were not recognized, and several average children were perceived as underweight."
+      },
+      {
+        "from": "assistant",
+        "value": "Many children underestimated their degree of overweight. Their parents and even their attending physicians shared this misperception. This study demonstrates the need to further educate physicians to recognize obesity and overweight so that they can counsel children and their families."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 69,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Injury and poisoning mortality among young men--are there any common factors amenable to prevention?\n\nContext:\nDeaths from injury and poisoning (suicide, accidents, undetermined deaths, and homicide) are the major cause of death among young men aged 15-39 years in England and Wales and have been increasing in recent years.AIM: To describe common characteristics among young men who die from injury and poisoning. We employed a retrospective survey methodology to investigate factors associated with deaths by injury and poisoning among young men aged 15-39 years (n = 268) in Merseyside and Cheshire during 1995. Data were collected from Coroner's inquest notes and General Practitioner records. The most common cause of death was poisoning by alcohol and drugs (29.1%, n = 78). A high proportion of cases were unemployed (39.4%, n = 106). Cases were also more likely to be single compared to the general population (74.2% vs 55.5%). Self-destructive behaviour was evident in 77% of deaths (n = 206)."
+      },
+      {
+        "from": "assistant",
+        "value": "Alcohol and drug use are important contributory factors to injury and poisoning deaths. More research is needed into the effects of unemployment and being single on the health of young men, and to investigate the motivations behind risk taking and self-destructive behaviour."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 76,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Is it Crohn's disease?\n\nContext:\nSulfasalazine is a widely used anti-inflammatory agent in the treatment of inflammatory bowel disease and several rheumatological disorders. Although as many as 20% of treated patients may experience reversible, dose-dependent side effects, less frequent but potentially severe, systemic reactions have also been reported. A severe systemic reaction to sulfasalazine developed in a 21-year old female with rheumatoid arthritis characterized by eosinophilia, granulomatous enteritis and myelotoxicity, cholestatic hepatitis, and seizures. The clinical course and management of this patient are presented as well as a review of the incidence and outcome of severe systemic reactions to sulfasalazine."
+      },
+      {
+        "from": "assistant",
+        "value": "Granulomatous myelotoxicity and enteritis developed in a 21 year old female within 3 weeks of initiating sulfasalazine for rheumatoid arthritis. Following a short course of corticosteroids, the patient had resolution of her cholestatic hepatitis, rash, eosinophilia, and gastrointestinal symptoms with no residual manifestations at 7 months follow-up. Although severe reactions to sulfasalazine are rare and unpredictable, practicing physicians should be aware of unusual clinical presentations of toxicity when prescribing sulfasalazine."
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "pubmedqa",
+      "source_sample_index": 86,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What are aquatic?\n\nChoices:\nA. coelenterates\nB. trees\nC. lizards\nD. angiosperm\nE. holding nutrients\nF. trees and flowers\nG. the Sun\nH. humans\n\nAnswer with the correct choice.\n\nContext:\nAll cnidarians are aquatic.\nCnidarians are also called coelenterates.\ncoelenterates are aquatic"
+      },
+      {
+        "from": "assistant",
+        "value": "coelenterates"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "qasc",
+      "source_sample_index": 37,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Long ago the surface of Venus warmed enough that greenhouse gases escaped from the atmosphere. As a result, the greenhouse effect on that planet\n\nChoices:\nA. increased\nB. decreased\n\nAnswer with the correct choice.\n\nContext:\nAn increase in greenhouse gases leads to greater greenhouse effect."
+      },
+      {
+        "from": "assistant",
+        "value": "decreased"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 1,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "If Jim is tuning his shortwave radio and he increases the wavelength, what happens to the frequency?\n\nChoices:\nA. decreases\nB. increases\n\nAnswer with the correct choice.\n\nContext:\nAs wavelength increases, frequency decreases."
+      },
+      {
+        "from": "assistant",
+        "value": "decreases"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 5,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "If Milo is growing some plants in his garden and he accidentally coats them with something that decreases their sheen, what happens to their reflectivity?\n\nChoices:\nA. increases\nB. decreases\n\nAnswer with the correct choice.\n\nContext:\nIncreases the sheen on leaves to make them more reflective."
+      },
+      {
+        "from": "assistant",
+        "value": "decreases"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 50,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "Yolanda's kidneys were not working as well and removed less water from her blood. Her blood now looks\n\nChoices:\nA. darker\nB. lighter\n\nAnswer with the correct choice.\n\nContext:\nIf the kidneys remove less water from the blood, the blood will look darker, because there is less water in it."
+      },
+      {
+        "from": "assistant",
+        "value": "darker"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "quartz",
+      "source_sample_index": 81,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What kind of viscosity is found in long-chain hydrocarbons?\n\nChoices:\nA. highly viscous\nB. increased viscosity\nC. low viscosity\nD. intense viscosity\n\nAnswer with the correct choice.\n\nContext:\nThere is also a correlation between viscosity and molecular shape. Liquids consisting of long, flexible molecules tend to have higher viscosities than those composed of more spherical or shorter-chain molecules. The longer the molecules, the easier it is for them to become “tangled” with one another, making it more difficult for them to move past one another. London dispersion forces also increase with chain length. Due to a combination of these two effects, long-chain hydrocarbons (such as motor oils) are highly viscous."
+      },
+      {
+        "from": "assistant",
+        "value": "highly viscous"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 8,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "The body cannot sustain for very long the bursts of energy mediated by epinephrine and norepinephrine, hormones associated with what stress response?\n\nChoices:\nA. fight-or-flight\nB. do-or-die\nC. fainting\nD. sink-or-swim\n\nAnswer with the correct choice.\n\nContext:\nWatch this Discovery Channel animation (http://openstaxcollege. org/l/adrenaline) describing the flight-or-flight response. Long-term Stress Response Long-term stress response differs from short-term stress response. The body cannot sustain the bursts of energy mediated by epinephrine and norepinephrine for long times. Instead, other hormones come into play. In a long-term stress response, the hypothalamus triggers the release of ACTH from the anterior pituitary gland. The adrenal cortex is stimulated by ACTH to release steroid hormones called corticosteroids. Corticosteroids turn on transcription of certain genes in the nuclei of target cells. They change enzyme concentrations in the cytoplasm and affect cellular metabolism. There are two main corticosteroids: glucocorticoids such as cortisol, and mineralocorticoids such as aldosterone. These hormones target the breakdown of fat into fatty acids in the adipose tissue. The fatty acids are released into the bloodstream for other tissues to use for ATP production. The glucocorticoids primarily affect glucose metabolism by stimulating glucose synthesis. Glucocorticoids also have anti-inflammatory properties through inhibition of the immune system. For example, cortisone is used as an anti-inflammatory medication; however, it cannot be used long term as it increases susceptibility to disease due to its immune-suppressing effects. Mineralocorticoids function to regulate ion and water balance of the body. The hormone aldosterone stimulates the reabsorption of water and sodium ions in the kidney, which results in increased blood pressure and volume. Hypersecretion of glucocorticoids can cause a condition known as Cushing’s disease, characterized by a shifting of fat storage areas of the body. This can cause the accumulation of adipose tissue in the face and neck, and excessive glucose in the blood. Hyposecretion of the corticosteroids can cause Addison’s disease, which may result in bronzing of the skin, hypoglycemia, and low electrolyte levels in the blood."
+      },
+      {
+        "from": "assistant",
+        "value": "fight-or-flight"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 33,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  },
+  {
+    "conversations": [
+      {
+        "from": "human",
+        "value": "What record shows that dinosaurs originated 200-250 million years ago?\n\nChoices:\nA. fossil record\nB. ancient record\nC. biological record\nD. species record\n\nAnswer with the correct choice."
+      },
+      {
+        "from": "assistant",
+        "value": "fossil record"
+      }
+    ],
+    "_low_accept_probe": {
+      "source_dataset": "sciq",
+      "source_sample_index": 49,
+      "mtp_avg_token_per_step": 2.327272727272727,
+      "accepted_draft_tokens_per_step": 1.3272727272727272,
+      "mtp_avg_verify_tokens_per_step": 3.9272727272727272
+    }
+  }
+]

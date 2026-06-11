@@ -67,6 +67,18 @@ class ChunkedPrefillBackend(ModeBackend):
             logger.info(f"mtp_gloo_group ranks {dist.get_rank(self.mtp_gloo_group)}")
         return
 
+    def _update_decode_exec_stats_for_round(
+        self, decode_reqs: List[InferReq], old_output_lens: List[int], decode_step_time_ms: float
+    ):
+        for req, old_output_len in zip(decode_reqs, old_output_lens):
+            decode_token_num = req.cur_output_len - old_output_len
+            if decode_token_num > 0:
+                req.update_decode_exec_stats(
+                    decode_exec_time_ms=decode_step_time_ms,
+                    decode_exec_token_num=int(decode_token_num),
+                )
+        return
+
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
         try:
@@ -101,9 +113,17 @@ class ChunkedPrefillBackend(ModeBackend):
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    old_output_lens = [req.cur_output_len for req in decode_reqs]
+                    decode_step_start_time = time.perf_counter()
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
+                    )
+                    decode_step_time_ms = (time.perf_counter() - decode_step_start_time) * 1000.0
+                    self._update_decode_exec_stats_for_round(
+                        decode_reqs=decode_reqs,
+                        old_output_lens=old_output_lens,
+                        decode_step_time_ms=decode_step_time_ms,
                     )
                     continue
                 elif run_way.is_pass():

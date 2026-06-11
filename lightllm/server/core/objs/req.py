@@ -109,6 +109,8 @@ class Req(ctypes.Structure):
         # mtp draft model 多输出命中接受的token数量
         ("mtp_accepted_token_num", ctypes.c_int),
         ("mtp_verify_token_num", ctypes.c_int),
+        ("decode_exec_time_ms", ctypes.c_double),
+        ("decode_exec_token_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
         # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
@@ -178,6 +180,8 @@ class Req(ctypes.Structure):
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
         self.mtp_verify_token_num = 0
+        self.decode_exec_time_ms = 0.0
+        self.decode_exec_token_num = 0
         self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1

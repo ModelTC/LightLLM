@@ -565,6 +565,11 @@ class InferReq:
         # 用于统计 mtp 验证时发送给主模型的 token 总数
         self.shm_req.mtp_verify_token_num += verify_token_num
 
+    def update_decode_exec_stats(self, decode_exec_time_ms: float, decode_exec_token_num: int):
+        self.shm_req.decode_exec_time_ms += decode_exec_time_ms
+        self.shm_req.decode_exec_token_num += decode_exec_token_num
+        return
+
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
 

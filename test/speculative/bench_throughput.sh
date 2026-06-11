@@ -1,9 +1,15 @@
 #!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
+
 # 默认值
 PORT=8088
 NUM_PROMPTS=1000
-TOKENIZER="/mtc/models/qwen3-32b"
-DATASET="/data/nvme0/chenjunyi/project/lightllm/datasets/gsm8k.json"
+TOKENIZER="${LIGHTLLM_QWEN3_32B_TOKENIZER:-/mtc/models/qwen3-32b}"
+DATASET="${LIGHTLLM_BENCH_DATASET:-${LIGHTLLM_PROJECT_ROOT}/datasets/gsm8k.json}"
 HISTORY_TURNS=1
 CONCURRENCY=128
 # 解析命令行参数
@@ -39,8 +45,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-# 执行 Python 脚本
-python /data/nvme0/chenjunyi/project/lightllm/test/benchmark/service/benchmark_sharegpt.py \
+
+"${LIGHTLLM_SPEC_PYTHON}" "${LIGHTLLM_BENCHMARK_SCRIPT}" \
     --port "$PORT" \
     --num-prompts "$NUM_PROMPTS" \
     --tokenizer "$TOKENIZER" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Download and prepare benchmark datasets for benchmark_sharegpt.py
-Extended with: PubMedQA (medical), LegalBench, FinQA, MATH
+Extended with: PubMedQA, LegalBench, FinQA, MATH and several colder / rarer QA datasets
 """
 
 import argparse
@@ -20,6 +20,26 @@ def build_prompt(question: str, context: str = "", long_answer: bool = False) ->
     if long_answer:
         prompt += "\n\nPlease provide a detailed, step-by-step explanation."
     return prompt
+
+
+def save_results(output_path: str, results: List[Dict[str, Any]]):
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+
+def get_choice_answer(choices: Dict[str, List[str]], answer_key: Any) -> str:
+    labels = choices["label"]
+    texts = choices["text"]
+    if isinstance(answer_key, int):
+        return texts[answer_key]
+    for label, text in zip(labels, texts):
+        if label == answer_key:
+            return text
+    raise ValueError(f"Cannot find answer {answer_key} in choices {labels}")
+
+
+def build_choices_text(choices: Dict[str, List[str]]) -> str:
+    return "\n".join([f"{label}. {text}" for label, text in zip(choices["label"], choices["text"])])
 
 
 # ========== Existing Datasets ==========
@@ -41,7 +61,7 @@ def prepare_gsm8k(output_path: str, num_samples: int = None, long_answer: bool =
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_humaneval(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -61,7 +81,7 @@ def prepare_humaneval(output_path: str, num_samples: int = None, long_answer: bo
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_mmlu(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -91,7 +111,7 @@ def prepare_mmlu(output_path: str, num_samples: int = None, long_answer: bool = 
                 ]
             })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_truthfulqa(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -111,7 +131,7 @@ def prepare_truthfulqa(output_path: str, num_samples: int = None, long_answer: b
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_sharegpt(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -126,7 +146,7 @@ def prepare_sharegpt(output_path: str, num_samples: int = None, long_answer: boo
         if len(convs) >= 2:
             results.append({"conversations": convs})
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_alpaca(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -151,7 +171,7 @@ def prepare_alpaca(output_path: str, num_samples: int = None, long_answer: bool 
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_pubmedqa(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -172,7 +192,7 @@ def prepare_pubmedqa(output_path: str, num_samples: int = None, long_answer: boo
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_legalbench(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -196,7 +216,7 @@ def prepare_legalbench(output_path: str, num_samples: int = None, long_answer: b
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_finqa(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -217,7 +237,7 @@ def prepare_finqa(output_path: str, num_samples: int = None, long_answer: bool =
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
 
 
 def prepare_math(output_path: str, num_samples: int = None, long_answer: bool = False):
@@ -237,7 +257,147 @@ def prepare_math(output_path: str, num_samples: int = None, long_answer: bool = 
             ]
         })
 
-    json.dump(results, open(output_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    save_results(output_path, results)
+
+
+def prepare_drop(output_path: str, num_samples: int = None, long_answer: bool = False):
+    dataset = load_dataset("ucinlp/drop", split="validation")
+    results = []
+
+    for i, item in enumerate(dataset):
+        if num_samples and i >= num_samples:
+            break
+
+        spans = item.get("answers_spans", {}).get("spans", [])
+        if not spans:
+            continue
+
+        prompt = build_prompt(item["question"], item["passage"], long_answer)
+        results.append({
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "assistant", "value": spans[0]}
+            ]
+        })
+
+    save_results(output_path, results)
+
+
+def prepare_qasc(output_path: str, num_samples: int = None, long_answer: bool = False):
+    dataset = load_dataset("allenai/qasc", split="validation")
+    results = []
+
+    for i, item in enumerate(dataset):
+        if num_samples and i >= num_samples:
+            break
+
+        choices = item["choices"]
+        answer = get_choice_answer(choices, item["answerKey"])
+        facts = []
+        for key in ["fact1", "fact2", "combinedfact"]:
+            value = item.get(key)
+            if value:
+                facts.append(value)
+
+        prompt = build_prompt(
+            f"{item['question']}\n\nChoices:\n{build_choices_text(choices)}\n\nAnswer with the correct choice.",
+            context="\n".join(facts),
+            long_answer=long_answer,
+        )
+
+        results.append({
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "assistant", "value": answer}
+            ]
+        })
+
+    save_results(output_path, results)
+
+
+def prepare_quartz(output_path: str, num_samples: int = None, long_answer: bool = False):
+    dataset = load_dataset("allenai/quartz", split="validation")
+    results = []
+
+    for i, item in enumerate(dataset):
+        if num_samples and i >= num_samples:
+            break
+
+        choices = item["choices"]
+        answer = get_choice_answer(choices, item["answerKey"])
+        prompt = build_prompt(
+            f"{item['question']}\n\nChoices:\n{build_choices_text(choices)}\n\nAnswer with the correct choice.",
+            context=item.get("para", ""),
+            long_answer=long_answer,
+        )
+
+        results.append({
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "assistant", "value": answer}
+            ]
+        })
+
+    save_results(output_path, results)
+
+
+def prepare_sciq(output_path: str, num_samples: int = None, long_answer: bool = False):
+    dataset = load_dataset("allenai/sciq", split="test")
+    results = []
+
+    for i, item in enumerate(dataset):
+        if num_samples and i >= num_samples:
+            break
+
+        choices = {
+            "label": ["A", "B", "C", "D"],
+            "text": [
+                item["correct_answer"],
+                item["distractor1"],
+                item["distractor2"],
+                item["distractor3"],
+            ],
+        }
+        prompt = build_prompt(
+            f"{item['question']}\n\nChoices:\n{build_choices_text(choices)}\n\nAnswer with the correct choice.",
+            context=item.get("support", ""),
+            long_answer=long_answer,
+        )
+
+        results.append({
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "assistant", "value": item["correct_answer"]}
+            ]
+        })
+
+    save_results(output_path, results)
+
+
+def prepare_openbookqa(output_path: str, num_samples: int = None, long_answer: bool = False):
+    dataset = load_dataset("allenai/openbookqa", "additional", split="test")
+    results = []
+
+    for i, item in enumerate(dataset):
+        if num_samples and i >= num_samples:
+            break
+
+        choices = item["choices"]
+        answer = get_choice_answer(choices, item["answerKey"])
+        prompt = build_prompt(
+            f"{item['question_stem']}\n\nChoices:\n{build_choices_text(choices)}\n\nAnswer with the correct choice.",
+            context=item.get("fact1", ""),
+            long_answer=long_answer,
+        )
+
+        results.append({
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "assistant", "value": answer}
+            ]
+        })
+
+    save_results(output_path, results)
 
 
 # ========== Registry ==========
@@ -253,6 +413,11 @@ DATASET_HANDLERS = {
     "legalbench": prepare_legalbench,
     "finqa": prepare_finqa,
     "math": prepare_math,
+    "drop": prepare_drop,
+    "qasc": prepare_qasc,
+    "quartz": prepare_quartz,
+    "sciq": prepare_sciq,
+    "openbookqa": prepare_openbookqa,
 }
 
 

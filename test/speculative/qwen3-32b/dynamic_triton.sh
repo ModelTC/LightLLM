@@ -1,8 +1,20 @@
-MTP_STEP=4
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common.sh"
+
+MTP_STEP=3
+PORT=8088
 export CUDA_VISIBLE_DEVICES=3,4
 # 解析命名参数
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
         --mtp-step)
             MTP_STEP="$2"
             shift 2
@@ -14,19 +26,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-MODEL_DIR=/mtc/models/qwen3-32b 
-DRAFT_MODEL_DIR=/mtc/models/qwen3-32b-eagle3
+MODEL_DIR="${LIGHTLLM_QWEN3_32B_MODEL_DIR:-/mtc/models/qwen3-32b}"
+DRAFT_MODEL_DIR="${LIGHTLLM_QWEN3_32B_DRAFT_MODEL_DIR:-/mtc/models/qwen3-32b-eagle3}"
 
-PATH=/data/nvme0/chenjunyi/miniconda3/envs/lightllm/bin:$PATH
-
-LOADWORKER=18 /data/nvme0/chenjunyi/miniconda3/envs/lightllm/bin/python -m lightllm.server.api_server --port 8088 \
+LOADWORKER=18 "${LIGHTLLM_SERVER_PYTHON}" -m lightllm.server.api_server --port "${PORT}" \
 --tp 2 \
---model_dir ${MODEL_DIR} \
+--model_dir "${MODEL_DIR}" \
 --mtp_mode eagle3 \
---disable_dynamic_prompt_cache \
---mtp_draft_model_dir ${DRAFT_MODEL_DIR} \
+--mtp_draft_model_dir "${DRAFT_MODEL_DIR}" \
 --graph_grow_step_size 1 \
---mtp_step ${MTP_STEP}  \
+--mtp_step "${MTP_STEP}" \
 --llm_decode_att_backend triton \
 --mtp_dynamic_verify
 # if you want to enable microbatch overlap, you can uncomment the following lines

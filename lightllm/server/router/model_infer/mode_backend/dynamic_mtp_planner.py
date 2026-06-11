@@ -25,7 +25,7 @@ class DynamicMTPPlanner:
         self._use_random_mode = use_random_mode
         random.seed(0)
 
-        # 记录每个请求对应的单token速度记录信息
+        # 记录每个请求对应的单token速度记录信息o
         self.req_num_to_speed_dict: Dict[int, List[_EMAValue]] = {}
         return
 
