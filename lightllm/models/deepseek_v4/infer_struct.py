@@ -26,3 +26,10 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
         self.position_cos_compress = torch.index_select(model._cos_cached_compress, 0, pos)
         self.position_sin_compress = torch.index_select(model._sin_cached_compress, 0, pos)
+        # prefill-cudagraph 桶填充的 HOLD 尾请求的 q 行数。其注意力读 HOLD 槽位(内容被并发写
+        # 竞争,每轮不同),输出必须清零,否则 pad 行 hidden 不确定 -> MoE 路由抖动 -> 共享 expert
+        # 批次组成变化 -> 真实行 GEMM 归约顺序变化(ulp 级),44 层放大后翻转低置信 token。
+        self._dsv4_prefill_pad_q_len = 0
+        if self.is_prefill and self.b_req_idx.numel() > 0:
+            if int(self.b_req_idx[-1].item()) == self.req_manager.HOLD_REQUEST_ID:
+                self._dsv4_prefill_pad_q_len = int((self.b_seq_len[-1] - self.b_ready_cache_len[-1]).item())

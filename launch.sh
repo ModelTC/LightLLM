@@ -5,9 +5,6 @@
 #
 # Required env/flags and why:
 #   LOADWORKER=16      - parallel weight loading (~5x faster startup).
-#   Optional sizing knobs (defaults shown): LIGHTLLM_DSV4_SWA_FULL_TOKENS_RATIO=0.1 (swa pool floor
-#   as a fraction of full tokens; raise for long-prompt x high-parallel workloads),
-#   LIGHTLLM_DSV4_PROFILE_MAX_FULL_TOKENS=1500000 (auto-profile cap on max_total_token_num).
 #   PYTHONPATH sglang  - _get_qkv / compressor reuse sglang.jit_kernel.dsv4 (fused_q_norm_rope, compress_old).
 #   --batch_max_tokens 8192        - FlashMLA get_decoding_sched_meta rejects >8192 rows per call (probed: 8192 OK, 12288 fails).
 #   decode cudagraph ENABLED - the v5 decode path is graph-safe: slot alloc/scatter in prep (outside
@@ -17,6 +14,18 @@
 #     (gsm8k dropped to 0.74 with coherent-but-runaway generations). reset_sched_meta_for_capture()
 #     in cuda_graph._capture_decode re-plans INSIDE the captured region so every replay re-plans.
 #     DSV4 caps graph max_len_in_batch at 8192; longer decode batches fall back to eager.
+#   --enable_prefill_cudagraph + --prefill_cudagraph_max_handle_token 2048 - graph-sandwich prefill:
+#     graphs capture only the per-token dense ops; attention/compressor/indexer run eagerly between
+#     graph segments (att_func), so host-side planning and .tolist() prep never enter capture. Only
+#     cold prefills (prefix_total_token_num == 0, model gate) of <= 2048 new tokens replay; cache-hit
+#     and large batched prefills stay eager. Buckets are padded with a HOLD tail request whose
+#     attention output MUST be zeroed (infer_struct._dsv4_prefill_pad_q_len): pad rows read the
+#     racing HOLD slot, and nondeterministic pad hiddens perturb real rows via MoE expert batching
+#     (ulp-level, chaotically amplified ~1.9x/layer to O(1) by layer ~16 -> greedy token flips).
+#     Residual caveat: padded-vs-unpadded expert-batch composition still shifts reductions by ulps,
+#     same class as decode bucket padding; run-to-run determinism is anyway bounded by the fp4
+#     marlin MoE kernel itself (probabilistic 1-ulp reduction-order noise measured eager-vs-eager).
+#     Acceptance is therefore statistical (gsm8k parity), not bitwise.
 #   --disable_flashinfer_allreduce - flashinfer cuda_ipc resolves libcudart to tilelang's stub (undefined cudaDeviceReset); symm-mem allreduce is used instead.
 #
 # One-time container setup already applied (survives until container rebuild):
@@ -36,4 +45,6 @@ python -m lightllm.server.api_server \
   --tp 4 \
   --batch_max_tokens 8192 \
   --disable_flashinfer_allreduce \
+  --enable_prefill_cudagraph \
+  --prefill_cudagraph_max_handle_token 2048 \
   --port 8000

@@ -528,12 +528,17 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 "tp_world_size": self.tp_world_size_,
             },
         )
-        return infer_state.prefill_att_state.prefill_att(
+        out = infer_state.prefill_att_state.prefill_att(
             q=q,
             k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
             v=None,
             att_control=att_control,
         )
+        pad_q_len = getattr(infer_state, "_dsv4_prefill_pad_q_len", 0)
+        if pad_q_len:
+            # pad 行读 HOLD 槽位(参见 infer_struct._dsv4_prefill_pad_q_len),清零以保持确定性
+            out[-pad_q_len:] = 0
+        return out
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
