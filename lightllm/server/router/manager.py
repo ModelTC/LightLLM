@@ -244,7 +244,7 @@ class RouterManager:
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
                         logger.debug(self.router_statics.log_str())
-                        self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
+                    self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
