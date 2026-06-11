@@ -464,6 +464,14 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         self.flashmla_sched_meta = {ratio: flash_mla.get_mla_metadata()[0] for ratio in (0, 4, 128)}
         return
 
+    def reset_sched_meta_for_capture(self):
+        # cuda-graph capture hook: the warmup pass already locked/stored sched meta on this
+        # (shared) state object; reset so the capture pass re-plans INSIDE the graph and every
+        # replay re-plans from the live tensors instead of binding warmup leftovers.
+        flash_mla = self.backend.flash_mla()
+        self.flashmla_sched_meta = {ratio: flash_mla.get_mla_metadata()[0] for ratio in (0, 4, 128)}
+        return
+
     def decode_att(
         self,
         q: Tuple[torch.Tensor, torch.Tensor],
