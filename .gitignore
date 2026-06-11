@@ -13,4 +13,5 @@ hf_datasets_cache/
 wandb/
 datasets/
 trace/
-experiment_results/*.nsys-rep
+experiment_results/
+*.nsys-rep
