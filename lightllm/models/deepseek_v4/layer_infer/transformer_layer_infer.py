@@ -152,7 +152,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         from sglang.jit_kernel.dsv4 import fused_q_norm_rope
 
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        cos_tok, sin_tok = self._select_rope(infer_state)
         T = input.shape[0]
         qa = layer_weight.q_norm_(layer_weight.wq_a_.mm(input), eps=self.eps_)
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
@@ -172,20 +171,17 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             freqs_cis=self.freqs_cis,
             positions=infer_state.position_ids,
         )
-        return q, qa, cos_tok, sin_tok
+        return q, qa
 
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
+        position_cos, position_sin = self._select_rope(infer_state)
+        rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, position_cos, position_sin, inverse=True)
         T = o.shape[0]
         o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
         o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
         o = layer_weight.wo_b_.mm(o)
         return self._tpsp_reduce(input=o, infer_state=infer_state)
-
-    def _inv_rope(self, o, cos_tok, sin_tok):
-        # in-place; 单张量路径只需要旋转 rope 切片。
-        rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok, inverse=True)
-        return o
 
     # ------------------------------------------------------------------ compressor / indexer
     def _indexer_q_weight(
@@ -468,9 +464,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         # _get_qkv writes the chunk's packed latent into the swa pool (fused kernel) before
         # attention reads it back via full_to_swa indices (this custom forward bypasses the
         # tpl _post_cache_kv path).
-        q, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, layer_weight)
+        q, q_lora = self._get_qkv(x, infer_state, layer_weight)
         o = self._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
-        return self._get_o(self._inv_rope(o, cos_tok, sin_tok), infer_state, layer_weight)
+        return self._get_o(o, infer_state, layer_weight)
 
     def _context_attention_wrapper_run(
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
@@ -543,9 +539,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def token_attention_forward(
         self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        q, q_lora, cos_tok, sin_tok = self._get_qkv(x, infer_state, layer_weight)
+        q, q_lora = self._get_qkv(x, infer_state, layer_weight)
         o = self._token_attention_kernel(q, q_lora, x, infer_state, layer_weight)
-        return self._get_o(self._inv_rope(o, cos_tok, sin_tok), infer_state, layer_weight)
+        return self._get_o(o, infer_state, layer_weight)
 
     def _token_attention_kernel(
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
