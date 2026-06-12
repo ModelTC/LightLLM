@@ -4,6 +4,7 @@ import torch.distributed as dist
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
@@ -21,27 +22,26 @@ from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
 
 
-class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
+class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def __init__(self, layer_num, network_config):
-        super().__init__(layer_num, network_config)
-        cfg = network_config
-        self.eps_ = cfg["rms_norm_eps"]
-        self.hidden = cfg["hidden_size"]
-        self.n_heads = cfg["num_attention_heads"]
-        self.head_dim = cfg["head_dim"]
-        self.rope_dim = cfg["qk_rope_head_dim"]
-        self.index_n_heads = cfg["index_n_heads"]
-        self.index_head_dim = cfg["index_head_dim"]
-        self.index_topk = cfg["index_topk"]
-        self.o_groups = cfg["o_groups"]
-        self.o_lora = cfg["o_lora_rank"]
-        self.hc_mult = cfg["hc_mult"]
-        self.sinkhorn_iters = cfg["hc_sinkhorn_iters"]
-        self.hc_eps = cfg["hc_eps"]
-        self.window = cfg["sliding_window"]
-        self.compress_ratio = cfg["compress_ratios"][layer_num]
-        self.is_hash = layer_num < cfg["num_hash_layers"]
-        self.is_last_layer = layer_num == cfg["n_layer"] - 1
+        TransformerLayerInferTpl.__init__(self, layer_num, network_config)
+        self.eps_ = network_config["rms_norm_eps"]
+        self.embed_dim_ = network_config["hidden_size"]
+        self.num_heads = network_config["num_attention_heads"]
+        self.head_dim_ = network_config["head_dim"]
+        self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
+        self.qk_nope_head_dim = self.head_dim_ - self.qk_rope_head_dim
+        self.v_head_dim = self.head_dim_
+        self.index_n_heads = network_config["index_n_heads"]
+        self.index_head_dim = network_config["index_head_dim"]
+        self.index_topk = network_config["index_topk"]
+        self.o_groups = network_config["o_groups"]
+        self.hc_mult = network_config["hc_mult"]
+        self.sinkhorn_iters = network_config["hc_sinkhorn_iters"]
+        self.hc_eps = network_config["hc_eps"]
+        self.compress_ratio = network_config["compress_ratios"][layer_num]
+        self.is_hash = layer_num < network_config["num_hash_layers"]
+        self.is_last_layer = layer_num == network_config["n_layer"] - 1
         # complex64 rope table for this layer's variant (sliding / compressed); set by
         # DeepseekV4TpPartModel._init_to_get_rotary once the tables are built. The full compress
         # cos/sin tables (compressor entry rope uses entry positions, not token positions) are
@@ -49,19 +49,13 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.freqs_cis = None
         self.cos_compress_table = None
         self.sin_compress_table = None
-        self.topk = cfg["num_experts_per_tok"]
-        self.route_scale = cfg["routed_scaling_factor"]
-        self.swiglu_limit = cfg["swiglu_limit"]
-        self.softmax_scale = self.head_dim ** -0.5
-        self.tp_q_heads = self.n_heads // self.tp_world_size_
-        self.tp_index_heads = self.index_n_heads // self.tp_world_size_
+        self.num_experts_per_tok = network_config["num_experts_per_tok"]
+        self.routed_scaling_factor = network_config["routed_scaling_factor"]
+        self.swiglu_limit = network_config["swiglu_limit"]
+        self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
+        self.tp_q_head_num_ = self.num_heads // self.tp_world_size_
+        self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
         self.tp_groups = self.o_groups // self.tp_world_size_
-        self.tp_q_head_num_ = self.tp_q_heads
-        self.tp_k_head_num_ = 1
-        self.tp_v_head_num_ = 1
-        self.tp_o_head_num_ = self.tp_q_heads
-        self.head_dim_ = self.head_dim
-        self.embed_dim_ = self.hc_mult * self.hidden
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.indexer_score_scale = self.index_head_dim ** -0.5
         self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
@@ -72,7 +66,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         and runs a standalone hc_pre; later layers get (x, residual, post_mix, res_mix) and fuse
         the previous layer's ffn hc_post with this layer's attn hc_pre."""
         if torch.is_tensor(input_embdings):
-            residual = input_embdings.view(-1, self.hc_mult, self.hidden)
+            residual = input_embdings.view(-1, self.hc_mult, self.embed_dim_)
             return hc_pre(
                 residual,
                 layer_weight.hc_attn_fn_.weight,
@@ -149,14 +143,19 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return infer_state.position_cos_compress, infer_state.position_sin_compress
         return infer_state.position_cos_sliding, infer_state.position_sin_sliding
 
-    def _get_qkv(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+    def _get_qkv(
+        self,
+        input: torch.Tensor,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+    ):
         from sglang.jit_kernel.dsv4 import fused_q_norm_rope
 
-        x = self._tpsp_allgather(input=x, infer_state=infer_state)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
         cos_tok, sin_tok = self._select_rope(infer_state)
-        T = x.shape[0]
-        qa = layer_weight.q_norm_(layer_weight.wq_a_.mm(x), eps=self.eps_)
-        q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_heads, self.head_dim)
+        T = input.shape[0]
+        qa = layer_weight.q_norm_(layer_weight.wq_a_.mm(input), eps=self.eps_)
+        q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
         # per-(token, head) weightless self-RMSNorm + interleaved rope on the last rope_dim dims,
         # fused in one sglang dsv4 jit kernel (fp32 norm/rotation, bf16 in between -- same as eager).
         q = self.alloc_tensor(q_in.shape, dtype=q_in.dtype, device=q_in.device)
@@ -167,7 +166,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
             mem_index=infer_state.mem_index,
-            kv=layer_weight.wkv_.mm(x),
+            kv=layer_weight.wkv_.mm(input),
             kv_weight=layer_weight.kv_norm_.weight,
             eps=self.eps_,
             freqs_cis=self.freqs_cis,
@@ -176,7 +175,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         return q, qa, cos_tok, sin_tok
 
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
-        # o: [T, tp_q_heads, head_dim] after inverse rope -> grouped low-rank O -> [T, hidden]
+        # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
         T = o.shape[0]
         o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
         o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
@@ -185,7 +184,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
     def _inv_rope(self, o, cos_tok, sin_tok):
         # in-place; 单张量路径只需要旋转 rope 切片。
-        rotary_emb_fwd(o[..., -self.rope_dim :], None, cos_tok, sin_tok, inverse=True)
+        rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok, inverse=True)
         return o
 
     # ------------------------------------------------------------------ compressor / indexer
@@ -196,8 +195,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return None, None
         cos_tok = infer_state.position_cos_compress
         sin_tok = infer_state.position_sin_compress
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.tp_index_heads, self.index_head_dim)
-        rotary_emb_fwd(idx_q[..., -self.rope_dim :], None, cos_tok, sin_tok)
+        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.tp_index_n_heads, self.index_head_dim)
+        rotary_emb_fwd(idx_q[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok)
         idx_weight = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
         return idx_q, idx_weight
 
@@ -231,7 +230,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             layer_weight.compressor_wgate_.mm_param.weight,
             layer_weight.compressor_norm_.weight,
             layer_weight.compressor_ape_.weight,
-            self.head_dim,
+            self.head_dim_,
         )
 
     def _run_compressor_prefill(
@@ -286,7 +285,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 wgate,
                 norm,
                 ape,
-                self.head_dim,
+                self.head_dim_,
                 self.cos_compress_table,
                 self.sin_compress_table,
                 self.eps_,
@@ -337,7 +336,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                     norm,
                     ape,
                     self.compress_ratio,
-                    self.head_dim,
+                    self.head_dim_,
                     self.cos_compress_table,
                     self.sin_compress_table,
                     self.eps_,
@@ -354,7 +353,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                         norm,
                         ape,
                         self.compress_ratio,
-                        self.head_dim,
+                        self.head_dim_,
                         self.cos_compress_table,
                         self.sin_compress_table,
                         self.eps_,
@@ -406,7 +405,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 wgate,
                 norm,
                 ape,
-                self.head_dim,
+                self.head_dim_,
                 self.cos_compress_table,
                 self.sin_compress_table,
                 self.eps_,
@@ -424,8 +423,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 norm,
                 ape,
                 ratio,
-                self.head_dim,
-                self.rope_dim,
+                self.head_dim_,
+                self.qk_rope_head_dim,
                 self.cos_compress_table,
                 self.sin_compress_table,
                 self.eps_,
@@ -491,7 +490,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
             # Same graph-split output handoff as the template, but avoid its dry-run because
             # DSV4 attention mutates compressor/cache state before returning.
-            o = self.alloc_tensor((q.shape[0], self.tp_q_heads, self.head_dim), dtype=q.dtype, device=q.device)
+            o = self.alloc_tensor((q.shape[0], self.tp_q_head_num_, self.head_dim_), dtype=q.dtype, device=q.device)
             _o = tensor_to_no_ref_tensor(o)
 
             def att_func(new_infer_state: DeepseekV4InferStateInfo):
@@ -516,7 +515,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 "flashmla_kvcache": True,
                 "layer_index": self.layer_num_,
                 "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.head_dim,
+                "head_dim_v": self.v_head_dim,
                 "softmax_scale": self.softmax_scale,
                 "q_lora": q_lora,
                 "hidden_states": x,
@@ -559,7 +558,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 "flashmla_kvcache": True,
                 "layer_index": self.layer_num_,
                 "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.head_dim,
+                "head_dim_v": self.v_head_dim,
                 "softmax_scale": self.softmax_scale,
                 "q_lora": q_lora,
                 "hidden_states": x,
@@ -588,7 +587,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
-        x = x.view(-1, self.hidden)
+        x = x.view(-1, self.embed_dim_)
         if not self.enable_ep_moe:
             x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
@@ -637,16 +636,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         else:
             bias = layer_weight.gate_bias_.weight
 
-        weights = self.alloc_tensor((M, self.topk), dtype=torch.float32, device=logits.device)
-        indices = self.alloc_tensor((M, self.topk), dtype=indices_dtype, device=logits.device)
-        token_expert_indices = self.alloc_tensor((M, self.topk), dtype=torch.int32, device=logits.device)
+        weights = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.float32, device=logits.device)
+        indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device)
+        token_expert_indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.int32, device=logits.device)
         ops.topk_hash_softplus_sqrt(
             weights,
             indices,
             token_expert_indices,
             logits,
             True,
-            self.route_scale,
+            self.routed_scaling_factor,
             bias,
             input_tokens,
             hash_indices_table,
