@@ -1,10 +1,11 @@
 import os
 import torch
+import torch.distributed as dist
 import copy
 import bisect
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
 from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
@@ -24,6 +25,7 @@ class CudaGraph:
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
+        self.is_mtp_draft_model = False
 
         # gen cuda graph batch_sizes
         # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
@@ -93,7 +95,37 @@ class CudaGraph:
                 model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
+        self._record_capture_replay_infer_cost_ms(graph_obj=graph_obj, batch_size=batch_size)
         return model_output
+
+    def _record_capture_replay_infer_cost_ms(self, graph_obj: torch.cuda.CUDAGraph, batch_size: int) -> None:
+        if not enable_dynamic_mtp_verify():
+            return
+
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        assert g_infer_context.dynamic_mtp_planner is not None
+
+        dist.barrier(group=dist.group.WORLD)
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        graph_obj.replay()
+        start_event.record()
+        graph_obj.replay()
+        end_event.record()
+        end_event.synchronize()
+        infer_cost_ms_tensor = torch.tensor([start_event.elapsed_time(end_event)], dtype=torch.float32, device="cuda")
+        dist.all_reduce(infer_cost_ms_tensor, op=dist.ReduceOp.MIN, group=dist.group.WORLD)
+        infer_cost_ms = float(infer_cost_ms_tensor.item())
+        if self.is_mtp_draft_model:
+            g_infer_context.dynamic_mtp_planner.draft_model_speeds.update(
+                batch_size=batch_size, infer_cost_ms=infer_cost_ms
+            )
+        else:
+            g_infer_context.dynamic_mtp_planner.main_model_speeds.update(
+                batch_size=batch_size, infer_cost_ms=infer_cost_ms
+            )
+        return
 
     def _capture_decode_overlap(
         self,
@@ -137,6 +169,7 @@ class CudaGraph:
             model_output1,
         )
         graph_obj.replay()
+        self._record_capture_replay_infer_cost_ms(graph_obj=graph_obj, batch_size=batch_size)
         return model_output, model_output1
 
     def capture_decode(
@@ -194,6 +227,7 @@ class CudaGraph:
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
+        self.is_mtp_draft_model = model.is_mtp_draft_model
 
         # decode cuda graph init
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
@@ -250,6 +284,7 @@ class CudaGraph:
         from .basemodel import TpPartBaseModel
 
         model: TpPartBaseModel = model
+        self.is_mtp_draft_model = model.is_mtp_draft_model
 
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
             decode_batches = []

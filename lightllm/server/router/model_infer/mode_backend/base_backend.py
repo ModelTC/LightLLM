@@ -150,6 +150,9 @@ class ModeBackend:
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
 
+        if self.args.mtp_mode and enable_dynamic_mtp_verify():
+            g_infer_context.init_dynamic_mtp_planner(mtp_step=self.args.mtp_step)
+
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
         model_kvargs = {

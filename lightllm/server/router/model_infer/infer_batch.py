@@ -33,6 +33,7 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
+    dynamic_mtp_planner: Optional[Any] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -66,6 +67,15 @@ class InferenceContext:
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+        return
+
+    def init_dynamic_mtp_planner(self, mtp_step: int):
+        if self.dynamic_mtp_planner is not None and self.dynamic_mtp_planner.mtp_step == mtp_step:
+            return
+
+        from lightllm.server.router.model_infer.mode_backend.dynamic_mtp_planner import DynamicMTPPlanner
+
+        self.dynamic_mtp_planner = DynamicMTPPlanner(mtp_step=mtp_step)
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
