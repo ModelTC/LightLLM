@@ -16,7 +16,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     """Per-layer weights for DeepSeek-V4-Flash.
 
     DS4 does not share DS2/DS3.2's ``model.layers.*.self_attn/mlp`` layout. Its attention is
-    HC + CSA, and routed experts are checkpointed as MXFP4.
+    HC + CSA, and routed experts are checkpointed as MXFP4 (fp4 release) or
+    FP8 block-128 (fp8 release, same layout as the dense fp8 weights).
     """
 
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
@@ -306,12 +307,17 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         scale_renames = self._fp8_scale_renames()
         # Convert every `.scale` belonging to this layer. Weights are loaded incrementally
         # per safetensors shard, so the paired weight may live in another shard:
-        # - routed FP4 experts keep `.scale` as-is (matches marlin-mxfp4w4a16-b32's suffix);
+        # - routed expert `.scale` follows the fused_moe quant method's weight_scale_suffix:
+        #   MXFP4 consumes `.scale` as-is, FP8 DeepGEMM expects `.weight_scale_inv` (rename only);
         # - FP8 matmul scales only need renaming for DeepGEMM, no weight required;
         # - FP8 pairs on no-quant paths (wo_a's ROWBMMWeight) are expanded to bf16,
         #   the only case that truly requires weight and scale in the same shard.
+        expert_scale_suffix = self.experts_.quant_method.weight_scale_suffix
         for scale_k in [k for k in list(weights.keys()) if k.startswith(p) and k.endswith(".scale")]:
             if scale_k.startswith(f"{p}ffn.experts."):
+                if expert_scale_suffix is not None and expert_scale_suffix != "scale":
+                    weights[scale_k[: -len("scale")] + expert_scale_suffix] = weights[scale_k].to(torch.float32)
+                    del weights[scale_k]
                 continue
             k = scale_k[: -len(".scale")] + ".weight"
             target = scale_renames.get(k)

@@ -595,10 +595,12 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         gw = layer_weight.gate_weight_.mm_param.weight
         logits = F.linear(x.float(), gw.float()).contiguous()
         weights, indices = self._select_experts(logits, infer_state, layer_weight)
-        routed = self._routed_experts(x, weights, indices, layer_weight)
+        # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
+        # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
         g = layer_weight.shared_gate_.mm(x).float().clamp(max=self.swiglu_limit)
         u = layer_weight.shared_up_.mm(x).float().clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
         shared = layer_weight.shared_down_.mm((F.silu(g) * u).to(x.dtype))
+        routed = self._routed_experts(x, weights, indices, layer_weight)
         if self.enable_ep_moe:
             if self.tp_world_size_ > 1:
                 all_reduce(
