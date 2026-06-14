@@ -2,7 +2,7 @@ import torch
 import time
 import collections
 import torch.distributed as dist
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Callable, Dict, Any, Tuple
 from queue import Queue
 from lightllm.server.router.model_infer.mode_backend.update_mem_index import update_eagle_mem_indexes_triton
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -247,15 +247,25 @@ class ChunkedPrefillBackend(ModeBackend):
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        original_run_reqs = run_reqs
         draft_step = self.mtp_step
+
+        # skip_verify_sync: 上一轮 draft_step 为 0 时，本轮没有真实 draft 候选需要验证，
+        # accept_len 恒为 1，因此 Phase 2 无需等待 GPU verify 结果即可执行 pre_post_handle。
+        skip_verify_sync = False
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
             if self.enable_dynamic_mtp:
-                dynamic_batch_size, draft_step = g_infer_context.dynamic_mtp_planner.get_dynamic_batch_size(
+                (
+                    dynamic_batch_size,
+                    draft_step,
+                    pre_draft_step,
+                ) = g_infer_context.dynamic_mtp_planner.get_dynamic_batch_size(
                     req_num=len(decode_reqs),
                     original_batch_size=model_input.batch_size,
                 )
+                skip_verify_sync = pre_draft_step == 0
                 # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
                 model_input, selected_run_reqs = prepare_dynamic_mtp_model_input(
                     model_input=model_input,
@@ -374,17 +384,25 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        verify_event.synchronize()
-        if self.enable_dynamic_mtp:
-            selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
-            run_reqs = [run_reqs[i] for i in range(len(run_reqs)) if selected_run_reqs_cpu_numpy[i] == 1]
+        if skip_verify_sync:
+            assert self.enable_dynamic_mtp, "skip_verify_sync should only be True when dynamic MTP is enabled"
+            # 上轮 draft_step==0 → 本轮 accept_len 恒为 1 (base position 恒被接受且被选中)，
+            # dynamic_batch_size == req_num, 每个请求恰好被选中 1 次，无需等待 GPU verify。
+            # _update_mtp_verify_token_num 必须在 notify_forward 之前更新，与 decode_normal 一致。
+            run_reqs = decode_reqs
+            verify_ok_reqs = decode_reqs
             self._update_mtp_verify_token_num(decode_reqs=decode_reqs, dynamic_mtp_run_reqs=run_reqs)
+            update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
         else:
-            self._update_mtp_verify_token_num(decode_reqs=decode_reqs)
-
-        accepted_index_cpu_numpy = accepted_index_cpu.numpy()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
-        update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+            verify_event.synchronize()
+            run_reqs, verify_ok_reqs = self.build_mtp_dynamic_reqs(
+                original_run_reqs, selected_run_reqs_cpu, accepted_index_cpu
+            )
+            self._update_mtp_verify_token_num(
+                decode_reqs=decode_reqs,
+                dynamic_mtp_run_reqs=run_reqs if self.enable_dynamic_mtp else None,
+            )
+            update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
@@ -422,6 +440,25 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
+
+    def build_mtp_dynamic_reqs(
+        self,
+        original_run_reqs: List[InferReq],
+        selected_run_reqs_cpu: torch.Tensor,
+        accepted_index_cpu: torch.Tensor,
+    ) -> Tuple[List[InferReq], List[InferReq]]:
+        """从 GPU 同步后的结果构建过滤后的 run_reqs 和 verify_ok_reqs（纯过滤，不更新统计）。"""
+        if self.enable_dynamic_mtp:
+            selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
+            run_reqs = [
+                original_run_reqs[i] for i in range(len(original_run_reqs)) if selected_run_reqs_cpu_numpy[i] == 1
+            ]
+        else:
+            run_reqs = original_run_reqs
+
+        accepted_index_cpu_numpy = accepted_index_cpu.numpy()
+        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
+        return run_reqs, verify_ok_reqs
 
     def _update_dynamic_mtp_accept_ratio_statics(
         self,

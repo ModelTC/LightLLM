@@ -60,27 +60,34 @@ class DynamicMTPPlanner:
             )
         return self.req_num_to_dynamic_batch_size_to_accept_ratio[req_num][dynamic_batch_size]
 
-    def get_dynamic_batch_size(self, req_num: int, original_batch_size: int) -> Tuple[int, int]:
+    def get_dynamic_batch_size(self, req_num: int, original_batch_size: int) -> Tuple[int, int, int]:
+        """
+        返回 (dynamic_batch_size, draft_step, pre_draft_step)。
+        pre_draft_step 是上一轮推理实际使用的 draft_step，
+        调用方可据此判断当前 verify 是否有真实候选需要验证
+        (pre_draft_step == 0 时 accept_len 恒为 1，无需等待 GPU verify 结果)。
+        """
         assert req_num * (self.mtp_step + 1) == original_batch_size
+        pre_draft_step = self.pre_draft_step
         # case 1 如果采用随机的方式决定 dynamic_batch_size
         self._iter += 1
         if self._use_random_mode and self._iter % self._iter_threshold == 0:
             min_batch_size = req_num
-            max_batch_size = req_num * (self.pre_draft_step + 1)
+            max_batch_size = req_num * (pre_draft_step + 1)
             dynamic_batch_size = random.randint(min_batch_size, max_batch_size)
 
             draft_step = random.randint(0, self.mtp_step)
             self.pre_draft_step = draft_step
-            return dynamic_batch_size, draft_step
+            return dynamic_batch_size, draft_step, pre_draft_step
 
         # 通过计算的方式来获取已经知道的最优的 dynamic_batch_size，然后再决定 draft step 步长
         min_batch_size = req_num
-        max_batch_size = req_num * (self.pre_draft_step + 1)
+        max_batch_size = req_num * (pre_draft_step + 1)
         dynamic_batch_size_keys = self.main_model_speeds.get_batch_size_keys_between(min_batch_size, max_batch_size)
 
         # 计算每个 dynamic_batch_size 对应的接受率以及单token的速度收益，然后选择最优的 dynamic_batch_size
         cost_ms_list = [
-            self._get_cost_ms(req_num=req_num, dynamic_batch_size=dynamic_batch_size, draft_step=self.pre_draft_step)
+            self._get_cost_ms(req_num=req_num, dynamic_batch_size=dynamic_batch_size, draft_step=pre_draft_step)
             for dynamic_batch_size in dynamic_batch_size_keys
         ]
         dynamic_batch_size = dynamic_batch_size_keys[np.argmin(cost_ms_list)]
@@ -98,7 +105,7 @@ class DynamicMTPPlanner:
         min_cost_ms_draft_step = min(min_cost_ms_draft_step, self.mtp_step)
         min_cost_ms_draft_step = max(min_cost_ms_draft_step, 0)
         self.pre_draft_step = min_cost_ms_draft_step
-        return dynamic_batch_size, min_cost_ms_draft_step
+        return dynamic_batch_size, min_cost_ms_draft_step, pre_draft_step
 
     def _get_cost_ms(self, req_num: int, dynamic_batch_size: int, draft_step: int) -> float:
         accept_ratio = self._get_dynamic_batch_size_to_accept_ratio(
