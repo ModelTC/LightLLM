@@ -6,6 +6,12 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+    DSV4_C4_STATE_RING,
+    DSV4_C128_STATE_RING,
+    DSV4_SWA_PAGE_SIZE,
+)
+
 
 _SGLANG_COMPRESS_ERR = None
 _SGLANG_COMPRESS_MOD = None
@@ -80,7 +86,7 @@ def _save_partial_states_kernel(
     IS_C4: tl.constexpr,
     IS_PREFILL: tl.constexpr,
     SWA_PAGE_SIZE: tl.constexpr,
-    C4_STATE_RING: tl.constexpr,
+    STATE_RING: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -89,19 +95,18 @@ def _save_partial_states_kernel(
     seq_len = tl.load(b_seq_len + batch_idx)
 
     if IS_C4:
-        same_page_next = (position % SWA_PAGE_SIZE) + C4_STATE_RING < SWA_PAGE_SIZE
-        if same_page_next and position + C4_STATE_RING < seq_len:
+        same_page_next = (position % SWA_PAGE_SIZE) + STATE_RING < SWA_PAGE_SIZE
+        if same_page_next and position + STATE_RING < seq_len:
             return
-        full_slot = tl.load(mem_index + token_idx).to(tl.int64)
-        swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
-        if swa_slot < 0:
-            return
-        state_row = (swa_slot // SWA_PAGE_SIZE) * C4_STATE_RING + (swa_slot % C4_STATE_RING)
     else:
         if position + COMPRESS_RATIO < seq_len:
             return
-        req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-        state_row = req_idx * COMPRESS_RATIO + (position % COMPRESS_RATIO)
+
+    full_slot = tl.load(mem_index + token_idx).to(tl.int64)
+    swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
+    if swa_slot < 0:
+        return
+    state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
 
     offs = tl.arange(0, BLOCK)
     mask = offs < STATE_WIDTH
@@ -144,7 +149,7 @@ def _fused_compress_norm_rope_insert_kernel(
     IS_C4: tl.constexpr,
     IS_PREFILL: tl.constexpr,
     SWA_PAGE_SIZE: tl.constexpr,
-    C4_STATE_RING: tl.constexpr,
+    STATE_RING: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     FP8_MAX: tl.constexpr,
     SCALE_MIN: tl.constexpr,
@@ -188,12 +193,18 @@ def _fused_compress_norm_rope_insert_kernel(
             other=0,
         ).to(tl.int64)
         swa_slot = tl.load(full_to_swa + full_slot, mask=valid_pos & (~use_current), other=-1).to(tl.int64)
-        state_row = (swa_slot // SWA_PAGE_SIZE) * C4_STATE_RING + (swa_slot % C4_STATE_RING)
+        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
         state_valid = valid_pos & (~use_current) & (swa_slot >= 0)
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
     else:
-        state_row = req_idx * COMPRESS_RATIO + (gather_pos % COMPRESS_RATIO)
-        state_valid = valid_pos & (~use_current)
+        full_slot = tl.load(
+            req_to_token + req_idx * req_to_token_stride0 + gather_pos,
+            mask=valid_pos & (~use_current),
+            other=0,
+        ).to(tl.int64)
+        swa_slot = tl.load(full_to_swa + full_slot, mask=valid_pos & (~use_current), other=-1).to(tl.int64)
+        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
+        state_valid = valid_pos & (~use_current) & (swa_slot >= 0)
         head_offset = token_offsets * 0
 
     offs = tl.arange(0, BLOCK)
@@ -288,7 +299,7 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int)
         out_pool = mem_manager.c4_pool
     elif compress_ratio == 128:
         out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.long().reshape(-1)]
-        state_buffer = infer_state.req_manager.get_compress_state_pool(layer_idx)
+        state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
         out_pool = mem_manager.c128_pool
     else:
         raise AssertionError(f"invalid DeepSeek-V4 compress ratio {compress_ratio}")
@@ -367,6 +378,7 @@ def fused_compress(
     state_width = kv_score.shape[-1] // 2
     state_last_dim = metadata.state_buffer.shape[-1]
     is_c4 = compress_ratio == 4
+    state_ring = DSV4_C4_STATE_RING if is_c4 else DSV4_C128_STATE_RING
     block_state = triton.next_power_of_2(state_width)
     block_head = triton.next_power_of_2(head_dim)
 
@@ -399,8 +411,8 @@ def fused_compress(
         WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
         IS_C4=is_c4,
         IS_PREFILL=metadata.is_prefill,
-        SWA_PAGE_SIZE=128,
-        C4_STATE_RING=8,
+        SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
+        STATE_RING=state_ring,
         ROPE_HEAD_DIM=qk_rope_head_dim,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
         SCALE_MIN=1e-4,
@@ -429,8 +441,8 @@ def fused_compress(
         COMPRESS_RATIO=compress_ratio,
         IS_C4=is_c4,
         IS_PREFILL=metadata.is_prefill,
-        SWA_PAGE_SIZE=128,
-        C4_STATE_RING=8,
+        SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
+        STATE_RING=state_ring,
         BLOCK=block_state,
         num_warps=4,
     )
@@ -623,7 +635,7 @@ def compressor_decode_step_batch(
     return out.to(x_new.dtype), should_compress
 
 
-# ---------------------------------------------------------------------------- paged state (c4)
+# ---------------------------------------------------------------------------- paged state
 # 与 sglang srt compressor 的 paged 路径同构(compress_old 内核 + 分组槽 indices + overlap
 # extra_data): state 槽位由 swa 槽位算术派生(翻译③ state_loc = page*ring + swa_loc%ring,
 # 分组槽 = state_loc//ratio),state 随 swa 页生灭,radix 命中零拷贝续算。
@@ -667,35 +679,49 @@ def paged_decode_state_slots(
     ratio: int,
     hold_req_id: int,
     num_swa_pages: int,
+    overlap: bool = True,
 ):
-    """decode 步的 state 分组槽(写槽 = 当前组 clip_down(seq-1) 的槽,overlap 伙伴 = 前一组)。
+    """decode 步的 state 分组槽(写槽 = 当前组 clip_down(seq-1) 的槽,可选 overlap 前一组)。
     纯张量算术(prep 已写本步 req_to_token),图安全。padding(HOLD)行重定向到 HOLD 页的
     state 槽,隔离其垃圾累加。"""
     seq = b_seq_len.long()
     write_positions = torch.div(seq - 1, ratio, rounding_mode="floor") * ratio
     write_slot = _paged_state_group_slot(req_to_token, full_to_swa, b_req_idx, write_positions, page_size, ring, ratio)
-    overlap_slot = _paged_state_group_slot(
-        req_to_token, full_to_swa, b_req_idx, write_positions - ratio, page_size, ring, ratio
-    )
+    overlap_slot = None
+    if overlap:
+        overlap_slot = _paged_state_group_slot(
+            req_to_token, full_to_swa, b_req_idx, write_positions - ratio, page_size, ring, ratio
+        )
     hold_slot = num_swa_pages * ring // ratio  # HOLD 页区域([pages*ring, pages*ring+ring))的首个分组槽
     is_hold = b_req_idx.long() == hold_req_id
     write_slot = torch.where(is_hold, torch.full_like(write_slot, hold_slot), write_slot)
-    overlap_slot = torch.where(is_hold, torch.full_like(overlap_slot, hold_slot), overlap_slot)
+    if overlap_slot is not None:
+        overlap_slot = torch.where(is_hold, torch.full_like(overlap_slot, hold_slot), overlap_slot)
     return write_slot, overlap_slot
 
 
-def paged_prefill_compress_data(req_to_token, full_to_swa, req_idx: int, ready_len: int, seq_len: int, ring: int):
+def paged_prefill_compress_data(
+    req_to_token,
+    full_to_swa,
+    req_idx: int,
+    ready_len: int,
+    seq_len: int,
+    ring: int,
+    ratio: int = 4,
+    page_size: int = DSV4_SWA_PAGE_SIZE,
+    overlap: bool = True,
+):
     """单请求 prefill chunk 的 (indices, extra_data, plan): 与 sglang 同走
-    triton_create_paged_compress_data(按请求产出,内核经 plan 逐 token 步进)。仅 c4(overlap)。
+    triton_create_paged_compress_data(按请求产出,内核经 plan 逐 token 步进)。
     三者都与层无关,同一 forward 内可跨全部 c4 层复用。"""
     mod, _ = _load_sglang_compressor()
     fn = _load_paged_compress_data_fn()
     device = req_to_token.device
     n_new = seq_len - ready_len
     write_loc, extra_data = fn(
-        compress_ratio=4,
-        is_overlap=True,
-        swa_page_size=128,
+        compress_ratio=ratio,
+        is_overlap=overlap,
+        swa_page_size=page_size,
         ring_size=ring,
         req_pool_indices=torch.tensor([req_idx], device=device, dtype=torch.int64),
         seq_lens=torch.tensor([seq_len], device=device, dtype=torch.int64),
@@ -704,7 +730,7 @@ def paged_prefill_compress_data(req_to_token, full_to_swa, req_idx: int, ready_l
         full_to_swa_index_mapping=full_to_swa,
     )
     plan = mod.CompressorPrefillPlan.generate(
-        4,
+        ratio,
         n_new,
         torch.tensor([seq_len], dtype=torch.int64),
         torch.tensor([n_new], dtype=torch.int64),
@@ -727,15 +753,16 @@ def compressor_paged_prefill(
     compress_data,
     ready_len,
     seq_len,
+    ratio: int = 4,
 ):
-    """单请求 prefill/extend chunk(c4 paged): x [n_new, dim] 为位置 [ready, seq) 的 hidden,
+    """单请求 prefill/extend chunk(paged): x [n_new, dim] 为位置 [ready, seq) 的 hidden,
     state 写到 swa 派生的分组槽(compress_data 来自 paged_prefill_compress_data,跨层复用)。
-    返回本 chunk 完结组的压缩条目 [seq//4 - ready//4, head_dim](rope 已施加)。"""
+    返回本 chunk 完结组的压缩条目 [seq//ratio - ready//ratio, head_dim](rope 已施加)。"""
     mod, _ = _load_sglang_compressor()
-    ratio = 4
     kv_score = _project_kv_score(x, wkv_w, wgate_w)
     pool = state_buffer.view(-1, ratio, state_buffer.shape[-1])
     write_loc, extra_data, plan = compress_data
+    kwargs = {"extra_data": extra_data} if extra_data is not None else {}
     out = mod.compress_forward(
         pool,
         kv_score,
@@ -744,7 +771,7 @@ def compressor_paged_prefill(
         plan,
         head_dim=head_dim,
         compress_ratio=ratio,
-        extra_data=extra_data,
+        **kwargs,
     )
     ncomp = seq_len // ratio - ready_len // ratio
     if ncomp == 0:
@@ -768,15 +795,16 @@ def compressor_paged_decode_batch(
     write_slot,
     overlap_slot,
     b_seq_len,
+    ratio: int = 4,
 ):
-    """批量 decode 一步(c4 paged): state 槽位为 swa 派生分组槽(paged_decode_state_slots,
+    """批量 decode 一步(paged): state 槽位为 swa 派生分组槽(paged_decode_state_slots,
     可跨层复用)。返回 (entries [bs, head_dim], should_compress [bs])。"""
     mod, _ = _load_sglang_compressor()
-    ratio = 4
     kv_score = _project_kv_score(x_new, wkv_w, wgate_w)
     pool = state_buffer.view(-1, ratio, state_buffer.shape[-1])
     seq_lens = b_seq_len.to(torch.int32).contiguous()
     plan = mod.CompressorDecodePlan(ratio, seq_lens)
+    kwargs = {"extra_data": overlap_slot.view(-1, 1)} if overlap_slot is not None else {}
     out = mod.compress_forward(
         pool,
         kv_score,
@@ -785,7 +813,7 @@ def compressor_paged_decode_batch(
         plan,
         head_dim=head_dim,
         compress_ratio=ratio,
-        extra_data=overlap_slot.view(-1, 1),
+        **kwargs,
     )
     should_compress = (seq_lens % ratio) == 0
     mod.compress_fused_norm_rope_inplace(out, norm_w.float(), eps, _freq_cis(cos_table, sin_table), plan)

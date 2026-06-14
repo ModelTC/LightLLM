@@ -31,9 +31,9 @@ DSV4_FP8_SCALE_MIN = 1e-4
 DSV4_SWA_PAGE_SIZE = 128
 DSV4_C4_PAGE_SIZE = 64
 DSV4_C128_PAGE_SIZE = 2
-# c4 compressor state ring(overlap 对: 每页 2 个分组槽 × ratio 4 行)。c128 state 在 128 边界
-# 自然归零(在线聚合),无缓存常驻需求,保持 req 键控,不进 swa 派生池。
+# compressor state ring: c4 overlap 对为每页 2 个分组槽 × ratio 4 行;c128 离线聚合为每页 1 组。
 DSV4_C4_STATE_RING = 8
+DSV4_C128_STATE_RING = 128
 # swa 池占 full token 空间的比例下限(sglang swa_full_tokens_ratio=0.1 同值)。
 # v5 的 swa 压力阀(借页/驱逐)已覆盖 radix 树与准入波次的瞬时增长,结构性预算
 # (max_req×window + batch_max_tokens 余量)另行叠加,0.1 仅作 full 池比例下限。
@@ -154,6 +154,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         max_request_num: Optional[int] = None,
         sliding_window: Optional[int] = None,
         swa_extra_token_num: int = 0,
+        swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
     ):
@@ -174,6 +175,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         # 活跃窗口(max_request_num * sliding_window)之外的余量: 在途 prefill chunk 的瞬时占用
         # (出窗槽位要到下一次 prep 才回收) + radix cache 持有的窗口尾部。
         self.swa_extra_token_num = int(swa_extra_token_num)
+        self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
 
         # 全局层号 -> 各压缩池内的压实层号(同 qwen3next 的层号压实手法)
         self.layer_to_c4_idx = {}
@@ -200,7 +202,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         if self.max_request_num is None or self.sliding_window is None:
             return _ceil_div(full_size, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
         cap = int(self.max_request_num) * self._swa_per_req_budget() + self.swa_extra_token_num
-        cap = max(cap, int(full_size * DSV4_SWA_FULL_TOKENS_RATIO))
+        cap = max(cap, int(full_size * self.swa_full_tokens_ratio))
         cap = max(1, min(full_size, cap))
         return _ceil_div(cap, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
 
@@ -209,18 +211,32 @@ class DeepseekV4MemoryManager(MemoryManager):
         bytes_per_page = _ceil_div(page_size * (data_bytes + scale_bytes), align_bytes) * align_bytes
         return bytes_per_page / page_size
 
-    def _c4_state_bytes_per_swa_slot(self) -> float:
-        """c4 compressor state(attention + indexer,swa 页派生寻址)摊到每个 swa 槽的字节数。"""
-        if self.n_c4 == 0:
-            return 0.0
-        per_page = DSV4_C4_STATE_RING * (4 * self.head_dim + 4 * self.indexer_head_dim) * 4  # fp32
-        return per_page * self.n_c4 / DSV4_SWA_PAGE_SIZE
+    @staticmethod
+    def _paged_state_rows(num_swa_pages: int, ring: int, ratio: int) -> int:
+        rows = num_swa_pages * ring + ring + 1
+        return _ceil_div(rows, ratio) * ratio
+
+    @staticmethod
+    def _init_state_sentinel(buffer: torch.Tensor) -> None:
+        half = buffer.shape[-1] // 2
+        buffer[:, -1, :half].zero_()
+        buffer[:, -1, half:].fill_(float("-inf"))
+        return
+
+    def _paged_state_bytes_per_swa_slot(self) -> float:
+        """c4/c128 compressor state(swa 页派生寻址)摊到每个 swa 槽的字节数。"""
+        per_page = 0.0
+        if self.n_c4 > 0:
+            per_page += DSV4_C4_STATE_RING * (4 * self.head_dim + 4 * self.indexer_head_dim) * 4 * self.n_c4
+        if self.n_c128 > 0:
+            per_page += DSV4_C128_STATE_RING * (2 * self.head_dim) * 4 * self.n_c128
+        return per_page / DSV4_SWA_PAGE_SIZE
 
     def _swa_slot_bytes(self) -> float:
         per_layer = self._slab_bytes_per_slot(
             DSV4_SWA_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
         )
-        return per_layer * self.layer_num + self._c4_state_bytes_per_swa_slot()
+        return per_layer * self.layer_num + self._paged_state_bytes_per_swa_slot()
 
     def _compressed_cell_size(self) -> float:
         """每个 full token 摊到压缩池上的精确字节数(按 page-slab 对齐后)。"""
@@ -259,10 +275,10 @@ class DeepseekV4MemoryManager(MemoryManager):
                 self.size = max(1, int(available_bytes / full_cell))
             else:
                 size_budget = max(1, int((available_bytes - swa_slot_bytes * swa_budget) / compressed_cell))
-                if size_budget * DSV4_SWA_FULL_TOKENS_RATIO > swa_budget:
+                if size_budget * self.swa_full_tokens_ratio > swa_budget:
                     # 比例下限生效(_planned_swa_size 会取 ratio*full),按该机制反解 full。
                     self.size = max(
-                        1, int(available_bytes / (swa_slot_bytes * DSV4_SWA_FULL_TOKENS_RATIO + compressed_cell))
+                        1, int(available_bytes / (swa_slot_bytes * self.swa_full_tokens_ratio + compressed_cell))
                     )
                 else:
                     self.size = size_budget
@@ -321,6 +337,9 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.c4_allocator: Optional[KvCacheAllocator] = None
         self.c128_pool: Optional[PackedPagePool] = None
         self.c128_allocator: Optional[KvCacheAllocator] = None
+        self.c4_state_buffer: Optional[torch.Tensor] = None
+        self.c4_indexer_state_buffer: Optional[torch.Tensor] = None
+        self.c128_state_buffer: Optional[torch.Tensor] = None
         # 压缩槽映射: 键 = 组末 token(位置 (g+1)%ratio==0)的 full 槽位,值 = 压缩池槽位。
         # 与 full_to_swa_indexs 同构: radix 持有 full 槽 => 映射行存活,free 级联回收。
         self.full_to_c4_indexs: Optional[torch.Tensor] = None
@@ -350,8 +369,7 @@ class DeepseekV4MemoryManager(MemoryManager):
             # 生灭 -> radix 命中零拷贝续算。行数 = 页数*ring + ring(HOLD 页) + 1(哨兵),
             # 取整到 ratio;末行哨兵 kv=0/score=-inf(KVAndScore.clear 语义),其余行由内核在
             # 组起点覆写,无需按页清零。last_dim = 2*coff*head_dim(overlap coff=2)。
-            state_rows = self.swa_num_pages * DSV4_C4_STATE_RING + DSV4_C4_STATE_RING + 1
-            state_rows = _ceil_div(state_rows, 4) * 4
+            state_rows = self._paged_state_rows(self.swa_num_pages, DSV4_C4_STATE_RING, 4)
             self.c4_state_buffer = torch.zeros(
                 (self.n_c4, state_rows, 4 * self.head_dim), dtype=torch.float32, device="cuda"
             )
@@ -359,8 +377,7 @@ class DeepseekV4MemoryManager(MemoryManager):
                 (self.n_c4, state_rows, 4 * self.indexer_head_dim), dtype=torch.float32, device="cuda"
             )
             for buf in (self.c4_state_buffer, self.c4_indexer_state_buffer):
-                half = buf.shape[-1] // 2
-                buf[:, -1, half:].fill_(float("-inf"))
+                self._init_state_sentinel(buf)
         if self.n_c128 > 0:
             self.c128_pool = PackedPagePool(
                 size=self.c128_size,
@@ -375,6 +392,13 @@ class DeepseekV4MemoryManager(MemoryManager):
             )
             self.full_to_c128_indexs = torch.full((size + 1,), -1, dtype=torch.int32, device="cuda")
             self.full_to_c128_indexs[size] = self.c128_pool.HOLD_TOKEN_MEMINDEX
+            # c128 compressor 在途状态: 与 c4 同样由 full->swa 推导行号,但 ring=128 且无 overlap。
+            # last_dim = 2*head_dim;末行是 swa 缺失/出窗时读取的哨兵。
+            state_rows = self._paged_state_rows(self.swa_num_pages, DSV4_C128_STATE_RING, 128)
+            self.c128_state_buffer = torch.zeros(
+                (self.n_c128, state_rows, 2 * self.head_dim), dtype=torch.float32, device="cuda"
+            )
+            self._init_state_sentinel(self.c128_state_buffer)
 
         logger.info(
             f"DeepseekV4MemoryManager pools: full_tokens={size} swa={self.swa_size}({self.swa_num_pages}p) "
@@ -409,6 +433,10 @@ class DeepseekV4MemoryManager(MemoryManager):
     def get_c4_indexer_state_buffer(self, layer_index: int) -> torch.Tensor:
         assert self.compress_rates[layer_index] == 4, "只有 c4(CSA) 层有 paged indexer state"
         return self.c4_indexer_state_buffer[self.layer_to_c4_idx[layer_index]]
+
+    def get_c128_state_buffer(self, layer_index: int) -> torch.Tensor:
+        assert self.compress_rates[layer_index] == 128, "只有 c128(HCA) 层有 paged compressor state"
+        return self.c128_state_buffer[self.layer_to_c128_idx[layer_index]]
 
     # ------------------------------------------------------------------ swa slot lifecycle
     def set_swa_pressure_valve(self, valve) -> None:

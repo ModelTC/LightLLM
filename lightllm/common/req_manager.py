@@ -29,8 +29,8 @@ class DeepseekV4PromptCachePayload:
     """prompt cache 载荷: 只剩 swa 按页有效性 bitmap。
 
     槽位与 compressor 状态都不进载荷: full_to_swa/full_to_c4/full_to_c128 以 full token 槽位
-    为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4 compressor 状态以 swa 页派生
-    寻址(随 swa 页生灭,命中零拷贝续算);c128 状态在 128 边界自然归零,无需恢复。
+    为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4/c128 compressor 状态以 swa
+    页派生寻址(随 swa 页生灭,命中零拷贝续算)。c128 partial state 不跨 radix 的 128 边界保存。
 
     * ``swa_page_valid``: cpu bool [cache_len // page]，插入时按当下 full_to_swa 映射写定
       (页内 128 个映射全有效才为 True)。匹配层据此把命中裁剪到"结尾页有效"的 128 边界,
@@ -368,9 +368,8 @@ class DeepseekV4ReqManager(ReqManager):
         本类只负责 prep 阶段的分配与 scatter(``prepare_prefill_compress_slots`` /
         ``prepare_decode_compress_slots``)——必须先于 attention metadata 构建/图捕获;
         条目内容由 layer-infer 的 compressor 前向写入。
-      * ``req_to_c128_state_pool`` —— c128 compressor 的在途状态(per req、per c128 层)。
-        c128 在线聚合在 128 边界自然归零(命中边界必 128 对齐),无缓存常驻需求,保持 req 键控。
-        c4 状态(跨边界 overlap)在 mem manager 的 swa 页派生池,随页生灭,命中零拷贝续算。
+      * compressor 在途状态不在本类: c4/c128 都在 mem manager 的 swa 页派生池,
+        随页生灭,命中零拷贝续算。
       * SWA 槽位分配/出窗回收(``prepare_prefill_swa`` / ``prepare_decode_swa``): 每步 prep 阶段
         为新 token 调 mem_manager.alloc_swa，并按 per-req 水位线(``_swa_evict_marks``)惰性回收
         已出窗位置的 swa 槽。水位线首次置为该请求首个 chunk 的 ready_cache_len(radix 共享前缀
@@ -419,16 +418,6 @@ class DeepseekV4ReqManager(ReqManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        # c128 compressor 在途状态(fp32): 在线聚合在 128 边界自然归零(命中边界必 128 对齐),
-        # 无缓存常驻需求,保持 req 键控。c4 状态(有跨边界 overlap)在 mem manager 的
-        # swa 页派生池(c4_state_buffer / c4_indexer_state_buffer)。
-        self.req_to_c128_state_pool = LayerCache(
-            size=max_request_num + 1,
-            dtype=torch.float32,
-            shape=(1, 128, 2 * head_dim),
-            layer_num=self.n_c128,
-            device="cuda",
-        )
         return
 
     def bind_mem_manager(self, mem_manager: DeepseekV4MemoryManager):
@@ -524,20 +513,11 @@ class DeepseekV4ReqManager(ReqManager):
         self.mem_manager.alloc_swa_decode(b_req_idx, b_seq_len, mem_indexes, self.req_to_token_indexs)
         return
 
-    def _reset_state_pool_req(self, cache: LayerCache, req_idx: int):
-        if cache.layer_num == 0:
-            return
-        cache.buffer[:, req_idx, ...].fill_(0)
-        return
-
     def init_compress_state(self, req_idx: int):
-        """新请求开始时重置其 compressor 在途状态(对应 mamba 的 init_linear_att_state)。
+        """新请求开始时重置 runtime 水位线(对应 mamba 的 init_linear_att_state 调用点)。
 
-        只有 c128 状态是 req 键控的(c4 状态随 swa 页生灭,内核组起点覆写,无需重置;
-        压缩槽位以 full 槽位为键,随请求 full 槽的释放级联回收)。"""
+        c4/c128 compressor state 都随 swa 页寻址,由内核按组覆写;请求复用时不做 per-req 清零。"""
         self.clear_runtime_state(req_idx)
-        if self.n_c128 > 0:
-            self._reset_state_pool_req(self.req_to_c128_state_pool, req_idx)
         return
 
     # ------------------------------------------------------------------ compress slot prep (per step)
@@ -628,14 +608,6 @@ class DeepseekV4ReqManager(ReqManager):
         self._swa_evict_marks[req_idx] = -1
         return
 
-    def get_compress_state_pool_for_req(self, layer_index: int, req_idx: int):
-        assert self.compress_rates[layer_index] == 128, "c4 state 在 mem manager 的 swa 页派生池"
-        return self.req_to_c128_state_pool.buffer[self.layer_to_c128_idx[layer_index], req_idx]
-
-    def get_compress_state_pool(self, layer_index: int):
-        assert self.compress_rates[layer_index] == 128, "c4 state 在 mem manager 的 swa 页派生池"
-        return self.req_to_c128_state_pool.buffer[self.layer_to_c128_idx[layer_index]]
-
     def get_prompt_cache_value_ops(self):
         return DeepseekV4PromptCacheValueOps(self)
 
@@ -712,6 +684,4 @@ class DeepseekV4ReqManager(ReqManager):
     def free_all(self):
         super().free_all()
         self._swa_evict_marks = [-1 for _ in range(self.max_request_num + 1)]
-        if self.n_c128 > 0:
-            self.req_to_c128_state_pool.buffer.fill_(0)
         return
