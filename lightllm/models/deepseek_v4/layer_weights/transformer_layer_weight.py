@@ -121,19 +121,10 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
 
         coff = 2 if ratio == 4 else 1
         # wkv/wgate are bf16 (no scale) and replicated (single KV head).
-        self.compressor_wkv_ = ROWMMWeight(
+        self.compressor_wkv_gate_ = ROWMMWeight(
             in_dim=self.hidden,
-            out_dims=[coff * head_dim],
-            weight_names=f"{prefix}.wkv.weight",
-            data_type=self.data_type_,
-            quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
-        )
-        self.compressor_wgate_ = ROWMMWeight(
-            in_dim=self.hidden,
-            out_dims=[coff * head_dim],
-            weight_names=f"{prefix}.wgate.weight",
+            out_dims=[coff * head_dim, coff * head_dim],
+            weight_names=[f"{prefix}.wkv.weight", f"{prefix}.wgate.weight"],
             data_type=self.data_type_,
             quant_method=None,
             tp_rank=0,

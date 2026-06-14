@@ -9,15 +9,9 @@ from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import D
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
-from .compressor import (
-    compressor_prefill_state,
-    compressor_decode_step_single,
-    compressor_decode_step_batch,
-    compressor_paged_prefill,
-    compressor_paged_decode_batch,
-    paged_prefill_compress_data,
-    paged_decode_state_slots,
-)
+from .compressor import fused_compress as fused_compress_op
+from .compressor import prepare_partial_states
+from .compressor import prepare_compress_states
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
 
@@ -59,6 +53,9 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.indexer_score_scale = self.index_head_dim ** -0.5
         self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
+        self.compressor = CompressorInfer(
+            layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
+        )
 
     # ------------------------------------------------------------------ forward (HC-threaded)
     def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
@@ -196,267 +193,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         idx_weight = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
         return idx_q, idx_weight
 
-    def _gather_compress_slots(self, infer_state: DeepseekV4InferStateInfo, req, entry_start, entry_count):
-        """组末 token 的 full 槽位 -> 压缩槽(条目 [entry_start, entry_start+entry_count))。
-        槽位已由 prep 阶段(prepare_*_compress_slots)分配并 scatter 进 full_to_c4/c128_indexs。"""
-        ratio = self.compress_ratio
-        mem = infer_state.mem_manager
-        mapping = mem.full_to_c4_indexs if ratio == 4 else mem.full_to_c128_indexs
-        last = entry_start + entry_count
-        ends = infer_state.req_manager.req_to_token_indexs[req, ratio - 1 : last * ratio : ratio][entry_start:]
-        return mapping[ends.long()]
-
-    def _write_compressed_kv(self, infer_state: DeepseekV4InferStateInfo, req, entry_start, comp):
-        slots = self._gather_compress_slots(infer_state, req, entry_start, comp.shape[0])
-        if comp.shape[0]:
-            infer_state.mem_manager.pack_compressed_kv_to_cache(self.layer_num_, slots, comp)
-        return slots
-
-    def _compressor_weights(self, layer_weight: DeepseekV4TransformerLayerWeight, for_indexer: bool):
-        if for_indexer:
-            return (
-                layer_weight.idx_cmp_wkv_.mm_param.weight,
-                layer_weight.idx_cmp_wgate_.mm_param.weight,
-                layer_weight.idx_cmp_norm_.weight,
-                layer_weight.idx_cmp_ape_.weight,
-                self.index_head_dim,
-            )
-        return (
-            layer_weight.compressor_wkv_.mm_param.weight,
-            layer_weight.compressor_wgate_.mm_param.weight,
-            layer_weight.compressor_norm_.weight,
-            layer_weight.compressor_ape_.weight,
-            self.head_dim_,
-        )
-
-    def _run_compressor_prefill(
-        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
-        """Per-request compressor for the prefill chunk. Runs as part of the deferred attention
-        func, before the attention metadata gathers the slot mappings.
-
-        c4: paged state (swa-page-derived group slots, translation #3) — one fused extend-aware
-        call per request; the (write_loc, extra_data, plan) tuple is layer-independent and cached
-        on infer_state across all c4 layers. c128: req-keyed state (zero at every 128 boundary by
-        construction, nothing cache-resident), original jit paths."""
-        if not self.compress_ratio:
-            return
-        if self.compress_ratio == 4:
-            self._run_c4_compressor_prefill(x, infer_state, layer_weight)
-        else:
-            self._run_c128_compressor_prefill(x, infer_state, layer_weight)
-        return
-
-    def _run_c4_compressor_prefill(
-        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
-        rm = infer_state.req_manager
-        mem = infer_state.mem_manager
-        wkv, wgate, norm, ape, _ = self._compressor_weights(layer_weight, for_indexer=False)
-        iwkv, iwgate, inorm, iape, _ = self._compressor_weights(layer_weight, for_indexer=True)
-        state_buf = mem.get_c4_state_buffer(self.layer_num_)
-        idx_state_buf = mem.get_c4_indexer_state_buffer(self.layer_num_)
-        data_cache = getattr(infer_state, "_dsv4_c4_prefill_data", None)
-        if data_cache is None:
-            data_cache = {}
-            infer_state._dsv4_c4_prefill_data = data_cache
-        b_req = infer_state.b_req_idx.tolist()
-        starts = infer_state.b_q_start_loc.tolist()
-        lens = infer_state.b_q_seq_len.tolist()
-        ready_lens = infer_state.b_ready_cache_len.tolist()
-        for req, st, ln, ready_len in zip(b_req, starts, lens, ready_lens):
-            if req == rm.HOLD_REQUEST_ID or ln == 0:
-                continue
-            seq_len = ready_len + ln
-            data = data_cache.get(req)
-            if data is None:
-                data = paged_prefill_compress_data(
-                    rm.req_to_token_indexs, mem.full_to_swa_indexs, req, ready_len, seq_len, ring=8
-                )
-                data_cache[req] = data
-            x_r = x[st : st + ln]
-            comp = compressor_paged_prefill(
-                x_r,
-                wkv,
-                wgate,
-                norm,
-                ape,
-                self.head_dim_,
-                self.cos_compress_table,
-                self.sin_compress_table,
-                self.eps_,
-                state_buf,
-                data,
-                ready_len,
-                seq_len,
-            )
-            slots = self._write_compressed_kv(infer_state, req, ready_len // 4, comp)
-            idx_comp = compressor_paged_prefill(
-                x_r,
-                iwkv,
-                iwgate,
-                inorm,
-                iape,
-                self.index_head_dim,
-                self.cos_compress_table,
-                self.sin_compress_table,
-                self.eps_,
-                idx_state_buf,
-                data,
-                ready_len,
-                seq_len,
-            )
-            if idx_comp.shape[0]:
-                infer_state.mem_manager.pack_indexer_k_to_cache(self.layer_num_, slots, idx_comp)
-        return
-
-    def _run_c128_compressor_prefill(
-        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
-        rm = infer_state.req_manager
-        wkv, wgate, norm, ape, _ = self._compressor_weights(layer_weight, for_indexer=False)
-        b_req = infer_state.b_req_idx.tolist()
-        starts = infer_state.b_q_start_loc.tolist()
-        lens = infer_state.b_q_seq_len.tolist()
-        ready_lens = infer_state.b_ready_cache_len.tolist()
-        for req, st, ln, ready_len in zip(b_req, starts, lens, ready_lens):
-            if req == rm.HOLD_REQUEST_ID:
-                continue
-            x_r = x[st : st + ln]
-            state_pool = rm.get_compress_state_pool_for_req(self.layer_num_, req)
-            if ready_len == 0:
-                comp = compressor_prefill_state(
-                    x_r,
-                    wkv,
-                    wgate,
-                    norm,
-                    ape,
-                    self.compress_ratio,
-                    self.head_dim_,
-                    self.cos_compress_table,
-                    self.sin_compress_table,
-                    self.eps_,
-                    state_pool,
-                )
-                self._write_compressed_kv(infer_state, req, 0, comp)
-            else:
-                for j in range(ln):
-                    start_pos = ready_len + j
-                    entry = compressor_decode_step_single(
-                        x_r[j],
-                        wkv,
-                        wgate,
-                        norm,
-                        ape,
-                        self.compress_ratio,
-                        self.head_dim_,
-                        self.cos_compress_table,
-                        self.sin_compress_table,
-                        self.eps_,
-                        state_pool,
-                        start_pos,
-                    )
-                    if entry is not None:
-                        entry_start = (start_pos + 1) // self.compress_ratio - 1
-                        self._write_compressed_kv(infer_state, req, entry_start, entry.unsqueeze(0))
-        return
-
-    def _run_compressor_decode(
-        self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
-        """Batched decode compressor (cuda-graph safe): state update for every request, cache write
-        masked to the pool HOLD slot unless this token completes a window. Compressed-cache slots
-        were pre-allocated by prepare_decode_compress_slots in the prep phase.
-
-        c4: paged state — group slots derived from full_to_swa (translation #3) via pure tensor
-        ops (graph-safe), shared across all c4 layers per step. c128: req-keyed state."""
-        if not self.compress_ratio:
-            return
-        rm = infer_state.req_manager
-        mem = infer_state.mem_manager
-        req = infer_state.b_req_idx
-        ratio = self.compress_ratio
-        wkv, wgate, norm, ape, _ = self._compressor_weights(layer_weight, for_indexer=False)
-
-        if ratio == 4:
-            mapping, hold = mem.full_to_c4_indexs, mem.c4_pool.HOLD_TOKEN_MEMINDEX
-            slot_meta = getattr(infer_state, "_dsv4_c4_decode_slots", None)
-            if slot_meta is None:
-                slot_meta = paged_decode_state_slots(
-                    rm.req_to_token_indexs,
-                    mem.full_to_swa_indexs,
-                    req,
-                    infer_state.b_seq_len,
-                    page_size=128,
-                    ring=8,
-                    ratio=4,
-                    hold_req_id=rm.HOLD_REQUEST_ID,
-                    num_swa_pages=mem.swa_num_pages,
-                )
-                infer_state._dsv4_c4_decode_slots = slot_meta
-            write_slot, overlap_slot = slot_meta
-            entry, should = compressor_paged_decode_batch(
-                x,
-                wkv,
-                wgate,
-                norm,
-                ape,
-                self.head_dim_,
-                self.cos_compress_table,
-                self.sin_compress_table,
-                self.eps_,
-                mem.get_c4_state_buffer(self.layer_num_),
-                write_slot,
-                overlap_slot,
-                infer_state.b_seq_len,
-            )
-        else:
-            mapping, hold = mem.full_to_c128_indexs, mem.c128_pool.HOLD_TOKEN_MEMINDEX
-            entry, should = compressor_decode_step_batch(
-                x,
-                wkv,
-                wgate,
-                norm,
-                ape,
-                ratio,
-                self.head_dim_,
-                self.qk_rope_head_dim,
-                self.cos_compress_table,
-                self.sin_compress_table,
-                self.eps_,
-                rm.get_compress_state_pool(self.layer_num_),
-                req,
-                infer_state.b_seq_len.long() - 1,
-            )
-
-        should = should & (req != rm.HOLD_REQUEST_ID)
-        # 本步 token 即组末 token(should 为真时)，其 full 槽 = mem_index，映射在 prep 已 scatter。
-        slots = mapping[infer_state.mem_index.long()].long()
-        slots = torch.where(should, slots, torch.full_like(slots, hold))
-        mem.pack_compressed_kv_to_cache(self.layer_num_, slots, entry)
-
-        if ratio == 4:
-            iwkv, iwgate, inorm, iape, _ = self._compressor_weights(layer_weight, for_indexer=True)
-            idx_entry, idx_should = compressor_paged_decode_batch(
-                x,
-                iwkv,
-                iwgate,
-                inorm,
-                iape,
-                self.index_head_dim,
-                self.cos_compress_table,
-                self.sin_compress_table,
-                self.eps_,
-                mem.get_c4_indexer_state_buffer(self.layer_num_),
-                write_slot,
-                overlap_slot,
-                infer_state.b_seq_len,
-            )
-            idx_should = idx_should & (req != rm.HOLD_REQUEST_ID)
-            idx_slots = torch.where(idx_should, slots, torch.full_like(slots, hold))
-            mem.pack_indexer_k_to_cache(self.layer_num_, idx_slots, idx_entry)
-        return
-
     # ------------------------------------------------------------------ attention (prefill)
     def context_attention_forward(
         self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
@@ -503,7 +239,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _context_attention_kernel(
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        self._run_compressor_prefill(x, infer_state, layer_weight)
+        self.compressor.prepare_states(x, infer_state, layer_weight)
+        self.compressor.fused_compress(infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
         idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
             nsa_prefill=True,
@@ -546,7 +283,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _token_attention_kernel(
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        self._run_compressor_decode(x, infer_state, layer_weight)
+        self.compressor.prepare_states(x, infer_state, layer_weight)
+        self.compressor.fused_compress(infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
         idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
             nsa_decode=True,
@@ -647,3 +385,63 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             hash_indices_table,
         )
         return weights, indices.long()
+
+
+class CompressorInfer:
+    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
+        super().__init__()
+        self.layer_idx_ = layer_idx
+        self.network_config_ = network_config
+        self.tp_world_size_ = tp_world_size
+        self.compress_ratio = network_config["compress_ratios"][layer_idx]
+        self.head_dim = network_config["head_dim"]
+        self.index_head_dim = network_config["index_head_dim"]
+        self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
+        self.eps = network_config["rms_norm_eps"]
+        self._metadata = None
+
+    def prepare_states(
+        self,
+        x: torch.Tensor,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+    ):
+        self._metadata = prepare_compress_states(
+            infer_state=infer_state,
+            layer_idx=self.layer_idx_,
+            compress_ratio=self.compress_ratio,
+        )
+        if self._metadata is not None:
+            self._metadata.kv_score = layer_weight.compressor_wkv_gate_.mm(x).float()
+            prepare_partial_states(
+                kv_score=self._metadata.kv_score,
+                metadata=self._metadata,
+                ape=layer_weight.compressor_ape_.weight,
+                compress_ratio=self.compress_ratio,
+            )
+        return self._metadata
+
+    def fused_compress(
+        self,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+    ):
+        if self.compress_ratio == 0:
+            return None
+        metadata = self._metadata
+        if metadata is None:
+            raise RuntimeError("DeepSeek-V4 compressor.prepare_states must run before fused_compress")
+        return fused_compress_op(
+            kv_score=metadata.kv_score,
+            metadata=metadata,
+            norm_weight=layer_weight.compressor_norm_.weight,
+            ape=layer_weight.compressor_ape_.weight,
+            eps=self.eps,
+            head_dim=self.head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            compress_ratio=self.compress_ratio,
+            cos_table=cos_table,
+            sin_table=sin_table,
+        )
