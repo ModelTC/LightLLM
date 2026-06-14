@@ -257,6 +257,12 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
             if self.enable_dynamic_mtp:
+                pre_draft_step = g_infer_context.dynamic_mtp_planner.pre_draft_step
+                # 防止出现不正常的值
+                self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs[
+                    :, (pre_draft_step + 1) :
+                ].fill_(0.0)
+
                 (
                     dynamic_batch_size,
                     draft_step,
