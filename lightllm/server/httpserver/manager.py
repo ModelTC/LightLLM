@@ -127,10 +127,7 @@ class HttpServerManager:
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
-        self.vocab_size = max(
-            get_vocab_size(paths),
-            self.tokenizer.vocab_size,
-        )
+        self.vocab_size = max(get_vocab_size(paths), self.tokenizer.vocab_size)
 
         # The timemark of the latest inference(prefill/decode) which is used to check the health status of the system.
         # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.

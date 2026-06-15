@@ -235,11 +235,6 @@ def check_gguf_multimodal_paths(paths: ModelPaths, enable_multimodal: bool = Fal
         raise FileNotFoundError(f"mmproj_path {paths.mmproj_path} is not found")
 
 
-@lru_cache(maxsize=1)
-def get_start_args_model_config() -> dict:
-    return get_model_config(get_model_paths())
-
-
 def _derive_max_req_total_len_from_model_config(paths: ModelPaths) -> Optional[int]:
     """
     Derive `max_req_total_len` from model config.json.
@@ -521,7 +516,7 @@ def get_dtype(model_dir_or_paths: Union[str, ModelPaths]):
 
 @lru_cache(maxsize=None)
 def get_fixed_kv_len():
-    model_cfg = get_start_args_model_config()
+    model_cfg = get_model_config(get_model_paths())
     if "prompt_cache_token_ids" in model_cfg:
         return len(model_cfg["prompt_cache_token_ids"])
     else:

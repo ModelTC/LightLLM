@@ -23,11 +23,7 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
-from lightllm.utils.config_utils import (
-    apply_gguf_quant_type,
-    create_model_paths,
-    get_model_config,
-)
+from lightllm.utils.config_utils import create_model_paths, get_model_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
@@ -109,9 +105,8 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_quant()
-        self._align_quant_type_for_gguf_weights()
 
-        # read gguf and get quant shape
+        # Read GGUF weights mapping
         self._init_gguf()
         self._init_weights()
         self._init_req_manager()
@@ -175,13 +170,6 @@ class TpPartBaseModel:
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path)
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
-
-    def _align_quant_type_for_gguf_weights(self):
-        if self.model_paths_.gguf_path is None:
-            return
-        aligned = apply_gguf_quant_type(self.model_paths_, self.quant_cfg.quant_type)
-        if aligned != self.quant_cfg.quant_type:
-            self.quant_cfg.quant_type = aligned
 
     def _init_gguf(self):
         if self.model_paths_.gguf_path is None:
