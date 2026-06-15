@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 import math
+import os
 import torch
 import numpy as np
 from PIL import Image
@@ -284,3 +286,14 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         image_grid_thw = torch.as_tensor(processed_grids)
 
         return pixel_values, image_grid_thw
+
+
+def load_image_processor(processor_dir: str, processor_cls):
+    assert os.path.isdir(processor_dir), f"Processor directory not found at {processor_dir}"
+    config_path = os.path.join(processor_dir, "preprocessor_config.json")
+
+    assert os.path.exists(config_path), f"Processor config file not found at {config_path} for {processor_dir}"
+    with open(config_path, "r") as f:
+        processor_config = json.load(f)
+
+    return processor_cls(**processor_config) 

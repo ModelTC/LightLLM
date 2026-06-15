@@ -16,7 +16,7 @@ from safetensors import safe_open
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
-from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
+from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, load_image_processor
 
 
 def add_split_tokens(image_features, image_newline_embed, image_new_embed):
@@ -217,10 +217,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         return image_features
 
     def load_model(self, weight_dir):
-        processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
-        with open(processor_config_path, "r") as f:
-            processor_config_dict = json.load(f)
-        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+        self.processor = load_image_processor(self.processor_dir, Qwen2VLImageProcessor)
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:

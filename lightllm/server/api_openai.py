@@ -32,6 +32,7 @@ from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.error_utils import ClientDisconnected
 
+from lightllm.utils.config_utils import ModelPaths, has_vision_module
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -232,6 +233,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     created_time = int(time.time())
 
+    supports_vl_chat = has_vision_module(ModelPaths.from_args(g_objs.args))
     multimodal_params_dict = {"images": [], "audios": []}
     for message in request.messages:
         if isinstance(message.content, list):
@@ -275,6 +277,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                             raise ValueError("Unrecognized audio input.")
                     else:
                         raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
+
+            if not supports_vl_chat:
+                message.content = "\n".join(texts) if texts else ""
 
     tools = None
     if request.tools and request.tool_choice != "none":

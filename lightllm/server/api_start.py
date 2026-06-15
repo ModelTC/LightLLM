@@ -18,13 +18,13 @@ from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.utils.config_utils import (
-    align_quant_type_for_gguf_model,
-    check_gguf_quant_model_dir,
-    check_gguf_tokenizer_dir,
+    ModelPaths,
+    apply_gguf_quant_type,
     has_audio_module,
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    check_gguf_multimodal_paths,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -77,7 +77,9 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
-    auto_set_max_req_total_len(args)
+    paths = ModelPaths.from_args(args)
+
+    auto_set_max_req_total_len(args, paths)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -89,16 +91,22 @@ def normal_or_p_d_start(args):
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
-    if args.disable_vision is None:
-        if has_vision_module(args.model_dir):
-            args.disable_vision = False
-        else:
-            args.disable_vision = True
-    if args.disable_audio is None:
-        if has_audio_module(args.model_dir):
-            args.disable_audio = False
-        else:
+    if paths.is_gguf:
+        if args.disable_vision is None:
+            args.disable_vision = not bool(args.mmproj_path)
+        if args.disable_audio is None:
             args.disable_audio = True
+    else:
+        if args.disable_vision is None:
+            if has_vision_module(paths):
+                args.disable_vision = False
+            else:
+                args.disable_vision = True
+        if args.disable_audio is None:
+            if has_audio_module(paths):
+                args.disable_audio = False
+            else:
+                args.disable_audio = True
 
     # pd 分离模式下，不启动多模态的模块
     if args.run_mode in ["decode", "nixl_decode"]:
@@ -109,6 +117,9 @@ def normal_or_p_d_start(args):
         args.enable_multimodal = False
     else:
         args.enable_multimodal = True
+
+    # Check if the tokenizer directory and mmproj path are provided for GGUF multimodal models
+    check_gguf_multimodal_paths(paths, enable_multimodal=args.enable_multimodal)
 
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
@@ -145,14 +156,7 @@ def normal_or_p_d_start(args):
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
 
-    check_gguf_tokenizer_dir(args.model_dir, args.tokenizer_dir)
-    aligned_quant_type = align_quant_type_for_gguf_model(args.model_dir, args.quant_type, args.quant_cfg)
-    if aligned_quant_type != args.quant_type:
-        logger.warning(
-            f"model_dir contains GGUF weights; overriding --quant_type {args.quant_type!r} -> {aligned_quant_type!r}"
-        )
-        args.quant_type = aligned_quant_type
-    check_gguf_quant_model_dir(args.model_dir, args.quant_type, args.quant_cfg)
+    args.quant_type = apply_gguf_quant_type(paths, args.quant_type)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
     # 确保单机上多实列不冲突
@@ -303,7 +307,7 @@ def normal_or_p_d_start(args):
         # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
         args.linear_att_cache_size = args.running_max_req_size * 2
 
-    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+    if args.enable_cpu_cache and is_linear_att_mixed_model(paths):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
 
@@ -317,15 +321,13 @@ def normal_or_p_d_start(args):
     if args.eos_id is None:
         from lightllm.utils.config_utils import get_eos_token_ids
 
-        args.eos_id = get_eos_token_ids(args.model_dir)
+        args.eos_id = get_eos_token_ids(paths)
 
     # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
     if args.tool_call_parser is None:
         from lightllm.utils.config_utils import get_tool_call_parser_for_model
 
-        args.tool_call_parser = get_tool_call_parser_for_model(
-            config_path=args.config_path, model_dir=args.model_dir
-        )
+        args.tool_call_parser = get_tool_call_parser_for_model(paths)
         if args.tool_call_parser:
             logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
 
@@ -333,16 +335,14 @@ def normal_or_p_d_start(args):
     if args.reasoning_parser is None:
         from lightllm.utils.config_utils import get_reasoning_parser_for_model
 
-        args.reasoning_parser = get_reasoning_parser_for_model(
-            config_path=args.config_path, model_dir=args.model_dir
-        )
+        args.reasoning_parser = get_reasoning_parser_for_model(paths)
         if args.reasoning_parser:
             logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
-        args.data_type = get_dtype(args.model_dir)
+        args.data_type = get_dtype(paths)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     already_uesd_ports = [args.port]
@@ -543,7 +543,8 @@ def pd_master_start(args):
     if args.run_mode != "pd_master":
         return
 
-    auto_set_max_req_total_len(args)
+    paths = ModelPaths.from_args(args)
+    auto_set_max_req_total_len(args, paths)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
@@ -568,21 +569,7 @@ def pd_master_start(args):
 
     set_env_start_args(args)
 
-    check_gguf_tokenizer_dir(args.model_dir, args.tokenizer_dir)
-    aligned_quant_type = align_quant_type_for_gguf_model(args.model_dir, args.quant_type, args.quant_cfg)
-    if aligned_quant_type != args.quant_type:
-        logger.warning(
-            f"model_dir contains GGUF weights; overriding --quant_type {args.quant_type!r} -> {aligned_quant_type!r}"
-        )
-        args.quant_type = aligned_quant_type
-    check_gguf_quant_model_dir(args.model_dir, args.quant_type, args.quant_cfg)
-    aligned_quant_type = align_quant_type_for_gguf_model(args.model_dir, args.quant_type, args.quant_cfg)
-    if aligned_quant_type != args.quant_type:
-        logger.warning(
-            f"model_dir contains GGUF weights; overriding --quant_type {args.quant_type!r} -> {aligned_quant_type!r}"
-        )
-        args.quant_type = aligned_quant_type
-    check_gguf_quant_model_dir(args.model_dir, args.quant_type, args.quant_cfg)
+    args.quant_type = apply_gguf_quant_type(paths, args.quant_type)
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -623,6 +610,7 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+    paths = ModelPaths.from_args(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
@@ -641,7 +629,7 @@ def visual_only_start(args):
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
-        args.data_type = get_dtype(args.model_dir)
+        args.data_type = get_dtype(paths)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
     logger.info(f"alloced ports: {can_use_ports}")

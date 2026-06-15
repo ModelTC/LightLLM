@@ -14,16 +14,14 @@ class GGUFWeightMeta:
     quant_type: GGMLQuantizationType
 
 
-def numpy_dtype_to_torch(np_dtype: np.dtype) -> torch.dtype:
-    return torch.from_numpy(np.zeros((), dtype=np_dtype)).dtype
-
-
 @dataclass
 class WeightPack:
     weight: Optional[torch.Tensor] = None
     weight_scale: Optional[torch.Tensor] = None
     weight_zero_point: Optional[torch.Tensor] = None
     gguf_quant_type: Optional[GGMLQuantizationType] = None
+    # Dequantize unsupported quantization formats during loading for GGUF
+    gguf_load_predquant: bool = False
 
     def __post_init__(self):
         self.load_ok = [False, self.weight_scale is None, self.weight_zero_point is None]
@@ -38,6 +36,7 @@ class WeightPack:
             weight_scale=weight_scale,
             weight_zero_point=weight_zero_point,
             gguf_quant_type=self.gguf_quant_type,
+            gguf_load_predquant=self.gguf_load_predquant,
         )
 
 
@@ -190,6 +189,7 @@ class QuantizationMethod(ABC):
                     weight_scale=weight_scale,
                     weight_zero_point=weight_zero_point,
                     gguf_quant_type=weight_pack.gguf_quant_type,
+                    gguf_load_predquant=weight_pack.gguf_load_predquant,
                 )
             )
         return mm_param_list

@@ -22,6 +22,8 @@ class ROWMMWeight(MMWeightTpl):
     ) -> None:
         self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
         self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
+        if isinstance(out_dims, int):
+            out_dims = [out_dims]
         out_dims = [self._get_tp_dim(out_dim) for out_dim in out_dims]
         super().__init__(
             in_dim=in_dim,

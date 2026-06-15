@@ -7,7 +7,7 @@ import threading
 import time
 import torch.distributed as dist
 from typing import Dict, List, Tuple, Deque, Optional
-from transformers.configuration_utils import PretrainedConfig
+from lightllm.utils.config_utils import get_model_paths, get_model_config
 from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
@@ -52,6 +52,7 @@ class VisualModelRpcServer(rpyc.Service):
         # }
 
         weight_dir = kvargs["weight_dir"]
+        processor_dir = kvargs.get("processor_dir", weight_dir)
         self.infer_max_batch_size = kvargs["max_batch_size"]
         self.device_id = kvargs["device_id"]
         self.vit_tp = kvargs["vit_tp"]
@@ -63,11 +64,12 @@ class VisualModelRpcServer(rpyc.Service):
         self.vit_attn_backend = kvargs["vit_attn_backend"]
         set_vit_att_backend(self.vit_attn_backend)
         init_vision_distributed_env(kvargs)
-        model_cfg, _ = PretrainedConfig.get_config_dict(weight_dir)
+        model_cfg = get_model_config(get_model_paths())
 
         try:
             kvargs = {
                 "weight_dir": weight_dir,
+                "processor_dir": processor_dir,
                 "data_type": self.data_type,
                 "quant_type": kvargs["quant_type"],
                 "quant_cfg": kvargs["quant_cfg"],

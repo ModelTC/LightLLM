@@ -8,6 +8,7 @@ from lightllm.common.build_utils import repair_config
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
+from lightllm.utils.config_utils import get_model_config
 
 from .vision_process import smart_resize
 from lightllm.models.qwen2.model import Qwen2TpPartModel
@@ -100,8 +101,7 @@ class Qwen2VLTpPartModel(Qwen2TpPartModel):
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
+        self.config = get_model_config(self.model_paths_)
         # rename keys
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])

@@ -22,7 +22,11 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
-from lightllm.utils.config_utils import find_gguf_path, get_model_config_dict
+from lightllm.utils.config_utils import (
+    apply_gguf_quant_type,
+    _create_model_paths,
+    get_model_config,
+)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
@@ -58,7 +62,7 @@ class TpPartBaseModel:
         self.args = get_env_start_args()
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
-        self.gguf_path_ = find_gguf_path(self.weight_dir_)
+        self.model_paths_ = _create_model_paths(self.weight_dir_)
         self.max_total_token_num = kvargs["max_total_token_num"]
         self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
@@ -148,10 +152,7 @@ class TpPartBaseModel:
         return
 
     def _init_config(self):
-        self.config = get_model_config_dict(
-            config_path=self.args.config_path,
-            model_dir=self.weight_dir_,
-        )
+        self.config = get_model_config(self.model_paths_)
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -171,51 +172,20 @@ class TpPartBaseModel:
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _align_quant_type_for_gguf_weights(self):
-        if self.gguf_path_ is None:
+        if self.model_paths_.gguf_path is None:
             return
-        if self.quant_cfg.quant_type == "gguf":
-            return
-        logger.warning(
-            f"model_dir contains GGUF weights ({self.gguf_path_!r}) but quant_type is "
-            f"{self.quant_cfg.quant_type!r}; using quant_type='gguf' instead."
-        )
-        self.quant_cfg.quant_type = "gguf"
+        aligned = apply_gguf_quant_type(self.model_paths_, self.quant_cfg.quant_type)
+        if aligned != self.quant_cfg.quant_type:
+            self.quant_cfg.quant_type = aligned
 
     def _init_gguf(self):
-        if self.gguf_path_ is None:
+        if self.model_paths_.gguf_path is None:
             return
 
-        import numpy as np
-        from gguf.gguf_reader import GGUFReader
-        from lightllm.common.basemodel.layer_weights.gguf_load_utils import (
-            DEQUANT_KEYS,
-            build_gguf_to_hf_mapping,
-        )
-        from lightllm.common.quantization.quantize_method import GGUFWeightMeta, numpy_dtype_to_torch
+        from lightllm.common.basemodel.layer_weights.gguf_load_utils import get_gguf_reader
 
-        self._gguf_to_hf = build_gguf_to_hf_mapping(self.config)
-        self._gguf_reader = GGUFReader(self.gguf_path_)
-
-        gguf_quant_meta_map = {}
-        for t in self._gguf_reader.tensors:
-            if t.name in DEQUANT_KEYS:
-                continue
-            hf_name = self._gguf_to_hf.get(t.name)
-            if hf_name is None:
-                continue
-            np_data = np.asarray(t.data)
-            logical_shape = tuple(reversed([int(x) for x in t.shape.tolist()]))
-            gguf_quant_meta_map[hf_name] = GGUFWeightMeta(
-                shape=logical_shape,
-                dtype=numpy_dtype_to_torch(np_data.dtype),
-                quant_type=t.tensor_type,
-            )
-        self.quant_cfg.gguf_quant_meta_map = gguf_quant_meta_map
-
-    def _release_gguf_reader(self):
-        if getattr(self, "_gguf_reader", None) is not None:
-            del self._gguf_reader
-            self._gguf_reader = None
+        reader = get_gguf_reader(self.model_paths_.gguf_path)
+        self.quant_cfg.gguf_quant_meta_map = reader.build_quant_meta_map(self.config)
 
     def _init_weights(self, start_layer_index=0):
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
@@ -231,19 +201,15 @@ class TpPartBaseModel:
         return
 
     def _load_hf_weights(self):
-        if self.gguf_path_ is not None:
-            from lightllm.common.basemodel.layer_weights.gguf_load_utils import load_gguf_weights
+        if self.model_paths_.gguf_path is not None:
+            from lightllm.common.basemodel.layer_weights.gguf_load_utils import get_gguf_reader
 
-            load_gguf_weights(
-                self.data_type,
-                weight_dir=self.gguf_path_,
+            reader = get_gguf_reader(self.model_paths_.gguf_path)
+            reader.load_weights(
+                data_type=self.data_type,
                 config=self.config,
                 pre_post_layer=self.pre_post_weight,
                 transformer_layer_list=self.trans_layers_weight,
-                weight_dict=self.weight_dict,
-                reader=getattr(self, "_gguf_reader", None),
-                gguf_to_hf=getattr(self, "_gguf_to_hf", None),
-                release_reader=self._release_gguf_reader,
             )
         else:
             load_hf_weights(

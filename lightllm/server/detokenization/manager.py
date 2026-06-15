@@ -12,6 +12,7 @@ from typing import Union, Dict, List
 from .decode import decode_token
 from .decode_mode_fix import decode_mode_fix
 from .decode_req import DecodeReq
+from lightllm.utils.config_utils import ModelPaths
 from ..tokenizer import get_tokenizer
 import pickle
 import time
@@ -35,8 +36,7 @@ class DeTokenizationManager:
         self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
         logger.info(f"pub_to_httpserver sendhwm {self.pub_to_httpserver.getsockopt(zmq.SNDHWM)}")
         self.tokenizer = get_tokenizer(
-            tokenizer_name=args.model_dir,
-            tokenizer_dir=args.tokenizer_dir,
+            ModelPaths.from_args(args),
             tokenizer_mode=args.tokenizer_mode,
             trust_remote_code=args.trust_remote_code,
         )

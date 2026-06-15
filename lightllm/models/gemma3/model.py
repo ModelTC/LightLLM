@@ -11,6 +11,7 @@ from lightllm.models.gemma3.layer_infer.pre_layer_infer import Gemma3PreLayerInf
 from lightllm.models.gemma3.layer_infer.transformer_layer_infer import Gemma3TransformerLayerInfer
 from lightllm.models.gemma3.layer_weights.pre_and_post_layer_weight import Gemma3PreAndPostLayerWeight
 from lightllm.models.gemma3.layer_weights.transformer_layer_weight import Gemma3TransformerLayerWeight
+from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
@@ -151,6 +152,7 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         return
 
     def _init_config(self):
+        TpPartBaseModel._init_config(self)
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = json.load(json_file)
         # rename keys

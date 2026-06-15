@@ -1,6 +1,7 @@
 import torch
 import threading
 from typing import Dict, Any, Optional, Tuple, List
+from lightllm.common.basemodel.layer_weights.gguf_load_utils import load_weight_shard
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
@@ -332,14 +333,21 @@ class FusedMoeWeight(BaseWeightTpl):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.quant_method.weight_suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.quant_method.weight_suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.quant_method.weight_suffix}"
-        row_slice_func = self.row_slicer._slice_weight
-        col_slice_func = self.col_slicer._slice_weight
-        if w1_weight in weights:
-            self.quant_method.load_weight(row_slice_func(weights[w1_weight]), self.w1_list[local_expert_idx])
-        if w3_weight in weights:
-            self.quant_method.load_weight(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
-        if w2_weight in weights:
-            self.quant_method.load_weight(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
+        expert_weights = (
+            (w1_weight, self.w1_list[local_expert_idx], self.row_slicer),
+            (w3_weight, self.w3_list[local_expert_idx], self.row_slicer),
+            (w2_weight, self.w2_list[local_expert_idx], self.col_slicer),
+        )
+        for param_name, weight_pack, slicer in expert_weights:
+            if param_name not in weights:
+                continue
+            load_weight_shard(
+                raw_weight=weights[param_name],
+                param_name=param_name,
+                weight_pack=weight_pack,
+                slicer=slicer,
+                quant_method=self.quant_method,
+            )
 
     def _load_expert_scale(
         self,

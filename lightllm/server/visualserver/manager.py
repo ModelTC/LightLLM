@@ -17,6 +17,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer import start_model_process, VisualModelRpcClient
 from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
+from lightllm.utils.config_utils import ModelPaths
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -50,7 +51,7 @@ class VisualManager:
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.model_weightdir = args.model_dir
+        self.visual_weight_dir, self.processor_dir = ModelPaths.from_args(args).resolve_visual_dirs()
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
         # image 最大推理 batch size
@@ -74,7 +75,8 @@ class VisualManager:
             for tp_rank_id in range(self.vit_tp):
                 device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
                 kvargs = {
-                    "weight_dir": self.model_weightdir,
+                    "weight_dir": self.visual_weight_dir,
+                    "processor_dir": self.processor_dir,
                     "device_id": device_id,
                     "vit_tp": self.vit_tp,
                     "cache_port": self.args.cache_port,

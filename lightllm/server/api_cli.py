@@ -132,7 +132,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--tokenizer_dir",
         type=str,
         default=None,
-        help="tokenizer directory; required for GGUF models, otherwise defaults to model_dir",
+        help="tokenizer directory; for gguf, load tokenizer from gguf is default, override it by providing this param",
+    )
+    parser.add_argument(
+        "--mmproj_path",
+        type=str,
+        default=None,
+        help="The path of mmproj for multimodal mode, only supported for GGUF models",
     )
     parser.add_argument(
         "--tokenizer_mode",

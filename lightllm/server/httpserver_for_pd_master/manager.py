@@ -12,6 +12,7 @@ from lightllm.server.core.objs import FinishStatus
 from ..pd_io_struct import PD_Client_Obj, UpKVStatus, NixlUpKVStatus, ObjType, NodeRole, NIXLDecodeNodeInfo
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
+from lightllm.utils.config_utils import ModelPaths
 from ..tokenizer import get_tokenizer
 from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
 from fastapi import Request
@@ -43,9 +44,8 @@ class HttpServerManagerForPDMaster:
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
 
         self.tokenizer = get_tokenizer(
-            args.model_dir,
-            args.tokenizer_dir,
-            args.tokenizer_mode,
+            ModelPaths.from_args(args),
+            tokenizer_mode=args.tokenizer_mode,
             trust_remote_code=args.trust_remote_code,
         )
 

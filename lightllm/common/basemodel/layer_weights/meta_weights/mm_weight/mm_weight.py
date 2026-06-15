@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Union, Type
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
+from lightllm.common.basemodel.layer_weights.gguf_load_utils import load_weight_shard
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.no_quant import NoQuantization
@@ -127,9 +128,13 @@ class MMWeightTpl(BaseWeightTpl):
         if quanted_param_name in weights:
             param_name = quanted_param_name
         if param_name in weights:
-            slicer = self._get_param_slicer(sub_child_index)
-            weight = slicer._slice_weight(weights[param_name])
-            self.quant_method.load_weight(weight, self.mm_param_list[sub_child_index])
+            load_weight_shard(
+                raw_weight=weights[param_name],
+                param_name=param_name,
+                weight_pack=self.mm_param_list[sub_child_index],
+                slicer=self._get_param_slicer(sub_child_index),
+                quant_method=self.quant_method,
+            )
         return
 
     def _load_bias(

@@ -27,7 +27,7 @@ from transformers.activations import ACT2FN
 
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, load_image_processor
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
 
 
@@ -139,6 +139,7 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        self.processor_dir = kvargs.get("processor_dir", kvargs.get("weight_dir"))
         self.data_type = kvargs.get("data_type", "bfloat16")
 
         self.depth = depth
@@ -220,11 +221,7 @@ class Qwen3OmniMoeVisionTransformerPretrainedModel(nn.Module):
         return all_img_embeds_ds, valid_ids
 
     def load_model(self, weight_dir):
-
-        processor_config_path = os.path.join(weight_dir, "preprocessor_config.json")
-        with open(processor_config_path, "r") as f:
-            processor_config_dict = json.load(f)
-        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+        self.processor = load_image_processor(self.processor_dir, Qwen2VLImageProcessor)
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:

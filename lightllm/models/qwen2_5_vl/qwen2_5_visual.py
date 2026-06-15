@@ -4,11 +4,13 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from typing import List, Optional
+from lightllm.common.basemodel.layer_weights.gguf_load_utils import load_mmproj_gguf_weights
+from lightllm.utils.log_utils import init_logger
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from io import BytesIO
 import torch.nn as nn
 from transformers.activations import ACT2FN
-from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
+from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, load_image_processor, resize_image
 from safetensors import safe_open
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import PatchEmbed, VisionRotaryEmbedding
@@ -16,6 +18,8 @@ from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
+
+logger = init_logger(__name__)
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -154,8 +158,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         fullatt_block_indexes=[7, 15, 23, 31],
         **kwargs,
     ):
-        super().__init__()
-        self.weight_dir = kvargs["weight_dir"]
+        super().__init__() 
         self.data_type = kvargs.get("data_type", "bfloat16")
 
         self.depth = depth
@@ -204,10 +207,8 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
 
         self.gradient_checkpointing = False
 
-        processor_config_path = os.path.join(self.weight_dir, "preprocessor_config.json")
-        with open(processor_config_path, "r") as f:
-            processor_config_dict = json.load(f)
-        self.processor = Qwen2VLImageProcessor(**processor_config_dict)
+        processor_dir = kvargs.get("processor_dir")
+        self.processor = load_image_processor(processor_dir, Qwen2VLImageProcessor)
 
         self._init_datatype()
 
@@ -350,6 +351,22 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         return pixel_values.to(dtype=self.data_type), image_grid_thw
 
     def load_model(self, weight_dir):
+        if weight_dir.endswith(".gguf"):
+            load_dtype = self.data_type
+            if not isinstance(load_dtype, torch.dtype):
+                load_dtype = torch.bfloat16 if load_dtype in ("bf16", "bfloat16") else torch.float16
+            weight_dict = load_mmproj_gguf_weights(
+                mmproj_path=weight_dir,
+                module_keys=self.state_dict().keys(),
+                depth=self.depth,
+                dtype=load_dtype,
+            )
+            missing, unexpected = self.load_state_dict(weight_dict, strict=False)
+            if missing:
+                logger.warning("mmproj missing keys (first 10): %s", missing[:10])
+            if unexpected:
+                logger.warning("mmproj unexpected keys (first 10): %s", unexpected[:10])
+            return
 
         bin_weight_files = [file_ for file_ in os.listdir(weight_dir) if file_.endswith(".bin")]
         if bin_weight_files:
