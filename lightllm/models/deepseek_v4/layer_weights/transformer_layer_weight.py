@@ -189,12 +189,14 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     # ------------------------------------------------------------------ moe
     def _init_moe(self):
         p = f"{self.prefix}.ffn"
-        # router gate (replicated)
+        # router gate (replicated). Stored as fp32: the topk_hash_softplus_sqrt router wants fp32 logits,
+        # so keep the gate matmul in fp32 — but store the (constant) weight as fp32 once here instead of
+        # re-casting it to fp32 on every forward in _ffn.
         self.gate_weight_ = ROWMMWeight(
             in_dim=self.hidden,
             out_dims=[self.n_routed_experts],
             weight_names=f"{p}.gate.weight",
-            data_type=self.data_type_,
+            data_type=torch.float32,
             quant_method=None,
             tp_rank=0,
             tp_world_size=1,
@@ -209,23 +211,19 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             self.gate_bias_ = ParameterWeight(
                 weight_name=f"{p}.gate.bias", data_type=torch.float32, weight_shape=(self.n_routed_experts,)
             )
-        # shared expert (dense, bf16 after de-quant): w1=gate, w3=up (row), w2=down (col)
+        # shared expert (dense, bf16 after de-quant): w1=gate, w3=up fused (row), w2=down (col).
+        # Named gate_up_proj/down_proj so the inherited Llama `_ffn_tp` (fused gate_up matmul +
+        # silu_and_mul triton kernel, no swiglu clamp) drives it directly. Order [w1, w3] = [gate, up]
+        # matches silu_and_mul_fwd's blocked layout (first half gate, second half up).
         sp = f"{p}.shared_experts"
-        self.shared_gate_ = ROWMMWeight(
+        self.gate_up_proj = ROWMMWeight(
             in_dim=self.hidden,
-            out_dims=[self.moe_inter],
-            weight_names=f"{sp}.w1.weight",
+            out_dims=[self.moe_inter, self.moe_inter],
+            weight_names=[f"{sp}.w1.weight", f"{sp}.w3.weight"],
             data_type=self.data_type_,
             quant_method=self.get_quant_method("shared_gate"),
         )
-        self.shared_up_ = ROWMMWeight(
-            in_dim=self.hidden,
-            out_dims=[self.moe_inter],
-            weight_names=f"{sp}.w3.weight",
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("shared_up"),
-        )
-        self.shared_down_ = COLMMWeight(
+        self.down_proj = COLMMWeight(
             in_dim=self.moe_inter,
             out_dims=[self.hidden],
             weight_names=f"{sp}.w2.weight",

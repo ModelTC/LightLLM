@@ -640,13 +640,7 @@ class TpPartBaseModel:
 
         handle_token_num = infer_state.input_ids.shape[0]
 
-        can_run_prefill_graph = self.prefill_graph is not None and self.prefill_graph.can_run(
-            handle_token_num=handle_token_num
-        )
-        if can_run_prefill_graph and hasattr(self, "_can_run_prefill_cudagraph"):
-            can_run_prefill_graph = self._can_run_prefill_cudagraph(infer_state, handle_token_num)
-
-        if can_run_prefill_graph:
+        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
             finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
                 handle_token_num=handle_token_num
             )

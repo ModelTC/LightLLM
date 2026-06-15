@@ -116,11 +116,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             self.graph_max_len_in_batch = DSV4_DECODE_CUDAGRAPH_MAX_LEN
         return super()._init_cudagraph()
 
-    def _can_run_prefill_cudagraph(self, infer_state: DeepseekV4InferStateInfo, handle_token_num):
-        if infer_state.prefix_total_token_num == 0:
-            return True
-        return False
-
     def _init_att_backend(self):
         args = get_env_start_args()
         if args.llm_kv_type == "None":

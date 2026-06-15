@@ -22,9 +22,12 @@ def _gather_c4_indexer_k_kernel(
     BYTES_PER_PAGE: tl.constexpr,
     SCALE_OFFSET: tl.constexpr,  # page_size * head_dim (byte offset of the scale tail)
 ):
-    r = tl.program_id(0)
-    e = tl.program_id(1)
-    out_pos = r * c4_cap + e
+    # entry index on grid-X (limit ~2^31), batch on grid-Y (<= running_max_req_size): c4_cap reaches
+    # 65536 at 256K context, which would blow the 65535 grid-Y cap if entries were the grid-Y axis.
+    e = tl.program_id(0)
+    r = tl.program_id(1)
+    # int64: out_pos*HEAD_DIM can exceed int32 at high batch + long context (read side is already int64).
+    out_pos = r.to(tl.int64) * c4_cap + e
     c4_len = tl.load(c4_len_ptr + r)
     if e >= c4_len:
         # padding entry: mark slot invalid; K is never read (ke bounds the scorer range).
@@ -84,7 +87,7 @@ def gather_c4_indexer_k_ragged(
     k_fp8 = torch.empty((n, head_dim), dtype=torch.float8_e4m3fn, device=buf.device)
     k_scale = torch.empty((n,), dtype=torch.float32, device=buf.device)
     slots = torch.empty((n,), dtype=torch.int32, device=buf.device)
-    _gather_c4_indexer_k_kernel[(batch, c4_cap)](
+    _gather_c4_indexer_k_kernel[(c4_cap, batch)](
         b_req_idx,
         c4_len,
         req_to_token_indexs,

@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
@@ -306,14 +305,13 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         if not self.enable_ep_moe:
             x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
-        gw = layer_weight.gate_weight_.mm_param.weight
-        logits = F.linear(x.float(), gw.float()).contiguous()
+        logits = layer_weight.gate_weight_.mm(x.float()).contiguous()
         weights, indices = self._select_experts(logits, infer_state, layer_weight)
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
         # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
-        g = layer_weight.shared_gate_.mm(x).float().clamp(max=self.swiglu_limit)
-        u = layer_weight.shared_up_.mm(x).float().clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
-        shared = layer_weight.shared_down_.mm((F.silu(g) * u).to(x.dtype))
+        # 复用 Llama 的 _ffn_tp: fused gate_up matmul + silu_and_mul triton kernel，无 swiglu clamp，
+        # 对齐参考 DeepseekV4MLP(=LlamaMLP)。swiglu_limit clamp 只属于 routed 专家 (见 _routed_experts)。
+        shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = self._routed_experts(x, weights, indices, layer_weight)
         if self.enable_ep_moe:
             if self.tp_world_size_ > 1:
