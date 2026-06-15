@@ -8,6 +8,7 @@ from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deep
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.utils.vllm_utils import vllm_ops
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
 from .compressor import fused_compress as fused_compress_op
 from .compressor import prepare_partial_states
@@ -26,9 +27,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.qk_nope_head_dim = self.head_dim_ - self.qk_rope_head_dim
         self.v_head_dim = self.head_dim_
-        self.index_n_heads = network_config["index_n_heads"]
-        self.index_head_dim = network_config["index_head_dim"]
-        self.index_topk = network_config["index_topk"]
         self.o_groups = network_config["o_groups"]
         self.hc_mult = network_config["hc_mult"]
         self.sinkhorn_iters = network_config["hc_sinkhorn_iters"]
@@ -48,12 +46,12 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.swiglu_limit = network_config["swiglu_limit"]
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.tp_q_head_num_ = self.num_heads // self.tp_world_size_
-        self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
         self.tp_groups = self.o_groups // self.tp_world_size_
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
-        self.indexer_score_scale = self.index_head_dim ** -0.5
-        self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
         self.compressor = CompressorInfer(
+            layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
+        )
+        self.index_infer = DeepseekV4IndexInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
 
@@ -180,19 +178,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         o = layer_weight.wo_b_.mm(o)
         return self._tpsp_reduce(input=o, infer_state=infer_state)
 
-    # ------------------------------------------------------------------ compressor / indexer
-    def _indexer_q_weight(
-        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
-        if self.compress_ratio != 4:
-            return None, None
-        cos_tok = infer_state.position_cos_compress
-        sin_tok = infer_state.position_sin_compress
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.tp_index_n_heads, self.index_head_dim)
-        rotary_emb_fwd(idx_q[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok)
-        idx_weight = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
-        return idx_q, idx_weight
-
     # ------------------------------------------------------------------ attention (prefill)
     def context_attention_forward(
         self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
@@ -241,7 +226,14 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     ):
         self.compressor.prepare_states(x, infer_state, layer_weight)
         self.compressor.fused_compress(infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
-        idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
+        # Write this step's c4 Lightning-Indexer keys (no-op off c4) BEFORE build_metadata so the
+        # scorer's gather_indexer_k reads fresh+accumulated entries.
+        self.index_infer.write_indexer_k(x, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
+        # Build the FINAL flash_mla index tensors here (model side), so att_control is a thin
+        # transport of ready-to-forward tensors -- not indexer raw material. Must stay after
+        # fused_compress (c4 reads the indexer-K pool it writes) and before prefill_att (keeps the
+        # c4 einsum/topk/all_reduce at the same cuda-graph capture position).
+        meta = self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
@@ -250,14 +242,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 "compress_ratio": self.compress_ratio,
                 "head_dim_v": self.v_head_dim,
                 "softmax_scale": self.softmax_scale,
-                "q_lora": q_lora,
-                "hidden_states": x,
                 "attn_sink": layer_weight.attn_sink_.weight,
-                "idx_q": idx_q,
-                "idx_weight": idx_weight,
-                "index_topk": self.index_topk,
-                "indexer_score_scale": self.indexer_score_scale,
-                "tp_world_size": self.tp_world_size_,
+                **meta,
             },
         )
         out = infer_state.prefill_att_state.prefill_att(
@@ -285,7 +271,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     ):
         self.compressor.prepare_states(x, infer_state, layer_weight)
         self.compressor.fused_compress(infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
-        idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
+        self.index_infer.write_indexer_k(x, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
+        meta = self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
             nsa_decode=True,
             nsa_decode_dict={
@@ -294,14 +281,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 "compress_ratio": self.compress_ratio,
                 "head_dim_v": self.v_head_dim,
                 "softmax_scale": self.softmax_scale,
-                "q_lora": q_lora,
-                "hidden_states": x,
                 "attn_sink": layer_weight.attn_sink_.weight,
-                "idx_q": idx_q,
-                "idx_weight": idx_weight,
-                "index_topk": self.index_topk,
-                "indexer_score_scale": self.indexer_score_scale,
-                "tp_world_size": self.tp_world_size_,
+                **meta,
             },
         )
         return infer_state.decode_att_state.decode_att(
@@ -354,8 +335,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _select_experts_vllm(
         self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        from vllm import _custom_ops as ops
-
         M = logits.shape[0]
         bias = None
         input_tokens = None
@@ -373,7 +352,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         weights = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.float32, device=logits.device)
         indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=indices_dtype, device=logits.device)
         token_expert_indices = self.alloc_tensor((M, self.num_experts_per_tok), dtype=torch.int32, device=logits.device)
-        ops.topk_hash_softplus_sqrt(
+        vllm_ops.topk_hash_softplus_sqrt(
             weights,
             indices,
             token_expert_indices,
@@ -388,11 +367,18 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
 
 
 class CompressorInfer:
-    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
+    """Window-softmax compressor. is_in_indexer=False compresses the c4/c128 latent KV into the
+    paged fp8 slab (attention extra_k); is_in_indexer=True reuses the SAME machinery (mirroring
+    sglang's Compressor(is_in_indexer=...)) with the indexer weights/dims/state pool to produce the
+    per-c4-entry Lightning-Indexer keys, emitted as dense bf16 (OUTPUT_BF16) then fp8-packed into
+    c4_indexer_pool by the caller. Indexer mode is c4-only."""
+
+    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int, is_in_indexer: bool = False):
         super().__init__()
         self.layer_idx_ = layer_idx
         self.network_config_ = network_config
         self.tp_world_size_ = tp_world_size
+        self.is_in_indexer = is_in_indexer
         self.compress_ratio = network_config["compress_ratios"][layer_idx]
         self.head_dim = network_config["head_dim"]
         self.index_head_dim = network_config["index_head_dim"]
@@ -410,13 +396,23 @@ class CompressorInfer:
             infer_state=infer_state,
             layer_idx=self.layer_idx_,
             compress_ratio=self.compress_ratio,
+            is_in_indexer=self.is_in_indexer,
         )
         if self._metadata is not None:
-            self._metadata.kv_score = layer_weight.compressor_wkv_gate_.mm(x).float()
+            if self.is_in_indexer:
+                # indexer wkv/wgate are two separate replicated weights; cat -> [T, 2*coff*idx_hd]
+                # (same [kv | score] layout the fused compressor_wkv_gate_ produces for attention).
+                kv = layer_weight.idx_cmp_wkv_.mm(x)
+                gate = layer_weight.idx_cmp_wgate_.mm(x)
+                self._metadata.kv_score = torch.cat([kv, gate], dim=-1).float()
+                ape = layer_weight.idx_cmp_ape_.weight
+            else:
+                self._metadata.kv_score = layer_weight.compressor_wkv_gate_.mm(x).float()
+                ape = layer_weight.compressor_ape_.weight
             prepare_partial_states(
                 kv_score=self._metadata.kv_score,
                 metadata=self._metadata,
-                ape=layer_weight.compressor_ape_.weight,
+                ape=ape,
                 compress_ratio=self.compress_ratio,
             )
         return self._metadata
@@ -433,15 +429,178 @@ class CompressorInfer:
         metadata = self._metadata
         if metadata is None:
             raise RuntimeError("DeepSeek-V4 compressor.prepare_states must run before fused_compress")
+        if self.is_in_indexer:
+            norm_weight = layer_weight.idx_cmp_norm_.weight
+            ape = layer_weight.idx_cmp_ape_.weight
+            head_dim = self.index_head_dim
+        else:
+            norm_weight = layer_weight.compressor_norm_.weight
+            ape = layer_weight.compressor_ape_.weight
+            head_dim = self.head_dim
         return fused_compress_op(
             kv_score=metadata.kv_score,
             metadata=metadata,
-            norm_weight=layer_weight.compressor_norm_.weight,
-            ape=layer_weight.compressor_ape_.weight,
+            norm_weight=norm_weight,
+            ape=ape,
             eps=self.eps,
-            head_dim=self.head_dim,
+            head_dim=head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
             compress_ratio=self.compress_ratio,
             cos_table=cos_table,
             sin_table=sin_table,
+            output_bf16=self.is_in_indexer,
         )
+
+
+FLASHMLA_INDEX_ALIGN = 64
+
+
+def _pad_last_dim(x: torch.Tensor, multiple: int = FLASHMLA_INDEX_ALIGN, value: int = -1) -> torch.Tensor:
+    pad = (-x.shape[-1]) % multiple
+    if pad == 0:
+        return x.contiguous()
+    out = torch.full((*x.shape[:-1], x.shape[-1] + pad), value, dtype=x.dtype, device=x.device)
+    out[..., : x.shape[-1]] = x
+    return out.contiguous()
+
+
+class DeepseekV4IndexInfer:
+    """Model-side builder for the FlashMLA sparse-index metadata. Mirrors deepseek3_2's NsaInfer
+    *boundary* (the model owns ALL index construction; the attention backend only forwards final
+    tensors to flash_mla.flash_mla_with_kvcache) but NOT its implementation -- the two share ~no
+    concrete operators (ds3_2: fp8_mqa_logits over the full ragged kv; dsv4: bf16 einsum over the
+    compressed c4 entries), hence no inheritance. Owns swa/c128 slot bookkeeping AND the c4
+    Lightning-Indexer scoring. Holds only static per-layer config; all per-request data flows in via
+    args. Invoke from _context/_token_attention_kernel (after compressor.fused_compress, before
+    *_att) so the c4 einsum/topk/all_reduce keep the same cuda-graph capture position they had when
+    this lived in the backend."""
+
+    def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
+        self.layer_idx_ = layer_idx
+        self.compress_ratio = network_config["compress_ratios"][layer_idx]
+        self.index_topk = network_config["index_topk"]
+        self.index_head_dim = network_config["index_head_dim"]
+        self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
+        self.index_n_heads = network_config["index_n_heads"]
+        self.tp_world_size_ = tp_world_size
+        self.tp_index_n_heads = self.index_n_heads // tp_world_size
+        self.indexer_score_scale = self.index_head_dim ** -0.5
+        self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
+        # c4 layers own a second compressor (is_in_indexer) that writes the Lightning-Indexer key
+        # pool every step; the scorer in _c4_indices reads it back via gather_indexer_k.
+        self.indexer_compressor = (
+            CompressorInfer(layer_idx, network_config, tp_world_size, is_in_indexer=True)
+            if self.compress_ratio == 4
+            else None
+        )
+
+    def write_indexer_k(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight, cos_table, sin_table):
+        """c4-only: compress this step's tokens into per-c4-entry indexer keys and pack them into
+        c4_indexer_pool. MUST run before build_metadata so the scorer's gather_indexer_k reads the
+        finished entries; runs every step (incl. in the decode graph) so keys accumulate for later
+        long-context scoring. No-op on c128 / dense layers."""
+        if self.compress_ratio != 4:
+            return
+        self.indexer_compressor.prepare_states(x, infer_state, layer_weight)
+        self.indexer_compressor.fused_compress(infer_state, layer_weight, cos_table, sin_table)
+        scratch = self.indexer_compressor._metadata.out_buffer  # [T, index_head_dim] bf16 (group-end rows valid)
+        mem_manager = infer_state.mem_manager
+        positions = infer_state.position_ids
+        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
+        # only group-end tokens finish a c4 entry; mask the rest to -1 so the packer skips them
+        # (mid-group tokens share the group's c4 slot -> avoids racing a finished slot).
+        completed = ((positions + 1) % 4 == 0) & (out_slots >= 0)
+        masked_slots = torch.where(completed, out_slots, torch.full_like(out_slots, -1)).to(torch.int32)
+        mem_manager.pack_indexer_k_to_cache(self.layer_idx_, masked_slots, scratch)
+
+    def build_metadata(self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight):
+        """Return the final flash_mla index tensors for this layer's compress variant. swa indices and
+        the per-token req_idx are layer-independent and precomputed once in init_some_extra_state
+        (read here); only the c4 scorer / c128 gather is per-layer. The backend pairs these with the
+        (data-independent, layer-keyed) fp8 cache-byte views it owns."""
+        swa_indices = infer_state.dsv4_swa_indices.unsqueeze(1)
+        swa_lengths = infer_state.dsv4_swa_lengths
+        req_idx = infer_state.dsv4_sparse_req_idx
+        positions = infer_state.position_ids
+        extra_indices = extra_lengths = None
+        if self.compress_ratio == 4:
+            idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
+            extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q, idx_weight, req_idx, positions)
+        elif self.compress_ratio == 128:
+            extra_indices, extra_lengths = self._c128_indices(infer_state, req_idx, positions)
+        return {
+            "swa_indices": swa_indices,
+            "swa_lengths": swa_lengths,
+            "extra_indices": extra_indices,
+            "extra_lengths": extra_lengths,
+        }
+
+    @staticmethod
+    def _gather_compress_slots(infer_state, mapping, req_idx, valid, offsets, ratio):
+        """条目 g 的压缩槽 = full_to_c*[req_to_token[req, (g+1)*ratio-1]](组末 token 的 full 槽位)。
+        无效条目(超出因果长度/HOLD 行)用位置 0 安全 gather 后由调用方按 valid 掩掉。"""
+        end_pos = offsets[None, :] * ratio + (ratio - 1)
+        safe_pos = torch.where(valid, end_pos, torch.zeros_like(end_pos))
+        full_slots = infer_state.req_manager.req_to_token_indexs[req_idx.long()[:, None], safe_pos]
+        return mapping[full_slots.long()].to(torch.int32)
+
+    def _c128_indices(self, infer_state: DeepseekV4InferStateInfo, req_idx, positions):
+        raw_lengths = (positions + 1) // 128
+        lengths = torch.clamp(raw_lengths, min=1).to(torch.int32)
+        max_len = max(1, int(infer_state.max_kv_seq_len) // 128)
+        offsets = torch.arange(max_len, dtype=torch.long, device=positions.device)
+        valid = offsets[None, :] < raw_lengths[:, None]
+        slots = self._gather_compress_slots(
+            infer_state, infer_state.mem_manager.full_to_c128_indexs, req_idx, valid, offsets, 128
+        )
+        indices = torch.where(valid, slots, torch.full_like(slots, -1))
+        return _pad_last_dim(indices).unsqueeze(1), lengths.contiguous()
+
+    def _indexer_q_weight(self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight):
+        cos_tok = infer_state.position_cos_compress
+        sin_tok = infer_state.position_sin_compress
+        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.tp_index_n_heads, self.index_head_dim)
+        rotary_emb_fwd(idx_q[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok)
+        idx_weight = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
+        return idx_q, idx_weight
+
+    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q, idx_weight, req_idx, positions):
+        """c4(CSA) extra indices: causal all-entries when the entry space fits index_topk, otherwise
+        Lightning-Indexer scored top-k. Pure tensor ops (decode runs inside cuda graphs)."""
+        mem_manager = infer_state.mem_manager
+        raw_lengths = (positions + 1) // 4
+        max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
+        index_topk = self.index_topk
+        offsets = torch.arange(max_entries, dtype=torch.long, device=positions.device)
+        valid = offsets[None, :] < raw_lengths[:, None]
+        slots = self._gather_compress_slots(infer_state, mem_manager.full_to_c4_indexs, req_idx, valid, offsets, 4)
+
+        if max_entries <= index_topk:
+            lengths = torch.clamp(raw_lengths, min=1).to(torch.int32)
+            indices = torch.where(valid, slots, torch.full_like(slots, -1))
+            return _pad_last_dim(indices).unsqueeze(1), lengths.contiguous()
+
+        score_scale = float(self.indexer_score_scale)
+        hold_slot = mem_manager.c4_indexer_pool.HOLD_TOKEN_MEMINDEX
+        safe_slots = torch.where(valid, slots.long(), torch.full_like(slots.long(), hold_slot))
+        k = mem_manager.gather_indexer_k(self.layer_idx_, safe_slots.reshape(-1)).view(
+            positions.shape[0], max_entries, -1
+        )
+        num_tokens, num_heads = idx_q.shape[0], idx_q.shape[1]
+        score_chunks = []
+        chunk = max(1, min(num_tokens, (16 * 1024 * 1024) // max(1, num_heads * max_entries)))
+        for start in range(0, num_tokens, chunk):
+            end = min(num_tokens, start + chunk)
+            scores = torch.einsum("thd,tnd->thn", idx_q[start:end].float(), k[start:end].float())
+            scores = F.relu(scores) * score_scale
+            score_chunks.append((scores * idx_weight[start:end].unsqueeze(-1)).sum(dim=1))
+        index_scores = torch.cat(score_chunks, dim=0)
+        if self.tp_world_size_ > 1:
+            all_reduce(index_scores, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+        index_scores = index_scores.masked_fill(~valid, float("-inf"))
+        top = index_scores.topk(index_topk, dim=-1).indices
+        top_valid = torch.gather(valid, 1, top)
+        top_slots = torch.gather(slots.long(), 1, top).to(torch.int32)
+        indices = torch.where(top_valid, top_slots, torch.full_like(top_slots, -1))
+        lengths = torch.clamp(torch.minimum(raw_lengths, torch.full_like(raw_lengths, index_topk)), min=1)
+        return _pad_last_dim(indices).unsqueeze(1), lengths.to(torch.int32).contiguous()
