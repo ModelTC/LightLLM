@@ -227,12 +227,12 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.compressor.prepare_states(x, infer_state, layer_weight)
         self.compressor.fused_compress(infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
         # Write this step's c4 Lightning-Indexer keys (no-op off c4) BEFORE build_metadata so the
-        # scorer's gather_indexer_k reads fresh+accumulated entries.
+        # scorer (gather + deep_gemm.fp8_mqa_logits) reads fresh+accumulated entries from the indexer pool.
         self.index_infer.write_indexer_k(x, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
         # Build the FINAL flash_mla index tensors here (model side), so att_control is a thin
         # transport of ready-to-forward tensors -- not indexer raw material. Must stay after
         # fused_compress (c4 reads the indexer-K pool it writes) and before prefill_att (keeps the
-        # c4 einsum/topk/all_reduce at the same cuda-graph capture position).
+        # c4 scorer/topk at the same cuda-graph capture position).
         meta = self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
         att_control = AttControl(
             nsa_prefill=True,
@@ -452,28 +452,18 @@ class CompressorInfer:
         )
 
 
-FLASHMLA_INDEX_ALIGN = 64
-
-
-def _pad_last_dim(x: torch.Tensor, multiple: int = FLASHMLA_INDEX_ALIGN, value: int = -1) -> torch.Tensor:
-    pad = (-x.shape[-1]) % multiple
-    if pad == 0:
-        return x.contiguous()
-    out = torch.full((*x.shape[:-1], x.shape[-1] + pad), value, dtype=x.dtype, device=x.device)
-    out[..., : x.shape[-1]] = x
-    return out.contiguous()
-
-
 class DeepseekV4IndexInfer:
     """Model-side builder for the FlashMLA sparse-index metadata. Mirrors deepseek3_2's NsaInfer
-    *boundary* (the model owns ALL index construction; the attention backend only forwards final
-    tensors to flash_mla.flash_mla_with_kvcache) but NOT its implementation -- the two share ~no
-    concrete operators (ds3_2: fp8_mqa_logits over the full ragged kv; dsv4: bf16 einsum over the
-    compressed c4 entries), hence no inheritance. Owns swa/c128 slot bookkeeping AND the c4
-    Lightning-Indexer scoring. Holds only static per-layer config; all per-request data flows in via
-    args. Invoke from _context/_token_attention_kernel (after compressor.fused_compress, before
-    *_att) so the c4 einsum/topk/all_reduce keep the same cuda-graph capture position they had when
-    this lived in the backend."""
+    boundary (the model owns ALL index construction; the attention backend only forwards final
+    tensors to flash_mla.flash_mla_with_kvcache) AND its c4 implementation: hadamard'd fp8 q/K, a
+    ragged gather of the compressed c4 keys, deep_gemm.fp8_mqa_logits, then topk -- adapted for the
+    replicated indexer (no gather-q/all_reduce), the c4-compressed entry space, and topk-512 (no
+    inheritance only because of those data-shape differences). swa metadata is precomputed in
+    init_some_extra_state; this class owns the c4/c128 entry gather (build_compress_index) AND the c4
+    Lightning-Indexer scoring (gather + deep_gemm.fp8_mqa_logits + topk). Holds only static per-layer
+    config; all per-request data flows in via args. Invoke from _context/_token_attention_kernel
+    (after compressor.fused_compress, before *_att) so the c4 scorer/topk keep the same cuda-graph
+    capture position they had when this lived in the backend. The indexer is replicated (no TP collective)."""
 
     def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
         self.layer_idx_ = layer_idx
@@ -483,11 +473,10 @@ class DeepseekV4IndexInfer:
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.index_n_heads = network_config["index_n_heads"]
         self.tp_world_size_ = tp_world_size
-        self.tp_index_n_heads = self.index_n_heads // tp_world_size
         self.indexer_score_scale = self.index_head_dim ** -0.5
         self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
         # c4 layers own a second compressor (is_in_indexer) that writes the Lightning-Indexer key
-        # pool every step; the scorer in _c4_indices reads it back via gather_indexer_k.
+        # pool every step; _c4_indices gathers it back + scores via deep_gemm.fp8_mqa_logits.
         self.indexer_compressor = (
             CompressorInfer(layer_idx, network_config, tp_world_size, is_in_indexer=True)
             if self.compress_ratio == 4
@@ -496,14 +485,19 @@ class DeepseekV4IndexInfer:
 
     def write_indexer_k(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight, cos_table, sin_table):
         """c4-only: compress this step's tokens into per-c4-entry indexer keys and pack them into
-        c4_indexer_pool. MUST run before build_metadata so the scorer's gather_indexer_k reads the
-        finished entries; runs every step (incl. in the decode graph) so keys accumulate for later
-        long-context scoring. No-op on c128 / dense layers."""
+        c4_indexer_pool. MUST run before build_metadata so the scorer (gather + deep_gemm.fp8_mqa_logits)
+        reads the finished entries; runs every step (incl. in the decode graph) so keys accumulate for
+        later long-context scoring. No-op on c128 / dense layers."""
         if self.compress_ratio != 4:
             return
         self.indexer_compressor.prepare_states(x, infer_state, layer_weight)
         self.indexer_compressor.fused_compress(infer_state, layer_weight, cos_table, sin_table)
         scratch = self.indexer_compressor._metadata.out_buffer  # [T, index_head_dim] bf16 (group-end rows valid)
+        # Rotate K (post norm+rope) by the SAME 1/sqrt(d) Hadamard the q kernel applies, so
+        # (Hq)·(Hk)=q·k (H orthogonal) and the fp8 quant of K stays accurate.
+        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
+
+        scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5)
         mem_manager = infer_state.mem_manager
         positions = infer_state.position_ids
         out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
@@ -524,8 +518,8 @@ class DeepseekV4IndexInfer:
         positions = infer_state.position_ids
         extra_indices = extra_lengths = None
         if self.compress_ratio == 4:
-            idx_q, idx_weight = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
-            extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q, idx_weight, req_idx, positions)
+            idx_q_fp8, weights = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
+            extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights, positions)
         elif self.compress_ratio == 128:
             extra_indices, extra_lengths = self._c128_indices(infer_state, req_idx, positions)
         return {
@@ -535,72 +529,98 @@ class DeepseekV4IndexInfer:
             "extra_lengths": extra_lengths,
         }
 
-    @staticmethod
-    def _gather_compress_slots(infer_state, mapping, req_idx, valid, offsets, ratio):
-        """条目 g 的压缩槽 = full_to_c*[req_to_token[req, (g+1)*ratio-1]](组末 token 的 full 槽位)。
-        无效条目(超出因果长度/HOLD 行)用位置 0 安全 gather 后由调用方按 valid 掩掉。"""
-        end_pos = offsets[None, :] * ratio + (ratio - 1)
-        safe_pos = torch.where(valid, end_pos, torch.zeros_like(end_pos))
-        full_slots = infer_state.req_manager.req_to_token_indexs[req_idx.long()[:, None], safe_pos]
-        return mapping[full_slots.long()].to(torch.int32)
-
     def _c128_indices(self, infer_state: DeepseekV4InferStateInfo, req_idx, positions):
-        raw_lengths = (positions + 1) // 128
-        lengths = torch.clamp(raw_lengths, min=1).to(torch.int32)
-        max_len = max(1, int(infer_state.max_kv_seq_len) // 128)
-        offsets = torch.arange(max_len, dtype=torch.long, device=positions.device)
-        valid = offsets[None, :] < raw_lengths[:, None]
-        slots = self._gather_compress_slots(
-            infer_state, infer_state.mem_manager.full_to_c128_indexs, req_idx, valid, offsets, 128
+        from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
+
+        cap = ((max(1, int(infer_state.max_kv_seq_len) // 128) + 63) // 64) * 64
+        indices, lengths = build_compress_index(
+            req_idx,
+            positions,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.mem_manager.full_to_c128_indexs,
+            ratio=128,
+            cap=cap,
         )
-        indices = torch.where(valid, slots, torch.full_like(slots, -1))
-        return _pad_last_dim(indices).unsqueeze(1), lengths.contiguous()
+        return indices.unsqueeze(1), lengths
 
     def _indexer_q_weight(self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight):
+        """fp8 indexer q (mirrors deepseek3_2 NsaInfer): wq_b -> rope(last rope dims) -> 1/sqrt(d)
+        Hadamard -> per-token fp8 quant. Returns (idx_q_fp8 [T,H,d], weights [T,H]); the per-token q
+        fp8 scale and the head_dim^-0.5 * n_heads^-0.5 score scale are folded into weights -- the
+        deep_gemm.fp8_mqa_logits contract (fp8 q carries no companion scale). Replicated -> full heads."""
+        from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
+        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
+
         cos_tok = infer_state.position_cos_compress
         sin_tok = infer_state.position_sin_compress
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.tp_index_n_heads, self.index_head_dim)
+        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.index_n_heads, self.index_head_dim)
         rotary_emb_fwd(idx_q[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok)
-        idx_weight = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale
-        return idx_q, idx_weight
+        idx_q = hadamard_transform(idx_q, scale=self.index_head_dim ** -0.5)
+        idx_q_fp8, q_scale = act_quant(idx_q, self.index_head_dim, None)  # fp8 [T,H,d], scale [T,H,1]
+        weights = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale  # [T, H]
+        weights = weights.unsqueeze(-1) * q_scale  # fold per-token q scale
+        return idx_q_fp8, weights.squeeze(-1).contiguous()
 
-    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q, idx_weight, req_idx, positions):
-        """c4(CSA) extra indices: causal all-entries when the entry space fits index_topk, otherwise
-        Lightning-Indexer scored top-k. Pure tensor ops (decode runs inside cuda graphs)."""
+    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions):
+        """c4 scorer via ds3.2-style gather + deep_gemm.fp8_mqa_logits. Gather each request's causal c4
+        keys into a padded-per-request ragged fp8 buffer (k row r*c4_cap+e), score every query token
+        over its absolute [ks, ke) range, then masked topk-512 -> c4 slots. Fixed shapes (c4_cap pinned
+        per graph bucket) keep the decode cuda graph capturable."""
         mem_manager = infer_state.mem_manager
-        raw_lengths = (positions + 1) // 4
-        max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
         index_topk = self.index_topk
-        offsets = torch.arange(max_entries, dtype=torch.long, device=positions.device)
-        valid = offsets[None, :] < raw_lengths[:, None]
-        slots = self._gather_compress_slots(infer_state, mem_manager.full_to_c4_indexs, req_idx, valid, offsets, 4)
+        max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
+        c4_cap = ((max_entries + 63) // 64) * 64
 
+        # entry space fits the budget -> every causal entry is selected; no scoring needed. The
+        # captured decode graph (graph_max_len -> max_entries > topk) always takes the scorer branch
+        # below, so this only shortcuts tiny eager contexts.
         if max_entries <= index_topk:
-            lengths = torch.clamp(raw_lengths, min=1).to(torch.int32)
-            indices = torch.where(valid, slots, torch.full_like(slots, -1))
-            return _pad_last_dim(indices).unsqueeze(1), lengths.contiguous()
+            from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
 
-        score_scale = float(self.indexer_score_scale)
-        hold_slot = mem_manager.c4_indexer_pool.HOLD_TOKEN_MEMINDEX
-        safe_slots = torch.where(valid, slots.long(), torch.full_like(slots.long(), hold_slot))
-        k = mem_manager.gather_indexer_k(self.layer_idx_, safe_slots.reshape(-1)).view(
-            positions.shape[0], max_entries, -1
+            slots, lengths = build_compress_index(
+                infer_state.dsv4_sparse_req_idx,
+                positions,
+                infer_state.req_manager.req_to_token_indexs,
+                mem_manager.full_to_c4_indexs,
+                ratio=4,
+                cap=c4_cap,
+            )
+            return slots.unsqueeze(1), lengths
+
+        import deep_gemm
+        from ..triton_kernel.gather_c4_indexer_k_dsv4 import gather_c4_indexer_k_ragged
+
+        b_req_idx = infer_state.b_req_idx
+        batch = b_req_idx.shape[0]
+        device = positions.device
+        c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)  # entries/req
+        k_fp8, k_scale, ragged_slots = gather_c4_indexer_k_ragged(
+            mem_manager,
+            self.layer_idx_,
+            b_req_idx,
+            c4_len,
+            c4_cap,
+            infer_state.req_manager.req_to_token_indexs,
         )
-        num_tokens, num_heads = idx_q.shape[0], idx_q.shape[1]
-        score_chunks = []
-        chunk = max(1, min(num_tokens, (16 * 1024 * 1024) // max(1, num_heads * max_entries)))
-        for start in range(0, num_tokens, chunk):
-            end = min(num_tokens, start + chunk)
-            scores = torch.einsum("thd,tnd->thn", idx_q[start:end].float(), k[start:end].float())
-            scores = F.relu(scores) * score_scale
-            score_chunks.append((scores * idx_weight[start:end].unsqueeze(-1)).sum(dim=1))
-        index_scores = torch.cat(score_chunks, dim=0)
-        if self.tp_world_size_ > 1:
-            all_reduce(index_scores, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        index_scores = index_scores.masked_fill(~valid, float("-inf"))
-        top = index_scores.topk(index_topk, dim=-1).indices
-        top_valid = torch.gather(valid, 1, top)
-        top_slots = torch.gather(slots.long(), 1, top).to(torch.int32)
-        indices = torch.where(top_valid, top_slots, torch.full_like(top_slots, -1))
-        lengths = torch.clamp(torch.minimum(raw_lengths, torch.full_like(raw_lengths, index_topk)), min=1)
-        return _pad_last_dim(indices).unsqueeze(1), lengths.to(torch.int32).contiguous()
+        # batch position of each query token -> absolute [ks, ke) into the padded buffer.
+        if infer_state.is_prefill:
+            token_batch_pos = torch.repeat_interleave(
+                torch.arange(batch, device=device, dtype=torch.int32), infer_state.b_q_seq_len
+            )
+        else:
+            token_batch_pos = torch.arange(batch, device=device, dtype=torch.int32)
+        valid_len = ((positions + 1) // 4).to(torch.int32)  # causal candidate count per query
+        ks = token_batch_pos * c4_cap
+        ke = ks + valid_len
+        logits = deep_gemm.fp8_mqa_logits(
+            idx_q_fp8, (k_fp8, k_scale), weights, ks, ke, clean_logits=False, max_seqlen_k=c4_cap
+        )  # [T, c4_cap] f32, left-aligned: logits[t, j] = q_t . k[ks[t]+j]
+        col = torch.arange(c4_cap, device=device)
+        logits = logits.masked_fill(col.unsqueeze(0) >= valid_len.unsqueeze(1), float("-inf"))
+        top = logits.topk(index_topk, dim=-1).indices.to(torch.int32)  # relative positions in [0, valid_len)
+        abs_idx = top + ks.unsqueeze(1)  # absolute compact row
+        top_slots = ragged_slots[abs_idx.long()]  # compact row -> c4 pool slot
+        invalid = top >= valid_len.unsqueeze(1)  # topk over -inf padding when valid_len < index_topk
+        top_slots = torch.where(invalid, torch.full_like(top_slots, -1), top_slots)
+        topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
+        return top_slots.unsqueeze(1), topk_lengths.contiguous()

@@ -156,6 +156,11 @@ class ReqManager:
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
 
+    def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu):
+        """每个 decode step 在 to_cuda 之前调用的钩子 (数据为原生 CPU 张量, 且已在 forward 的
+        CUDA stream 上)。基类 no-op; 需要 per-step KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
+        return
+
 
 class ReqSamplingParamsManager:
     """
@@ -479,26 +484,32 @@ class DeepseekV4ReqManager(ReqManager):
         self.mem_manager.alloc_swa_prefill(b_req_idx, b_ready_cache_len, b_seq_len, self.req_to_token_indexs)
         return
 
+    def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu):
+        """decode 每步槽位 prep: 先 swa 再 compress。由 BaseModel.forward / microbatch_overlap_decode
+        在 to_cuda 之前调用 (CPU 数据 + forward 的 CUDA stream); 不再放在 _decode 里。"""
+        self.prepare_decode_swa(b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu)
+        self.prepare_decode_compress_slots(b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu)
+        return
+
     def prepare_decode_swa(
         self,
-        b_req_idx: torch.Tensor,
-        b_seq_len: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
         mem_indexes: torch.Tensor,
     ) -> None:
         """decode prep: 回收出窗槽并为本步新 token 分配位置对齐的 swa 槽。当前 query 位置
         seq_len-1 的窗口是 [seq_len-W, seq_len-1]；回收边界额外保留一个 radix 页
-        (_swa_retain_len)，即位置 < seq_len-retain。先回收再分配。"""
+        (_swa_retain_len)，即位置 < seq_len-retain。先回收再分配。
+        seq_len/req_idx 从 CPU 镜像读(host 算术,无 D2H);水位线 _swa_evict_marks 仍是 host 状态。"""
         assert self.mem_manager is not None
         if self.sliding_window is not None:
             retain = self._swa_retain_len()
             evict_slots = []
-            req_list = b_req_idx.detach().cpu().tolist()
-            seq_list = b_seq_len.detach().cpu().tolist()
+            req_list = b_req_idx_cpu.tolist()
+            seq_list = b_seq_len_cpu.tolist()
             for req_idx, seq_len in zip(req_list, seq_list):
-                req_idx = int(req_idx)
                 if req_idx == self.HOLD_REQUEST_ID:
                     continue
-                seq_len = int(seq_len)
                 mark = self._swa_evict_marks[req_idx]
                 if mark < 0:
                     # 未经过 prefill prep 的保守路径: 不回收旧位置，仅推进水位线。
@@ -510,7 +521,7 @@ class DeepseekV4ReqManager(ReqManager):
                     self._swa_evict_marks[req_idx] = evict_end
             if evict_slots:
                 self.mem_manager.evict_swa(torch.cat(evict_slots))
-        self.mem_manager.alloc_swa_decode(b_req_idx, b_seq_len, mem_indexes, self.req_to_token_indexs)
+        self.mem_manager.alloc_swa_decode(b_req_idx_cpu, b_seq_len_cpu, mem_indexes, self.req_to_token_indexs)
         return
 
     def init_compress_state(self, req_idx: int):
@@ -575,23 +586,24 @@ class DeepseekV4ReqManager(ReqManager):
 
     def prepare_decode_compress_slots(
         self,
-        b_req_idx: torch.Tensor,
-        b_seq_len: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
         mem_indexes: torch.Tensor,
     ) -> None:
         """decode prep: 本步 token 关闭一个组(seq_len % ratio == 0)时为其分配压缩槽并 scatter。
-        组末 full 槽即本步的 mem_index(此刻 req_to_token_indexs 尚未写入本步槽位)。"""
+        组末 full 槽即本步的 mem_index(此刻 req_to_token_indexs 尚未写入本步槽位)。
+        从 CPU 镜像读 seq_len/req_idx(host 算术,无 D2H);非关组步 rows 为空 => 不调 _scatter,零同步。"""
         if self.n_c4 == 0 and self.n_c128 == 0:
             return
-        req_list = b_req_idx.detach().cpu().tolist()
-        seq_list = b_seq_len.detach().cpu().tolist()
+        req_list = b_req_idx_cpu.tolist()
+        seq_list = b_seq_len_cpu.tolist()
         for ratio, n_layers in ((4, self.n_c4), (128, self.n_c128)):
             if n_layers == 0:
                 continue
             rows = [
                 i
                 for i, (req_idx, seq_len) in enumerate(zip(req_list, seq_list))
-                if int(req_idx) != self.HOLD_REQUEST_ID and int(seq_len) > 0 and int(seq_len) % ratio == 0
+                if req_idx != self.HOLD_REQUEST_ID and seq_len > 0 and seq_len % ratio == 0
             ]
             if rows:
                 self._scatter_compress_slots(ratio, mem_indexes.reshape(-1)[rows])

@@ -511,8 +511,8 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     def alloc_swa_decode(
         self,
-        b_req_idx: torch.Tensor,
-        b_seq_len: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
         mem_indexes: torch.Tensor,
         req_to_token_indexs: torch.Tensor,
     ) -> None:
@@ -523,8 +523,8 @@ class DeepseekV4MemoryManager(MemoryManager):
         (DSV4 启动参数已拒绝 MTP;支持需按步内顺序分段派生)。"""
         page = DSV4_SWA_PAGE_SIZE
         hold_req_id = self.max_request_num
-        req_list = b_req_idx.detach().cpu().tolist()
-        seq_list = b_seq_len.detach().cpu().tolist()
+        req_list = b_req_idx_cpu.tolist()
+        seq_list = b_seq_len_cpu.tolist()
         cont_rows, cont_prev_pos, new_rows = [], [], []
         for i, (req_idx, seq_len) in enumerate(zip(req_list, seq_list)):
             req_idx, seq_len = int(req_idx), int(seq_len)
@@ -537,7 +537,7 @@ class DeepseekV4MemoryManager(MemoryManager):
                 cont_prev_pos.append(seq_len - 2)
         mem_indexes = mem_indexes.cuda().long().reshape(-1)
         if cont_rows:
-            req_rows = b_req_idx[cont_rows].long()
+            req_rows = torch.tensor([req_list[i] for i in cont_rows], dtype=torch.long, device="cuda")
             prev_full = req_to_token_indexs[req_rows, torch.tensor(cont_prev_pos, device="cuda")].long()
             prev_slots = self.full_to_swa_indexs[prev_full]
             # 续槽不变式哨兵: 上一位置必驻留(retain 覆盖)。prep 阶段本就有同步,代价可忽略。

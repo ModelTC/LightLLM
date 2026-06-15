@@ -297,6 +297,11 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
+        # decode 槽位 prep: 放在 to_cuda 前 (b_req_idx/b_seq_len/mem_indexes_cpu 还是原生 CPU 张量),
+        # 且此刻已在 forward 的 CUDA stream 上 -> 与后续 attention 同流, 无跨流竞态、无 D2H。
+        # mem_indexes_cpu is None 时跳过: cudagraph warmup 的输入全在 CUDA 且 b_req_idx 全为 HOLD, prep 本就是 no-op。
+        if not model_input.is_prefill and model_input.mem_indexes_cpu is not None:
+            self.req_manager.prepare_decode(model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes_cpu)
         model_input.to_cuda()
         assert model_input.mem_indexes.is_cuda
 
@@ -579,14 +584,6 @@ class TpPartBaseModel:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
-            if hasattr(self.req_manager, "prepare_decode_swa"):
-                self.req_manager.prepare_decode_swa(
-                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
-                )
-            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(
-                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
-                )
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -608,14 +605,6 @@ class TpPartBaseModel:
             model_input = self._create_padded_decode_model_input(
                 model_input=model_input, new_batch_size=infer_batch_size
             )
-            if hasattr(self.req_manager, "prepare_decode_swa"):
-                self.req_manager.prepare_decode_swa(
-                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
-                )
-            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(
-                    model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes
-                )
             infer_state = self._create_inferstate(model_input)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -845,6 +834,10 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
+        # decode 槽位 prep: 在 to_cuda 前 (原生 CPU 张量)、且已在 forward 的 CUDA stream 上 (见 forward 注释)。
+        for mi in (model_input0, model_input1):
+            if mi.mem_indexes_cpu is not None:
+                self.req_manager.prepare_decode(mi.b_req_idx, mi.b_seq_len, mi.mem_indexes_cpu)
         model_input0.to_cuda()
         model_input1.to_cuda()
         assert self.args.enable_tpsp_mix_mode
@@ -876,20 +869,6 @@ class TpPartBaseModel:
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            if hasattr(self.req_manager, "prepare_decode_swa"):
-                self.req_manager.prepare_decode_swa(
-                    padded_model_input0.b_req_idx, padded_model_input0.b_seq_len, padded_model_input0.mem_indexes
-                )
-                self.req_manager.prepare_decode_swa(
-                    padded_model_input1.b_req_idx, padded_model_input1.b_seq_len, padded_model_input1.mem_indexes
-                )
-            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(
-                    padded_model_input0.b_req_idx, padded_model_input0.b_seq_len, padded_model_input0.mem_indexes
-                )
-                self.req_manager.prepare_decode_compress_slots(
-                    padded_model_input1.b_req_idx, padded_model_input1.b_seq_len, padded_model_input1.mem_indexes
-                )
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
@@ -931,20 +910,6 @@ class TpPartBaseModel:
         else:
             model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            if hasattr(self.req_manager, "prepare_decode_swa"):
-                self.req_manager.prepare_decode_swa(
-                    model_input0.b_req_idx, model_input0.b_seq_len, model_input0.mem_indexes
-                )
-                self.req_manager.prepare_decode_swa(
-                    model_input1.b_req_idx, model_input1.b_seq_len, model_input1.mem_indexes
-                )
-            if hasattr(self.req_manager, "prepare_decode_compress_slots"):
-                self.req_manager.prepare_decode_compress_slots(
-                    model_input0.b_req_idx, model_input0.b_seq_len, model_input0.mem_indexes
-                )
-                self.req_manager.prepare_decode_compress_slots(
-                    model_input1.b_req_idx, model_input1.b_seq_len, model_input1.mem_indexes
-                )
             infer_state0 = self._create_inferstate(model_input0, 0)
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,

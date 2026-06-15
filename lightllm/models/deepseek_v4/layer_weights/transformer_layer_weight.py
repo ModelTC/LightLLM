@@ -47,7 +47,6 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.is_hash = self.layer_num_ < self.num_hash_layers
         assert self.n_heads % self.tp_world_size_ == 0
         assert self.o_groups % self.tp_world_size_ == 0
-        assert self.index_n_heads % self.tp_world_size_ == 0
         self.prefix = f"layers.{self.layer_num_}"
 
     def _init_weight(self):
@@ -139,13 +138,18 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
 
     def _init_indexer(self):
         p = f"{self.prefix}.attn.indexer"
-        # wq_b is FP8 in the checkpoint -> de-quantized to bf16 at load; column-parallel over index heads.
+        # The Lightning-Indexer is REPLICATED across TP ranks (like sglang/vllm), not head-sharded:
+        # q_lora and the attn input are already full on every rank, so each rank scores all
+        # index_n_heads locally and the c4 top-k is identical everywhere -- no gather/all_reduce.
+        # wq_b is FP8 in the checkpoint -> de-quantized to bf16 at load.
         self.idx_wq_b_ = ROWMMWeight(
             in_dim=self.q_lora_rank,
             out_dims=[self.index_n_heads * self.index_head_dim],
             weight_names=f"{p}.wq_b.weight",
             data_type=self.data_type_,
             quant_method=self.get_quant_method("idx_wq_b"),
+            tp_rank=0,
+            tp_world_size=1,
         )
         self.idx_weights_proj_ = ROWMMWeight(
             in_dim=self.hidden,
@@ -153,6 +157,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             weight_names=f"{p}.weights_proj.weight",
             data_type=self.data_type_,
             quant_method=None,
+            tp_rank=0,
+            tp_world_size=1,
         )
         coff = 2  # indexer compressor always uses ratio 4 (overlap)
         self.idx_cmp_wkv_ = ROWMMWeight(
