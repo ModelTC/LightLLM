@@ -1,6 +1,6 @@
 import os
 import json
-from lightllm.utils.config_utils import ModelPaths
+from lightllm.utils.config_utils import create_model_paths
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 
@@ -12,9 +12,13 @@ tokenizer = None
 def init_tokenizer(args):
     global tokenizer
 
-    paths = ModelPaths.from_args(args)
     tokenizer = get_tokenizer(
-        paths,
+        create_model_paths(
+            args.model_dir,
+            config_path=args.config_path,
+            tokenizer_dir=args.tokenizer_dir,
+            mmproj_path=args.mmproj_path,
+        ),
         tokenizer_mode=args.tokenizer_mode,
         trust_remote_code=args.trust_remote_code,
     )

@@ -19,7 +19,7 @@ from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearA
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
-from lightllm.utils.config_utils import _create_model_paths, get_model_config
+from lightllm.utils.config_utils import create_model_paths, get_model_config
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -151,7 +151,7 @@ class ModeBackend:
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
 
-        model_cfg = get_model_config(_create_model_paths(self.weight_dir))
+        model_cfg = get_model_config(create_model_paths(self.weight_dir))
 
         model_kvargs = {
             "weight_dir": self.weight_dir,

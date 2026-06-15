@@ -185,7 +185,7 @@ def load_tokenizer_from_gguf(
         )
 
     logger.info(
-        f"loading tokenizer from GGUF ReaderField metadata: {gguf_path} "
+        f"Loading tokenizer from GGUF ReaderField metadata: {gguf_path} "
         f"(architecture={architecture}, vocab_size={len(tokenizer_dict['tokens'])})"
     )
 

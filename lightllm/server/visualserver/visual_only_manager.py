@@ -21,7 +21,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer import start_model_process, VisualModelRpcClient
 from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
-from lightllm.utils.config_utils import ModelPaths
+from lightllm.utils.config_utils import create_model_paths
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -40,7 +40,12 @@ class VisualOnlyManager(rpyc.Service):
         args: StartArgs,
     ):
         self.args = args
-        self.visual_weight_dir, self.processor_dir = ModelPaths.from_args(args).resolve_visual_dirs()
+        self.visual_weight_dir, self.processor_dir = create_model_paths(
+            args.model_dir,
+            config_path=args.config_path,
+            tokenizer_dir=args.tokenizer_dir,
+            mmproj_path=args.mmproj_path,
+        ).resolve_visual_dirs()
         self.vit_dp = args.visual_dp
         assert self.vit_dp == 1
         self.vit_tp = args.visual_tp

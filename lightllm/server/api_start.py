@@ -18,7 +18,7 @@ from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
 from lightllm.utils.config_utils import (
-    ModelPaths,
+    create_model_paths,
     apply_gguf_quant_type,
     has_audio_module,
     has_vision_module,
@@ -77,7 +77,12 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
-    paths = ModelPaths.from_args(args)
+    paths = create_model_paths(
+        args.model_dir,
+        config_path=args.config_path,
+        tokenizer_dir=args.tokenizer_dir,
+        mmproj_path=args.mmproj_path,
+    )
 
     auto_set_max_req_total_len(args, paths)
     set_unique_server_name(args)
@@ -543,7 +548,12 @@ def pd_master_start(args):
     if args.run_mode != "pd_master":
         return
 
-    paths = ModelPaths.from_args(args)
+    paths = create_model_paths(
+        args.model_dir,
+        config_path=args.config_path,
+        tokenizer_dir=args.tokenizer_dir,
+        mmproj_path=args.mmproj_path,
+    )
     auto_set_max_req_total_len(args, paths)
 
     # when use config_server to support multi pd_master node, we
@@ -610,7 +620,12 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
-    paths = ModelPaths.from_args(args)
+    paths = create_model_paths(
+        args.model_dir,
+        config_path=args.config_path,
+        tokenizer_dir=args.tokenizer_dir,
+        mmproj_path=args.mmproj_path,
+    )
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)

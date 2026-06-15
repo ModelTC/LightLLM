@@ -16,6 +16,7 @@ from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.infer_utils import init_req_to_token_indexes
+from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.cuda_graph import CudaGraph
@@ -24,7 +25,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
 from lightllm.utils.config_utils import (
     apply_gguf_quant_type,
-    _create_model_paths,
+    create_model_paths,
     get_model_config,
 )
 from lightllm.utils.log_utils import init_logger
@@ -62,7 +63,7 @@ class TpPartBaseModel:
         self.args = get_env_start_args()
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
-        self.model_paths_ = _create_model_paths(self.weight_dir_)
+        self.model_paths_ = create_model_paths(self.weight_dir_)
         self.max_total_token_num = kvargs["max_total_token_num"]
         self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
@@ -153,6 +154,10 @@ class TpPartBaseModel:
 
     def _init_config(self):
         self.config = get_model_config(self.model_paths_)
+        # rename keys
+        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
+        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
+        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return

@@ -32,7 +32,7 @@ from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
-from lightllm.utils.config_utils import ModelPaths, get_vocab_size
+from lightllm.utils.config_utils import create_model_paths, get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
@@ -102,7 +102,12 @@ class HttpServerManager:
         self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
-        paths = ModelPaths.from_args(args)
+        paths = create_model_paths(
+            args.model_dir,
+            config_path=args.config_path,
+            tokenizer_dir=args.tokenizer_dir,
+            mmproj_path=args.mmproj_path,
+        )
 
         self.tokenizer = get_tokenizer(
             paths,

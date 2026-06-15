@@ -21,7 +21,7 @@ from typing import List, Tuple, Union
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from transformers.convert_slow_tokenizer import convert_slow_tokenizer
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.utils.config_utils import ModelPaths, get_model_config
+from lightllm.utils.config_utils import ModelPaths, get_model_config, create_model_paths
 from lightllm.utils.gguf_tokenizer_utils import load_tokenizer_from_gguf
 from lightllm.utils.log_utils import init_logger
 from ..models.tarsier2.model import Tarsier2Tokenizer
@@ -69,7 +69,6 @@ def _load_base_tokenizer(
         kwargs["use_fast"] = False
     
     if from_gguf:
-        logger.info(f"Loading tokenizer from GGUF file: {load_path}")
         return load_tokenizer_from_gguf(load_path, model_cfg, *args, **kwargs)
 
     if "llama" in load_path.lower() and kwargs.get("use_fast", True):
@@ -158,13 +157,14 @@ def _wrap_tokenizer(
 
 
 def get_tokenizer(
-    paths: ModelPaths,
+    paths: Union[str, ModelPaths],
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     *args,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    """Load base tokenizer (HF or GGUF), then wrap for model-specific behavior if needed."""
+    """ Load base tokenizer (HF or GGUF), then wrap for model-specific behavior if needed. """
+    paths = create_model_paths(paths)
     model_cfg = get_model_config(paths)
     load_path, from_gguf = paths.tokenizer_load_path
 

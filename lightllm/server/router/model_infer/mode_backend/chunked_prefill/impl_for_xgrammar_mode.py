@@ -5,7 +5,7 @@ from .impl import ChunkedPrefillBackend
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
-from lightllm.utils.config_utils import ModelPaths
+from lightllm.utils.config_utils import create_model_paths
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 
@@ -24,7 +24,12 @@ class XgrammarBackend(ChunkedPrefillBackend):
         import xgrammar as xgr
 
         self.tokenizer = get_tokenizer(
-            ModelPaths.from_args(self.args),
+            create_model_paths(
+                self.args.model_dir,
+                config_path=self.args.config_path,
+                tokenizer_dir=self.args.tokenizer_dir,
+                mmproj_path=self.args.mmproj_path,
+            ),
             tokenizer_mode=self.args.tokenizer_mode,
             trust_remote_code=self.args.trust_remote_code,
         )

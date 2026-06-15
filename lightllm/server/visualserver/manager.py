@@ -17,7 +17,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from .model_infer import start_model_process, VisualModelRpcClient
 from lightllm.common.basemodel.attention_vit.create_utils import init_vit_att_backend
-from lightllm.utils.config_utils import ModelPaths
+from lightllm.utils.config_utils import create_model_paths
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -51,7 +51,12 @@ class VisualManager:
         self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
         self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.visual_weight_dir, self.processor_dir = ModelPaths.from_args(args).resolve_visual_dirs()
+        self.visual_weight_dir, self.processor_dir = create_model_paths(
+            args.model_dir,
+            config_path=args.config_path,
+            tokenizer_dir=args.tokenizer_dir,
+            mmproj_path=args.mmproj_path,
+        ).resolve_visual_dirs()
         self.vit_dp = args.visual_dp
         self.vit_tp = args.visual_tp
         # image 最大推理 batch size

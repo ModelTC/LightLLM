@@ -19,21 +19,6 @@ class ModelPaths:
     mmproj_path: Optional[str] = None
     _gguf_path: Optional[str] = field(default=None, init=False, repr=False, compare=False)
 
-    @classmethod
-    def from_args(cls, args) -> "ModelPaths":
-        return _fill_paths_from_env(
-            cls(
-                model_dir=args.model_dir,
-                tokenizer_dir=getattr(args, "tokenizer_dir", None),
-                config_path=getattr(args, "config_path", None),
-                mmproj_path=getattr(args, "mmproj_path", None),
-            )
-        )
-
-    @classmethod
-    def from_env(cls) -> "ModelPaths":
-        return cls.from_args(get_env_start_args())
-
     @property
     def is_gguf(self) -> bool:
         return self._gguf_path is not None
@@ -117,12 +102,22 @@ def _fill_paths_from_env(paths: ModelPaths) -> ModelPaths:
     )
 
 
-def _create_model_paths(
-    model_dir_or_paths: Union[str, ModelPaths],
+def create_model_paths(
+    model_dir_or_paths: Union[str, ModelPaths, None] = None,
+    *,
     config_path: Optional[str] = None,
     tokenizer_dir: Optional[str] = None,
     mmproj_path: Optional[str] = None,
 ) -> ModelPaths:
+    if model_dir_or_paths is None:
+        start_args = get_env_start_args()
+        return create_model_paths(
+            start_args.model_dir,
+            config_path=getattr(start_args, "config_path", None),
+            tokenizer_dir=getattr(start_args, "tokenizer_dir", None),
+            mmproj_path=getattr(start_args, "mmproj_path", None),
+        )
+
     if isinstance(model_dir_or_paths, ModelPaths):
         paths = model_dir_or_paths
     else:
@@ -132,12 +127,13 @@ def _create_model_paths(
             tokenizer_dir=tokenizer_dir,
             mmproj_path=mmproj_path,
         )
+
     return _fill_paths_from_env(paths)
 
 
 @lru_cache(maxsize=1)
 def get_model_paths() -> ModelPaths:
-    return ModelPaths.from_env()
+    return create_model_paths()
 
 
 def _load_config_from_path(config_path: str) -> dict:
@@ -178,8 +174,7 @@ def _find_gguf_path_cached(model_dir: Optional[str]) -> Optional[str]:
 
 def apply_gguf_quant_type(paths: Union[str, ModelPaths], quant_type: str) -> str:
     """Align quant_type for GGUF models and log when overriding."""
-    if not isinstance(paths, ModelPaths):
-        paths = _create_model_paths(paths)
+    paths = create_model_paths(paths)
     aligned = paths.align_quant_type(quant_type)
     if aligned != quant_type:
         logger.warning(
@@ -188,12 +183,7 @@ def apply_gguf_quant_type(paths: Union[str, ModelPaths], quant_type: str) -> str
     return aligned
 
 
-def normalize_model_config(config: dict) -> dict:
-    from lightllm.common.build_utils import repair_config
-
-    repair_config(config, same_names=["num_attention_heads", "n_head"])
-    repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
-    repair_config(config, same_names=["num_hidden_layers", "n_layer"])
+def _normalize_gguf_model_config(config: dict) -> dict:
     if config.get("head_dim") is None:
         hidden_size = config.get("hidden_size") or config.get("n_embd") or config.get("n_embed")
         num_heads = config.get("num_attention_heads") or config.get("n_head")
@@ -203,14 +193,12 @@ def normalize_model_config(config: dict) -> dict:
 
 
 @lru_cache(maxsize=None)
-def _get_model_config_cached(paths: ModelPaths) -> dict:
-    return normalize_model_config(paths.load_config())
-
-
 def get_model_config(paths: Union[str, ModelPaths]) -> dict:
-    if isinstance(paths, str):
-        paths = _create_model_paths(paths)
-    return _get_model_config_cached(paths)
+    paths = create_model_paths(paths)
+    config = paths.load_config()
+    if paths.is_gguf:
+        config = _normalize_gguf_model_config(config)
+    return config
 
 
 def check_gguf_multimodal_paths(paths: ModelPaths, enable_multimodal: bool = False) -> None:
@@ -351,7 +339,7 @@ def _derive_max_req_total_len_from_model_config(paths: ModelPaths) -> Optional[i
     return None
 
 
-def auto_set_max_req_total_len(args, paths: Optional[ModelPaths] = None) -> None:
+def auto_set_max_req_total_len(args, paths: ModelPaths) -> None:
     """
     Ensure `args.max_req_total_len` is an int.
 
@@ -362,9 +350,6 @@ def auto_set_max_req_total_len(args, paths: Optional[ModelPaths] = None) -> None
     default_fallback = 16384
     if args.max_req_total_len is not None:
         return
-
-    if paths is None:
-        paths = ModelPaths.from_args(args)
 
     if not paths.model_dir:
         logger.warning("model_dir is empty; fallback max_req_total_len=16384")
@@ -408,7 +393,7 @@ def _get_config_llm_keyvalue(paths: ModelPaths, key_name: list[str]):
 
 
 def get_hidden_size(model_dir_or_paths: Union[str, ModelPaths]) -> Optional[int]:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     hidden_size = _get_config_llm_keyvalue(paths, key_name=["hidden_size", "n_embd", "n_embed"])
     if isinstance(hidden_size, int):
         return hidden_size
@@ -417,7 +402,7 @@ def get_hidden_size(model_dir_or_paths: Union[str, ModelPaths]) -> Optional[int]
 
 @lru_cache(maxsize=None)
 def get_num_key_value_heads(model_dir_or_paths: Union[str, ModelPaths]) -> int:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     num_key_value_heads = _get_config_llm_keyvalue(paths, key_name=["num_key_value_heads"])
     if isinstance(num_key_value_heads, int):
         return num_key_value_heads
@@ -426,7 +411,7 @@ def get_num_key_value_heads(model_dir_or_paths: Union[str, ModelPaths]) -> int:
 
 @lru_cache(maxsize=None)
 def get_num_attention_heads(model_dir_or_paths: Union[str, ModelPaths]) -> int:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     num_attention_heads = _get_config_llm_keyvalue(paths, key_name=["num_attention_heads"])
     if isinstance(num_attention_heads, int):
         return num_attention_heads
@@ -435,7 +420,7 @@ def get_num_attention_heads(model_dir_or_paths: Union[str, ModelPaths]) -> int:
 
 @lru_cache(maxsize=None)
 def get_head_dim(model_dir_or_paths: Union[str, ModelPaths]) -> int:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     head_dim = _get_config_llm_keyvalue(paths, key_name=["head_dim"])
     if isinstance(head_dim, int):
         return head_dim
@@ -447,7 +432,7 @@ def get_head_dim(model_dir_or_paths: Union[str, ModelPaths]) -> int:
 
 @lru_cache(maxsize=None)
 def get_layer_num(model_dir_or_paths: Union[str, ModelPaths]) -> int:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     num_hidden_layers = _get_config_llm_keyvalue(paths, key_name=["num_hidden_layers"])
     if isinstance(num_hidden_layers, int):
         return num_hidden_layers
@@ -455,7 +440,7 @@ def get_layer_num(model_dir_or_paths: Union[str, ModelPaths]) -> int:
 
 
 def get_eos_token_ids(model_dir_or_paths: Union[str, ModelPaths]) -> Optional[List[int]]:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     try:
         config_json = get_model_config(paths)
         assert config_json["architectures"][0] == "Qwen3OmniMoeForConditionalGeneration"
@@ -489,7 +474,7 @@ def get_eos_token_ids(model_dir_or_paths: Union[str, ModelPaths]) -> Optional[Li
 
 
 def get_model_architectures(model_dir_or_paths: Union[str, ModelPaths]):
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     try:
         config_json = get_model_config(paths)
         arch = config_json["architectures"][0]
@@ -504,7 +489,7 @@ def get_vocab_size(paths: Optional[Union[str, ModelPaths]] = None) -> int:
         if paths is None:
             paths = get_model_paths()
         elif not isinstance(paths, ModelPaths):
-            paths = _create_model_paths(paths)
+            paths = create_model_paths(paths)
         config_json = get_model_config(paths)
         # qwen3-omini special
         if "thinker_config" in config_json:
@@ -525,7 +510,7 @@ def get_vocab_size(paths: Optional[Union[str, ModelPaths]] = None) -> int:
 
 
 def get_dtype(model_dir_or_paths: Union[str, ModelPaths]):
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     torch_dtype = _get_config_llm_keyvalue(paths, key_name=["torch_dtype", "dtype", "model_dtype"])
     if torch_dtype is None:
         logger.warning("torch_dtype not in config.json, use float16 as default")
@@ -545,7 +530,7 @@ def get_fixed_kv_len():
 
 @lru_cache(maxsize=None)
 def has_vision_module(model_dir_or_paths: Union[str, ModelPaths]) -> bool:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     try:
         model_cfg = get_model_config(paths)
         model_type = model_cfg["model_type"]
@@ -592,7 +577,7 @@ def has_vision_module(model_dir_or_paths: Union[str, ModelPaths]) -> bool:
 
 @lru_cache(maxsize=None)
 def has_audio_module(model_dir_or_paths: Union[str, ModelPaths]) -> bool:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     try:
         model_cfg = get_model_config(paths)
         if model_cfg.get("thinker_config") is not None:
@@ -614,7 +599,7 @@ def has_audio_module(model_dir_or_paths: Union[str, ModelPaths]) -> bool:
 
 @lru_cache(maxsize=None)
 def is_linear_att_mixed_model(model_dir_or_paths: Union[str, ModelPaths]) -> bool:
-    paths = _create_model_paths(model_dir_or_paths)
+    paths = create_model_paths(model_dir_or_paths)
     try:
         model_cfg = get_model_config(paths)
         model_type = model_cfg["model_type"]

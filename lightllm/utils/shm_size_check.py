@@ -6,7 +6,7 @@ import threading
 from lightllm.server.core.objs.req import ChunkedPrefillReq, TokenHealingReq
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.tokenizer import get_tokenizer
-from lightllm.utils.config_utils import ModelPaths, get_hidden_size
+from lightllm.utils.config_utils import create_model_paths, get_hidden_size
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -86,9 +86,13 @@ def _get_recommended_shm_size_gb(args, max_image_resolution=(3940, 2160), dtype_
     """
     获取所需的 /dev/shm 大小(以GB为单位)。
     """
-    paths = ModelPaths.from_args(args)
     tokenizer = get_tokenizer(
-        paths,
+        create_model_paths(
+            args.model_dir,
+            config_path=args.config_path,
+            tokenizer_dir=args.tokenizer_dir,
+            mmproj_path=args.mmproj_path,
+        ),
         tokenizer_mode=args.tokenizer_mode,
         trust_remote_code=args.trust_remote_code,
     )

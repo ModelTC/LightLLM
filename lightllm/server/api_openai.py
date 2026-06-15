@@ -32,7 +32,7 @@ from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
 from lightllm.utils.error_utils import ClientDisconnected
 
-from lightllm.utils.config_utils import ModelPaths, has_vision_module
+from lightllm.utils.config_utils import create_model_paths, has_vision_module
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -233,7 +233,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     created_time = int(time.time())
 
-    supports_vl_chat = has_vision_module(ModelPaths.from_args(g_objs.args))
+    supports_vl_chat = has_vision_module(create_model_paths(
+        g_objs.args.model_dir,
+        config_path=g_objs.args.config_path,
+        tokenizer_dir=g_objs.args.tokenizer_dir,
+        mmproj_path=g_objs.args.mmproj_path,
+    ))
     multimodal_params_dict = {"images": [], "audios": []}
     for message in request.messages:
         if isinstance(message.content, list):
