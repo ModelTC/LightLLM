@@ -116,8 +116,6 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
     decode_wrapper: object = None
 
     def init_state(self):
-        import flashinfer
-
         self.backend: MlaFlashInferAttBackend = self.backend
         model = self.backend.model
         device = self.infer_state.input_ids.device
@@ -145,6 +143,11 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )
+        if self.infer_state.skip_decode_att_wrapper_init:
+            return
+
+        import flashinfer
+
         assert self.decode_wrapper is None
 
         self.decode_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(

@@ -40,6 +40,7 @@ class InferStateInfo:
         self.b_mtp_index: torch.Tensor = None
 
         self.b_seq_len: torch.Tensor = None
+        self.b_seq_len_cpu: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度
@@ -56,6 +57,7 @@ class InferStateInfo:
         self.return_all_prompt_logics: bool = False
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
+        self.skip_decode_att_wrapper_init: bool = False
         self.dist_group: CustomProcessGroup = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
