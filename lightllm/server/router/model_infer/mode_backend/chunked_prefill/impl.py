@@ -163,11 +163,22 @@ class ChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         # 第二阶段
-        event_pack.notify_post_handle_and_wait_pre_post_handle()
-        update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
+        can_pre_post_early = self._can_decode_pre_post_before_prev_post_handle(
+            run_reqs=run_reqs,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
+        )
+        if can_pre_post_early:
+            event_pack.notify_post_handle_event.set()
+            update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
+            event_pack.notify_forward_event.set()
+            event_pack.wait_pre_post_handle_event.wait()
+        else:
+            event_pack.notify_post_handle_and_wait_pre_post_handle()
+            update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
         # 第三阶段
-        event_pack.notify_forward_and_wait_post_handle()
+        if not can_pre_post_early:
+            event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
         self._post_handle(
             run_reqs=run_reqs,

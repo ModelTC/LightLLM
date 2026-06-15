@@ -1,5 +1,5 @@
 import torch
-from typing import List, Tuple
+from typing import List, Optional, Union
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
@@ -7,8 +7,24 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_con
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
+_flashinfer_top_k_top_p_sampling_from_logits = None
+_flashinfer_top_k_top_p_sampling_from_logits_checked = False
+_flashinfer_top_k_top_p_sampling_from_probs = None
+_flashinfer_top_k_top_p_sampling_from_probs_checked = False
+_flashinfer_top_p_sampling_from_probs = None
+_flashinfer_top_p_sampling_from_probs_checked = False
+_flashinfer_top_k_sampling_from_probs = None
+_flashinfer_top_k_sampling_from_probs_checked = False
+_uniform_tensor_cache = {}
+_softmax_out_cache = {}
+_is_flashinfer_sampling_backend = None
+
 
 def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
+    fast_next_token_ids = _try_flashinfer_sample_without_penalty(logits, reqs)
+    if fast_next_token_ids is not None:
+        return fast_next_token_ids.view(-1), None
+
     (
         b_req_idx,
         b_temperatures,
@@ -75,25 +91,84 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
             cu_invalid_token_num=cu_invalid_token_num,
         )
 
-    logits.div_(b_temperatures.view((-1, 1)))
-    probs = torch.softmax(logits, dim=-1)
+    if b_temperatures is not None:
+        logits.div_(b_temperatures.view((-1, 1)))
 
     if is_all_greedy:
         batch_next_token_ids = torch.argmax(logits, -1)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+        return batch_next_token_ids.view(-1), None
 
-    elif skip_top_k and skip_top_p:
+    probs = torch.softmax(logits, dim=-1)
+
+    if skip_top_k and skip_top_p:
         # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
         batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
-        batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+        return batch_next_token_ids.view(-1), None
 
     else:
-        batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(
-            reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+        batch_next_token_ids = _top_p_top_k_sample(
+            reqs,
+            probs,
+            b_top_ps,
+            b_top_ks,
+            skip_top_k,
+            skip_top_p,
+            exist_req_use_random_seed,
         )
-        return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
+        return batch_next_token_ids.view(-1), None
+
+
+def _try_flashinfer_sample_without_penalty(logits: torch.Tensor, reqs: List[InferReq]) -> Optional[torch.Tensor]:
+    if not _is_flashinfer_sampling() or not reqs:
+        return None
+
+    first_param = reqs[0].sampling_param.shm_param
+    top_p = first_param.top_p
+    top_k = first_param.top_k
+    temperature = first_param.temperature
+    vocab_size = reqs[0].vocab_size
+
+    if top_k <= 1 or (top_k == vocab_size and top_p == 1.0):
+        return None
+
+    for req in reqs:
+        shm_param = req.sampling_param.shm_param
+        if req.generator is not None:
+            return None
+        if len(req.sampling_param.invalid_token_ids) != 0:
+            return None
+        if not shm_param.ignore_eos:
+            return None
+        if shm_param.presence_penalty != 0.0:
+            return None
+        if shm_param.frequency_penalty != 0.0:
+            return None
+        if shm_param.repetition_penalty != 1.0:
+            return None
+        if shm_param.temperature != temperature:
+            return None
+        if shm_param.top_p != top_p:
+            return None
+        if shm_param.top_k != top_k:
+            return None
+
+    if temperature != 1.0:
+        logits.div_(temperature)
+
+    if top_k == vocab_size and top_p != 1.0:
+        top_p_tensor = _get_uniform_tensor(top_p, logits.shape[0], torch.float32, logits.device)
+        return _flashinfer_top_p_sample_from_logits(logits, top_p_tensor)
+
+    top_p_tensor = _get_uniform_tensor(top_p, logits.shape[0], torch.float32, logits.device)
+    top_k_tensor = _get_uniform_tensor(top_k, logits.shape[0], torch.int32, logits.device)
+    return _flashinfer_top_p_top_k_sample_from_logits(logits, top_p_tensor, top_k_tensor)
+
+
+def _is_flashinfer_sampling() -> bool:
+    global _is_flashinfer_sampling_backend
+    if _is_flashinfer_sampling_backend is None:
+        _is_flashinfer_sampling_backend = get_env_start_args().sampling_backend == "flashinfer"
+    return _is_flashinfer_sampling_backend
 
 
 def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor):
@@ -107,13 +182,122 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     return probs_sort, probs_idx
 
 
+def _flashinfer_top_p_top_k_sample_from_logits(
+    logits: torch.Tensor,
+    b_top_ps: Union[torch.Tensor, float],
+    b_top_ks: Union[torch.Tensor, int],
+) -> Optional[torch.Tensor]:
+    global _flashinfer_top_k_top_p_sampling_from_logits
+    global _flashinfer_top_k_top_p_sampling_from_logits_checked
+
+    if not _flashinfer_top_k_top_p_sampling_from_logits_checked:
+        try:
+            from flashinfer.sampling import top_k_top_p_sampling_from_logits
+        except ImportError:
+            top_k_top_p_sampling_from_logits = None
+        _flashinfer_top_k_top_p_sampling_from_logits = top_k_top_p_sampling_from_logits
+        _flashinfer_top_k_top_p_sampling_from_logits_checked = True
+
+    if _flashinfer_top_k_top_p_sampling_from_logits is None:
+        return None
+
+    return _flashinfer_top_k_top_p_sampling_from_logits(
+        logits,
+        b_top_ks,
+        b_top_ps,
+        filter_apply_order="joint",
+        deterministic=True,
+        check_nan=False,
+    )
+
+
+def _flashinfer_top_p_sample_from_logits(
+    logits: torch.Tensor, top_p: Union[torch.Tensor, float]
+) -> Optional[torch.Tensor]:
+    probs = _softmax_out(logits)
+    return _flashinfer_top_p_sample_from_probs(probs, top_p)
+
+
+def _get_uniform_tensor(value: Union[float, int], size: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    key = (str(device), dtype, size, value)
+    tensor = _uniform_tensor_cache.get(key)
+    if tensor is None:
+        tensor = torch.full((size,), value, dtype=dtype, device=device)
+        _uniform_tensor_cache[key] = tensor
+    return tensor
+
+
+def _softmax_out(logits: torch.Tensor) -> torch.Tensor:
+    key = (str(logits.device), logits.dtype, tuple(logits.shape))
+    probs = _softmax_out_cache.get(key)
+    if probs is None:
+        probs = torch.empty_like(logits)
+        _softmax_out_cache[key] = probs
+    torch.ops.aten._softmax.out(logits, -1, False, out=probs)
+    return probs
+
+
+def _get_flashinfer_top_k_top_p_sampling_from_probs():
+    global _flashinfer_top_k_top_p_sampling_from_probs
+    global _flashinfer_top_k_top_p_sampling_from_probs_checked
+
+    if not _flashinfer_top_k_top_p_sampling_from_probs_checked:
+        try:
+            from flashinfer.sampling import top_k_top_p_sampling_from_probs
+        except ImportError:
+            top_k_top_p_sampling_from_probs = None
+        _flashinfer_top_k_top_p_sampling_from_probs = top_k_top_p_sampling_from_probs
+        _flashinfer_top_k_top_p_sampling_from_probs_checked = True
+    return _flashinfer_top_k_top_p_sampling_from_probs
+
+
+def _flashinfer_top_p_sample_from_probs(
+    probs: torch.Tensor, top_p: Union[torch.Tensor, float]
+) -> Optional[torch.Tensor]:
+    global _flashinfer_top_p_sampling_from_probs
+    global _flashinfer_top_p_sampling_from_probs_checked
+
+    if not _flashinfer_top_p_sampling_from_probs_checked:
+        try:
+            from flashinfer.sampling import top_p_sampling_from_probs
+        except ImportError:
+            top_p_sampling_from_probs = None
+        _flashinfer_top_p_sampling_from_probs = top_p_sampling_from_probs
+        _flashinfer_top_p_sampling_from_probs_checked = True
+
+    if _flashinfer_top_p_sampling_from_probs is None:
+        return None
+
+    return _flashinfer_top_p_sampling_from_probs(probs, top_p, deterministic=True, check_nan=False)
+
+
+def _flashinfer_top_k_sample_from_probs(probs: torch.Tensor, top_k: Union[torch.Tensor, int]) -> Optional[torch.Tensor]:
+    global _flashinfer_top_k_sampling_from_probs
+    global _flashinfer_top_k_sampling_from_probs_checked
+
+    if not _flashinfer_top_k_sampling_from_probs_checked:
+        try:
+            from flashinfer.sampling import top_k_sampling_from_probs
+        except ImportError:
+            top_k_sampling_from_probs = None
+        _flashinfer_top_k_sampling_from_probs = top_k_sampling_from_probs
+        _flashinfer_top_k_sampling_from_probs_checked = True
+
+    if _flashinfer_top_k_sampling_from_probs is None:
+        return None
+
+    return _flashinfer_top_k_sampling_from_probs(probs, top_k, deterministic=True, check_nan=False)
+
+
 def _top_p_top_k_sample(
     reqs: List[InferReq],
     probs: torch.Tensor,
-    b_top_ps: torch.Tensor,
-    b_top_ks: torch.Tensor,
+    b_top_ps: Union[torch.Tensor, float],
+    b_top_ks: Union[torch.Tensor, int],
+    skip_top_k: bool,
+    skip_top_p: bool,
     exist_req_use_random_seed: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     sampling_backend = get_env_start_args().sampling_backend
 
     if sampling_backend == "triton":
@@ -123,23 +307,28 @@ def _top_p_top_k_sample(
         else:
             sampled_index = _random_sample(probs_sort, reqs, exist_req_use_random_seed).view(-1, 1)
         next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index)
-        next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
-        return next_token_ids.view(-1), next_token_logprobs.view(-1)
+        return next_token_ids.view(-1)
 
     elif sampling_backend == "flashinfer":
-        from flashinfer.sampling import top_k_top_p_sampling_from_probs
-
-        batch_next_token_ids = top_k_top_p_sampling_from_probs(
-            probs,
-            b_top_ks,
-            b_top_ps,
-            filter_apply_order="joint",
-            check_nan=False,
-        )
-        int64_batch_next_token_ids = torch.empty_like(batch_next_token_ids, dtype=torch.int64)
-        int64_batch_next_token_ids[:] = batch_next_token_ids
-        batch_next_token_probs = torch.gather(probs, dim=1, index=int64_batch_next_token_ids.view(-1, 1))
-        return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
+        if skip_top_k:
+            batch_next_token_ids = _flashinfer_top_p_sample_from_probs(probs, b_top_ps)
+        elif skip_top_p:
+            batch_next_token_ids = _flashinfer_top_k_sample_from_probs(probs, b_top_ks)
+        else:
+            top_k_top_p_sampling_from_probs = _get_flashinfer_top_k_top_p_sampling_from_probs()
+            if top_k_top_p_sampling_from_probs is None:
+                raise ImportError("flashinfer.sampling.top_k_top_p_sampling_from_probs is not available")
+            batch_next_token_ids = top_k_top_p_sampling_from_probs(
+                probs,
+                b_top_ks,
+                b_top_ps,
+                filter_apply_order="joint",
+                deterministic=True,
+                check_nan=False,
+            )
+        if batch_next_token_ids is None:
+            raise ImportError("flashinfer sampling op is not available")
+        return batch_next_token_ids.view(-1)
     else:
         assert False, "Unsupported sampling backend for top_p_top_k_sample"
 
@@ -165,6 +354,7 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     skip_top_k = True
     skip_top_p = True
     exist_req_use_random_seed = False
+    all_temperature_one = True
 
     # invalid token ids
     invalid_token_ids: List[int] = []
@@ -192,6 +382,8 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             skip_top_p = False
         if req_obj.generator is not None:
             exist_req_use_random_seed = True
+        if shm_param.temperature != 1.0:
+            all_temperature_one = False
         req_idxes.append(req_obj.req_idx)
         invalid_token_num_start += len(req_obj.sampling_param.invalid_token_ids)
         cu_invalid_token_num.append(invalid_token_num_start)
@@ -200,13 +392,25 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
             invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
 
     req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
-    temperatures_cpu = g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
-    top_ps_cpu = g_pin_mem_manager.gen_from_list(key="top_ps", data=top_ps, dtype=torch.float32)
-    top_ks_cpu = g_pin_mem_manager.gen_from_list(key="top_ks", data=top_ks, dtype=torch.int32)
     length_penalty_param_cpu = g_pin_mem_manager.gen_from_list(
         key="length_penalty_param", data=length_penalty_param, dtype=torch.int32
     )
     mask_eos_reqs_cpu = g_pin_mem_manager.gen_from_list(key="mask_eos_reqs", data=mask_eos_reqs, dtype=torch.bool)
+    temperatures_cpu = (
+        None
+        if all_temperature_one
+        else g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
+    )
+    sampling_backend = get_env_start_args().sampling_backend
+    need_top_k_top_p_tensors = (not is_all_greedy) and (not (skip_top_k and skip_top_p))
+    need_top_ps_tensor = need_top_k_top_p_tensors and (sampling_backend != "flashinfer" or not skip_top_p)
+    need_top_ks_tensor = need_top_k_top_p_tensors and (sampling_backend != "flashinfer" or not skip_top_k)
+    top_ps_cpu = (
+        g_pin_mem_manager.gen_from_list(key="top_ps", data=top_ps, dtype=torch.float32) if need_top_ps_tensor else None
+    )
+    top_ks_cpu = (
+        g_pin_mem_manager.gen_from_list(key="top_ks", data=top_ks, dtype=torch.int32) if need_top_ks_tensor else None
+    )
 
     if has_invalid_token_ids:
         invalid_token_ids_cpu = g_pin_mem_manager.gen_from_list(
@@ -218,9 +422,9 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
 
     return (
         req_idxes_cpu.cuda(non_blocking=True),
-        temperatures_cpu.cuda(non_blocking=True),
-        top_ps_cpu.cuda(non_blocking=True),
-        top_ks_cpu.cuda(non_blocking=True),
+        temperatures_cpu.cuda(non_blocking=True) if temperatures_cpu is not None else None,
+        top_ps_cpu.cuda(non_blocking=True) if top_ps_cpu is not None else None,
+        top_ks_cpu.cuda(non_blocking=True) if top_ks_cpu is not None else None,
         length_penalty_param_cpu.cuda(non_blocking=True),
         mask_eos_reqs_cpu.cuda(non_blocking=True),
         invalid_token_ids_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
