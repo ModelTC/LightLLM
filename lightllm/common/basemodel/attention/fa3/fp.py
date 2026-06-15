@@ -3,10 +3,14 @@ import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+from lightllm.utils.sgl_utils import flash_attn_with_kvcache, get_scheduler_metadata
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+
+
+_DECODE_MAX_NUM_SPLITS = 32
+_DECODE_PACK_GQA = True
 
 
 class Fa3AttBackend(BaseAttBackend):
@@ -119,6 +123,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
     b_att_seq_len: torch.Tensor = None
+    scheduler_metadata: torch.Tensor = None
     # 在是否开启mtp 的不同模式下，其设置不同的值，可以加速算子的运行。
     decode_max_q_seq_len: int = None
 
@@ -179,7 +184,32 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             )
             self.b_att_seq_len = self.infer_state.b_seq_len
             self.decode_max_q_seq_len = 1
+        self._init_scheduler_metadata()
         return
+
+    def _init_scheduler_metadata(self):
+        if get_scheduler_metadata is None:
+            self.scheduler_metadata = None
+            return
+
+        model = self.backend.model
+        self.scheduler_metadata = get_scheduler_metadata(
+            batch_size=self.b_att_seq_len.shape[0],
+            max_seqlen_q=self.decode_max_q_seq_len,
+            max_seqlen_k=self.infer_state.max_kv_seq_len,
+            num_heads=model.config["num_attention_heads"] // model.tp_world_size_,
+            num_heads_k=model.tp_k_head_num_,
+            headdim=model.head_dim_,
+            cache_seqlens=self.b_att_seq_len,
+            qkv_dtype=model.data_type,
+            headdim_v=model.head_dim_,
+            cu_seqlens_q=self.cu_seqlens_q,
+            cu_seqlens_k_new=self.cu_seqlens_k,
+            page_size=1,
+            causal=True,
+            num_splits=_DECODE_MAX_NUM_SPLITS,
+            pack_gqa=_DECODE_PACK_GQA,
+        )
 
     def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -235,6 +265,9 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             causal=True,
             window_size=window_size,
             softcap=0.0,
+            scheduler_metadata=self.scheduler_metadata,
+            num_splits=_DECODE_MAX_NUM_SPLITS,
+            pack_gqa=_DECODE_PACK_GQA,
             k_descale=k_descale,
             v_descale=v_descale,
             return_softmax_lse=False,

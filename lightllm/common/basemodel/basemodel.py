@@ -314,6 +314,7 @@ class TpPartBaseModel:
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
+        infer_state.b_seq_len_cpu = model_input.b_seq_len_cpu
         infer_state.b_mtp_index = model_input.b_mtp_index
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
@@ -371,6 +372,10 @@ class TpPartBaseModel:
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
+        if new_model_input.b_seq_len_cpu is not None:
+            new_model_input.b_seq_len_cpu = F.pad(
+                new_model_input.b_seq_len_cpu, (0, padded_batch_size), mode="constant", value=2
+            )
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_batch_size),
@@ -562,6 +567,8 @@ class TpPartBaseModel:
                 model_input=model_input, new_batch_size=infer_batch_size
             )
             infer_state = self._create_inferstate(model_input)
+            need_capture = self.graph.need_capture(infer_batch_size)
+            infer_state.skip_decode_att_wrapper_init = not need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
                 infer_state.b_req_idx,
@@ -571,7 +578,7 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
-            if self.graph.need_capture(infer_batch_size):
+            if need_capture:
                 infer_state.is_cuda_graph = True
                 model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
