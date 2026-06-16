@@ -169,6 +169,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "qwen",
             "deepseekv31",
             "deepseekv32",
+            "deepseekv4",
             "glm47",
             "kimi_k2",
             "qwen3_coder",

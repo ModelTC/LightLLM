@@ -191,6 +191,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 class DeepSeekV4Tokenizer:
     """Tokenizer wrapper for DeepSeek-V4's Python prompt encoding."""
 
+    # DeepSeek-V4 has a per-request thinking mode (<think>...</think>) toggled via
+    # chat_template_kwargs={"thinking": true}. It has no Jinja chat_template string,
+    # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
+    supports_thinking = True
+
     def __init__(self, tokenizer, model_dir):
         self.tokenizer = tokenizer
         self.model_dir = model_dir
