@@ -267,7 +267,7 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
                 eos_token_ids.extend(config_eos_token_id)
 
             if eos_token_ids:
-                return list(dict.fromkeys(int(eos_id) for eos_id in eos_token_ids))
+                return list(set(eos_token_ids))
     except Exception:
         pass
 
