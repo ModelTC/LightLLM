@@ -30,7 +30,9 @@ def _fwd_kernel_ep_scatter_1(
     # synchronization, so the extracted value is always correct.
     expert_mask = offset_cumsum == cur_expert
     cur_expert_start = tl.sum(tl.where(expert_mask, cumsum, tl.zeros_like(cumsum)))
-    cur_expert_token_num = tl.sum(tl.where(expert_mask, tokens_per_expert, tl.zeros_like(tokens_per_expert)))
+    # num_recv_tokens_per_expert is a read-only input (never written in this
+    # kernel), so a direct load carries no stale-read risk.
+    cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
 
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E)
