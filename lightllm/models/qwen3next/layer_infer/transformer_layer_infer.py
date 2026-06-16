@@ -10,8 +10,10 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from typing import Tuple
-from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
+from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gdn_decode_inputs
+from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import add_shared_expert_gate_, sigmoid_mul_
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
@@ -114,15 +116,14 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         input = input.view(-1, self.embed_dim_)
         shared_expert_out = LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
-        gate = layer_weight.ffn_gate.mm(input).sigmoid_()
-        shared_expert_out.mul_(gate)
-        return shared_expert_out
+        gate = layer_weight.ffn_gate.mm(input)
+        return shared_expert_out, gate
 
     def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
 
-        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
+        shared_expert_out, gate = self._compute_shared_expert(input, infer_state, layer_weight)
 
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
@@ -135,15 +136,16 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            shared_expert_out=shared_expert_out,
+            shared_expert_gate=gate,
         )
         hidden_states = hidden_states.view(num_tokens, hidden_dim)
-        hidden_states.add_(shared_expert_out)
         return hidden_states
 
     def _moe_ffn_edp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
+        shared_expert_out, gate = self._compute_shared_expert(input, infer_state, layer_weight)
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -158,7 +160,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             is_prefill=infer_state.is_prefill,
         )
         ep_output = ep_output.view(token_num, hidden_dim)
-        ep_output.add_(shared_expert_out)
+        add_shared_expert_gate_(ep_output, shared_expert_out, gate)
         return ep_output
 
     def _get_qkv(
@@ -169,13 +171,25 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        qkv_out = layer_weight.qkv_proj.mm(input)
+        qkvo_gate_proj = getattr(layer_weight, "qkvo_gate_proj", None)
+        if qkvo_gate_proj is None:
+            qkv_out = layer_weight.qkv_proj.mm(input)
+            o_gate = layer_weight._o_gate_proj.mm(input)
+        else:
+            qkv_gate_out = qkvo_gate_proj.mm(input)
+            qkv_out, o_gate = qkv_gate_out.split(
+                [
+                    self.tp_q_head_num_ * self.head_dim_ * 2
+                    + (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_,
+                    self.tp_q_head_num_ * self.head_dim_,
+                ],
+                dim=-1,
+            )
         q, cache_kv = qkv_out.split(
             [self.tp_q_head_num_ * self.head_dim_ * 2, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_],
             dim=-1,
         )
-        o_gate = layer_weight._o_gate_proj.mm(input)
-        infer_state.gate_value = o_gate.sigmoid_()
+        infer_state.gate_value = o_gate
         layer_weight.qk_norm_weight_(
             q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
@@ -200,14 +214,23 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> torch.Tensor:
+        o_tensor = self._get_o_local(input=input, infer_state=infer_state, layer_weight=layer_weight)
+        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
+        return o_tensor
+
+    def _get_o_local(
+        self,
+        input,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ) -> torch.Tensor:
         """Output projection with gating (in-place multiply to save one allocation)."""
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        input.mul_(infer_state.gate_value)
+        sigmoid_mul_(input, infer_state.gate_value)
         infer_state.gate_value = None
         o_tensor = layer_weight.o_proj.mm(input)
-        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
     # ==================== GDN Helper Methods ====================
@@ -257,8 +280,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         else:
             mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
             conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-            core_attn_out = self._gdn_decode_kernel(
+            core_attn_out, z = self._gdn_decode_kernel(
                 mixed_qkv,
+                z,
                 conv_states,
                 ssm_states,
                 a,
@@ -406,6 +430,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _gdn_decode_kernel(
         self,
         mixed_qkv: torch.Tensor,
+        z: torch.Tensor,
         conv_states: torch.Tensor,
         ssm_states: torch.Tensor,
         a: torch.Tensor,
@@ -413,18 +438,24 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ):
-        mixed_qkv = causal_conv1d_update(
+        # Recurrent processing with fused gating. Decode uses a specialized
+        # conv+pack kernel to avoid materializing the post-conv qkv tensor
+        # before immediately splitting it into q/k/v.
+        query, key, value, z, a, b = conv_pack_gdn_decode_inputs(
             mixed_qkv,
+            z,
+            a,
+            b,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
-            bias=layer_weight.linear_conv1d.bias,
-            activation=self.activation,
-            conv_state_indices=infer_state.b_buffer_idx,
+            layer_weight.linear_conv1d.bias,
+            infer_state.b_buffer_idx,
+            self.activation,
+            self.tp_num_k_heads,
+            self.head_k_dim,
+            self.tp_num_v_heads,
+            self.head_v_dim,
         )
-
-        # Recurrent processing with fused gating; the kernel reads the
-        # q/k/v/a/b column views directly via per-token strides (no copies)
-        query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=True)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -438,4 +469,4 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             a_raw=a,
             b_raw=b,
         )
-        return core_attn_out
+        return core_attn_out, z

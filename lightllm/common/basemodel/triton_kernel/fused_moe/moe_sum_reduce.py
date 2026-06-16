@@ -14,12 +14,20 @@ def _moe_sum_reduce_kernel(
     output_ptr,
     output_stride_0,
     output_stride_1,
+    shared_ptr,
+    shared_stride_0,
+    shared_stride_1,
+    gate_ptr,
+    gate_stride_0,
+    gate_stride_1,
     token_num: int,
     topk_num: int,
     hidden_dim: int,
     BLOCK_M: tl.constexpr,
     BLOCK_DIM: tl.constexpr,
     NUM_STAGE: tl.constexpr,
+    HAS_SHARED_GATE: tl.constexpr,
+    GATE_DIM: tl.constexpr,
 ):
     input_stride_0 = tl.cast(input_stride_0, dtype=tl.int64)
     input_stride_1 = tl.cast(input_stride_1, dtype=tl.int64)
@@ -42,12 +50,38 @@ def _moe_sum_reduce_kernel(
         for i in tl.range(0, topk_num, num_stages=NUM_STAGE):
             tmp = tl.load(input_t_ptr + i * input_stride_1, mask=offs_dim < dim_end, other=0.0)
             accumulator += tmp
+        if HAS_SHARED_GATE:
+            shared = tl.load(
+                shared_ptr + token_index * shared_stride_0 + offs_dim * shared_stride_1,
+                mask=offs_dim < dim_end,
+                other=0.0,
+            ).to(tl.float32)
+            if GATE_DIM == 1:
+                gate = tl.load(gate_ptr + token_index * gate_stride_0).to(tl.float32) + tl.zeros(
+                    (BLOCK_DIM,), dtype=tl.float32
+                )
+            else:
+                gate = tl.load(
+                    gate_ptr + token_index * gate_stride_0 + offs_dim * gate_stride_1,
+                    mask=offs_dim < dim_end,
+                    other=0.0,
+                ).to(tl.float32)
+            gate = 1.0 / (1.0 + tl.exp(-gate))
+            accumulator += shared * gate
         store_t_ptr = output_ptr + token_index * output_stride_0 + offs_dim
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
 
 
-def _get_moe_sum_reduce_static_key(input: torch.Tensor, output: torch.Tensor):
-    return {"topk_num": input.shape[1], "hidden_dim": input.shape[2], "out_dtype": str(output.dtype)}
+def _get_moe_sum_reduce_static_key(
+    input: torch.Tensor, output: torch.Tensor, shared: torch.Tensor = None, gate: torch.Tensor = None
+):
+    return {
+        "topk_num": input.shape[1],
+        "hidden_dim": input.shape[2],
+        "out_dtype": str(output.dtype),
+        "has_shared_gate": shared is not None,
+        "gate_dim": 0 if gate is None else gate.shape[-1],
+    }
 
 
 def _get_moe_sum_reduce_configs():
@@ -67,12 +101,20 @@ def _get_moe_sum_reduce_configs():
     run_key_func=lambda input: input.shape[0],
     mutates_args=["output"],
 )
-def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):
+def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, shared=None, gate=None, run_config: Dict = None):
     assert input.is_contiguous()
     assert output.is_contiguous()
 
     token_num, topk_num, hidden_dim = input.shape
     assert output.shape[0] == token_num and output.shape[1] == hidden_dim
+    has_shared_gate = shared is not None
+    if has_shared_gate:
+        assert gate is not None
+        shared = shared.view(token_num, hidden_dim)
+        gate = gate.view(token_num, gate.shape[-1])
+        assert shared.is_contiguous()
+        assert gate.is_contiguous()
+        assert gate.shape[1] in (1, hidden_dim)
 
     if not run_config:
         run_config = {
@@ -97,12 +139,20 @@ def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict =
         *input.stride(),
         output,
         *output.stride(),
+        shared if has_shared_gate else output,
+        shared.stride(0) if has_shared_gate else 0,
+        shared.stride(1) if has_shared_gate else 0,
+        gate if has_shared_gate else output,
+        gate.stride(0) if has_shared_gate else 0,
+        gate.stride(1) if has_shared_gate else 0,
         token_num=token_num,
         topk_num=topk_num,
         hidden_dim=hidden_dim,
         BLOCK_M=BLOCK_M,
         BLOCK_DIM=BLOCK_DIM,
         NUM_STAGE=NUM_STAGE,
+        HAS_SHARED_GATE=has_shared_gate,
+        GATE_DIM=gate.shape[1] if has_shared_gate else 0,
         num_warps=num_warps,
     )
     return

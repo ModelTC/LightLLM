@@ -134,6 +134,8 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        shared_expert_out: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Backward compatible method that routes to platform-specific implementation."""
         return self.fuse_moe_impl(
@@ -150,6 +152,8 @@ class FusedMoeWeight(BaseWeightTpl):
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
             per_expert_scale=self.per_expert_scale,
+            shared_expert_out=shared_expert_out,
+            shared_expert_gate=shared_expert_gate,
         )
 
     def low_latency_dispatch(

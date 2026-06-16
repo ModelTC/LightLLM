@@ -76,6 +76,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        shared_expert_out: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         output = fused_experts(
             hidden_states=input_tensor,

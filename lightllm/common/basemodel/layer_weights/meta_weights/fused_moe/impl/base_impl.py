@@ -63,5 +63,7 @@ class FuseMoeBaseImpl:
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
+        shared_expert_out: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pass

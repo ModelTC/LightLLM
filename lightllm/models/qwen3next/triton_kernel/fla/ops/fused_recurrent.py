@@ -54,11 +54,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_q_tok: tl.constexpr,
-    stride_k_tok: tl.constexpr,
-    stride_v_tok: tl.constexpr,
-    stride_a_tok: tl.constexpr,
-    stride_b_tok: tl.constexpr,
     stride_init_state_token: tl.constexpr,
     stride_final_state_token: tl.constexpr,
     stride_indices_seq: tl.constexpr,
@@ -99,15 +94,15 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + bos * stride_q_tok + i_h * K + o_k
-    p_k = k + bos * stride_k_tok + i_h * K + o_k
-    p_v = v + bos * stride_v_tok + i_hv * V + o_v
+    p_q = q + (bos * H + i_h) * K + o_k
+    p_k = k + (bos * H + i_h) * K + o_k
+    p_v = v + (bos * HV + i_hv) * V + o_v
     if FUSE_GATING:
         # Fused gating: load per-head constants once, compute g/beta inline per token
         b_A_log = tl.load(A_log + i_hv).to(tl.float32)
         b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
-        p_a_raw = a_raw + bos * stride_a_tok + i_hv
-        p_b_raw = b_raw + bos * stride_b_tok + i_hv
+        p_a_raw = a_raw + bos * HV + i_hv
+        p_b_raw = b_raw + bos * HV + i_hv
     else:
         if IS_BETA_HEADWISE:
             p_beta = beta + (bos * HV + i_hv) * V + o_v
@@ -198,47 +193,19 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
-        p_q += stride_q_tok
-        p_k += stride_k_tok
+        p_q += H * K
+        p_k += H * K
         p_o += HV * V
-        p_v += stride_v_tok
+        p_v += HV * V
         if FUSE_GATING:
-            p_a_raw += stride_a_tok
-            p_b_raw += stride_b_tok
+            p_a_raw += HV
+            p_b_raw += HV
         else:
             if not IS_KDA:
                 p_g += HV
             else:
                 p_gk += HV * K
             p_beta += HV * (V if IS_BETA_HEADWISE else 1)
-
-
-def _ensure_qkv_token_strided(x: torch.Tensor, inner_numel: int):
-    """Return q/k/v and token stride, copying only when needed."""
-    if x is None:
-        return None, 0
-
-    # Decode layout must be [tokens, 1, head, dim].
-    assert x.shape[1] == 1, "q/k/v must use decode layout [tokens, 1, head, dim]"
-
-    # Packed tail [head, dim] means the last two strides are [dim, 1].
-    tail_contiguous = x.stride()[-2:] == (x.shape[-1], 1)
-    if not tail_contiguous:
-        x = x.contiguous()
-        return x, inner_numel
-    else:
-        return x, x.stride(0)
-
-
-def _ensure_gate_token_strided(x: torch.Tensor, inner_numel: int):
-    """Return a_raw/b_raw and token stride, copying only when needed."""
-    if x is None:
-        return None, 0
-    # a_raw/b_raw are 2D [tokens, HV]; the tail HV dimension must be packed.
-    if x.stride(1) != 1:
-        x = x.contiguous()
-        return x, inner_numel
-    return x, x.stride(0)
 
 
 def fused_recurrent_gated_delta_rule_fwd(
@@ -264,16 +231,7 @@ def fused_recurrent_gated_delta_rule_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
-    # In LightLLM's Qwen3Next inference path this fused recurrent kernel is
-    # used only for decode. Prefill/varlen requests are handled by
-    # chunk_gated_delta_rule, so keep cu_seqlens out of this strided-view path.
-    assert cu_seqlens is None, "cu_seqlens is not supported by the decode-only fused recurrent kernel"
-    N = B
-    q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
-    k, stride_k_tok = _ensure_qkv_token_strided(k, H * K)
-    v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
-    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV)
-    b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
     if T == 1:
         # Decode path: use larger BV to reduce kernel instances (4 blocks instead of 16)
@@ -303,23 +261,20 @@ def fused_recurrent_gated_delta_rule_fwd(
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
 
-    # Strides for read indices. The kernel advances along a row with `+ i_t`
-    # (token stride 1), so 2D index tensors must have contiguous rows.
+    # Strides for read indices
     if ssm_state_indices is None:
         stride_indices_seq, stride_indices_tok = 1, 1
     elif ssm_state_indices.ndim == 1:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
-        assert ssm_state_indices.stride(-1) == 1, "2D ssm_state_indices must have contiguous rows"
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    # Strides for write indices (if provided); same contiguous-row requirement
+    # Strides for write indices (if provided)
     if ssm_state_write_indices is None:
         stride_write_indices_seq, stride_write_indices_tok = 1, 1
     elif ssm_state_write_indices.ndim == 1:
         stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride(0), 1
     else:
-        assert ssm_state_write_indices.stride(-1) == 1, "2D ssm_state_write_indices must have contiguous rows"
         stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride()
 
     grid = (NK, NV, N * HV)
@@ -350,11 +305,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         V=V,
         BK=BK,
         BV=BV,
-        stride_q_tok=stride_q_tok,
-        stride_k_tok=stride_k_tok,
-        stride_v_tok=stride_v_tok,
-        stride_a_tok=stride_a_tok,
-        stride_b_tok=stride_b_tok,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
@@ -398,12 +348,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
         b_raw: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
     ):
-        # q/k/v/a_raw/b_raw may be non-contiguous column views of one projection
-        # output; the kernel handles them via per-token strides (no copies).
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
+            q=q.contiguous(),
+            k=k.contiguous(),
+            v=v.contiguous(),
             g=g.contiguous() if g is not None else None,
             beta=beta.contiguous() if beta is not None else None,
             scale=scale,
@@ -416,8 +364,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias,
-            a_raw=a_raw,
-            b_raw=b_raw,
+            a_raw=a_raw.contiguous() if a_raw is not None else None,
+            b_raw=b_raw.contiguous() if b_raw is not None else None,
             out=out,
         )
 
@@ -469,9 +417,8 @@ def fused_recurrent_gated_delta_rule(
             Whether to store the final state in-place to save memory.
             Default: `True`.
         cu_seqlens (torch.LongTensor):
-            Must be `None`. In LightLLM this fused recurrent kernel is used only
-            by the Qwen3Next decode path; prefill/varlen requests use
-            `chunk_gated_delta_rule`.
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         ssm_state_indices (Optional[torch.Tensor]):
             Indices to map the input sequences to the initial/final states.
         num_accepted_tokens (Optional[torch.Tensor]):
@@ -486,9 +433,10 @@ def fused_recurrent_gated_delta_rule(
     Examples::
         >>> import torch
         >>> import torch.nn.functional as F
+        >>> from einops import rearrange
         >>> from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
-        # decode inputs
-        >>> B, T, H, HV, K, V = 4, 1, 4, 8, 512, 512
+        # inputs with equal lengths
+        >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
         >>> q = torch.randn(B, T, H, K, device='cuda')
         >>> k = F.normalize(torch.randn(B, T, H, K, device='cuda'), p=2, dim=-1)
         >>> v = torch.randn(B, T, HV, V, device='cuda')
@@ -499,10 +447,21 @@ def fused_recurrent_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
         )
+        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
+        >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
+        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        >>> o_var, ht_var = fused_gated_recurrent_delta_rule(
+            q, k, v, g, beta,
+            initial_state=h0,
+            cu_seqlens=cu_seqlens
+        )
     """
-    # This wrapper is only used for Qwen3Next decode inference in LightLLM.
-    # Keep varlen/prefill inputs on chunk_gated_delta_rule instead.
-    assert cu_seqlens is None, "cu_seqlens is not supported by the decode-only fused recurrent kernel"
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+            f"Please flatten variable-length inputs before processing."
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:

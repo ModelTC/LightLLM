@@ -221,10 +221,17 @@ def moe_align_fused_kernel(
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
     token_num,
+    expert_num: tl.constexpr,
     topk_num: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    ZERO_EXPERT_TOKEN_NUM: tl.constexpr,
+    BLOCK_EXPERT: tl.constexpr,
 ):
     token_block = tl.program_id(0)
+    if ZERO_EXPERT_TOKEN_NUM:
+        expert_offs = tl.arange(0, BLOCK_EXPERT)
+        tl.store(expert_token_num_ptr + expert_offs, 0, mask=expert_offs < expert_num)
+
     offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < token_num * topk_num
 
@@ -282,6 +289,8 @@ def moe_align_fused(
         run_config = {}
     BLOCK_SIZE = run_config.get("BLOCK_SIZE", 256)
     num_warps = run_config.get("num_warps", 4)
+    expert_num = expert_token_num.shape[0]
+    zero_expert_token_num = token_num * topk_num <= BLOCK_SIZE
 
     grid = (triton.cdiv(token_num * topk_num, BLOCK_SIZE),)
     moe_align_fused_kernel[grid](
@@ -291,8 +300,11 @@ def moe_align_fused(
         expert_to_weight,
         expert_token_num,
         token_num,
+        expert_num,
         topk_num,
         BLOCK_SIZE=BLOCK_SIZE,
+        ZERO_EXPERT_TOKEN_NUM=zero_expert_token_num,
+        BLOCK_EXPERT=triton.next_power_of_2(expert_num),
         num_warps=num_warps,
     )
     return expert_to_token_index, expert_to_weight, expert_token_num
@@ -911,6 +923,8 @@ def fused_experts_impl(
     layout="blocked",
     limit=None,
     alpha=None,
+    shared_expert_out: Optional[torch.Tensor] = None,
+    shared_expert_gate: Optional[torch.Tensor] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -957,7 +971,12 @@ def fused_experts_impl(
 
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
-        expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
+        expert_token_count_in_align_kernel = topk_num * tokens_in_chunk <= 128
+        expert_to_token_num = (
+            torch.empty((E,), dtype=torch.int32, device="cuda")
+            if expert_token_count_in_align_kernel
+            else torch.zeros((E,), dtype=torch.int32, device="cuda")
+        )
         moe_align_fused(
             expert_to_token_index=expert_to_tokens,
             expert_to_weight=expert_to_weights,
@@ -1011,8 +1030,12 @@ def fused_experts_impl(
             bias=w2_bias,
         )
 
+        has_shared_gate = shared_expert_out is not None
         moe_sum_reduce(
-            intermediate_cache3.view(*intermediate_cache3.shape), out_hidden_states[begin_chunk_idx:end_chunk_idx]
+            intermediate_cache3.view(*intermediate_cache3.shape),
+            out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            shared=None if not has_shared_gate else shared_expert_out[begin_chunk_idx:end_chunk_idx],
+            gate=None if not has_shared_gate else shared_expert_gate[begin_chunk_idx:end_chunk_idx],
         )
     return out_hidden_states
 
@@ -1035,6 +1058,8 @@ def inplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    shared_expert_out: Optional[torch.Tensor] = None,
+    shared_expert_gate: Optional[torch.Tensor] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1054,6 +1079,8 @@ def inplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
+        shared_expert_out=shared_expert_out,
+        shared_expert_gate=shared_expert_gate,
     )
 
 
@@ -1075,6 +1102,8 @@ def inplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    shared_expert_out: Optional[torch.Tensor] = None,
+    shared_expert_gate: Optional[torch.Tensor] = None,
 ) -> None:
     pass
 
@@ -1105,6 +1134,8 @@ def outplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    shared_expert_out: Optional[torch.Tensor] = None,
+    shared_expert_gate: Optional[torch.Tensor] = None,
 ) -> None:
     return fused_experts_impl(
         hidden_states,
@@ -1124,6 +1155,8 @@ def outplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
+        shared_expert_out=shared_expert_out,
+        shared_expert_gate=shared_expert_gate,
     )
 
 
@@ -1145,6 +1178,8 @@ def outplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    shared_expert_out: Optional[torch.Tensor] = None,
+    shared_expert_gate: Optional[torch.Tensor] = None,
 ) -> None:
     return torch.empty_like(hidden_states)
 
@@ -1176,6 +1211,8 @@ def fused_experts(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
+    shared_expert_out: Optional[torch.Tensor] = None,
+    shared_expert_gate: Optional[torch.Tensor] = None,
 ):
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
@@ -1195,6 +1232,8 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
+            shared_expert_out=shared_expert_out,
+            shared_expert_gate=shared_expert_gate,
         )
         return hidden_states
     else:
@@ -1215,4 +1254,6 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
+            shared_expert_out=shared_expert_out,
+            shared_expert_gate=shared_expert_gate,
         )

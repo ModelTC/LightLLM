@@ -28,14 +28,24 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
 
-        qkv_out = layer_weight.qkv_proj.mm(input)
+        qkvo_gate_proj = getattr(layer_weight, "qkvo_gate_proj", None)
+        if qkvo_gate_proj is None:
+            qkv_out = layer_weight.qkv_proj.mm(input)
+            o_gate = layer_weight._o_gate_proj.mm(input)
+        else:
+            qkv_gate_out = qkvo_gate_proj.mm(input)
+            qkv_out, o_gate = qkv_gate_out.split(
+                [
+                    self.tp_q_head_num_ * self.head_dim_ + (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_,
+                    self.tp_q_head_num_ * self.head_dim_,
+                ],
+                dim=-1,
+            )
         q, cache_kv = qkv_out.split(
             [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
-        o_gate = layer_weight._o_gate_proj.mm(input)
 
-        # In-place sigmoid for gate
-        infer_state.gate_value = o_gate.sigmoid_()
+        infer_state.gate_value = o_gate
         layer_weight.qk_norm_weight_(
             q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],

@@ -94,6 +94,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
+        shared_expert_out: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -111,6 +113,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             use_fp8_w8a8=use_fp8_w8a8,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            shared_expert_out=shared_expert_out,
+            shared_expert_gate=shared_expert_gate,
         )
         return input_tensor
 
@@ -129,6 +133,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
+        shared_expert_out: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         topk_weights, topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -150,5 +156,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_ids=topk_ids,
             router_logits=router_logits,
             is_prefill=is_prefill,
+            shared_expert_out=shared_expert_out,
+            shared_expert_gate=shared_expert_gate,
         )
         return output
