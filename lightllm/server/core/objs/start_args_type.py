@@ -210,3 +210,11 @@ class StartArgs:
         default=None,
         metadata={"help": "Comma-separated Python modules to import for external @register_op implementations"},
     )
+    extra_att_plugins: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated lightllm.att_plugins entry point names"},
+    )
+    extra_att_modules: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated Python modules to import for external @register_att_backend implementations"},
+    )

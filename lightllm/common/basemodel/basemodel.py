@@ -20,7 +20,10 @@ from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.graph import DecodeGraph
-from lightllm.common.basemodel.attention.paged_fa3.fp import update_attn_params
+from lightllm.common.basemodel.attention.paged_fa3.graph_utils import (
+    maybe_sync_attn_params,
+    new_seq_len_ref_buffers,
+)
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
@@ -136,9 +139,9 @@ class TpPartBaseModel:
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
         if not self.disable_cudagraph:
-            self.b1_cu_q_seq_len_cpu_ref = torch.zeros(self.graph_max_batch_size, dtype=torch.int32)
-            self.b_cu_kv_seq_len_cpu_ref = torch.zeros(self.graph_max_batch_size, dtype=torch.int32)
-            self.ref_initialized = False
+            self.b1_cu_q_seq_len_cpu_ref, self.b_cu_kv_seq_len_cpu_ref = new_seq_len_ref_buffers(
+                self.graph_max_batch_size
+            )
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -591,19 +594,14 @@ class TpPartBaseModel:
             b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
             if self.platform_backend.name == "ascend":
                 if not self.platform_backend.graph.is_capturing():
-                    need_update_attn_params = not self.ref_initialized or not torch.equal(
-                        b_cu_kv_seq_len_cpu_slice, infer_state.b_cu_kv_seq_len_cpu
+                    maybe_sync_attn_params(
+                        batch_size=batch_size,
+                        b1_cu_q_seq_len_cpu_slice=b1_cu_q_seq_len_cpu_slice,
+                        b_cu_kv_seq_len_cpu_slice=b_cu_kv_seq_len_cpu_slice,
+                        b1_cu_q_seq_len_cpu=infer_state.b1_cu_q_seq_len_cpu,
+                        b_cu_kv_seq_len_cpu=infer_state.b_cu_kv_seq_len_cpu,
+                        update_stream=self.graph.update_stream,
                     )
-                    if need_update_attn_params:
-                        b1_cu_q_seq_len_cpu_slice.copy_(infer_state.b1_cu_q_seq_len_cpu)
-                        b_cu_kv_seq_len_cpu_slice.copy_(infer_state.b_cu_kv_seq_len_cpu)
-                        update_attn_params(
-                            batch_size,
-                            b1_cu_q_seq_len_cpu_slice,
-                            b_cu_kv_seq_len_cpu_slice,
-                            self.graph.update_stream,
-                        )
-                        self.ref_initialized = True
 
             if self.graph.need_capture(infer_batch_size):
                 infer_state.is_cuda_graph = True

@@ -2,8 +2,10 @@ import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Tuple
+from lightllm.platform.base.attention import register_att_backend
 
 
+@register_att_backend(name="triton", category="mla", platforms=("cuda",))
 class MlaTritonAttBackend(BaseAttBackend):
     def create_att_prefill_state(self, infer_state) -> "MlaTritonPrefillAttState":
         return MlaTritonPrefillAttState(backend=self, infer_state=infer_state)

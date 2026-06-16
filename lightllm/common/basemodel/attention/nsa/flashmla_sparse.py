@@ -7,11 +7,13 @@ from typing import Tuple, TYPE_CHECKING
 
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform.base.attention import register_att_backend
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
+@register_att_backend(name="flashmla_sparse", category="nsa", platforms=("cuda",))
 class NsaFlashMlaSparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)

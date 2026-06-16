@@ -8,8 +8,10 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
+from lightllm.platform.base.attention import register_att_backend
 
 
+@register_att_backend(name="fa3", category="mla", platforms=("cuda",))
 class MlaFa3AttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)

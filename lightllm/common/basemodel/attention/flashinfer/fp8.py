@@ -3,8 +3,10 @@ import torch
 from ..base_att import AttControl
 from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
 from .env_utils import set_flashinfer_envs
+from lightllm.platform.base.attention import register_att_backend
 
 
+@register_att_backend(name="flashinfer", category="standard", kv_types=("fp8kv_spt",), platforms=("cuda",))
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()

@@ -212,3 +212,122 @@ def resolve_op_fallback(platform: str, plugin_config: OpsPluginConfig | None = N
         merged.append(family)
 
     return tuple(merged)
+
+
+ATT_PLUGIN_ENTRY_GROUP = "lightllm.att_plugins"
+
+
+@dataclass(frozen=True)
+class AttPluginConfig:
+    extra_modules: tuple[str, ...] = ()
+
+
+_att_plugin_config: AttPluginConfig | None = None
+
+
+def _coerce_att_plugin_config(value: Any) -> AttPluginConfig:
+    if value is None:
+        return AttPluginConfig()
+    if isinstance(value, AttPluginConfig):
+        return value
+    if isinstance(value, dict):
+        return AttPluginConfig(
+            extra_modules=_normalize_tuple(value.get("extra_modules")),
+        )
+    raise TypeError(f"Unsupported att plugin config type: {type(value)!r}")
+
+
+def _iter_att_plugin_entry_points():
+    eps = entry_points()
+    if hasattr(eps, "select"):
+        yield from eps.select(group=ATT_PLUGIN_ENTRY_GROUP)
+        return
+    yield from eps.get(ATT_PLUGIN_ENTRY_GROUP, [])
+
+
+def _load_att_entry_point_plugins(plugin_names: tuple[str, ...]) -> list[AttPluginConfig]:
+    if not plugin_names:
+        return []
+
+    selected = set(plugin_names)
+    configs: list[AttPluginConfig] = []
+    loaded_names: set[str] = set()
+
+    for entry_point in _iter_att_plugin_entry_points():
+        if entry_point.name not in selected:
+            continue
+        register_fn: Callable[[], Any] = entry_point.load()
+        configs.append(_coerce_att_plugin_config(register_fn()))
+        loaded_names.add(entry_point.name)
+
+    missing = selected - loaded_names
+    if missing:
+        available = sorted(entry_point.name for entry_point in _iter_att_plugin_entry_points())
+        message = (
+            f"Attention plugin(s) not found in entry point group {ATT_PLUGIN_ENTRY_GROUP!r}: "
+            f"{sorted(missing)}"
+        )
+        if available:
+            message += f". Installed plugins: {available}"
+        else:
+            message += (
+                ". No att plugins installed; register entry points in group "
+                f"{ATT_PLUGIN_ENTRY_GROUP!r} and pip install -e your plugin package."
+            )
+        raise RuntimeError(message)
+
+    return configs
+
+
+def merge_att_plugin_configs(configs: Iterable[AttPluginConfig]) -> AttPluginConfig:
+    extra_modules: list[str] = []
+    seen_modules: set[str] = set()
+    for config in configs:
+        for module_name in config.extra_modules:
+            if module_name not in seen_modules:
+                seen_modules.add(module_name)
+                extra_modules.append(module_name)
+
+    return AttPluginConfig(extra_modules=tuple(extra_modules))
+
+
+def _att_plugin_config_from_cli() -> AttPluginConfig:
+    args = get_env_start_args()
+    return AttPluginConfig(
+        extra_modules=_parse_csv(getattr(args, "extra_att_modules", None)),
+    )
+
+
+def _collect_att_plugin_names() -> tuple[str, ...]:
+    args = get_env_start_args()
+    return _parse_csv(getattr(args, "extra_att_plugins", None))
+
+
+def configure_att_plugins() -> AttPluginConfig:
+    global _att_plugin_config
+
+    plugin_names = _collect_att_plugin_names()
+    direct_config = _att_plugin_config_from_cli()
+    has_plugins = bool(plugin_names)
+    has_direct = bool(direct_config.extra_modules)
+
+    if has_plugins and has_direct:
+        raise RuntimeError(
+            "Attention plugin configuration is ambiguous: use either "
+            "--extra_att_plugins or --extra_att_modules, not both."
+        )
+
+    if has_plugins:
+        _att_plugin_config = merge_att_plugin_configs(_load_att_entry_point_plugins(plugin_names))
+    elif has_direct:
+        _att_plugin_config = direct_config
+    else:
+        _att_plugin_config = AttPluginConfig()
+
+    return _att_plugin_config
+
+
+def get_att_plugin_config() -> AttPluginConfig:
+    if _att_plugin_config is None:
+        return AttPluginConfig()
+    return _att_plugin_config

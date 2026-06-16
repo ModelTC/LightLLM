@@ -1,6 +1,6 @@
 import torch
 from dataclasses import dataclass, field
-from lightllm.common.basemodel.attention.paged_fa3.fp import update_attn_params
+from lightllm.common.basemodel.attention.paged_fa3.graph_utils import update_attn_params
 from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph
 from lightllm.common.basemodel.infer_struct import InferStateInfo

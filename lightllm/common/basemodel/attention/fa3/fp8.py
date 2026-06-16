@@ -6,6 +6,7 @@ from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_fp8_quant
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+from lightllm.platform.base.attention import register_att_backend
 from typing import Union
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
@@ -15,6 +16,7 @@ else:
     scaled_fp8_quant = None
 
 
+@register_att_backend(name="fa3", category="standard", kv_types=("fp8kv_sph",), platforms=("cuda",))
 class Fp8Fa3AttBackend(Fa3AttBackend):
     def __init__(self, model):
         super().__init__(model=model)

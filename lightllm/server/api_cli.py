@@ -827,6 +827,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Comma-separated Python modules to import for external @register_op implementations.""",
     )
     parser.add_argument(
+        "--extra_att_plugins",
+        type=str,
+        default=None,
+        help="""Comma-separated pip attention plugin names (entry point group: lightllm.att_plugins).""",
+    )
+    parser.add_argument(
+        "--extra_att_modules",
+        type=str,
+        default=None,
+        help="""Comma-separated Python modules to import for external @register_att_backend implementations.""",
+    )
+    parser.add_argument(
         "--enable_torch_fallback",
         action="store_true",
         help="""Whether to enable torch naive implementation for the op.

@@ -7,9 +7,11 @@ from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.utils.envs_utils import get_env_start_args, get_page_size
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from typing import Any
+from lightllm.platform.base.attention import register_att_backend
+from .graph_utils import weak_ref_tensor
 
 
+@register_att_backend(name="paged_fa3", category="standard", platforms=("ascend", "cuda",), validate_name="fa3")
 class PagedFa3AttBackend(BaseAttBackend):
 
     def __init__(self, model, page_size=None):
@@ -323,50 +325,3 @@ class PagedFa3DecodeAttState(BaseDecodeAttState):
                 return_softmax_lse=False,
                 sinks=sink_weight,
             )
-
-
-def update_attn_params(
-    batch_size: int,
-    actual_seq_lengths: list[int],
-    actual_seq_lengths_kv: list[int],
-    update_stream: Any,
-):
-    import torch_npu
-    from lightllm.common.basemodel.graph.acl_graph import get_attn_params
-
-    attn_params = get_attn_params()
-    handles = attn_params.handles[batch_size]
-    events = attn_params.events[batch_size]
-    workspace = attn_params.workspaces[batch_size]
-    params_list = attn_params.attn_params[batch_size]
-
-    with torch.npu.stream(update_stream):
-        for handle, event, attn_param in zip(handles, events, params_list):
-            (q, k, v, sm_scale, N_Q, N_KV, page_table, block_size, output, softmax_lse) = attn_param
-            torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu.npu_fused_infer_attention_score.out(
-                q,
-                k,
-                v,
-                input_layout="TND",
-                scale=sm_scale,
-                actual_seq_lengths=actual_seq_lengths,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_heads=N_Q,
-                num_key_value_heads=N_KV,
-                block_table=page_table,
-                block_size=block_size,
-                workspace=workspace,
-                out=[output, softmax_lse],
-            )
-            torch.npu.graph_task_update_end(update_stream)
-            event.record(update_stream)
-
-
-def weak_ref_tensor(tensor: Any) -> Any:
-    import torch_npu
-
-    if isinstance(tensor, torch.Tensor):
-        return torch_npu._C._weak_ref_tensor(tensor)
-    else:
-        return tensor

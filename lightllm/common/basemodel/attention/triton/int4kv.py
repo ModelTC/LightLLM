@@ -3,8 +3,10 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, Tuple
+from lightllm.platform.base.attention import register_att_backend
 
 
+@register_att_backend(name="triton", category="standard", kv_types=("int4kv",), platforms=("cuda",))
 class Int4kvTritonAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model)
