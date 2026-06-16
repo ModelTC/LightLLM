@@ -25,18 +25,6 @@ def _pad_q_heads(q_4d: torch.Tensor, attn_sink: torch.Tensor):
     return q_pad, sink_pad, h_q
 
 
-class DeepseekV4MissingOperatorError(RuntimeError):
-    pass
-
-
-def _missing_attention_op(feature: str) -> None:
-    raise DeepseekV4MissingOperatorError(
-        f"DeepSeek-V4 {feature} has no production batch operator. The flashmla_kvcache path "
-        f"(packed swa/c4/c128 pools + paged compressor + indexer top-k) is the supported route; "
-        f"this legacy/non-flashmla entry point was never wired and is fenced on purpose."
-    )
-
-
 def _view_dsv4_flashmla_cache(layer_buffer: torch.Tensor, page_size: int) -> torch.Tensor:
     from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_MLA_BYTES_PER_TOKEN
 
