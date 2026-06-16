@@ -2,6 +2,11 @@ import os
 import ctypes
 from typing import Tuple
 
+from lightllm.utils.log_utils import init_logger
+
+
+logger = init_logger(__name__)
+
 LIGHTLLM_TOKEN_MAX_BYTES = int(os.getenv("LIGHTLLM_TOKEN_MAX_BYTES", 1280))
 LIGHTLLM_OUT_TOKEN_QUEUE_SIZE = int(os.getenv("LIGHTLLM_OUT_TOKEN_QUEUE_SIZE", 8))
 
@@ -24,9 +29,13 @@ class QueueItem(ctypes.Structure):
 
     def set(self, token_str: str, src_index: int, special: bool, count_output_tokens: int):
         str_bytes = token_str.encode("utf-8")
-        assert (
-            len(str_bytes) <= LIGHTLLM_TOKEN_MAX_BYTES
-        ), f"Token string {len(str_bytes)} exceeds maximum length of {LIGHTLLM_TOKEN_MAX_BYTES} bytes."
+        if len(str_bytes) > LIGHTLLM_TOKEN_MAX_BYTES:
+            old_len = len(str_bytes)
+            str_bytes = str_bytes[:LIGHTLLM_TOKEN_MAX_BYTES].decode("utf-8", errors="ignore").encode("utf-8")
+            logger.warning(
+                f"Token string {old_len} exceeds maximum length of {LIGHTLLM_TOKEN_MAX_BYTES} bytes, "
+                f"truncated to {len(str_bytes)} bytes."
+            )
         ctypes.memmove(self.data, str_bytes, len(str_bytes))
         self.data_len = len(str_bytes)
         self.src_index = src_index
