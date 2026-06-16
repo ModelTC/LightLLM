@@ -18,6 +18,8 @@ class LinearAttCacheConfig:
     full_att_head_dim: int
 
     # linear att 的参数
+    global_linear_k_heads: int
+    global_linear_v_heads: int
     num_linear_k_heads: int
     num_linear_v_heads: int
     head_linear_k_dim: int
@@ -30,7 +32,14 @@ class LinearAttCacheConfig:
     all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
 
     def get_conv_dim(self):
-        return self.head_linear_k_dim * self.num_linear_k_heads * 2 + self.head_linear_v_dim * self.num_linear_v_heads
+        # 第一项对应q的参数，第二项对应k的参数，第三项对应v的参数
+        # 由于 k_dim = q_dim, k_heads = q_heads, 所以第一项和第二项的计算
+        # 形式相同，但是实际内在含义是不同的。
+        return (
+            self.head_linear_k_dim * self.num_linear_k_heads
+            + self.head_linear_k_dim * self.num_linear_k_heads
+            + self.head_linear_v_dim * self.num_linear_v_heads
+        )
 
     def get_conv_state_shape(self):
         return (self.get_conv_dim(), self.conv_kernel_size - 1)
@@ -92,8 +101,10 @@ class LinearAttCacheConfig:
             full_att_dtype=get_torch_dtype(args.data_type),
             full_att_num_kv_heads=max(1, llm_config["num_key_value_heads"] // tp_world_size),
             full_att_head_dim=llm_config["head_dim"],
-            num_linear_k_heads=llm_config["linear_num_key_heads"] // tp_world_size,
-            num_linear_v_heads=llm_config["linear_num_value_heads"] // tp_world_size,
+            global_linear_k_heads=llm_config["linear_num_key_heads"],
+            global_linear_v_heads=llm_config["linear_num_value_heads"],
+            num_linear_k_heads=max(1, llm_config["linear_num_key_heads"] // tp_world_size),
+            num_linear_v_heads=max(1, llm_config["linear_num_value_heads"] // tp_world_size),
             head_linear_k_dim=llm_config["linear_key_head_dim"],
             head_linear_v_dim=llm_config["linear_value_head_dim"],
             conv_kernel_size=llm_config["linear_conv_kernel_dim"],

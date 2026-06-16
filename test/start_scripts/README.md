@@ -27,8 +27,6 @@ This directory contains various startup scripts for deploying DeepSeek models wi
 - `multi_pd_master/config_server.sh` - Configuration server
 - `multi_pd_master/pd_master_1.sh` - PD Master 1
 - `multi_pd_master/pd_master_2.sh` - PD Master 2
-- `multi_pd_master/pd_prefill.sh` - Prefill service
-- `multi_pd_master/pd_decode.sh` - Decode service
 
 ## Usage Instructions
 
@@ -89,9 +87,8 @@ sh multi_pd_master/config_server.sh <config_server_host>
 sh multi_pd_master/pd_master_1.sh <host> <config_server_host>
 sh multi_pd_master/pd_master_2.sh <host> <config_server_host>
 
-# Step 3: Start Prefill and Decode services
-sh multi_pd_master/pd_prefill.sh <host> <config_server_host>
-sh multi_pd_master/pd_decode.sh <host> <config_server_host>
+# Step 3: Start Prefill and Decode services with the prefill/decode run modes.
+# Multi-PD startup scripts for these nodes are not provided in this directory.
 ```
 
 ## Configuration Guide
@@ -99,7 +96,7 @@ sh multi_pd_master/pd_decode.sh <host> <config_server_host>
 ### Environment Variables
 
 - `LOADWORKER`: Model loading thread count, recommended 8-18
-- `DISABLE_KV_TRANS_USE_P2P`: Disable P2P communication optimization to transfer kv data
+- `LIGHTLLM_PD_KV_TRANSPORT_BACKEND`: KV transporter backend for PD disaggregation, `nixl` by default; set to `nccl` to use the NCCL data plane.
 - `CUDA_VISIBLE_DEVICES`: Specify GPU devices to use
 
 ### Important Parameters

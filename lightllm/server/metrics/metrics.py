@@ -27,6 +27,11 @@ MONITOR_INFO = {
     "lightllm_cache_ratio": "cache length / input_length",
     "lightllm_batch_current_max_tokens": "dynamic max token used for current batch",
     "lightllm_request_mtp_avg_token_per_step": "Average number of tokens per step",
+    "lightllm_prompt_tokens_total": "Total number of prefill tokens processed",
+    "lightllm_generation_tokens_total": "Total number of generation tokens processed",
+    "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
+    "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
+    "lightllm_num_running_reqs": "Number of running requests",
 }
 
 
@@ -60,6 +65,7 @@ class Monitor:
         self.init_metrics(args)
 
     def init_metrics(self, args):
+        self.model_name = args.model_name
 
         self.create_histogram("lightllm_request_duration", self.duration_buckets)
         self.create_histogram("lightllm_request_validation_duration", self.duration_buckets)
@@ -100,40 +106,43 @@ class Monitor:
             mtp_avg_token_per_step_buckets = [1.0, 2.0]
         self.create_histogram("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step_buckets)
 
+        self.create_counter("lightllm_prompt_tokens_total")
+        self.create_counter("lightllm_generation_tokens_total")
+        self.create_gauge("lightllm_cache_hit_rate")
+        self.create_gauge("lightllm_gen_throughput")
+        self.create_gauge("lightllm_num_running_reqs")
+
     def create_histogram(self, name, buckets, labelnames=None):
-        if labelnames is None:
-            histogram = Histogram(name, MONITOR_INFO[name], buckets=buckets, registry=self.registry)
-        else:
-            histogram = Histogram(
-                name, MONITOR_INFO[name], labelnames=labelnames, buckets=buckets, registry=self.registry
-            )
+        all_labels = ["model_name"] + (labelnames or [])
+        histogram = Histogram(name, MONITOR_INFO[name], labelnames=all_labels, buckets=buckets, registry=self.registry)
         self.monitor_registry[name] = histogram
 
     def create_counter(self, name, labelnames=None):
-        if labelnames is None:
-            histogram = Counter(name, MONITOR_INFO[name], registry=self.registry)
-        else:
-            histogram = Counter(name, MONITOR_INFO[name], labelnames=labelnames, registry=self.registry)
-        self.monitor_registry[name] = histogram
+        all_labels = ["model_name"] + (labelnames or [])
+        counter = Counter(name, MONITOR_INFO[name], labelnames=all_labels, registry=self.registry)
+        self.monitor_registry[name] = counter
 
     def create_gauge(self, name):
-        gauge = Gauge(name, MONITOR_INFO[name], registry=self.registry)
+        gauge = Gauge(name, MONITOR_INFO[name], labelnames=["model_name"], registry=self.registry)
         self.monitor_registry[name] = gauge
 
     def counter_inc(self, name, label=None):
         if label is None:
-            self.monitor_registry[name].inc()
+            self.monitor_registry[name].labels(model_name=self.model_name).inc()
         else:
-            self.monitor_registry[name].labels(method=label).inc()
+            self.monitor_registry[name].labels(model_name=self.model_name, method=label).inc()
+
+    def counter_inc_by(self, name, amount):
+        self.monitor_registry[name].labels(model_name=self.model_name).inc(amount)
 
     def histogram_observe(self, name, value, label=None):
         if label is None:
-            self.monitor_registry[name].observe(value)
+            self.monitor_registry[name].labels(model_name=self.model_name).observe(value)
         else:
-            self.monitor_registry[name].labels(method=label).observe(value)
+            self.monitor_registry[name].labels(model_name=self.model_name, method=label).observe(value)
 
     def gauge_set(self, name, value):
-        self.monitor_registry[name].set(value)
+        self.monitor_registry[name].labels(model_name=self.model_name).set(value)
 
     def push_metrices(self):
         if self.gateway_url is not None:

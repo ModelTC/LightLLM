@@ -11,14 +11,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "normal",
             "prefill",
             "decode",
-            "nixl_prefill",
-            "nixl_decode",
             "pd_master",
             "config_server",
             "visual_only",
         ],
         default="normal",
-        help="""set run mode, normal is started for a single server, prefill decode pd_master is for pd split run mode,
+        help="""set run mode, normal is started for a single server, prefill/decode/pd_master is for pd split run mode,
                 config_server is for pd split mode used to register pd_master node, and get pd_master node list,
                 specifically designed for large-scale, high-concurrency scenarios where `pd_master` encounters
                 significant CPU bottlenecks.""",
@@ -56,12 +54,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
     parser.add_argument(
-        "--pd_decode_rpyc_port",
-        type=int,
-        default=None,
-        help="p d mode, decode node used for kv move manager rpyc server port",
-    )
-    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="round_robin",
@@ -89,17 +81,17 @@ def make_argument_parser() -> argparse.ArgumentParser:
         proxy module use config server to find  remote vit infer nodes to infer img""",
     )
     parser.add_argument(
-        "--nixl_pd_kv_page_num",
+        "--pd_kv_page_num",
         type=int,
         default=16,
-        help="nixl pd mode, kv move page_num",
+        help="pd mode, kv move page_num",
     )
 
     parser.add_argument(
-        "--nixl_pd_kv_page_size",
+        "--pd_kv_page_size",
         type=int,
         default=1024,
-        help="nixl pd mode, kv page size.",
+        help="pd mode, kv page size.",
     )
 
     parser.add_argument(
@@ -568,7 +560,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         " currently only for llama and qwen model, not support ep moe model",
     )
     parser.add_argument(
-        "--prefill_cudagraph_max_handle_token", type=int, default=512, help="max handle token num for prefill cudagraph"
+        "--prefill_cudagraph_max_handle_token",
+        type=int,
+        default=8192,
+        help="max handle token num for prefill cudagraph",
     )
 
     parser.add_argument(
@@ -648,10 +643,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sampling_backend",
         type=str,
-        choices=["triton", "sglang_kernel"],
+        choices=["triton", "flashinfer"],
         default="triton",
         help="""sampling used impl. 'triton' is use torch and triton kernel,
-        sglang_kernel use sglang_kernel impl""",
+        flashinfer use flashinfer sampling impl""",
     )
     parser.add_argument(
         "--penalty_counter_mode",
@@ -850,5 +845,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Whether to enable triton implementation for the op.
         If the op is not implemented for the platform and the hardware support triton,
         it will use triton implementation.""",
+    )
+    parser.add_argument(
+        "--enable_profiling",
+        type=str,
+        choices=["torch_profiler", "nvtx"],
+        default=None,
+        help="""Enable profiler support.
+                This will expose '/profiler_start' and '/profiler_stop' API,
+                below profiling features will only be enabled in this range.
+                Options:
+                'torch_profiler': will setup torch.profiler.profile(), trace files will be saved to './trace',
+                or set by 'LIGHTLLM_TRACE_DIR' env;
+                'nvtx': will add NVTX marks for external profiler like NVIDIA Nsight System
+                (you should set it up by yourself).
+                A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
     return parser

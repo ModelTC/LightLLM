@@ -110,7 +110,6 @@ class TpPartBaseModel:
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
         self.req_manager.mem_manager = self.mem_manager
 
-        self._init_kv_move_buffer()
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -196,11 +195,6 @@ class TpPartBaseModel:
             mem_fraction=self.mem_fraction,
         )
         return
-
-    def _init_kv_move_buffer(self):
-        # p d 分离的推理模式下才需要做这一步初始化
-        if self.run_mode in ["prefill", "decode"]:
-            self.mem_manager.alloc_kv_move_buffer(self.mem_manager.size)
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size

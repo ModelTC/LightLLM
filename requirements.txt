@@ -47,7 +47,7 @@ python-dateutil==2.8.2
 python-dotenv==1.0.0
 PyYAML==6.0.1
 pyzmq==25.1.1b2
-regex==2023.6.3
+regex==2026.5.9
 requests==2.31.0
 rpyc==5.3.1
 ruamel.yaml==0.17.32
@@ -80,8 +80,8 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 hypercorn==0.18.0
-flashinfer-python==0.6.8.post1
-flashinfer-cubin==0.6.8.post1
+flashinfer-python==0.6.12
+flashinfer-cubin==0.6.12
 sglang-kernel==0.4.2.post1
 httpx==0.28.1
 librosa==0.11.0
@@ -94,7 +94,7 @@ interegular==0.3.3
 partial_json_parser==0.2.1.1.post6
 websockets==15.0.1
 cupy-cuda13x==14.0.1
-nixl==1.1.0
+nixl==1.2.0
 xformers==0.0.35
 redis==7.3.0
 litellm>=1.52.0,<1.85

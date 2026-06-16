@@ -4,7 +4,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
 ARG VLLM_VERSION=0.21.0
-ARG NIXL_REF=v1.1.0
+ARG NIXL_REF=v1.2.0
 ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG TARGETPLATFORM
@@ -48,9 +48,11 @@ WORKDIR /root
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
 RUN pip install --no-cache-dir \
+    -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     vllm==${VLLM_VERSION}
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
+    -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
 RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
     git clone https://github.com/deepseek-ai/FlashMLA.git /root/FlashMLA && \

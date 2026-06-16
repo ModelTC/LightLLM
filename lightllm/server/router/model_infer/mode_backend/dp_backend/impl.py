@@ -14,7 +14,6 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
     padded_overlap_prepare_decode_inputs,
 )
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
     prepare_mtp_prefill_inputs,
 )
@@ -70,8 +69,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         current_dp_reqs = [req for req in reqs if req[3] == dp_rank_in_node]
         other_dp_reqs = [req for req in reqs if req[3] != dp_rank_in_node]
 
-        g_infer_state_lock.acquire()
-
         infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         req_dp_ranks = [req[3] for req in reqs]
         self.dp_kv_shared_module.fill_reqs_info(reqs=infer_reqs)
@@ -79,7 +76,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         self.dp_kv_shared_module.kv_trans(trans_tasks=trans_taskes)
 
         g_infer_context._filter(finished_request_ids=[req[0] for req in other_dp_reqs])
-        g_infer_state_lock.release()
 
         req_ids = [e[0] for e in current_dp_reqs]
 
@@ -186,7 +182,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
+                pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -299,7 +295,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
+                pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -424,7 +420,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
+                pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
 
             # 第四阶段
@@ -520,9 +516,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
             if len(need_free_mem_indexes) > 0:
-                g_infer_state_lock.acquire()
                 g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
-                g_infer_state_lock.release()
 
             # 第四阶段
             event_pack.notify_pre_post_handle()
@@ -594,12 +588,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         real_req_num = req_num // (self.mtp_step + 1)
         padded_req_num = model_input.batch_size // (self.mtp_step + 1) - real_req_num
         eagle_mem_indexes_cpu = None
-
-        g_infer_state_lock.acquire()
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
-        g_infer_state_lock.release()
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
         # process the draft model output
@@ -728,7 +719,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 next_token_logprobs=next_token_logprobs_cpu,
                 run_reqs_update_packs=update_packs,
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
-                nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
+                pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
             )
             event_pack.notify_pre_post_handle()
         else:
@@ -842,9 +833,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 extra_post_req_handle_func=self.extra_post_req_handle_func,
             )
             if len(need_free_mem_indexes) > 0:
-                g_infer_state_lock.acquire()
                 g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
-                g_infer_state_lock.release()
             event_pack.notify_pre_post_handle()
         else:
             event_pack.notify_post_handle_and_wait_pre_post_handle()
@@ -957,11 +946,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         real_req_num = real_req_num0 + real_req_num1
         padded_req_num0 = model_input0.batch_size // (self.mtp_step + 1) - real_req_num0
         padded_req_num1 = model_input1.batch_size // (self.mtp_step + 1) - real_req_num1
-        g_infer_state_lock.acquire()
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
-        g_infer_state_lock.release()
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
         eagle_mem_indexes0 = eagle_mem_indexes[0 : real_req_num0 * self.mtp_step]
         eagle_mem_indexes1 = eagle_mem_indexes[real_req_num0 * self.mtp_step : real_req_num * self.mtp_step]

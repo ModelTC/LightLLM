@@ -13,11 +13,11 @@ import pickle
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
+from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole, ObjType, NIXLDecodeNodeInfo
+from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
@@ -34,7 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import ClientDisconnected, NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -112,7 +112,7 @@ class HttpServerManager:
         self.metric_client = MetricClient(args.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.NP, NodeRole.ND]
+        assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -196,7 +196,7 @@ class HttpServerManager:
         return
 
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        # 只有 prefill 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             items, md5sums, tokens_nums, datas = [], [], [], []
             for img in multimodal_params.images:
@@ -226,7 +226,7 @@ class HttpServerManager:
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        # 只有 prefill 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             if multimodal_params is not None:
                 ids_to_release = []
@@ -312,10 +312,10 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-        # 该参数只会在 nixl pd mode 中使用，用于上报一些信息给 pd_master
-        nixl_pd_upload_websocket: ClientConnection = None,
+        # 该参数只会在 pd mode 中使用，用于上报一些信息给 pd_master
+        pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
-        nixl_pd_event: asyncio.Event = None,
+        pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
@@ -370,28 +370,28 @@ class HttpServerManager:
                 "check_and_repair_length_done",
             )
 
-            if nixl_pd_upload_websocket is not None and self.pd_mode.is_NP():
-                # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
-                # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
+            if pd_upload_websocket is not None and self.pd_mode.is_P():
+                # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
+                # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
                 logger.info(
-                    f"nixl prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
+                    f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
-                await nixl_pd_upload_websocket.send(
-                    pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
+                await pd_upload_websocket.send(
+                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, prompt_ids))
                 )
                 try:
-                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=80)
+                    await asyncio.wait_for(pd_event.wait(), timeout=180)
                 except asyncio.TimeoutError:
-                    logger.error(f"nixl np node wait nixl_pd_event 36s time out, group_req_id {group_request_id}")
-                    raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
+                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
+                    raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
 
-                decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
-                sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
+                decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
+                sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
                 if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
-                    # 直接 raise NixlPrefillNodeStopGenToken
-                    raise NixlPrefillNodeStopGenToken(group_request_id=group_request_id)
+                    # 直接 raise PDPrefillNodeStopGenToken
+                    raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
             alloced_req_indexes = []
@@ -468,7 +468,7 @@ class HttpServerManager:
                 yield sub_req_id, request_output, metadata, finish_status
 
         except (ClientDisconnected, Exception) as e:
-            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+            logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
 
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {group_request_id} {e.reason}")
@@ -706,10 +706,10 @@ class HttpServerManager:
                     if self.pd_mode.is_P() and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
-                    prompt_cache_len = metadata.pop("prompt_cache_len", 0)
+                    gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
-                    metadata["prompt_cache_len"] = prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                    metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
 
                     if is_first_token:
@@ -733,9 +733,12 @@ class HttpServerManager:
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        gpu_prompt_cache_ratio = gpu_prompt_cache_len / prompt_tokens
                         cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
                         disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
+                        prompt_cache_len = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
                         mtp_avg_token_per_step = out_token_counter / max(
                             (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
@@ -748,9 +751,9 @@ class HttpServerManager:
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
-                            f"gpu cache hit: {prompt_cache_len > 0} "
-                            f"gpu_prompt_cache_len:{prompt_cache_len} "
-                            f"gpu_prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
+                            f"gpu_prompt_cache_len:{gpu_prompt_cache_len} "
+                            f"gpu_prompt_cache_ratio:{gpu_prompt_cache_ratio} "
                             f"cpu cache hit: {cpu_prompt_cache_len > 0} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
                             f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
@@ -759,8 +762,13 @@ class HttpServerManager:
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                         )
+
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
                         self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
+                        self.metric_client.counter_inc_by("lightllm_prompt_tokens_total", prompt_tokens)
+                        self.metric_client.counter_inc_by("lightllm_generation_tokens_total", out_token_counter)
+                        self.metric_client.gauge_set("lightllm_cache_hit_rate", prompt_cache_ratio)
+                        self.metric_client.gauge_set("lightllm_gen_throughput", generation_throughput)
                         self.metric_client.histogram_observe(
                             "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
                         )
@@ -791,6 +799,23 @@ class HttpServerManager:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
+
+    def _get_router_profiler_client(self):
+        router_profiler_client = getattr(self, "router_profiler_client", None)
+        if router_profiler_client is None or getattr(router_profiler_client, "closed", False):
+            from lightllm.utils.retry_utils import retry
+
+            self.router_profiler_client = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
+                "localhost",
+                self.args.router_profiler_port,
+                config={"allow_pickle": True},
+            )
+            self.router_profiler_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return self.router_profiler_client
+
+    async def profiler_cmd(self, cmd: Literal["start", "stop"]):
+        client = self._get_router_profiler_client()
+        client.root.profiler_cmd(cmd)
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()

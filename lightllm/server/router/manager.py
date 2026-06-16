@@ -12,7 +12,7 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
@@ -26,16 +26,16 @@ from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.common.basemodel.infer_lock import g_router_lock
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
-
+from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
 
 logger = init_logger(__name__)
 
@@ -73,7 +73,6 @@ class RouterManager:
         self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", self.dp_size_in_node)
         for dp_index in range(self.dp_size_in_node):
             self.shared_token_load.set_estimated_peak_token_count(0, dp_index)
-            self.shared_token_load.set_frozened_token_count(0, dp_index)
             self.shared_token_load.set_current_load(0.0, dp_index)
             self.shared_token_load.set_logical_max_load(0.0, dp_index)
             self.shared_token_load.set_dynamic_max_load(0.0, dp_index)
@@ -95,13 +94,8 @@ class RouterManager:
             )
 
         self.metric_client = MetricClient(args.metric_port)
-        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]
-        self.is_pd_decode_mode = self.args.run_mode in ["decode", "nixl_decode"]
-        # p d 分离模式下，需要调度锁来同步调度端和推理端的一些数据操作
-        # 主要是为了防止调度失误，造成 OOM 等错误
-        self.router_lock = mp.Lock()
-        g_router_lock.obj = self.router_lock
-
+        self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
+        self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
 
         self.cpu_cache_client = (
@@ -110,6 +104,8 @@ class RouterManager:
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
         self.router_statics = RouterStatics(self.args)
+        self.profiler_cmd_queue = RouterProfilerCmdQueue()
+
         return
 
     async def wait_to_model_ready(self):
@@ -135,7 +131,6 @@ class RouterManager:
                     rank_in_node=rank_in_node,
                     node_world_size=node_world_size,
                     info_queue=self.info_queue,
-                    router_lock=self.router_lock,
                 )
             )
             tasks.append(task)
@@ -204,30 +199,14 @@ class RouterManager:
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
 
         if self.args.run_mode == "prefill":
-            # 启动 prefill kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.prefill_node_impl import (
-                start_prefill_kv_move_manager_process,
-            )
-
-            start_prefill_kv_move_manager_process(self.args, self.info_queue)
-
-        if self.args.run_mode == "nixl_prefill":
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.prefill_node_impl import (
+            from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import (
                 start_prefill_kv_move_manager_process,
             )
 
             start_prefill_kv_move_manager_process(self.args, self.info_queue)
 
         if self.args.run_mode == "decode":
-            # 启动 decode kv move 管理进程
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.decode_node_impl import (
-                start_decode_kv_move_manager_process,
-            )
-
-            start_decode_kv_move_manager_process(self.args, self.info_queue)
-
-        if self.args.run_mode == "nixl_decode":
-            from lightllm.server.router.model_infer.mode_backend.pd_nixl.decode_node_impl import (
+            from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import (
                 start_decode_kv_move_manager_process,
             )
 
@@ -255,22 +234,21 @@ class RouterManager:
                             - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
                         ) / self.max_total_token_num
                         d_i = dp_index
-                        frozen_token_num = self.shared_token_load.get_frozened_token_count(d_i)
                         estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)
                         paused_req_num = self._get_paused_req_num_in_dp_index(dp_index=d_i)
                         logger.debug(
                             f"dp_i {d_i} current batch size: {len(self.running_batch.reqs)} \n"
                             f"dp_i {d_i} paused req num: {paused_req_num} \n"
-                            f"dp_i {d_i} frozen token num: {frozen_token_num} \n"
                             f"dp_i {d_i} estimated_peak_token_count: {estimated_peak_token_count} \n"
                             f"dp_i {d_i} token used ratio: {token_ratio1} not contain prompt cache tree unrefed token\n"
                             f"dp_i {d_i} token used ratio: {token_ratio2} contain prompt cache tree unrefed token"
                         )
                         logger.debug(self.router_statics.log_str())
-                        self.metric_client.gauge_set("lightllm_batch_pause_size", paused_req_num)
+                    self.metric_client.gauge_set("lightllm_batch_pause_size", self._get_paused_req_num())
                 # pd decode mode need to update token_load more frequently
                 self.req_queue.update_token_load(self.running_batch, force_update=self.is_pd_decode_mode)
                 self.metric_client.gauge_set("lightllm_batch_current_size", len(self.running_batch.reqs))
+                self.metric_client.gauge_set("lightllm_num_running_reqs", len(self.running_batch.reqs))
                 self.metric_client.gauge_set("lightllm_queue_size", self.req_queue.get_wait_req_num())
                 self.metric_client.gauge_set(
                     "lightllm_batch_current_max_tokens",
@@ -283,15 +261,14 @@ class RouterManager:
                 self.req_queue.update_token_load(self.running_batch, force_update=True)
                 if counter_count % 300 == 0:
                     self.metric_client.gauge_set("lightllm_batch_current_size", 0.0)
+                    self.metric_client.gauge_set("lightllm_num_running_reqs", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_pause_size", 0.0)
                     self.metric_client.gauge_set("lightllm_queue_size", 0.0)
                     self.metric_client.gauge_set("lightllm_batch_current_max_tokens", 0.0)
                     # 60s print once
-                    if log_time_ready("frozen_info", 60):
+                    if log_time_ready("token_load_info", 60):
                         for dp_i in range(self.dp_size_in_node):
-                            frozen_token_num = self.shared_token_load.get_frozened_token_count(dp_i)
                             estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(dp_i)
-                            logger.debug(f"dp_i {dp_i} frozen token num: {frozen_token_num} \n")
                             logger.debug(f"dp_i {dp_i} estimated_peak_token_count: {estimated_peak_token_count} \n")
 
             await asyncio.sleep(self._get_schedule_time_interval())
@@ -302,6 +279,7 @@ class RouterManager:
         """
         # 接受新请求，并尝试调度
         await self._recv_new_reqs_and_schedule()
+        await self._write_profiler_cmds()
         # 判断是否有新请求加入推理
         # 激进调度满足，有新的推理batch就需要进行加入。
         # 或者延迟step的步数满足了当前条件，也需要进行新的推理batch的加入。
@@ -328,6 +306,17 @@ class RouterManager:
         self.shm_reqs_io_buffer.write_obj(reqs)
         self.shm_reqs_io_buffer.set_ready()
         logger.debug(f"Prefill Batch: {batch.simple_log()} \n")
+        return
+
+    async def _write_profiler_cmds(self):
+        cmd = self.profiler_cmd_queue.pop()
+        if cmd is None:
+            return
+
+        while not self.shm_reqs_io_buffer.is_empty():
+            await asyncio.sleep(0.001)
+        self.shm_reqs_io_buffer.write_obj([ProfilerCmd(cmd)])
+        self.shm_reqs_io_buffer.set_ready()
         return
 
     async def _aborted_reqs(self, aborted_reqs: List[Req]):
@@ -564,6 +553,10 @@ def start_router_process(args, pipe_writer):
         )
 
         loop.run_until_complete(router.wait_to_model_ready())
+        router.profiler_rpyc_server, router.profiler_rpyc_thread = start_router_profiler_server(
+            args,
+            router.profiler_cmd_queue,
+        )
     except:
         import traceback
         import sys

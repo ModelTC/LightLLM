@@ -58,8 +58,6 @@ class SamplingParams:
         invalid_token_ids: Optional[List[int]] = None,
         # p d mode used params
         group_request_id: Optional[int] = None,
-        # move kv to deocde node, only used in pd mode
-        move_kv_to_decode_node: Optional[dict] = None,
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
         seed: Optional[int] = -1,
@@ -93,7 +91,6 @@ class SamplingParams:
         self.allowed_token_ids = allowed_token_ids
         self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
-        self.move_kv_to_decode_node = move_kv_to_decode_node
         self.suggested_dp_index = suggested_dp_index
         self.seed = seed
         if self.do_sample is False:
@@ -192,9 +189,6 @@ class SamplingParams:
         if not (self.group_request_id is None or isinstance(self.group_request_id, int)):
             raise ValueError(f"group_request_id must be None or int ,but get {self.group_request_id}")
 
-        if not (self.move_kv_to_decode_node is None or isinstance(self.move_kv_to_decode_node, dict)):
-            raise ValueError(f"move_kv_to_decode_node must be None or dict, but get {self.move_kv_to_decode_node}")
-
         if not (self.suggested_dp_index is None or isinstance(self.suggested_dp_index, int)):
             raise ValueError(f"suggested_dp_index must be None or int, but get {self.suggested_dp_index}")
 
@@ -273,7 +267,6 @@ class SamplingParams:
         ret["guided_json"] = self.guided_json
         ret["allowed_token_ids"] = self.allowed_token_ids
         ret["invalid_token_ids"] = self.invalid_token_ids
-        ret["move_kv_to_decode_node"] = self.move_kv_to_decode_node
         ret["seed"] = self.seed
         return ret
 

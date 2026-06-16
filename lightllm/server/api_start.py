@@ -89,14 +89,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in [
-        "normal",
-        "prefill",
-        "decode",
-        "nixl_prefill",
-        "nixl_decode",
-        "visual_only",
-    ]:
+    if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -112,7 +105,7 @@ def normal_or_p_d_start(args):
             args.disable_audio = True
 
     # pd 分离模式下，不启动多模态的模块
-    if args.run_mode in ["decode", "nixl_decode"]:
+    if args.run_mode == "decode":
         args.disable_audio = True
         args.disable_vision = True
 
@@ -371,8 +364,6 @@ def normal_or_p_d_start(args):
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
         already_uesd_ports.append(args.nccl_port)
-    if args.pd_decode_rpyc_port is not None:
-        already_uesd_ports.append(args.pd_decode_rpyc_port)
     if args.visual_nccl_ports is not None:
         already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
     if not args.disable_audio and args.audio_nccl_ports is not None:
@@ -392,6 +383,7 @@ def normal_or_p_d_start(args):
     (
         nccl_port,
         router_port,
+        router_profiler_port,
         detokenization_port,
         http_server_port,
         visual_port,
@@ -399,7 +391,6 @@ def normal_or_p_d_start(args):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-        pd_decode_rpyc_port,
     ) = can_use_ports[0:10]
     can_use_ports = can_use_ports[10:]
 
@@ -418,9 +409,8 @@ def normal_or_p_d_start(args):
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
-    if args.pd_decode_rpyc_port is None:
-        args.pd_decode_rpyc_port = pd_decode_rpyc_port
     args.router_port = router_port
+    args.router_profiler_port = router_profiler_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
     args.visual_port = visual_port
@@ -432,10 +422,6 @@ def normal_or_p_d_start(args):
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
-    # p 节点用来建立torch kv 传输分布组的可用端口范围
-    args.pd_p_allowed_port_min = 20000
-    args.pd_p_allowed_port_max = 30000
-
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0

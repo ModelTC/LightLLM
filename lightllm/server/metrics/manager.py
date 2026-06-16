@@ -48,6 +48,9 @@ class MetricServer(rpyc.Service):
     def exposed_counter_inc(self, name: str, label: str = None) -> None:
         return self.monitor.counter_inc(name, label)
 
+    def exposed_counter_inc_by(self, name: str, amount: float) -> None:
+        return self.monitor.counter_inc_by(name, amount)
+
     def exposed_histogram_observe(self, name: str, value: float, label: str = None) -> None:
         return self.monitor.histogram_observe(name, value, label)
 
@@ -102,6 +105,13 @@ class MetricClient(threading.Thread):
     def counter_inc(self, *args, **kwargs):
         def inner_func():
             return self.conn.root.counter_inc(*args, **kwargs)
+
+        self._append_task(inner_func)
+        return
+
+    def counter_inc_by(self, *args, **kwargs):
+        def inner_func():
+            return self.conn.root.counter_inc_by(*args, **kwargs)
 
         self._append_task(inner_func)
         return

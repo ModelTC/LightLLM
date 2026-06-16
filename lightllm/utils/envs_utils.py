@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
-    node_uuid = uuid.uuid1().hex[0:8]
+    node_uuid = uuid.uuid4().hex[0:16]
 
     if args.run_mode == "pd_master":
         os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(node_uuid) + "_pd_master"
@@ -59,7 +59,7 @@ def get_llm_data_type() -> torch.dtype:
     elif data_type in ["fp32", "float32"]:
         data_type = torch.float32
     else:
-        raise ValueError(f"Unsupport datatype {data_type}!")
+        raise ValueError(f"Unsupported datatype {data_type}!")
     return data_type
 
 

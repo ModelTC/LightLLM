@@ -3,7 +3,7 @@ import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
-from .nixl_params import NIXLParamObj
+from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
 DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
@@ -260,44 +260,6 @@ class NodeUUId(ctypes.Structure):
         return (self.node_id_high << 64) | self.node_id_low
 
 
-class DecodeNode(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [
-        ("exists", ctypes.c_bool),
-        ("node_id", NodeUUId),
-        ("ip", ctypes.c_int32 * 4),
-        ("rpyc_port", ctypes.c_int),
-        ("max_new_tokens", ctypes.c_int),
-    ]
-
-    def initialize(self, data_dict):
-        if data_dict is None:
-            self.exists = False
-            return
-
-        self.exists = True
-
-        pd_node_id = data_dict["node_id"]
-        self.node_id = NodeUUId()
-        self.node_id.initialize(pd_node_id)
-
-        ip_parts = [int(part) for part in data_dict["ip"].split(".")]
-        self.ip = (ctypes.c_int32 * 4)(*ip_parts)
-
-        self.rpyc_port = data_dict["rpyc_port"]
-        self.max_new_tokens = data_dict["max_new_tokens"]
-
-    def to_dict(self):
-        if not self.exists:
-            return None
-        return {
-            "node_id": self.node_id.get(),
-            "ip": ".".join(str(self.ip[i]) for i in range(4)),
-            "rpyc_port": self.rpyc_port,
-            "max_new_tokens": self.max_new_tokens,
-        }
-
-
 class SamplingParams(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -330,11 +292,10 @@ class SamplingParams(ctypes.Structure):
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
         ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
-        ("move_kv_to_decode_node", DecodeNode),  # move kv to deocde node, only used in pd mode
         # in pd split mode, use to keep the id of pd master
         ("pd_master_node_id", NodeUUId),
-        # nixl params object, only used in nixl pd mode, used to build nixl connection in p and d
-        ("nixl_params", NIXLParamObj),
+        # pd params object, only used in pd mode, used to build kv transport connection in prefill and decode
+        ("pd_kv_trans_params", PDKVTransParamObj),
         ("skip_special_tokens", ctypes.c_bool),  # whether to skip special tokens when decoding
         ("add_special_tokens", ctypes.c_bool),  # whether to add special tokens when encoding
         (
@@ -384,10 +345,8 @@ class SamplingParams(ctypes.Structure):
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
 
-        self.move_kv_to_decode_node = DecodeNode()
-        self.move_kv_to_decode_node.initialize(kwargs.get("move_kv_to_decode_node", None))
-        self.nixl_params = NIXLParamObj()
-        self.nixl_params.set(kwargs.get("nixl_params", None))
+        self.pd_kv_trans_params = PDKVTransParamObj()
+        self.pd_kv_trans_params.set(kwargs.get("pd_kv_trans_params", None))
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
@@ -522,7 +481,6 @@ class SamplingParams(ctypes.Structure):
             "allowed_token_ids": self.allowed_token_ids.to_list(),
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
-            "move_kv_to_decode_node": self.move_kv_to_decode_node.to_dict(),
             "skip_special_tokens": self.skip_special_tokens,
             "add_special_tokens": self.add_special_tokens,
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
