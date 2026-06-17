@@ -992,6 +992,7 @@ class HttpServerManager:
                                     "count_output_tokens": count_output_tokens,
                                     "prompt_cache_len": req.prompt_cache_len,
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
+                                    "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:
