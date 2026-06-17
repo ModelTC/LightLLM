@@ -275,8 +275,6 @@ class SamplingParams(ctypes.Structure):
         ("ignore_eos", ctypes.c_bool),
         # the max number of image patches to be used in the internvl model, for the test
         ("image_max_patch_num", ctypes.c_int),
-        ("min_pixels", ctypes.c_int),
-        ("max_pixels", ctypes.c_int),
         ("max_new_tokens", ctypes.c_int),
         ("min_new_tokens", ctypes.c_int),
         # Whether to count input tokens for presence_penalty, frequency_penalty and repetition_penalty
@@ -319,9 +317,6 @@ class SamplingParams(ctypes.Structure):
 
     def init(self, tokenizer, **kwargs):
         super().__init__()
-        # 移除kwargs中为null的参数，避免覆盖默认值
-        kwargs = {k: v for k, v in kwargs.items() if v is not None}
-
         self.best_of = kwargs.get("best_of", 1)
         self.n = kwargs.get("n", self.best_of)
         self.do_sample = kwargs.get("do_sample", SamplingParams._do_sample)
@@ -479,8 +474,6 @@ class SamplingParams(ctypes.Structure):
             "image_max_patch_num": self.image_max_patch_num,
             "max_new_tokens": self.max_new_tokens,
             "min_new_tokens": self.min_new_tokens,
-            "min_pixels": self.min_pixels,
-            "max_pixels": self.max_pixels,
             "exponential_decay_length_penalty": self.exponential_decay_length_penalty.to_tuple(),
             "stop_sequences": self.stop_sequences.to_list(),
             "best_of": self.best_of,
