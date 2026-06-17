@@ -9,9 +9,6 @@ logger = init_logger(__name__)
 
 LIGHTLLM_TOKEN_MAX_BYTES = int(os.getenv("LIGHTLLM_TOKEN_MAX_BYTES", 1280))
 LIGHTLLM_OUT_TOKEN_QUEUE_SIZE = int(os.getenv("LIGHTLLM_OUT_TOKEN_QUEUE_SIZE", 8))
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class QueueItem(ctypes.Structure):
