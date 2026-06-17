@@ -66,7 +66,7 @@ def _moe_sum_reduce_kernel(
                     mask=offs_dim < dim_end,
                     other=0.0,
                 ).to(tl.float32)
-            gate = 1.0 / (1.0 + tl.exp(-gate))
+            gate = tl.sigmoid(gate)
             accumulator += shared * gate
         store_t_ptr = output_ptr + token_index * output_stride_0 + offs_dim
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
@@ -113,7 +113,7 @@ def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, shared=None, gate=
         shared = shared.view(token_num, hidden_dim)
         gate = gate.view(token_num, gate.shape[-1])
         assert shared.is_contiguous()
-        assert gate.is_contiguous()
+        assert gate.stride(1) == 1
         assert gate.shape[1] in (1, hidden_dim)
 
     if not run_config:

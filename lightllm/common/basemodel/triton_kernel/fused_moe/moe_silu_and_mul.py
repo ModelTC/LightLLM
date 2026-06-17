@@ -122,7 +122,7 @@ def silu_and_mul_fwd(
     alpha=None,
     run_config=None,
 ):
-    assert input.is_contiguous()
+    assert input.stride(-1) == 1
     assert output.is_contiguous()
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
 

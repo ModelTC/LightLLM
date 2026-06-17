@@ -29,7 +29,7 @@ def _add_shared_expert_gate_kernel(
     else:
         gate_vals = tl.load(gate + row * stride_g_m + offs * stride_g_n, mask=mask, other=0.0).to(tl.float32)
     hidden_vals = tl.load(hidden_ptrs, mask=mask, other=0.0).to(tl.float32)
-    gate_vals = 1.0 / (1.0 + tl.exp(-gate_vals))
+    gate_vals = tl.sigmoid(gate_vals)
     out = hidden_vals + shared_vals * gate_vals
     tl.store(hidden_ptrs, out.to(hidden.dtype.element_ty), mask=mask)
 
@@ -55,7 +55,7 @@ def _sigmoid_mul_kernel(
         gate_vals = tl.load(gate + row * stride_g_m).to(tl.float32)
     else:
         gate_vals = tl.load(gate + row * stride_g_m + offs * stride_g_n, mask=mask, other=0.0).to(tl.float32)
-    gate_vals = 1.0 / (1.0 + tl.exp(-gate_vals))
+    gate_vals = tl.sigmoid(gate_vals)
     tl.store(x_ptrs, (x_vals * gate_vals).to(x.dtype.element_ty), mask=mask)
 
 

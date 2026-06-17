@@ -14,6 +14,7 @@ from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
 from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gdn_decode_inputs
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import add_shared_expert_gate_, sigmoid_mul_
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
@@ -115,8 +116,17 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
         input = input.view(-1, self.embed_dim_)
-        shared_expert_out = LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
-        gate = layer_weight.ffn_gate.mm(input)
+        if getattr(layer_weight, "fused_shared_expert_gate", False):
+            up_gate_and_gate = layer_weight.gate_up_proj.mm(input)
+            up_gate_dim = layer_weight.gate_up_proj.out_dims[0] + layer_weight.gate_up_proj.out_dims[1]
+            gate = up_gate_and_gate[:, up_gate_dim : up_gate_dim + 1]
+            up_gate_out = up_gate_and_gate[:, :up_gate_dim]
+            ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
+            silu_and_mul_fwd(up_gate_out, ffn1_out)
+            shared_expert_out = layer_weight.down_proj.mm(ffn1_out)
+        else:
+            shared_expert_out = LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
+            gate = layer_weight.ffn_gate.mm(input)
         return shared_expert_out, gate
 
     def _moe_ffn_tp(

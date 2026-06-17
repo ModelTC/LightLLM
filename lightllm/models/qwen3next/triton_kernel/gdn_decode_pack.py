@@ -65,63 +65,6 @@ def _pack_gdn_decode_kernel(
     tl.store(b_out + row * gate_dim + gate_offsets, b_vals, mask=gate_mask)
 
 
-@torch.no_grad()
-def pack_gdn_decode_inputs(
-    mixed_qkv: torch.Tensor,
-    z_raw: torch.Tensor,
-    a_raw: torch.Tensor,
-    b_raw: torch.Tensor,
-    num_k_heads: int,
-    head_k_dim: int,
-    num_v_heads: int,
-    head_v_dim: int,
-):
-    batch = mixed_qkv.shape[0]
-    q_dim = num_k_heads * head_k_dim
-    k_dim = q_dim
-    v_dim = num_v_heads * head_v_dim
-    gate_dim = num_v_heads
-
-    q = torch.empty((batch, 1, num_k_heads, head_k_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-    k = torch.empty_like(q)
-    v = torch.empty((batch, 1, num_v_heads, head_v_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-    z = torch.empty((batch, num_v_heads, head_v_dim), dtype=z_raw.dtype, device=z_raw.device)
-    a = torch.empty((batch, gate_dim), dtype=a_raw.dtype, device=a_raw.device)
-    b = torch.empty((batch, gate_dim), dtype=b_raw.dtype, device=b_raw.device)
-
-    block_qkv = triton.next_power_of_2(max(q_dim, k_dim, v_dim))
-    block_gate = triton.next_power_of_2(gate_dim)
-    _pack_gdn_decode_kernel[(batch,)](
-        mixed_qkv,
-        z_raw,
-        a_raw,
-        b_raw,
-        q,
-        k,
-        v,
-        z,
-        a,
-        b,
-        mixed_qkv.stride(0),
-        mixed_qkv.stride(1),
-        z_raw.stride(0),
-        z_raw.stride(1),
-        z_raw.stride(2),
-        a_raw.stride(0),
-        a_raw.stride(1),
-        b_raw.stride(0),
-        b_raw.stride(1),
-        q_dim,
-        k_dim,
-        v_dim,
-        gate_dim,
-        BLOCK_QKV=block_qkv,
-        BLOCK_GATE=block_gate,
-        num_warps=4,
-    )
-    return q, k, v, z, a, b
-
-
 @triton.jit
 def _conv_pack_gdn_decode_kernel(
     mixed_qkv,

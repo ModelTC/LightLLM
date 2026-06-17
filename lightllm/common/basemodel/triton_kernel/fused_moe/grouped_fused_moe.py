@@ -231,6 +231,7 @@ def moe_align_fused_kernel(
     if ZERO_EXPERT_TOKEN_NUM:
         expert_offs = tl.arange(0, BLOCK_EXPERT)
         tl.store(expert_token_num_ptr + expert_offs, 0, mask=expert_offs < expert_num)
+        tl.debug_barrier()
 
     offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < token_num * topk_num
