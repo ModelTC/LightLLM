@@ -69,8 +69,6 @@ class TpPartBaseModel:
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
-        # 用于等待外围的一些模块的初始化完成（如 CPU KV Cache 注册完成）
-        self.wait_events = kvargs.get("wait_events", [])
         # is_token_healing 和 return_all_prompt_logics 是有排斥关系的两个模式，只能单独有一个生效
         # 主要是在prefill阶段返回多少个token的用于后续处理相关。
         self.is_token_healing = kvargs.get("is_token_healing", False)
@@ -124,8 +122,6 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)
-        # wait必须在init cudagraph 之前，避免错误捕获
-        self._wait_other_modules_ready()
 
         self._init_att_backend()
         self._init_att_backend1()
@@ -143,11 +139,6 @@ class TpPartBaseModel:
         self._check_max_len_infer()
         torch.cuda.empty_cache()
         set_model_init_status(True)
-        return
-
-    def _wait_other_modules_ready(self):
-        for event in self.wait_events:
-            event.wait()
         return
 
     def _init_config(self):
@@ -191,14 +182,15 @@ class TpPartBaseModel:
     def load_weights(self, weight_dict: dict):
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
-            self.data_type,
-            self.weight_dir_,
+            data_type=self.data_type,
+            weight_dir=self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
             weight_dict=weight_dict,
         )
-        # self.pre_post_weight.verify_load()
-        # [weight.verify_load() for weight in self.trans_layers_weight]
+        self.pre_post_weight.verify_load()
+        [weight.verify_load() for weight in self.trans_layers_weight]
+        return
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
