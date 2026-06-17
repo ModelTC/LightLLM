@@ -13,8 +13,7 @@ from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn
 from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
 from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import add_shared_expert_gate_, sigmoid_mul_
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
@@ -116,28 +115,34 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
         input = input.view(-1, self.embed_dim_)
-        if getattr(layer_weight, "fused_shared_expert_gate", False):
-            up_gate_and_gate = layer_weight.gate_up_proj.mm(input)
-            up_gate_dim = layer_weight.gate_up_proj.out_dims[0] + layer_weight.gate_up_proj.out_dims[1]
-            gate = up_gate_and_gate[:, up_gate_dim : up_gate_dim + 1]
-            up_gate_out = up_gate_and_gate[:, :up_gate_dim]
-            ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-            silu_and_mul_fwd(up_gate_out, ffn1_out)
-            shared_expert_out = layer_weight.down_proj.mm(ffn1_out)
-        else:
-            shared_expert_out = LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
-            gate = layer_weight.ffn_gate.mm(input)
-        return shared_expert_out, gate
+        shared_expert_out = LlamaTransformerLayerInfer._ffn_tp(self, input, infer_state, layer_weight)
+        gate = layer_weight.ffn_gate.mm(input)
+        sigmoid_mul_(shared_expert_out, gate)
+        return shared_expert_out
 
     def _moe_ffn_tp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
 
-        shared_expert_out, gate = self._compute_shared_expert(input, infer_state, layer_weight)
-
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
+        if getattr(layer_weight, "num_fused_shared_experts", 0) > 0:
+            shared_expert_gate = layer_weight.ffn_gate.mm(hidden_states)
+            layer_weight.experts.fused_shared_experts(
+                hidden_states,
+                router_logits=router_logits,
+                top_k=self.num_experts_per_tok,
+                renormalize=self.norm_topk_prob,
+                use_grouped_topk=False,
+                topk_group=None,
+                num_expert_group=None,
+                shared_expert_weight=shared_expert_gate,
+            )
+            hidden_states = hidden_states.view(num_tokens, hidden_dim)
+            return hidden_states
+
+        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
         layer_weight.experts.experts(
             hidden_states,
             router_logits=router_logits,
@@ -146,16 +151,15 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
-            shared_expert_out=shared_expert_out,
-            shared_expert_gate=gate,
         )
         hidden_states = hidden_states.view(num_tokens, hidden_dim)
+        hidden_states.add_(shared_expert_out)
         return hidden_states
 
     def _moe_ffn_edp(
         self, input: torch.Tensor, infer_state: Qwen3NextInferStateInfo, layer_weight: Qwen3NextTransformerLayerWeight
     ):
-        shared_expert_out, gate = self._compute_shared_expert(input, infer_state, layer_weight)
+        shared_expert_out = self._compute_shared_expert(input, infer_state, layer_weight)
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
@@ -170,7 +174,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             is_prefill=infer_state.is_prefill,
         )
         ep_output = ep_output.view(token_num, hidden_dim)
-        add_shared_expert_gate_(ep_output, shared_expert_out, gate)
+        ep_output.add_(shared_expert_out)
         return ep_output
 
     def _get_qkv(
