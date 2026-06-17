@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _CUSTOM_ALLREDUCE_WORLD_SIZES = (2, 4, 6, 8)
-_TWO_GPU_CHECK_TIMEOUT_SECONDS = 60.0
+_TWO_GPU_CHECK_TIMEOUT_SECONDS = 600.0
 
 
 def _start_two_gpu_check_timeout_watchdog(backend_name: str) -> threading.Event:
@@ -84,6 +84,8 @@ def _flashinfer_two_gpu_check_worker(process_rank: int, init_tcp_port: int) -> N
                 input_tensor = torch.zeros(2, 64, device=cuda_device, dtype=torch.bfloat16)
             else:
                 input_tensor = torch.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)
+            if not flashinfer_all_reduce.should_use(input_tensor):
+                raise RuntimeError("FlashInferAllReduce unsupported for probe tensor")
             output_tensor = flashinfer_all_reduce.all_reduce(input_tensor)
             dist.barrier()
             expected_reduced = torch.ones(2, 64, device=cuda_device, dtype=torch.bfloat16)

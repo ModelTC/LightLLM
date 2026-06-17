@@ -30,15 +30,21 @@ class PrefillCudaGraph:
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
         self.max_handle_token_num = self.args.prefill_cudagraph_max_handle_token
+        if self.args.batch_max_tokens is not None:
+            self.max_handle_token_num = min(self.max_handle_token_num, self.args.batch_max_tokens)
 
-        graph_handle_token_nums = []
-        for i in range(2048):
-            token_num = int(2 ** (2 * i))
-            if 1 < token_num < self.max_handle_token_num:
-                graph_handle_token_nums.append(token_num)
+        graph_handle_token_nums = (
+            list(range(4, 33, 4))
+            + list(range(48, 257, 16))
+            + list(range(288, 513, 32))
+            + list(range(576, 1024 + 1, 64))
+            + list(range(1280, 4096 + 1, 256))
+            + list(range(4608, self.max_handle_token_num + 1, 512))
+        )
+        graph_handle_token_nums = [e for e in graph_handle_token_nums if e <= self.max_handle_token_num]
         graph_handle_token_nums.append(self.max_handle_token_num)
 
-        graph_handle_token_nums = list(set(graph_handle_token_nums))
+        graph_handle_token_nums = list(set[int](graph_handle_token_nums))
         graph_handle_token_nums.sort()
         if self.args.enable_tpsp_mix_mode:
             graph_handle_token_nums = [

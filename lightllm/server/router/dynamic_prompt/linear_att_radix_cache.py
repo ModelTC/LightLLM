@@ -163,7 +163,10 @@ class LinearAttPagedRadixCache:
         return
 
     def _add_node(self, node: LinearAttPagedTreeNode):
-        if node.is_leaf():
+        # root 永远不参与回收：当树为空时 root 自身也满足 is_leaf()，若加入 _evict_tree_set，
+        # 会与 _evict 中 "node is not self.root_node" 的断言相矛盾（当前仅靠 root 的 ref_counter>=1
+        # 和回收水位 guard 掩盖）。这里显式排除，使数据结构与回收逻辑的意图一致。
+        if node.is_leaf() and node is not self.root_node:
             self._evict_tree_set.add(node)
         if node.small_page_buffer_idx is not None:
             self._evict_tree_set_for_linear_att.add(node)

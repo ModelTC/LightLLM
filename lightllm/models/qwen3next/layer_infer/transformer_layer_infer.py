@@ -422,8 +422,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             conv_state_indices=infer_state.b_buffer_idx,
         )
 
-        # Recurrent processing with fused gating
-        # FusedRecurrentFunction.forward calls .contiguous() on q/k/v/a/b internally
+        # Recurrent processing with fused gating; the kernel reads the
+        # q/k/v/a/b column views directly via per-token strides (no copies)
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=True)
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,

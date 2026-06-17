@@ -27,6 +27,13 @@ def get_tokenizer(
     return tokenizer
 
 
+def normalize_model_name(model_name: str) -> str:
+    if not model_name:
+        return model_name
+    normalized = model_name.rstrip("/\\")
+    return normalized or model_name
+
+
 def get_output_length(input_num: int, output_len: int) -> List[int]:
     min_len, max_len = 2, output_len * 2
     mean = (min_len + max_len) * 0.5
@@ -162,7 +169,7 @@ def main():
         return
 
     assert args.tokenizer_path is not None
-    model_name.append(args.tokenizer_path)
+    model_name.append(normalize_model_name(args.tokenizer_path))
     seed_all(args.seed)
     url = args.url
     tokenizer = get_tokenizer(args.tokenizer_path)

@@ -175,6 +175,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
 
     # PD prefill mode for DeepSeek-R1 (DP+EP) on H200
     # Usage: sh pd_prefill.sh <host> <pd_master_ip>
+    # NIXL is used by default. To use NCCL as the data-plane backend, set LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl.
     # nvidia-cuda-mps-control -d, run MPS (optional, performance will be much better with mps support, but some GPUs may encounter errors when enabling mps, it's recommended to upgrade to a higher driver version, especially for H-series cards)
 
     export host=$1
@@ -198,6 +199,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
 
     # PD decode mode for DeepSeek-R1 (DP+EP) on H200
     # Usage: sh pd_decode.sh <host> <pd_master_ip>
+    # NIXL is used by default. To use NCCL as the data-plane backend, set LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl.
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d

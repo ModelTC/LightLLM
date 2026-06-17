@@ -4,9 +4,10 @@ description: >-
   Runs LightLLM DeepSeek-V3.2 EP MoE gsm8k: api_server with --tp 8 --dp 8 --enable_ep_moe,
   tool_call_parser deepseekv32, reasoning_parser deepseek-v3, graph_max_batch_size 32,
   mem_fraction 0.8, LOADWORKER 14, port 8000 aligned with lm_eval base_url. Requires a
-  dedicated log directory, api_server and eval logs, summary.txt consolidated report,
-  tokenizer aligned with MODEL_DIR. Distinct from R1 MTP/Base flows. Use for V3.2 EP MoE
-  gsm8k accuracy on LightLLM.
+  dedicated log directory, api_server and eval logs, summary.txt consolidated report.
+  lm_eval uses tokenizer_backend=null (server-side tokenization) because local
+  transformers does not recognize model_type deepseek_v32. Distinct from R1 MTP/Base
+  flows. Use for V3.2 EP MoE gsm8k accuracy on LightLLM.
 ---
 
 # DeepSeek-V3.2 **EP**（`--tp 8`、`--dp 8`、`--enable_ep_moe`）本地 GSM8K 评测
@@ -64,7 +65,7 @@ nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" --tp 8 \
   --graph_max_batch_size 32 \
   --tool_call_parser deepseekv32 \
-  --mem_fraction 0.6 \
+  --mem_fraction 0.8 \
   --reasoning_parser deepseek-v3 \
   --dp 8 --enable_ep_moe \
   --port 8000 \
@@ -73,19 +74,22 @@ nohup python -m lightllm.server.api_server \
 
 ### 评测命令（服务就绪后执行一次）
 
-服务就绪后执行（本地回环走代理时用 `no_proxy` / `NO_PROXY` 排除本机）。**`model_args` 中 `tokenizer` 必须与本次 server 的 `--model_dir`（即 **`${MODEL_DIR}`**）为同一字符串路径**。**`base_url` 中的端口须为 `8000`，与 `api_server` 的 `--port` 一致。** 以下为带日志落盘的**完整命令**（`--model_args` 使用双引号以便展开 **`${MODEL_DIR}`**）：
+服务就绪后执行（本地回环走代理时用 `no_proxy` / `NO_PROXY` 排除本机）。**`base_url` 中的端口须为 `8000`，与 `api_server` 的 `--port` 一致。** 以下为带日志落盘的**完整命令**：
 
 ```bash
 HF_ALLOW_CODE_EVAL=1 HF_DATASETS_OFFLINE=0 \
 no_proxy=127.0.0.1,localhost,::1 \
 lm_eval --model local-completions \
-  --model_args "{\"model\":\"deepseek-ai/DeepSeek-V3.2\", \"base_url\":\"http://localhost:8000/v1/completions\", \"max_length\": 16384, \"tokenizer\":\"${MODEL_DIR}\"}" \
+  --model_args '{"model":"deepseek-ai/DeepSeek-V3.2", "base_url":"http://localhost:8000/v1/completions", "tokenizer_backend":null, "eos_string":"<｜end▁of▁sentence｜>"}' \
   --tasks gsm8k --batch_size 500 --confirm_run_unsafe_code \
   >> "${LOG_DIR}/eval_gsm8k.log" 2>&1
 ```
 
+> **为什么用 `tokenizer_backend=null` 而非 `tokenizer=${MODEL_DIR}`**：`local-completions` 默认会用 `transformers.AutoTokenizer.from_pretrained(${MODEL_DIR})` 在本地加载 HF tokenizer，但当前环境的 **transformers 不识别 `model_type: deepseek_v32`**（`KeyError: 'deepseek_v32'` → rope `AttributeError`），评测在加载 tokenizer 阶段即崩溃，根本跑不到推理。设 **`tokenizer_backend=null`** 后 lm_eval 不再本地加载 tokenizer，直接把 **prompt 文本**发给 server，由 lightllm 服务端用真正的 deepseek_v32 tokenizer 分词——更贴合实际且无需本地 HF 适配。`eos_string` 显式给出 DeepSeek 的结束符以消除 “Cannot determine EOS string” 告警（gsm8k 本身也带 stop 序列）。`tokenized_requests` 会被自动关闭、不再做 context 长度校验（gsm8k 5-shot prompt 很短，无需截断）。
+> 若哪天升级了能识别 `deepseek_v32` 的 transformers，可改回 `"tokenizer":"${MODEL_DIR}"` 形式（届时 tokenizer 须与 `--model_dir` 同一路径）。
+
 - **`LOG_DIR`**：与启动服务一节相同；若仅调试不重定向，去掉 `\` 续行及最后的 `>> "${LOG_DIR}/eval_gsm8k.log" 2>&1` 即可在前台查看输出。
-- **`MODEL_DIR`**：须与 server 启动命令中的 `--model_dir` 一致；路径随环境变化时的默认试跑与向用户确认见「执行约定」。
+- **tokenizer**：本命令用 `tokenizer_backend=null`，评测端不再依赖 `MODEL_DIR` 下的 HF tokenizer（分词在 server 端完成），故 `MODEL_DIR` 路径变化不影响评测命令；server 启动命令中的 `--model_dir` 仍按「执行约定」处理。
 - 若环境需要，可同时设置 `NO_PROXY=127.0.0.1,localhost,::1`（或与团队约定一致的列表）。
 
 ## 执行约定（不要额外写“专用启动脚本”）

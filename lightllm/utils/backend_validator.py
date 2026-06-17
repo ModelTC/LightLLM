@@ -196,12 +196,15 @@ def _validate_flashmla_sparse():
     except Exception as e:
         return False, f"sgl_kernel.flash_mla import failed: {type(e).__name__}: {e}"
 
-    batch, heads, seq, dim = 1, 64, 128, 512 + 64
+    batch, heads, seq = 1, 64, 128
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    qk_dim = kv_lora_rank + qk_rope_head_dim
     dtype = torch.bfloat16
     device = "cuda"
 
-    q = torch.randn(batch * seq, heads, dim, dtype=dtype, device=device)
-    kv = torch.zeros(batch * seq, 1, dim, dtype=dtype, device=device)
+    q = torch.randn(batch * seq, heads, qk_dim, dtype=dtype, device=device)
+    kv = torch.zeros(batch * seq, 1, qk_dim, dtype=dtype, device=device)
 
     index_topk = 128
     topk_indices = torch.zeros(batch * seq, index_topk, dtype=torch.int32, device=device)
@@ -210,8 +213,7 @@ def _validate_flashmla_sparse():
 
     topk_indices = topk_indices.view(batch * seq, 1, index_topk)
 
-    softmax_scale = 1.0 / (dim ** 0.5)
-    kv_lora_rank = dim
+    softmax_scale = 1.0 / (qk_dim ** 0.5)
 
     try:
         mla_out, _, _ = flash_mla_sparse_fwd(

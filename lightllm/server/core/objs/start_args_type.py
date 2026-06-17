@@ -8,18 +8,7 @@ from typing import List, Optional, Tuple
 class StartArgs:
     run_mode: str = field(
         default="normal",
-        metadata={
-            "choices": [
-                "normal",
-                "prefill",
-                "decode",
-                "nixl_prefill",
-                "nixl_decode",
-                "pd_master",
-                "config_server",
-                "visual_only",
-            ]
-        },
+        metadata={"choices": ["normal", "pd_master", "prefill", "decode", "config_server", "visual_only"]},
     )
     performance_mode: str = field(default=None, metadata={"choices": ["personal"]})
     host: str = field(default="127.0.0.1")
@@ -36,7 +25,6 @@ class StartArgs:
     config_server_visual_redis_port: int = field(default=None)
     afs_image_embed_dir: str = field(default=None)
     afs_embed_capacity: int = field(default=250000)
-    pd_decode_rpyc_port: int = field(default=None)
     control_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(
         default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
@@ -135,6 +123,10 @@ class StartArgs:
     use_reward_model: bool = field(default=False)
     use_tgi_api: bool = field(default=False)
     health_monitor: bool = field(default=False)
+    enable_profiling: Optional[str] = field(
+        default=None,
+        metadata={"choices": ["torch_profiler", "nvtx"]},
+    )
     metric_gateway: Optional[str] = field(default=None)
     job_name: str = field(default="lightllm")
     grouping_key: List[str] = field(default_factory=lambda: [])
@@ -155,7 +147,7 @@ class StartArgs:
     enable_monitor_auth: bool = field(default=False)
     disable_cudagraph: bool = field(default=False)
     enable_prefill_cudagraph: bool = field(default=False)
-    prefill_cudagraph_max_handle_token: int = field(default=512)
+    prefill_cudagraph_max_handle_token: int = field(default=8192)
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
@@ -164,6 +156,7 @@ class StartArgs:
     quant_cfg: Optional[str] = field(default=None)
     vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
+    expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
@@ -177,7 +170,7 @@ class StartArgs:
         default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
     )
     llm_kv_quant_group_size: int = field(default=8)
-    sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "sglang_kernel"]})
+    sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "flashinfer"]})
     penalty_counter_mode: str = field(
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
@@ -199,8 +192,8 @@ class StartArgs:
     mtp_draft_model_dir: Optional[str] = field(default=None)
     mtp_step: int = field(default=0)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
-    nixl_pd_kv_page_num: int = field(default=16)
-    nixl_pd_kv_page_size: int = field(default=1024)
+    pd_kv_page_num: int = field(default=16)
+    pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
@@ -211,6 +204,7 @@ class StartArgs:
     enable_dp_prompt_cache_fetch: bool = field(default=False)
     # zmp ports
     router_port: int = field(default=None)
+    router_profiler_port: int = field(default=None)
     detokenization_port: int = field(default=None)
     http_server_port: int = field(default=None)
     visual_port: int = field(default=None)

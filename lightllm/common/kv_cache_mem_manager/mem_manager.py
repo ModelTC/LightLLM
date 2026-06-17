@@ -4,15 +4,12 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from typing import List, Tuple, Any, Union
-from lightllm.server.pd_io_struct import KVMoveTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
-from lightllm.common.kv_trans_kernel.kv_trans import kv_trans
 from lightllm.utils.dist_utils import get_current_rank_in_node, get_node_world_size
 from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
-from lightllm.distributed.pynccl import PyNcclCommunicator
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
@@ -67,8 +64,7 @@ class MemoryManager:
 
         torch.cuda.empty_cache()
         world_size = dist.get_world_size()
-
-        available_memory = get_available_gpu_memory(world_size) * mem_fraction
+        available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         self.size = int(available_memory * 1024 ** 3 / cell_size)
         if world_size > 1:
@@ -89,23 +85,7 @@ class MemoryManager:
         # 成员变量中，其与 req_manager 中的HOLD_REQUEST_ID具有类似的作用和意义。
         self.kv_buffer = torch.empty((layer_num, size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda")
 
-    def alloc_kv_move_buffer(self, max_req_total_len):
-        """
-        pd 分离模式使用的特殊接口
-        """
-        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
-            raise NotImplementedError("subclass need reimpl this method")
-        self.kv_move_buffer = torch.empty(
-            (1, max_req_total_len + 8, 2 * self.head_num, self.head_dim), dtype=self.dtype, device="cuda"
-        )
-        self.kv_move_buf_indexes = torch.arange(0, max_req_total_len + 8, dtype=torch.int64, device="cuda")
-        self.token_dim_size = self.kv_move_buffer.shape[-2] * self.kv_move_buffer.shape[-1]
-        return
-
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        if isinstance(self, MemoryManager) and type(self) is not MemoryManager:
-            raise NotImplementedError("subclass need reimpl this method")
-
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         self.kv_move_buffer = torch.empty(
             (page_num, page_size, self.layer_num, 2 * num_kv_head, self.head_dim), dtype=self.dtype, device="cuda"
@@ -122,7 +102,10 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
     ):
+        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
@@ -151,7 +134,10 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
     ):
+        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
@@ -172,150 +158,6 @@ class MemoryManager:
         # keep for debug
         # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
-
-    def send_to_decode_node(
-        self,
-        move_tasks: List[KVMoveTask],
-        mem_managers: List["MemoryManager"],
-        dp_size_in_node: int,
-        nccl_comm: PyNcclCommunicator,
-    ):
-        assert dp_size_in_node == 1
-
-        # 先将数据发送到指定的一张卡上的buffer，再发送。
-
-        move_token_indexes = []
-        for task in move_tasks:
-            if task.move_kv_len != 0:
-                move_token_indexes.extend(task.prefill_token_indexes[-task.move_kv_len :])
-
-        cur_device_index = self.kv_buffer.get_device()
-        cur_mem = mem_managers[cur_device_index]
-        for i, mem in enumerate(mem_managers):
-            for layer_index in range(mem.layer_num):
-                move_buffer = mem._get_kv_move_data(move_token_indexes, layer_index)
-                if i == cur_device_index:
-                    nccl_comm.send(move_buffer, dst=1)
-                else:
-                    move_size = move_buffer.numel()
-                    new_move_buffer = cur_mem.kv_move_buffer.view(-1)[0:move_size].view(move_buffer.shape)
-                    from torch.cuda import comm
-
-                    comm.broadcast(move_buffer, out=[new_move_buffer])
-                    nccl_comm.send(new_move_buffer, dst=1)
-        return
-
-    def _get_kv_move_data(self, token_indexes: List[int], layer_index: int):
-        move_size = self.token_dim_size * len(token_indexes)
-        move_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(
-            1, len(token_indexes), 2 * self.head_num, self.head_dim
-        )
-        move_buffer[:, :, :, :] = self.kv_buffer[layer_index, token_indexes, :, :]
-        return move_buffer
-
-    def receive_from_prefill_node(
-        self,
-        move_tasks: List[KVMoveTask],
-        mem_managers: List["MemoryManager"],
-        dp_size_in_node: int,
-        nccl_comm: PyNcclCommunicator,
-    ):
-        assert dp_size_in_node == 1
-
-        # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
-
-        move_token_indexes = []
-        for task in move_tasks:
-            if task.move_kv_len != 0:
-                move_token_indexes.extend(task.decode_token_indexes[-task.move_kv_len :])
-
-        cur_device_index = self.kv_buffer.get_device()
-        token_num = len(move_token_indexes)
-        move_size = self.token_dim_size * token_num
-        recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(1, token_num, 2 * self.head_num, self.head_dim)
-        for i, mem in enumerate(mem_managers):
-            for layer_index in range(mem.layer_num):
-                nccl_comm.recv(recive_buffer, src=0)
-                if i == cur_device_index:
-                    mem._write_kv_move_data(move_token_indexes, recive_buffer, layer_index)
-                else:
-                    new_recive_buffer = mem.kv_move_buffer.view(-1)[0:move_size].view(recive_buffer.shape)
-                    from torch.cuda import comm
-
-                    comm.broadcast(recive_buffer, out=[new_recive_buffer])
-                    mem._write_kv_move_data(move_token_indexes, new_recive_buffer, layer_index)
-        return
-
-    def _write_kv_move_data(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
-        self.kv_buffer[layer_index : layer_index + 1, token_indexes, :, :] = buffer_tensor
-        return
-
-    def send_to_decode_node_p2p(
-        self,
-        move_tasks: List[KVMoveTask],
-        mem_managers: List["MemoryManager"],
-        dp_size_in_node: int,
-        nccl_comm: PyNcclCommunicator,
-    ):
-        """
-        使用 p2p triton kernel 进行数据复制和传输的实现方式。
-        """
-        assert dp_size_in_node == 1
-
-        # 先将数据发送到指定的一张卡上的buffer，再发送。
-
-        move_token_indexes = []
-        for task in move_tasks:
-            if task.move_kv_len != 0:
-                move_token_indexes.extend(task.prefill_token_indexes[-task.move_kv_len :])
-
-        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
-        for i, mem in enumerate(mem_managers):
-            for layer_index in range(mem.layer_num):
-                move_buffer = mem._get_kv_move_data_p2p(move_token_indexes, layer_index, self.kv_move_buffer)
-                nccl_comm.send(move_buffer, dst=1)
-        return
-
-    def _get_kv_move_data_p2p(self, token_indexes: torch.Tensor, layer_index: int, kv_move_buffer: torch.Tensor):
-        move_token_num = len(token_indexes)
-        move_size = self.token_dim_size * move_token_num
-        move_buffer = kv_move_buffer.view(-1)[0:move_size].view(move_token_num, 2 * self.head_num, self.head_dim)
-        kv_trans(
-            self.kv_buffer[layer_index, :, :, :], token_indexes, move_buffer, self.kv_move_buf_indexes[0:move_token_num]
-        )
-        return move_buffer
-
-    def receive_from_prefill_node_p2p(
-        self,
-        move_tasks: List[KVMoveTask],
-        mem_managers: List["MemoryManager"],
-        dp_size_in_node: int,
-        nccl_comm: PyNcclCommunicator,
-    ):
-        assert dp_size_in_node == 1
-
-        # 先将数据接受到指定的一张卡上的buffer，再复制到其他的卡上。
-
-        move_token_indexes = []
-        for task in move_tasks:
-            if task.move_kv_len != 0:
-                move_token_indexes.extend(task.decode_token_indexes[-task.move_kv_len :])
-
-        move_token_indexes = torch.tensor(move_token_indexes, dtype=torch.int64, device="cuda")
-
-        token_num = len(move_token_indexes)
-        move_size = self.token_dim_size * token_num
-        recive_buffer = self.kv_move_buffer.view(-1)[0:move_size].view(token_num, 2 * self.head_num, self.head_dim)
-        for i, mem in enumerate(mem_managers):
-            for layer_index in range(mem.layer_num):
-                nccl_comm.recv(recive_buffer, src=0)
-                mem._write_kv_move_data_p2p(move_token_indexes, recive_buffer, layer_index)
-        return
-
-    def _write_kv_move_data_p2p(self, token_indexes: torch.Tensor, buffer_tensor: torch.Tensor, layer_index):
-        move_token_num = len(token_indexes)
-        kv_trans(buffer_tensor, self.kv_move_buf_indexes[0:move_token_num], self.kv_buffer[layer_index], token_indexes)
-        return
 
     def _free_buffers(self):
         self.kv_buffer = None
@@ -357,7 +199,7 @@ class MemoryManager:
         将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
         """
         if kv_trans_use_p2p():
-            from lightllm.server.router.model_infer.mode_backend.continues_batch.pd_mode.p2p_fix import reduce_tensor
+            from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import reduce_tensor
 
             mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
 

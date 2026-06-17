@@ -5,8 +5,9 @@ For each concurrency level in --concurrency_levels, launches N concurrent
 "sessions". Each session starts from a prompt of ~start_input_len tokens
 (with a per-session random prefix so different sessions don't share KV
 cache) and keeps issuing streaming requests turn by turn. After every
-turn the model's generated text plus a dynamically sampled number of new
-tokens are appended to the prompt, simulating the user's next message.
+turn, deterministic synthetic assistant tokens plus a dynamically sampled
+number of new user tokens are appended to the prompt. This keeps the exact
+request stream reproducible for a fixed seed.
 A session stops when the next prompt would exceed max_input_len, or
 after max_turns turns.
 
@@ -39,12 +40,23 @@ import os
 import random
 import threading
 import time
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import requests
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+
+_DEFAULT_TRANSIENT_RETRIES = 2
+_PROMPT_LEN_OVERLAP_CHARS = 512
+_TRANSIENT_STREAM_ERRORS = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.Timeout,
+)
 
 
 def seed_all(seed: int) -> None:
@@ -57,6 +69,85 @@ def seed_all(seed: int) -> None:
 
 def get_tokenizer(tokenizer_name: str) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     return AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+
+
+def normalize_model_name(model_name: str) -> str:
+    if not model_name:
+        return model_name
+    normalized = model_name.rstrip("/\\")
+    return normalized or model_name
+
+
+def get_models_url(completions_url: str) -> str:
+    parsed = urllib.parse.urlsplit(completions_url)
+    path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/completions"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)] + "/models"
+            return urllib.parse.urlunsplit(parsed._replace(path=path, query="", fragment=""))
+    return urllib.parse.urlunsplit(parsed._replace(path="/v1/models", query="", fragment=""))
+
+
+def fetch_served_model_names(completions_url: str, timeout_s: int = 10) -> List[str]:
+    models_url = get_models_url(completions_url)
+    request = urllib.request.Request(models_url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return [item["id"] for item in payload.get("data", []) if item.get("id")]
+
+
+def resolve_model_name(
+    completions_url: str,
+    requested_model_name: str,
+    explicit_model_name: bool,
+) -> Tuple[str, Optional[str]]:
+    normalized_name = normalize_model_name(requested_model_name)
+    if normalized_name != requested_model_name:
+        note = f"Normalized model name from `{requested_model_name}` to `{normalized_name}`."
+    else:
+        note = None
+
+    try:
+        served_model_names = fetch_served_model_names(completions_url)
+    except Exception as exc:
+        if note is not None:
+            note = f"{note} Failed to query served models: {exc}."
+        return normalized_name, note
+
+    if requested_model_name in served_model_names:
+        return requested_model_name, note
+    if normalized_name in served_model_names:
+        if normalized_name != requested_model_name:
+            return normalized_name, (
+                f"Normalized model name from `{requested_model_name}` to `{normalized_name}` " "to match `/v1/models`."
+            )
+        return normalized_name, note
+
+    requested_basename = os.path.basename(normalized_name)
+    basename_matches = [
+        served_name
+        for served_name in served_model_names
+        if os.path.basename(normalize_model_name(served_name)) == requested_basename
+    ]
+    if len(basename_matches) == 1:
+        matched_name = basename_matches[0]
+        return matched_name, (
+            f"Resolved model name `{requested_model_name}` to served model `{matched_name}` " "via `/v1/models`."
+        )
+
+    if not explicit_model_name and len(served_model_names) == 1:
+        matched_name = served_model_names[0]
+        return matched_name, (
+            f"Using the only served model `{matched_name}` returned by `/v1/models` "
+            f"instead of `{requested_model_name}`."
+        )
+
+    if note is not None:
+        note = (
+            f"{note} Available served models: {', '.join(served_model_names) or '(none)'}. "
+            f"Using `{normalized_name}`."
+        )
+    return normalized_name, note
 
 
 def gen_random_token_ids(tokenizer, n: int, rng: random.Random) -> List[int]:
@@ -87,28 +178,55 @@ def gen_session_initial_prompt(
 def append_turn_input(
     tokenizer,
     prompt: str,
-    generated_text: str,
+    prompt_token_len: int,
+    assistant_token_count: int,
     turn_input_increment: int,
     rng: random.Random,
 ) -> Tuple[str, int]:
-    """Append the model's generated text plus a fresh random user turn
-    to the prompt. Returns (new_prompt, new_prompt_token_len)."""
-    if turn_input_increment > 0:
-        new_ids = gen_random_token_ids(tokenizer, turn_input_increment, rng)
-        new_text = decode_ids(tokenizer, new_ids)
+    """Append deterministic synthetic assistant/user text to the prompt.
+
+    The benchmark measures server output, but the next request must not depend
+    on that output; otherwise repeated runs with the same seed can diverge.
+    """
+    if assistant_token_count > 0:
+        assistant_ids = gen_random_token_ids(tokenizer, assistant_token_count, rng)
+        assistant_text = decode_ids(tokenizer, assistant_ids)
     else:
-        new_text = ""
-    new_prompt = prompt + generated_text + new_text
-    new_len = len(tokenizer.encode(new_prompt, add_special_tokens=False))
+        assistant_text = ""
+
+    if turn_input_increment > 0:
+        user_ids = gen_random_token_ids(tokenizer, turn_input_increment, rng)
+        user_text = decode_ids(tokenizer, user_ids)
+    else:
+        user_text = ""
+
+    appended_text = assistant_text + user_text
+    new_prompt = prompt + appended_text
+    if not appended_text:
+        return new_prompt, prompt_token_len
+
+    # Token merges only depend on a small boundary window, so avoid
+    # re-encoding the entire prompt on every turn.
+    overlap_text = prompt[-_PROMPT_LEN_OVERLAP_CHARS:]
+    if overlap_text:
+        overlap_token_len = len(tokenizer.encode(overlap_text, add_special_tokens=False))
+        merged_token_len = len(tokenizer.encode(overlap_text + appended_text, add_special_tokens=False))
+        appended_token_len = max(merged_token_len - overlap_token_len, 0)
+    else:
+        appended_token_len = len(tokenizer.encode(appended_text, add_special_tokens=False))
+    new_len = prompt_token_len + appended_token_len
     return new_prompt, new_len
 
 
 def stream_one_turn(
+    tokenizer,
     url: str,
     model_name: str,
     prompt: str,
+    prompt_token_len: int,
     max_new_tokens: int,
     request_timeout_s: int,
+    max_retries: int = _DEFAULT_TRANSIENT_RETRIES,
 ) -> Optional[Dict]:
     """Send one streaming completion request, return per-turn stats:
       {
@@ -117,6 +235,8 @@ def stream_one_turn(
         "prompt_tokens": int,
         "completion_tokens": int,
         "cached_tokens": int,
+        "cached_tokens_reported": bool,
+        "usage_estimated": bool,
         "generated_text": str,
       }
     Returns None on failure."""
@@ -131,79 +251,119 @@ def stream_one_turn(
     }
     headers = {"Content-Type": "application/json"}
 
-    start_time = time.time()
-    first_token_time: Optional[float] = None
-    last_token_time: Optional[float] = None
-    decode_times: List[float] = []
-    generated_text_parts: List[str] = []
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_tokens = 0
+    for attempt in range(max_retries + 1):
+        start_time = time.time()
+        first_token_time: Optional[float] = None
+        last_token_time: Optional[float] = None
+        decode_times: List[float] = []
+        generated_text_parts: List[str] = []
+        prompt_tokens = 0
+        completion_tokens = 0
+        cached_tokens = 0
+        cached_tokens_reported = False
 
-    with requests.Session() as req_session:
-        req_session.trust_env = False
-        with req_session.post(
-            url,
-            headers=headers,
-            json=payload,
-            stream=True,
-            timeout=(10, request_timeout_s),
-        ) as response:
-            if response.status_code != 200:
-                err = response.text
-                raise RuntimeError(f"stream_one_turn failed: status={response.status_code}, body={err[:200]}")
+        try:
+            with requests.Session() as req_session:
+                req_session.trust_env = False
+                with req_session.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=(10, request_timeout_s),
+                ) as response:
+                    if response.status_code != 200:
+                        err = response.text
+                        if response.status_code >= 500 and attempt < max_retries:
+                            time.sleep(0.2 * (attempt + 1))
+                            continue
+                        print(f"\n[turn failed] status={response.status_code} body={err[:200]}")
+                        return None
 
-            for raw in response.iter_lines():
-                if not raw:
-                    continue
-                line = raw.strip()
-                if not line.startswith(b"data:"):
-                    continue
-                data_str = line[len(b"data:") :].strip()
-                if data_str == b"[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                except Exception:
-                    continue
+                    for raw in response.iter_lines():
+                        if not raw:
+                            continue
+                        line = raw.strip()
+                        if not line.startswith(b"data:"):
+                            continue
+                        data_str = line[len(b"data:") :].strip()
+                        if data_str == b"[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                        except Exception:
+                            continue
 
-                # Final usage-only chunk: choices == [] and usage present
-                usage = chunk.get("usage")
-                choices = chunk.get("choices") or []
-                if usage is not None and not choices:
-                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                    completion_tokens = usage.get("completion_tokens", completion_tokens)
-                    details = usage.get("prompt_tokens_details") or {}
-                    cached_tokens = details.get("cached_tokens", cached_tokens)
-                    continue
+                        # Final usage-only chunk: choices == [] and usage present
+                        usage = chunk.get("usage")
+                        choices = chunk.get("choices") or []
+                        if usage is not None and not choices:
+                            prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                            completion_tokens = usage.get("completion_tokens", completion_tokens)
+                            details = usage.get("prompt_tokens_details")
+                            if isinstance(details, dict) and details.get("cached_tokens") is not None:
+                                cached_tokens = details["cached_tokens"]
+                                cached_tokens_reported = True
+                            continue
 
-                # Token-bearing chunk
-                if not choices:
-                    continue
-                text_piece = choices[0].get("text", "")
-                if text_piece == "" and choices[0].get("finish_reason") is None:
-                    continue
+                        # Token-bearing chunk
+                        if not choices:
+                            continue
+                        text_piece = choices[0].get("text", "")
+                        if text_piece == "" and choices[0].get("finish_reason") is None:
+                            continue
 
-                now = time.time()
-                if first_token_time is None:
-                    first_token_time = now
-                else:
-                    decode_times.append(now - last_token_time)
-                last_token_time = now
-                if text_piece:
-                    generated_text_parts.append(text_piece)
+                        now = time.time()
+                        if first_token_time is None:
+                            first_token_time = now
+                        else:
+                            decode_times.append(now - last_token_time)
+                        last_token_time = now
+                        if text_piece:
+                            generated_text_parts.append(text_piece)
+        except _TRANSIENT_STREAM_ERRORS as e:
+            if first_token_time is None and attempt < max_retries:
+                time.sleep(0.2 * (attempt + 1))
+                continue
 
-    if first_token_time is None:
-        raise RuntimeError("stream_one_turn failed: no token received from stream")
+            if first_token_time is not None:
+                print(f"\n[turn warning] {e}; discarding partial turn (attempt={attempt + 1})")
+                return None
 
-    return {
-        "ttft": first_token_time - start_time,
-        "decode_times": decode_times,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "cached_tokens": cached_tokens,
-        "generated_text": "".join(generated_text_parts),
-    }
+            print(f"\n[turn exception] {e}")
+            return None
+        except Exception as e:
+            print(f"\n[turn exception] {e}")
+            return None
+
+        if first_token_time is None:
+            if attempt < max_retries:
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            return None
+
+        generated_text = "".join(generated_text_parts)
+        usage_estimated = False
+        if prompt_tokens == 0:
+            prompt_tokens = prompt_token_len
+            usage_estimated = True
+        if completion_tokens == 0:
+            estimated_completion_tokens = len(tokenizer.encode(generated_text, add_special_tokens=False))
+            completion_tokens = max(estimated_completion_tokens, len(generated_text_parts))
+            usage_estimated = True
+
+        return {
+            "ttft": first_token_time - start_time,
+            "decode_times": decode_times,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "cached_tokens_reported": cached_tokens_reported,
+            "usage_estimated": usage_estimated,
+            "generated_text": generated_text,
+        }
+
+    return None
 
 
 def run_session(
@@ -234,9 +394,11 @@ def run_session(
         while turn_idx < max_turns and prompt_len < max_input_len:
             turn_output_len = rng.randint(min_output_len, output_len)
             result = stream_one_turn(
+                tokenizer=tokenizer,
                 url=url,
                 model_name=model_name,
                 prompt=prompt,
+                prompt_token_len=prompt_len,
                 max_new_tokens=turn_output_len,
                 request_timeout_s=request_timeout_s,
             )
@@ -248,14 +410,16 @@ def run_session(
                 print(
                     f"\rconc={progress_state['concurrency']} "
                     f"finished_turns={progress_state['finished_turns']} "
-                    f"active_sessions={progress_state['active_sessions']}",
+                    f"active_sessions={progress_state['active_sessions']}\033[K",
                     end="",
+                    flush=True,
                 )
             turn_input_len = rng.randint(min_turn_input_increment, turn_input_increment)
             prompt, prompt_len = append_turn_input(
                 tokenizer,
                 prompt,
-                result["generated_text"],
+                prompt_len,
+                turn_output_len,
                 turn_input_len,
                 rng,
             )
@@ -358,13 +522,14 @@ def summarize(
     prompt_tokens = sum(t["prompt_tokens"] for t in turns)
     completion_tokens = sum(t["completion_tokens"] for t in turns)
     cached_tokens = sum(t["cached_tokens"] for t in turns)
+    cached_tokens_reported_turns = sum(1 for t in turns if t.get("cached_tokens_reported"))
+    usage_estimated_turns = sum(1 for t in turns if t.get("usage_estimated"))
     total_tokens = prompt_tokens + completion_tokens
 
     qps = len(turns) / wall_time
     tpm_total = total_tokens / wall_time * 60.0
     tpm_prompt = prompt_tokens / wall_time * 60.0
     tpm_completion = completion_tokens / wall_time * 60.0
-    cache_hit_ratio = cached_tokens / prompt_tokens if prompt_tokens else 0.0
 
     out["QPS"] = round(qps, 4)
     out["TPM_total"] = round(tpm_total, 2)
@@ -373,7 +538,18 @@ def summarize(
     out["total_prompt_tokens"] = prompt_tokens
     out["total_completion_tokens"] = completion_tokens
     out["total_cached_prompt_tokens"] = cached_tokens
-    out["cache_hit_ratio"] = round(cache_hit_ratio, 6)
+    out["cached_tokens_reported_turns"] = cached_tokens_reported_turns
+    out["usage_estimated_turns"] = usage_estimated_turns
+    if cached_tokens_reported_turns > 0:
+        cache_hit_ratio = cached_tokens / prompt_tokens if prompt_tokens else 0.0
+        out["cache_hit_ratio"] = round(cache_hit_ratio, 6)
+    else:
+        out["cache_hit_ratio"] = None
+        out["cache_hit_ratio_note"] = (
+            "Server did not return usage.prompt_tokens_details.cached_tokens. "
+            "For vLLM OpenAI-compatible APIs, start the server with "
+            "--enable-prompt-tokens-details to expose cache-hit stats."
+        )
     out["avg_prompt_tokens_per_turn"] = round(prompt_tokens / len(turns), 2)
     out["avg_completion_tokens_per_turn"] = round(completion_tokens / len(turns), 2)
 
@@ -406,10 +582,16 @@ def print_summary(summary: Dict) -> None:
     print(f"  TPM (total)        : {summary['TPM_total']}")
     print(f"  TPM (prompt)       : {summary['TPM_prompt']}")
     print(f"  TPM (completion)   : {summary['TPM_completion']}")
-    print(
-        f"  Cache hit ratio    : {summary['cache_hit_ratio'] * 100:.2f}%  "
-        f"({summary['total_cached_prompt_tokens']} / {summary['total_prompt_tokens']})"
-    )
+    if summary["cache_hit_ratio"] is None:
+        print("  Cache hit ratio    : n/a")
+        print(f"  Cache hit note     : {summary['cache_hit_ratio_note']}")
+    else:
+        print(
+            f"  Cache hit ratio    : {summary['cache_hit_ratio'] * 100:.2f}%  "
+            f"({summary['total_cached_prompt_tokens']} / {summary['total_prompt_tokens']})"
+        )
+    if summary.get("usage_estimated_turns"):
+        print(f"  Usage estimated    : {summary['usage_estimated_turns']} turns")
     print(f"  Avg prompt tokens  : {summary['avg_prompt_tokens_per_turn']}")
     print(f"  Avg output tokens  : {summary['avg_completion_tokens_per_turn']}")
     ttft = summary["TTFT_ms"]
@@ -432,7 +614,7 @@ def main() -> None:
     parser.add_argument(
         "--url",
         type=str,
-        default="http://127.0.0.1:8088/v1/completions",
+        default="http://127.0.0.1:8000/v1/completions",
         help="Streaming OpenAI completion endpoint. The benchmark relies on "
         "the final SSE `usage` chunk to obtain cached_tokens.",
     )
@@ -459,7 +641,7 @@ def main() -> None:
         "--turn_input_increment",
         type=int,
         default=2048,
-        help="Maximum new 'user' tokens sampled after each turn, on top " "of the model's generated text.",
+        help="Maximum new 'user' tokens sampled after each turn, on top of deterministic synthetic assistant tokens.",
     )
     parser.add_argument(
         "--min_turn_input_increment", type=int, default=512, help="Minimum new 'user' tokens sampled after each turn."
@@ -499,12 +681,19 @@ def main() -> None:
         return
 
     seed_all(args.seed)
-    model_name = args.model_name or args.tokenizer_path
+    requested_model_name = args.model_name or args.tokenizer_path
+    model_name, model_name_note = resolve_model_name(
+        args.url,
+        requested_model_name,
+        explicit_model_name=args.model_name is not None,
+    )
     tokenizer = get_tokenizer(args.tokenizer_path)
     concurrency_levels = [int(x) for x in args.concurrency_levels.split(",") if x.strip()]
 
     print(f"URL                : {args.url}")
     print(f"Model              : {model_name}")
+    if model_name_note:
+        print(f"Model note         : {model_name_note}")
     print(f"Concurrency levels : {concurrency_levels}")
     print(f"start_input_len    : {args.start_input_len}")
     print(f"max_input_len      : {args.max_input_len}")
@@ -538,6 +727,7 @@ def main() -> None:
         "config": {
             "url": args.url,
             "model_name": model_name,
+            "requested_model_name": requested_model_name,
             "tokenizer_path": args.tokenizer_path,
             "concurrency_levels": concurrency_levels,
             "start_input_len": args.start_input_len,

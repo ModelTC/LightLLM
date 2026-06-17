@@ -91,6 +91,7 @@ class TpPartBaseModel:
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
         self.quant_type = kvargs.get("quant_type", "none")
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
+        self.expert_dtype = kvargs.get("expert_dtype", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
@@ -114,7 +115,6 @@ class TpPartBaseModel:
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
             self._init_mem_manager()
-            self._init_kv_move_buffer()
 
         # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
@@ -172,7 +172,7 @@ class TpPartBaseModel:
         return
 
     def _init_quant(self):
-        self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path)
+        self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self, start_layer_index=0):
@@ -211,11 +211,6 @@ class TpPartBaseModel:
             mem_fraction=self.mem_fraction,
         )
         return
-
-    def _init_kv_move_buffer(self):
-        # p d 分离的推理模式下才需要做这一步初始化
-        if self.run_mode in ["prefill", "decode"]:
-            self.mem_manager.alloc_kv_move_buffer(self.mem_manager.size)
 
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size

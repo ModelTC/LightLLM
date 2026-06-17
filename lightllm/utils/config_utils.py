@@ -238,16 +238,36 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
 
     # Qwen3.5 checkpoints can have an eos_token_id in config that differs from
     # tokenizer.eos_token_id. In practice tokenizer.eos_token_id is the reliable
-    # stop id (<|im_end|>) for detokenization/stop behavior.
+    # stop id (<|im_end|>, <|endoftext|>) for detokenization/stop behavior.
     try:
         config_json = get_config_json(model_path)
         model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
         if model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}:
             from transformers import AutoTokenizer
 
+            eos_token_ids = []
+
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
             if tokenizer.eos_token_id is not None:
-                return [int(tokenizer.eos_token_id)]
+                eos_token_ids.append(int(tokenizer.eos_token_id))
+
+            generation_config_path = os.path.join(model_path, "generation_config.json")
+            if os.path.exists(generation_config_path):
+                with open(generation_config_path, "r") as file:
+                    generation_eos_token_id = json.load(file).get("eos_token_id")
+                if isinstance(generation_eos_token_id, int):
+                    eos_token_ids.append(generation_eos_token_id)
+                elif isinstance(generation_eos_token_id, list):
+                    eos_token_ids.extend(generation_eos_token_id)
+
+            config_eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
+            if isinstance(config_eos_token_id, int):
+                eos_token_ids.append(config_eos_token_id)
+            elif isinstance(config_eos_token_id, list):
+                eos_token_ids.extend(config_eos_token_id)
+
+            if eos_token_ids:
+                return list(set(eos_token_ids))
     except Exception:
         pass
 

@@ -38,10 +38,10 @@ class ClientDisconnected(Exception):
         self.reason = reason
 
 
-class NixlPrefillNodeStopGenToken(Exception):
-    def __init__(self, group_request_id, message="Nixl prefill node stop gen token"):
+class PDPrefillNodeStopGenToken(Exception):
+    def __init__(self, group_request_id, message="PD prefill node stop gen token"):
         """
-        Initialize the NixlPrefillNodeStopGenToken
+        Initialize the PDPrefillNodeStopGenToken
 
         Args:
             message (str): Error message to display

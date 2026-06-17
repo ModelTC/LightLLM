@@ -49,10 +49,15 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
-        dist_group_manager.new_deepep_group(self.config["n_routed_experts"], self.config["hidden_size"])
         if self.args.enable_return_routed_experts:
             num_moe_layers = sum(1 for w in self.trans_layers_weight if w.is_moe)
             init_routing_capture(self, num_moe_layers)
+        dist_group_manager.new_deepep_group(
+            self.config["n_routed_experts"],
+            self.config["hidden_size"],
+            self.config.get("num_experts_per_tok", 1),
+            self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+        )
 
     def _verify_params(self):
         return super()._verify_params()

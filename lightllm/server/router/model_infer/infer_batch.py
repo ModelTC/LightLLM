@@ -18,11 +18,10 @@ from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.req_id_generator import convert_sub_id_to_group_id
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.pd_io_struct import NIXLDecodeNodeInfo
+from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel import routing_manager as _routing_mgr
 
@@ -238,6 +237,19 @@ class InferenceContext:
 
         if shared_kv_len <= req.cur_kv_len:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][shared_kv_len : req.cur_kv_len])
+            # 该分支不会把 prefill 阶段累积的 big page id 插入 radix cache（典型为 pause/abort
+            # 在 prefill 跨过 big page 边界后、到达末尾前触发），需在此显式释放，避免泄漏。
+
+            # 释放本请求 prefill 阶段在 big page 边界上申请、但尚未插入 radix cache 的 big page
+            # state buffer。仅当请求未走 insert 分支(小页/大页插入)就被释放时才会有残留，典型场景：
+            # big page 模式下请求在 prefill 跨过 big page 边界后、到达末尾前被 pause / abort。
+            # 若不释放，会泄漏 big page state slot，并触发 free_a_req_mem 中 dict 为空的断言。
+            if req.linear_att_len_to_big_page_id:
+                self.radix_cache.linear_att_big_page_buffers.free_state_cache(
+                    list(req.linear_att_len_to_big_page_id.values())
+                )
+                req.linear_att_len_to_big_page_id.clear()
+
             req.cur_kv_len = shared_kv_len
             assert req.tail_linear_att_small_page_buffer_id is None
             if req.shared_kv_node is not None:
@@ -299,15 +311,12 @@ class InferenceContext:
 
     def filter_reqs(self, finished_reqs: List["InferReq"]):
         if finished_reqs:
-            g_infer_state_lock.acquire()
             self._filter([req.req_id for req in finished_reqs])
-            g_infer_state_lock.release()
         return
 
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-            g_infer_state_lock.acquire()
 
             free_token_index = []
             for req in pause_reqs:
@@ -325,13 +334,10 @@ class InferenceContext:
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
                 self.req_manager.free_token(free_token_index)
-
-            g_infer_state_lock.release()
         return self
 
     def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
         if paused_reqs:
-            g_infer_state_lock.acquire()
 
             for req in paused_reqs:
                 prefill_need_token_num = req.get_cur_total_len()
@@ -349,8 +355,6 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
-
-            g_infer_state_lock.release()
         return
 
     def get_can_alloc_token_num(self):
@@ -383,20 +387,23 @@ class InferenceContext:
                 big_page_buffer_ids.append(-1)
 
         assert len(b_req_idx) == len(big_page_buffer_ids)
-        big_page_buffer_ids = torch.tensor(big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu")
-        big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
+        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
+            big_page_buffer_ids = torch.tensor(
+                big_page_buffer_ids, dtype=torch.int32, requires_grad=False, device="cpu"
+            )
+            big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
 
-        from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+            from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-        copy_linear_att_state_to_kv_buffer(
-            b_req_idx=b_req_idx,
-            big_page_buffer_ids=big_page_buffer_ids,
-            gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
-            gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
-            cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
-            cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
-            mtp_step=self.args.mtp_step,
-        )
+            copy_linear_att_state_to_kv_buffer(
+                b_req_idx=b_req_idx,
+                big_page_buffer_ids=big_page_buffer_ids,
+                gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
+                gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
+                cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
+                cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
+                mtp_step=self.args.mtp_step,
+            )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
 
@@ -458,12 +465,6 @@ class InferSamplingParams:
         # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
         self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
 
-        # p d mode use params
-        if self.shm_param.move_kv_to_decode_node.exists:
-            self.move_kv_to_decode_node = self.shm_param.move_kv_to_decode_node.to_dict()
-        else:
-            self.move_kv_to_decode_node = None
-
         # this check is not very good to placed here. to do...
         if self.allowed_token_ids is not None:
             if not all(e < vocab_size for e in self.allowed_token_ids):
@@ -475,11 +476,11 @@ class InferSamplingParams:
                 logger.error("invalid_token_ids contain tokenid >= vobsize, we remove these token ids")
                 self.invalid_token_ids = [e for e in self.invalid_token_ids if e < vocab_size]
 
-        # nixl decode node information
-        if self.shm_param.nixl_params.data_len > 0:
-            self.nixl_decode_node: NIXLDecodeNodeInfo = pickle.loads(self.shm_param.nixl_params.get())
+        # pd decode node information
+        if self.shm_param.pd_kv_trans_params.data_len > 0:
+            self.pd_decode_node: PDDecodeNodeInfo = pickle.loads(self.shm_param.pd_kv_trans_params.get())
         else:
-            self.nixl_decode_node: NIXLDecodeNodeInfo = None
+            self.pd_decode_node: PDDecodeNodeInfo = None
 
         # only pd mode used.
         self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
@@ -539,12 +540,12 @@ class InferReq:
         self.slave_reqs: List[InferReq] = []
         self.related_master_req: InferReq = None
 
-        # nixl pd 分离模式使用的变量, 普通模式下这些变量没有具体用途
-        self.nixl_trans_kv_start_index: int = 0
-        self.nixl_pd_task_num: int = 0
-        self.nixl_pd_task_sunccess_num: int = 0
-        self.nixl_pd_task_failed_num: int = 0
-        self.nixl_trans_device_id: int = -1
+        # pd 分离模式使用的变量, 普通模式下这些变量没有具体用途
+        self.pd_trans_kv_start_index: int = 0
+        self.pd_task_num: int = 0
+        self.pd_task_success_num: int = 0
+        self.pd_task_failed_num: int = 0
+        self.pd_trans_device_id: int = -1
 
         # 类似 qwen3.5 这种混合linear att 模型使用的状态，记录申请来用于保存对应的线性att缓存的 buffer id
         # 当 prefill 阶段结束后, 对应长度的 linear att state 会写入到申请 buffer id 对应的块中， 方便插入到 radix cache中
@@ -593,9 +594,9 @@ class InferReq:
         self.shm_req.link_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
 
-        # 更新 nixl pd 分离模式下， prefill 节点需要开始传输的起始位置
-        if self.sampling_param.nixl_decode_node is not None:
-            self.nixl_trans_kv_start_index = self.sampling_param.nixl_decode_node.ready_kv_len
+        # 更新 pd 分离模式下， prefill 节点需要开始传输的起始位置
+        if self.sampling_param.pd_decode_node is not None:
+            self.pd_trans_kv_start_index = self.sampling_param.pd_decode_node.ready_kv_len
 
         self.cur_kv_len = 0
         self.cur_output_len = 0
@@ -911,12 +912,12 @@ class InferReqUpdatePack:
         eos_ids: List[int],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
-        nixl_prefill_chuncked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
+        pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
     ):
-        # nixl_prefill_chuncked_handle_func 主要是为了处理 nixl prefill 模式下
+        # pd_prefill_chunked_handle_func 主要是为了处理 pd prefill 模式下
         # 分块 prefill 后，形成对应的pd 分块传输处理。
-        if nixl_prefill_chuncked_handle_func is not None:
-            nixl_prefill_chuncked_handle_func(self.req_obj, next_token_id, next_token_logprob, self.output_len)
+        if pd_prefill_chunked_handle_func is not None:
+            pd_prefill_chunked_handle_func(self.req_obj, next_token_id, next_token_logprob, self.output_len)
 
         if self.output_len <= 0:
             return

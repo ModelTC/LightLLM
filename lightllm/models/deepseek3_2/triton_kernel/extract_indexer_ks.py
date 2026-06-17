@@ -112,4 +112,4 @@ def extract_indexer_ks(
         num_stages=1,
     )
 
-    return O_fp8, O_scale
+    return O_fp8, O_scale.squeeze(-1)

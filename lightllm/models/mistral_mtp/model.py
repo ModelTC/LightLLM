@@ -10,6 +10,9 @@ from lightllm.common.basemodel import TpPartBaseModel
 
 class MistralMTPModel(MistralTpPartModel):
 
+    # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
+    is_mtp_draft_model = True
+
     pre_and_post_weight_class = MistralMTPPreAndPostLayerWeight
     pre_layer_infer_class = MistralMTPPreLayerInfer
 

@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
-    node_uuid = uuid.uuid1().hex[0:8]
+    node_uuid = uuid.uuid4().hex[0:16]
 
     if args.run_mode == "pd_master":
         os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(node_uuid) + "_pd_master"
@@ -59,7 +59,7 @@ def get_llm_data_type() -> torch.dtype:
     elif data_type in ["fp32", "float32"]:
         data_type = torch.float32
     else:
-        raise ValueError(f"Unsupport datatype {data_type}!")
+        raise ValueError(f"Unsupported datatype {data_type}!")
     return data_type
 
 
@@ -69,9 +69,22 @@ def enable_env_vars(args):
 
 
 @lru_cache(maxsize=None)
-def get_deepep_num_max_dispatch_tokens_per_rank():
+def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
+    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大。
+    # 如果未显式配置，则默认至少覆盖当前进程的 `batch_max_tokens`，避免 DeepEP V2 在 autotune
+    # warmup 或大 prefill batch 时因为 buffer 上界过小而报错。
+    configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", None)
+    if configured is not None:
+        return int(configured)
+
+    batch_max_tokens = get_env_start_args().batch_max_tokens or 256
+    return ((int(batch_max_tokens) + 7) // 8) * 8
+
+
+@lru_cache(maxsize=None)
+def get_deepep_num_max_dispatch_tokens_per_rank_decode():
     # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK", 256))
+    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
 
 
 def get_lightllm_gunicorn_keep_alive():

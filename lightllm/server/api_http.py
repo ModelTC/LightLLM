@@ -224,13 +224,12 @@ async def healthcheck(request: Request):
 
     if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":
         return JSONResponse({"message": "Error"}, status_code=503)
-    from lightllm.utils.health_check import health_check, health_obj
+    from lightllm.utils.health_check import health_check
 
-    health_task = asyncio.create_task(health_check(g_objs.args, g_objs.httpserver_manager, None))
-    if not health_obj.is_health():
-        await health_task
+    is_healthy = health_check(g_objs.httpserver_manager.shm_req_manager)
     return JSONResponse(
-        {"message": "Ok" if health_obj.is_health() else "Error"}, status_code=200 if health_obj.is_health() else 503
+        {"message": "Ok" if is_healthy else "Error"},
+        status_code=200 if is_healthy else 503,
     )
 
 
@@ -259,7 +258,7 @@ async def token_load(request: Request):
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -281,7 +280,7 @@ async def generate(request: Request) -> Response:
 
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -303,7 +302,7 @@ async def generate_stream(request: Request) -> Response:
 
 @app.post("/get_score")
 async def get_score(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -319,7 +318,7 @@ async def get_score(request: Request) -> Response:
 
 @app.post("/")
 async def compat_generate(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -334,7 +333,7 @@ async def compat_generate(request: Request) -> Response:
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -351,7 +350,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
 @app.post("/v1/completions", response_model=CompletionResponse)
 async def completions(request: CompletionRequest, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -368,7 +367,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
 @app.post("/v1/messages")
 async def anthropic_messages(raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
         return create_error_response(
             HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
         )
@@ -566,6 +565,24 @@ async def kv_move_status(websocket: WebSocket):
         logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
         logger.exception(str(e))
     return
+
+
+@app.get("/profiler_start")
+async def profiler_start() -> Response:
+    if g_objs.args.enable_profiling:
+        await g_objs.httpserver_manager.profiler_cmd("start")
+        return JSONResponse({"status": "ok"})
+    else:
+        return JSONResponse({"message": "Profiling support not enabled"}, status_code=400)
+
+
+@app.get("/profiler_stop")
+async def profiler_stop() -> Response:
+    if g_objs.args.enable_profiling:
+        await g_objs.httpserver_manager.profiler_cmd("stop")
+        return JSONResponse({"status": "ok"})
+    else:
+        return JSONResponse({"message": "Profiling support not enabled"}, status_code=400)
 
 
 @app.on_event("shutdown")

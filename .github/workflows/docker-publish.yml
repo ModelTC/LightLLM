@@ -86,8 +86,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      # Build and push default image (cuda12.8.0)
-      - name: Build and push Docker image (default cuda12.8.0)
+      # Build and push default image (cuda13.0.0)
+      - name: Build and push Docker image (default cuda13.0.0)
         id: build-and-push
         uses: docker/build-push-action@ac9327eae2b366085ac7f6a2d02df8aa8ead720a
         with:
@@ -97,10 +97,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            CUDA_VERSION=12.8.0
+            CUDA_VERSION=13.0.0
             ENABLE_DEEPEP=1
             ENABLE_NIXL=1
             ENABLE_CACHE=1
+            ENABLE_SM100=0
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

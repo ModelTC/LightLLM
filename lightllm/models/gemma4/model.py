@@ -130,7 +130,12 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def _init_custom(self):
         self._init_to_get_rotary_gemma4()
         if self.config.get("enable_moe_block", False):
-            dist_group_manager.new_deepep_group(self.config["num_experts"], self.config["hidden_size"])
+            dist_group_manager.new_deepep_group(
+                self.config["num_experts"],
+                self.config["hidden_size"],
+                self.config.get("num_experts_per_tok", self.config.get("top_k_experts", 1)),
+                self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+            )
         self._init_ple_static_buffer()
 
     def _init_ple_static_buffer(self):

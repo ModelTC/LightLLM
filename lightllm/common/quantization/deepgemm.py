@@ -126,6 +126,78 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
+@QUANTMETHODS.register(["deepgemm-fp4fp8-b32"], platform="cuda")
+class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.weight_suffix = "weight"
+        self.weight_zero_point_suffix = None
+        self.weight_scale_suffix = None
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
+
+    @property
+    def method_name(self):
+        return "deepgemm-fp4fp8-b32"
+
+    def quantize(self, weight: torch.Tensor, output: WeightPack):
+        from deep_gemm.utils import per_token_cast_to_fp4
+        import deep_gemm
+
+        weight = weight.cuda(output.weight.device)
+        if weight.dim() == 2:
+            n, k = weight.shape
+            packed_weight, weight_scale = per_token_cast_to_fp4(weight, use_ue8m0=True, gran_k=self.block_size)
+            weight_scale = deep_gemm.transform_sf_into_required_layout(weight_scale, n, k, (1, self.block_size), None)
+        else:
+            num_groups, n, k = weight.shape
+            packed_weight = torch.empty((num_groups, n, k // 2), device=weight.device, dtype=torch.int8)
+            weight_scale = torch.empty((num_groups, n, k // self.block_size), device=weight.device, dtype=torch.float32)
+            for i in range(num_groups):
+                packed_weight[i], weight_scale[i] = per_token_cast_to_fp4(
+                    weight[i], use_ue8m0=True, gran_k=self.block_size
+                )
+            weight_scale = deep_gemm.transform_sf_into_required_layout(
+                weight_scale, n, k, (1, self.block_size), num_groups
+            )
+        output.weight.copy_(packed_weight)
+        output.weight_scale.copy_(weight_scale)
+        return
+
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: "WeightPack",
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("deepgemm-fp4fp8-b32 is only implemented for fused MoE expert weights")
+
+    def _create_weight(
+        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
+        assert in_dim % 2 == 0, "FP4 packed weight requires even input dimension"
+        assert in_dim % self.block_size == 0, "FP4 scale dimension must be divisible by block_size"
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.int32).cuda(
+            device_id
+        )
+        mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
+        mm_param_list = self._split_weight_pack(
+            mm_param,
+            weight_out_dims=out_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=out_dims,
+            weight_scale_split_dim=-2,
+        )
+        return mm_param, mm_param_list
+
+
 def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "gemm_fp8_fp8_bf16_nt"):

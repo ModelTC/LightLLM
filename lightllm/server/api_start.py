@@ -5,6 +5,7 @@ import time
 import uuid
 import subprocess
 import signal
+import math
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
@@ -108,7 +109,7 @@ def _launch_subprocesses(args: StartArgs):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -124,7 +125,7 @@ def _launch_subprocesses(args: StartArgs):
             args.disable_audio = True
 
     # pd 分离模式下，不启动多模态的模块
-    if args.run_mode in ["decode", "nixl_decode"]:
+    if args.run_mode == "decode":
         args.disable_audio = True
         args.disable_vision = True
 
@@ -315,7 +316,10 @@ def _launch_subprocesses(args: StartArgs):
     # linear att cache 参数自动设置
     if args.linear_att_cache_size is None:
         # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
-        args.linear_att_cache_size = args.running_max_req_size * 2
+        default_cache_size = args.running_max_req_size * 2
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
+        args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
@@ -360,8 +364,6 @@ def _launch_subprocesses(args: StartArgs):
     # 不应该把它加入端口锁定列表，否则单机多节点 tp 测试会冲突。
     if args.nccl_port is not None and args.node_rank == 0:
         already_uesd_ports.append(args.nccl_port)
-    if args.pd_decode_rpyc_port is not None:
-        already_uesd_ports.append(args.pd_decode_rpyc_port)
     if args.control_rpyc_port is not None:
         already_uesd_ports.append(args.control_rpyc_port)
     if args.visual_nccl_ports is not None:
@@ -384,6 +386,7 @@ def _launch_subprocesses(args: StartArgs):
     (
         nccl_port,
         router_port,
+        router_profiler_port,
         detokenization_port,
         http_server_port,
         visual_port,
@@ -391,7 +394,6 @@ def _launch_subprocesses(args: StartArgs):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-        pd_decode_rpyc_port,
         control_rpyc_port,
     ) = can_use_ports[0:11]
     can_use_ports = can_use_ports[11:]
@@ -411,8 +413,6 @@ def _launch_subprocesses(args: StartArgs):
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
-    if args.pd_decode_rpyc_port is None:
-        args.pd_decode_rpyc_port = pd_decode_rpyc_port
     if args.control_rpyc_port is None:
         args.control_rpyc_port = control_rpyc_port
 
@@ -426,6 +426,7 @@ def _launch_subprocesses(args: StartArgs):
         logger.info(f"zmq mode head: {args.zmq_mode}")
 
     args.router_port = router_port
+    args.router_profiler_port = router_profiler_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
     args.visual_port = visual_port
@@ -437,10 +438,6 @@ def _launch_subprocesses(args: StartArgs):
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
-    # p 节点用来建立torch kv 传输分布组的可用端口范围
-    args.pd_p_allowed_port_min = 20000
-    args.pd_p_allowed_port_max = 30000
-
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
