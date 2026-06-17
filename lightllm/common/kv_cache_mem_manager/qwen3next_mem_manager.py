@@ -33,13 +33,7 @@ class Qwen3NextMemManager(MemoryManager):
         return super().get_att_input_params(layer_index)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        # 将原来一次性申请的大 tensor (layer_num, size+1, 2*head_num, head_dim)
-        # 拆分成 layer_num 个独立的小 tensor，避免单次大块连续显存的申请，
-        # 在 RL release/resume 显存回放等场景下减少 OOM 概率。
-        # 所有按 self.kv_buffer[layer_index] 形式的访问保持完全兼容。
-        self.kv_buffer = [
-            torch.empty((size + 1, 2 * head_num, head_dim), dtype=dtype, device="cuda") for _ in range(layer_num)
-        ]
+        super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
         # TODO 初始化线性 att 对应的部分 buffer.
         self._init_linear_att_buffers()
         return
