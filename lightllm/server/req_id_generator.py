@@ -30,11 +30,13 @@ class ReqIDGenerator:
         self.current_id.arr[0] = 0
         self.current_id.arr[1] = 0
         self.lock = AtomicShmLock(f"{get_unique_server_name()}_req_id_gen_lock")
-        if self.args.httpserver_workers > 1:
-            self._wait_all_workers_ready()
+        self._wait_all_workers_ready()
         logger.info("ReqIDGenerator init finished")
 
     def _wait_all_workers_ready(self):
+        if self.args.httpserver_workers == 1:
+            return
+        
         from lightllm.utils.envs_utils import get_unique_server_name
         from lightllm.server.core.objs.shm_array import ShmArray
 
