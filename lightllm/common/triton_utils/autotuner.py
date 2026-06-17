@@ -11,7 +11,7 @@ from tqdm import tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
-from typing import Callable, Optional, Union, List
+from typing import Callable, List
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
@@ -106,10 +106,6 @@ class Autotuner:
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
-        # cache_dir 依赖 get_current_device_name(),后者要求 torch.cuda.is_available()。
-        # 这里 lazy 化,避免 CPU-only 的进程(例如 Ray driver / verl rollout replica
-        # 入口)在 import 时就触发 TypeError。
-        self._cache_dir: Optional[str] = None
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -207,7 +203,7 @@ class Autotuner:
 
     @property
     def cache_dir(self) -> str:
-        if self._cache_dir is None:
+        if not hasattr(self, "_cache_dir"):
             device_name = get_current_device_name()
             if device_name is None:
                 raise RuntimeError(
