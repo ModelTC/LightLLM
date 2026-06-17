@@ -124,15 +124,16 @@ def _try_flashinfer_sample_without_penalty(logits: torch.Tensor, reqs: List[Infe
 
     first_param = reqs[0].sampling_param.shm_param
     top_p = first_param.top_p
-    top_k = first_param.top_k
     temperature = first_param.temperature
     vocab_size = reqs[0].vocab_size
+    top_k = _normalize_top_k(first_param.top_k, vocab_size)
 
     if top_k <= 1 or (top_k == vocab_size and top_p == 1.0):
         return None
 
     for req in reqs:
         shm_param = req.sampling_param.shm_param
+        req_top_k = _normalize_top_k(shm_param.top_k, req.vocab_size)
         if req.generator is not None:
             return None
         if len(req.sampling_param.invalid_token_ids) != 0:
@@ -149,7 +150,7 @@ def _try_flashinfer_sample_without_penalty(logits: torch.Tensor, reqs: List[Infe
             return None
         if shm_param.top_p != top_p:
             return None
-        if shm_param.top_k != top_k:
+        if req_top_k != top_k:
             return None
 
     if temperature != 1.0:
@@ -162,6 +163,11 @@ def _try_flashinfer_sample_without_penalty(logits: torch.Tensor, reqs: List[Infe
     top_p_tensor = _get_uniform_tensor(top_p, logits.shape[0], torch.float32, logits.device)
     top_k_tensor = _get_uniform_tensor(top_k, logits.shape[0], torch.int32, logits.device)
     return _flashinfer_top_p_top_k_sample_from_logits(logits, top_p_tensor, top_k_tensor)
+
+
+def _normalize_top_k(top_k: int, vocab_size: int) -> int:
+    # OpenAI-compatible requests use top_k=-1 to mean no top-k filtering.
+    return vocab_size if top_k <= 0 else top_k
 
 
 def _is_flashinfer_sampling() -> bool:
@@ -372,7 +378,7 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
 
         temperatures.append(shm_param.temperature)
         top_ps.append(shm_param.top_p)
-        top_k_val = shm_param.top_k
+        top_k_val = _normalize_top_k(shm_param.top_k, req_obj.vocab_size)
         top_ks.append(top_k_val)
         if top_k_val > 1:
             is_all_greedy = False

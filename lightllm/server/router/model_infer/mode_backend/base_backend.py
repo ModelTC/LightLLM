@@ -823,11 +823,12 @@ class ModeBackend:
             b_mtp_index=b_mtp_index,
             b_has_out=b_has_out,
         )
-        g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
-            b_req_idx=b_req_idx,
-            next_token_ids=next_token_ids,
-            mask=b_has_out,
-        )
+        if any(req.need_out_token_id_statistics for req in run_reqs):
+            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
+                b_req_idx=b_req_idx,
+                next_token_ids=next_token_ids,
+                mask=b_has_out,
+            )
         next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
             next_token_ids,
             next_token_logprobs,
