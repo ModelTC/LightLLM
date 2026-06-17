@@ -113,21 +113,6 @@ class ModelRpcServer(rpyc.Service):
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
-    def release_memory_occupation(self, tags: List[MemoryTag]):
-        try:
-            self.backend.release_memory_occupation(tags)
-            return True
-        except BaseException as e:
-            logger.exception(f"release memory occupation failed: {str(e)}")
-            return False
-
-    def resume_memory_occupation(self, tags: List[MemoryTag]):
-        try:
-            self.backend.resume_memory_occupation(tags)
-            return True
-        except BaseException as e:
-            logger.exception(f"resume memory occupation failed: {str(e)}")
-            return False
 
     def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
         try:
