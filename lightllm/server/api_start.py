@@ -103,6 +103,7 @@ def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
     auto_set_max_req_total_len(args)
+    set_unique_server_name(args)
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
