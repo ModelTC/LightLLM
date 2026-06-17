@@ -1,27 +1,26 @@
 import importlib
+import pkgutil
 
-_BUILTIN_ATT_MODULES: tuple[str, ...] = (
-    "lightllm.common.basemodel.attention.triton.fp",
-    "lightllm.common.basemodel.attention.triton.int4kv",
-    "lightllm.common.basemodel.attention.triton.int8kv",
-    "lightllm.common.basemodel.attention.triton.mla",
-    "lightllm.common.basemodel.attention.fa3.fp",
-    "lightllm.common.basemodel.attention.paged_fa3.fp",
-    "lightllm.common.basemodel.attention.fa3.fp8",
-    "lightllm.common.basemodel.attention.fa3.mla",
-    "lightllm.common.basemodel.attention.flashinfer.fp",
-    "lightllm.common.basemodel.attention.flashinfer.fp8",
-    "lightllm.common.basemodel.attention.flashinfer.mla",
-    "lightllm.common.basemodel.attention.nsa.flashmla_sparse",
-    "lightllm.common.basemodel.attention.nsa.fp8_flashmla_sparse",
+from lightllm.platform.plugins.att import ENTRY_POINT_GROUP
+from lightllm.platform.plugins.common import list_installed_plugin_names
+
+
+_ATT_ROOT = "lightllm.common.basemodel.attention"
+
+_BUILTIN_ATT_DIRS: tuple[str, ...] = (
+    "fa3",
+    "flashinfer",
+    "nsa",
+    "paged_fa3",
+    "triton",
 )
-
-_att_backends_loaded = False
 
 
 def _load_builtin_att_backends() -> None:
-    for module_name in _BUILTIN_ATT_MODULES:
-        importlib.import_module(module_name)
+    for backend_dir in _BUILTIN_ATT_DIRS:
+        package = importlib.import_module(f"{_ATT_ROOT}.{backend_dir}")
+        for module_info in pkgutil.iter_modules(package.__path__, prefix=f"{package.__name__}."):
+            importlib.import_module(module_info.name)
 
 
 def _load_att_backends(extra_modules: tuple[str, ...] = ()) -> None:
@@ -61,20 +60,18 @@ def _format_extra_att_module_hints() -> str:
         "Check that --extra_att_modules / plugin extra_modules import paths are correct "
         "and modules define @register_att_backend."
     ]
-    try:
-        from importlib.metadata import entry_points as eps_fn
-
-        available = sorted(ep.name for ep in eps_fn(group="lightllm.att_plugins"))
-    except Exception:
-        available = []
+    available = list_installed_plugin_names(ENTRY_POINT_GROUP)
     if available:
         hints.append(f"Installed att plugins: {available}.")
     else:
         hints.append(
             "No att plugins installed; use --extra_att_plugins <name> with a package "
-            "registered under entry point group 'lightllm.att_plugins'."
+            f"registered under entry point group {ENTRY_POINT_GROUP!r}."
         )
     return " ".join(hints)
+
+
+_att_backends_loaded = False
 
 
 def ensure_att_backends_loaded() -> None:

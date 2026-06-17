@@ -1,4 +1,3 @@
-import importlib.util
 from abc import ABC
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Type
@@ -8,9 +7,6 @@ from lightllm.platform.base.runtime import BackendRuntime
 
 if TYPE_CHECKING:
     from lightllm.platform.base.ops.base import OpsProtocol
-
-# For internal module registration, we use the prefix "lightllm.platform.ops."
-OP_FAMILY_MODULES_PREFIX = "lightllm.platform.ops."
 
 PLATFORMS: dict[str, "PlatformSpec"] = {}
 
@@ -87,25 +83,3 @@ def get_platform_spec(platform: str) -> PlatformSpec:
         return PLATFORMS[platform]
     except KeyError as exc:
         raise RuntimeError(f"Platform is not configured: {platform}") from exc
-
-
-def has_builtin_ops_module(family: str) -> bool:
-    module_name = f"{OP_FAMILY_MODULES_PREFIX}{family}"
-    return importlib.util.find_spec(module_name) is not None
-
-
-def get_op_modules_for_fallback(fallback_chain: tuple[str, ...]) -> tuple[str, ...]:
-    modules: list[str] = []
-    seen: set[str] = set()
-    for family in fallback_chain:
-        module_name = f"{OP_FAMILY_MODULES_PREFIX}{family}"
-        if module_name in seen:
-            continue
-        # External modules are not required to be imported by lightllm.platform.ops
-        if not has_builtin_ops_module(family):
-            continue
-
-        modules.append(module_name)
-        seen.add(module_name)
-
-    return tuple(modules)
