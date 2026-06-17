@@ -26,6 +26,6 @@ class MixtralTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
-            microbatch_index=getattr(infer_state, "microbatch_index", 0),
+            infer_state=infer_state,
         )
         return hidden_states.view(num_tokens, hidden_dim)

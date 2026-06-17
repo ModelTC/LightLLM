@@ -47,8 +47,7 @@ class MixtralTpPartModel(TpPartBaseModel):
     def _init_custom(self):
         self._init_to_get_rotary()
         if self.args.enable_return_routed_experts:
-            num_moe_layers = len(self.trans_layers_weight)
-            init_routing_capture(self, num_moe_layers)
+            init_routing_capture(self)
         return
 
     def _init_mem_manager(self):

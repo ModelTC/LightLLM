@@ -151,7 +151,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             if run_reqs_num > 0:
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                     logits=model_output.logits[:run_reqs_num],
@@ -199,7 +198,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             if run_reqs_num > 0:
                 _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                     logits=model_output.logits[:run_reqs_num],
@@ -248,8 +246,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
-            self._flush_routing_to_kv_buffer(model_input0.mem_indexes, microbatch_index=0)
-            self._flush_routing_to_kv_buffer(model_input1.mem_indexes, microbatch_index=1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
 
@@ -323,8 +319,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
-            self._flush_routing_to_kv_buffer(model_input0.mem_indexes, microbatch_index=0)
-            self._flush_routing_to_kv_buffer(model_input1.mem_indexes, microbatch_index=1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
 
@@ -379,7 +373,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         req_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output: ModelOutput = self.model.forward(model_input)
-            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             b_has_out_cpu = model_input.b_prefill_has_output_cpu[0:req_num]
             logits = model_output.logits[0:req_num, :]
             b_req_idx = model_input.b_req_idx[0:req_num]
@@ -445,7 +438,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
-            self._flush_routing_to_kv_buffer(model_input.mem_indexes)
             mtp_accept_len, b_req_mtp_start_loc, next_token_ids = None, None, None
             if req_num > 0:
                 logits = model_output.logits[0:req_num, :]
@@ -649,8 +641,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         ) = padded_overlap_prepare_prefill_inputs(prefill_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
-            self._flush_routing_to_kv_buffer(model_input0.mem_indexes, microbatch_index=0)
-            self._flush_routing_to_kv_buffer(model_input1.mem_indexes, microbatch_index=1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
@@ -753,8 +743,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         b_mtp_index_cpu1 = model_input1.b_mtp_index
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
-            self._flush_routing_to_kv_buffer(model_input0.mem_indexes, microbatch_index=0)
-            self._flush_routing_to_kv_buffer(model_input1.mem_indexes, microbatch_index=1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1

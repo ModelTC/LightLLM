@@ -33,7 +33,6 @@ class FusedMoeWeight(BaseWeightTpl):
         num_fused_shared_experts: int = 0,
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
-        moe_layer_index: int = 0,
         per_expert_scale_name: str = "",
     ) -> None:
         super().__init__(data_type=data_type)
@@ -55,7 +54,6 @@ class FusedMoeWeight(BaseWeightTpl):
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
-        self.moe_layer_index = moe_layer_index
         self._init_config(network_config)
         self._init_redundancy_expert_params()
         self._init_parallel_params()
@@ -126,6 +124,12 @@ class FusedMoeWeight(BaseWeightTpl):
             self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}
             self.rexpert_idx_to_local_idx = {}
 
+    def _make_routing_capture_callback(self, infer_state):
+        make_routing_capture_callback = getattr(infer_state, "make_routing_capture_callback", None)
+        if make_routing_capture_callback is None:
+            return None
+        return make_routing_capture_callback(self.layer_num_)
+
     def experts(
         self,
         input_tensor: torch.Tensor,
@@ -136,9 +140,9 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
-        microbatch_index: int = 0,
+        infer_state=None,
     ) -> torch.Tensor:
-        """Backward compatible method that routes to platform-specific implementation."""
+        routing_capture_callback = self._make_routing_capture_callback(infer_state)
         return self.fuse_moe_impl(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -152,8 +156,7 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
-            moe_layer_index=self.moe_layer_index,
-            microbatch_index=microbatch_index,
+            routing_capture_callback=routing_capture_callback,
             per_expert_scale=self.per_expert_scale,
         )
 

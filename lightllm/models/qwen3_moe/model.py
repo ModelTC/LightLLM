@@ -39,5 +39,4 @@ class Qwen3MOEModel(Qwen3TpPartModel):
                 self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
             )
         if self.args.enable_return_routed_experts:
-            num_moe_layers = sum(1 for w in self.trans_layers_weight if w.is_moe)
-            init_routing_capture(self, num_moe_layers)
+            init_routing_capture(self)

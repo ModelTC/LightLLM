@@ -2,8 +2,8 @@ import atexit
 import torch
 import numpy as np
 from multiprocessing import shared_memory
-from typing import Optional
-from lightllm.common.basemodel.triton_kernel.routing_capture import scatter_routing_capture_to_cpu
+from typing import Dict, List, Optional
+from lightllm.common.basemodel.triton_kernel.routing_capture import scatter_routing_topk_to_cpu
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_rank_in_dp
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
@@ -33,11 +33,14 @@ class RoutingCaptureManager:
         num_experts: int,
         kv_cache_size: int,
         max_capture_tokens: int,
+        layer_num_to_moe_index: Optional[Dict[int, int]] = None,
     ):
         self.num_moe_layers = num_moe_layers
         self.topk = topk
         self.num_experts = num_experts
         self.kv_cache_size = kv_cache_size
+        self.max_capture_tokens = max_capture_tokens
+        self.layer_num_to_moe_index = layer_num_to_moe_index or {i: i for i in range(num_moe_layers)}
 
         self.dtype = torch.uint8 if num_experts <= 256 else torch.int16
         dtype_bytes = 1 if self.dtype == torch.uint8 else 2
@@ -51,20 +54,13 @@ class RoutingCaptureManager:
             device="cpu",
             pin_memory=True,
         )
-
-        # Capture buffers: simple contiguous tensors written to during forward().
-        capture_buf_size = max_capture_tokens * num_moe_layers * topk * dtype_bytes
-        self._capture_buffer = [
-            torch.zeros((max_capture_tokens, num_moe_layers, topk), dtype=self.dtype, device="cuda") for _ in range(2)
-        ]
-        self._routing_ready_event = torch.cuda.Event(blocking=False)
-        self._has_pending_flush = False
+        self.routing_buffer_ptr = torch.tensor([self.routing_buffer.data_ptr()], dtype=torch.uint64, device="cuda")
 
         dtype_name = "uint8" if self.dtype == torch.uint8 else "int16"
         logger.info(
             f"RoutingCaptureManager initialized: {num_moe_layers} MoE layers, topk={topk}, "
             f"routing_buffer(cpu)={routing_buffer_size / 1024 / 1024:.2f}MB, "
-            f"capture_buffer={capture_buf_size / 1024 / 1024:.2f}MB x2, dtype={dtype_name}"
+            f"dtype={dtype_name}"
         )
 
     @property
@@ -75,27 +71,38 @@ class RoutingCaptureManager:
     def dtype_id(self) -> int:
         return 1 if self.dtype == torch.uint8 else 2
 
-    def capture(self, moe_layer_index: int, topk_ids: torch.Tensor, microbatch_index: int = 0) -> None:
-        num_tokens = topk_ids.shape[0]
-        self._capture_buffer[microbatch_index][:num_tokens, moe_layer_index, :] = topk_ids.to(self.dtype)
+    def make_capture_callback_factory(self, mem_indexes: torch.Tensor):
+        if not mem_indexes.is_cuda:
+            mem_indexes = mem_indexes.cuda(non_blocking=True)
 
-    def flush_to_routing_buffer(self, mem_indexes: torch.Tensor, num_tokens: int, microbatch_index: int = 0) -> None:
-        buf = self._capture_buffer[microbatch_index][:num_tokens]  # (num_tokens, num_moe_layers, topk)
-        scatter_routing_capture_to_cpu(
-            capture_buffer=buf,
-            mem_indexes=mem_indexes[:num_tokens],
-            routing_buffer=self.routing_buffer,
-            num_tokens=num_tokens,
+        def make_capture_callback(layer_num: int):
+            routing_layer_index = self.layer_num_to_moe_index.get(layer_num)
+            if routing_layer_index is None:
+                return None
+
+            def capture_callback(topk_ids: torch.Tensor) -> None:
+                self.capture(routing_layer_index=routing_layer_index, topk_ids=topk_ids, mem_indexes=mem_indexes)
+
+            return capture_callback
+
+        return make_capture_callback
+
+    def capture(self, routing_layer_index: int, topk_ids: torch.Tensor, mem_indexes: torch.Tensor) -> None:
+        assert topk_ids.dim() == 2
+        assert topk_ids.shape[1] == self.topk
+        assert mem_indexes.shape[0] >= topk_ids.shape[0]
+        scatter_routing_topk_to_cpu(
+            topk_ids=topk_ids,
+            mem_indexes=mem_indexes,
+            routing_buffer_ptr=self.routing_buffer_ptr,
+            moe_layer_index=routing_layer_index,
             num_moe_layers=self.num_moe_layers,
             topk=self.topk,
+            dtype_id=self.dtype_id,
         )
-        self._routing_ready_event.record(torch.cuda.current_stream())
-        self._has_pending_flush = True
 
     def extract_routing_data(self, mem_indexes: torch.Tensor) -> np.ndarray:
-        if self._has_pending_flush:
-            self._routing_ready_event.synchronize()
-            self._has_pending_flush = False
+        torch.cuda.current_stream().synchronize()
         cpu_indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
         return self.routing_buffer[cpu_indexes, :, :].numpy()
 
@@ -109,6 +116,7 @@ def create_routing_capture_manager(
     num_experts: int,
     kv_cache_size: int,
     max_capture_tokens: int,
+    layer_num_to_moe_index: Optional[Dict[int, int]] = None,
 ) -> None:
     global g_routing_capture_manager
     assert g_routing_capture_manager is None, "RoutingCaptureManager already exists"
@@ -118,7 +126,19 @@ def create_routing_capture_manager(
         num_experts=num_experts,
         kv_cache_size=kv_cache_size,
         max_capture_tokens=max_capture_tokens,
+        layer_num_to_moe_index=layer_num_to_moe_index,
     )
+
+
+def _get_moe_layer_nums(model) -> List[int]:
+    moe_layer_nums = []
+    for layer_weight in getattr(model, "trans_layers_weight", []):
+        is_moe = getattr(layer_weight, "is_moe", None)
+        if is_moe is None:
+            is_moe = hasattr(layer_weight, "experts")
+        if is_moe:
+            moe_layer_nums.append(layer_weight.layer_num_)
+    return moe_layer_nums
 
 
 def cleanup_routing_shm_pool() -> None:
@@ -150,9 +170,21 @@ def cleanup_routing_shm_pool() -> None:
         pass
 
 
-def init_routing_capture(model, num_moe_layers: int) -> None:
+def init_routing_capture(model, num_moe_layers: Optional[int] = None) -> None:
+    moe_layer_nums = _get_moe_layer_nums(model)
+    if num_moe_layers is None:
+        num_moe_layers = len(moe_layer_nums)
+    elif moe_layer_nums:
+        assert num_moe_layers == len(moe_layer_nums)
+    else:
+        moe_layer_nums = list(range(num_moe_layers))
+    layer_num_to_moe_index = {layer_num: moe_index for moe_index, layer_num in enumerate(moe_layer_nums)}
+
     dp_rank = get_current_rank_in_dp()
-    logger.info(f"init_routing_capture called: num_moe_layers={num_moe_layers}, dp_rank={dp_rank}")
+    logger.info(
+        f"init_routing_capture called: num_moe_layers={num_moe_layers}, "
+        f"moe_layer_nums={moe_layer_nums}, dp_rank={dp_rank}"
+    )
     if dp_rank != 0:
         logger.info(f"Skipping routing capture initialization on dp_rank={dp_rank}")
         return
@@ -163,7 +195,10 @@ def init_routing_capture(model, num_moe_layers: int) -> None:
         )
         return
 
-    num_experts = model.config.get("n_routed_experts", model.config.get("num_experts", 0))
+    num_experts = model.config.get(
+        "n_routed_experts",
+        model.config.get("num_experts", model.config.get("num_local_experts", 0)),
+    )
     topk = model.config.get("num_experts_per_tok", 0)
     assert num_experts > 0 and topk > 0
 
@@ -187,6 +222,7 @@ def init_routing_capture(model, num_moe_layers: int) -> None:
         num_experts=num_experts,
         kv_cache_size=model.mem_manager.size + 1,
         max_capture_tokens=max_capture_tokens,
+        layer_num_to_moe_index=layer_num_to_moe_index,
     )
 
     mgr = g_routing_capture_manager

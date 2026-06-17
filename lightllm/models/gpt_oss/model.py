@@ -25,8 +25,7 @@ class GptOssTpPartModel(LlamaTpPartModel):
     def _init_custom(self):
         super()._init_custom()
         if self.args.enable_return_routed_experts:
-            num_moe_layers = len(self.trans_layers_weight)
-            init_routing_capture(self, num_moe_layers)
+            init_routing_capture(self)
 
     def _init_att_backend(self):
         self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0, priority_list=["fa3"])(

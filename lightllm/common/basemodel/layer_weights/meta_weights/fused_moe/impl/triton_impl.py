@@ -1,9 +1,8 @@
 import torch
-from typing import Optional
+from typing import Callable, Optional
 from lightllm.common.quantization.no_quant import WeightPack
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from .base_impl import FuseMoeBaseImpl
-from lightllm.common.basemodel import routing_manager as _routing_mgr
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
@@ -63,6 +62,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
+        routed_topk_ids = topk_ids
         if self.num_fused_shared_experts > 0:
             pad_topk_ids = (
                 torch.arange(
@@ -84,7 +84,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
 
             topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
             topk_weights = torch.cat([topk_weights, pad_topk_weights], dim=1)
-        return topk_weights, topk_ids
+        return topk_weights, topk_ids, routed_topk_ids
 
     def _fused_experts(
         self,
@@ -129,11 +129,10 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
-        moe_layer_index: Optional[int] = None,
-        microbatch_index: int = 0,
+        routing_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
     ):
-        topk_weights, topk_ids = self._select_experts(
+        selected_experts = self._select_experts(
             input_tensor=input_tensor,
             router_logits=router_logits,
             correction_bias=correction_bias,
@@ -145,9 +144,14 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             scoring_func=scoring_func,
             per_expert_scale=per_expert_scale,
         )
+        if len(selected_experts) == 2:
+            topk_weights, topk_ids = selected_experts
+            routed_topk_ids = topk_ids
+        else:
+            topk_weights, topk_ids, routed_topk_ids = selected_experts
 
-        if _routing_mgr.g_routing_capture_manager is not None and moe_layer_index is not None:
-            _routing_mgr.g_routing_capture_manager.capture(moe_layer_index, topk_ids, microbatch_index)
+        if routing_capture_callback is not None:
+            routing_capture_callback(routed_topk_ids)
 
         output = self._fused_experts(
             input_tensor=input_tensor,
