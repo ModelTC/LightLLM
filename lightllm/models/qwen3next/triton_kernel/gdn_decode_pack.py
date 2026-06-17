@@ -4,68 +4,6 @@ import triton.language as tl
 
 
 @triton.jit
-def _pack_gdn_decode_kernel(
-    mixed_qkv,
-    z_raw,
-    a_raw,
-    b_raw,
-    q_out,
-    k_out,
-    v_out,
-    z_out,
-    a_out,
-    b_out,
-    stride_m_b: tl.constexpr,
-    stride_m_d: tl.constexpr,
-    stride_z_b: tl.constexpr,
-    stride_z_h: tl.constexpr,
-    stride_z_d: tl.constexpr,
-    stride_a_b: tl.constexpr,
-    stride_a_d: tl.constexpr,
-    stride_b_b: tl.constexpr,
-    stride_b_d: tl.constexpr,
-    q_dim: tl.constexpr,
-    k_dim: tl.constexpr,
-    v_dim: tl.constexpr,
-    gate_dim: tl.constexpr,
-    BLOCK_QKV: tl.constexpr,
-    BLOCK_GATE: tl.constexpr,
-):
-    row = tl.program_id(0)
-    qkv_offsets = tl.arange(0, BLOCK_QKV)
-
-    q_mask = qkv_offsets < q_dim
-    q_vals = tl.load(mixed_qkv + row * stride_m_b + qkv_offsets * stride_m_d, mask=q_mask, other=0.0)
-    tl.store(q_out + row * q_dim + qkv_offsets, q_vals, mask=q_mask)
-
-    k_mask = qkv_offsets < k_dim
-    k_vals = tl.load(
-        mixed_qkv + row * stride_m_b + (q_dim + qkv_offsets) * stride_m_d,
-        mask=k_mask,
-        other=0.0,
-    )
-    tl.store(k_out + row * k_dim + qkv_offsets, k_vals, mask=k_mask)
-
-    v_mask = qkv_offsets < v_dim
-    v_vals = tl.load(
-        mixed_qkv + row * stride_m_b + (q_dim + k_dim + qkv_offsets) * stride_m_d,
-        mask=v_mask,
-        other=0.0,
-    )
-    tl.store(v_out + row * v_dim + qkv_offsets, v_vals, mask=v_mask)
-
-    z_vals = tl.load(z_raw + row * stride_z_b + qkv_offsets, mask=v_mask, other=0.0)
-    tl.store(z_out + row * v_dim + qkv_offsets, z_vals, mask=v_mask)
-
-    gate_offsets = tl.arange(0, BLOCK_GATE)
-    gate_mask = gate_offsets < gate_dim
-    a_vals = tl.load(a_raw + row * stride_a_b + gate_offsets * stride_a_d, mask=gate_mask, other=0.0)
-    b_vals = tl.load(b_raw + row * stride_b_b + gate_offsets * stride_b_d, mask=gate_mask, other=0.0)
-    tl.store(a_out + row * gate_dim + gate_offsets, a_vals, mask=gate_mask)
-    tl.store(b_out + row * gate_dim + gate_offsets, b_vals, mask=gate_mask)
-
-
-@triton.jit
 def _conv_pack_gdn_decode_kernel(
     mixed_qkv,
     z_raw,
