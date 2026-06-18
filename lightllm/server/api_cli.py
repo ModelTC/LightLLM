@@ -875,3 +875,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
     return parser
+
+
+def make_argument_parser() -> argparse.ArgumentParser:
+    return add_cli_args(argparse.ArgumentParser())

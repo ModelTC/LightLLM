@@ -109,7 +109,8 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
-        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=self.args.enable_weight_cpu_backup):
+        enable_weight_cpu_backup = self.args.enable_weight_cpu_backup or self.args.enable_torch_memory_saver
+        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
             self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()

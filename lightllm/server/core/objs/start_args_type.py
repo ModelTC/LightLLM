@@ -25,7 +25,7 @@ class StartArgs:
     config_server_visual_redis_port: int = field(default=None)
     afs_image_embed_dir: str = field(default=None)
     afs_embed_capacity: int = field(default=250000)
-    control_rpyc_port: int = field(default=None)
+    rl_rpyc_port: int = field(default=None)
     select_p_d_node_strategy: str = field(
         default="round_robin", metadata={"choices": ["random", "round_robin", "adaptive_load"]}
     )

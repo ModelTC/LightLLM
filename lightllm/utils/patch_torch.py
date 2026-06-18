@@ -1,4 +1,6 @@
 # copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/patch_torch.py
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Callable, Union
 
 import torch
@@ -29,6 +31,16 @@ def monkey_patch_torch_reductions():
 # The signature has not been changed for years, and we will not need this when the next version is released,
 # so it looks safe to use a constant.
 _REDUCE_TENSOR_ARG_DEVICE_INDEX = 6
+_rebuild_device_fallback: ContextVar[Union[int, None]] = ContextVar("rebuild_device_fallback", default=None)
+
+
+@contextmanager
+def cuda_rebuild_device_fallback(device: Union[int, None]):
+    token = _rebuild_device_fallback.set(device)
+    try:
+        yield
+    finally:
+        _rebuild_device_fallback.reset(token)
 
 
 def _reduce_tensor_modified(*args, **kwargs):
@@ -54,6 +66,9 @@ def _device_from_maybe_uuid(device_maybe_uuid: Union[int, str]) -> int:
         for device in range(torch.cuda.device_count()):
             if str(torch.cuda.get_device_properties(device).uuid) == device_maybe_uuid:
                 return device
+        fallback_device = _rebuild_device_fallback.get()
+        if fallback_device is not None:
+            return fallback_device
         raise Exception("Invalid device_uuid=" + device_maybe_uuid)
 
     raise Exception(f"Unknown type: {device_maybe_uuid=}")

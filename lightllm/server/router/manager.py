@@ -5,8 +5,6 @@ import torch
 import pickle
 import inspect
 import setproctitle
-import queue
-import concurrent.futures
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import zmq
@@ -14,7 +12,7 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
@@ -42,6 +40,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
+from .rl_rpyc import RouterRlOpQueue, start_router_rl_rpyc_server
 
 logger = init_logger(__name__)
 
@@ -111,10 +110,8 @@ class RouterManager:
         )
         self.router_statics = RouterStatics(self.args)
 
-        # 控制面 rpyc 队列:rpyc 线程把 (req, future) 放进来,asyncio 主循环每个 step 取出处理
-        self._control_op_queue: "queue.Queue[Tuple[GeneralHttpToModelRpcReq, concurrent.futures.Future]]" = (
-            queue.Queue()
-        )
+        # RL 管理 rpyc 队列:rpyc 线程把请求放进来,asyncio 主循环每个 step 取出处理
+        self.rl_op_queue = RouterRlOpQueue()
         self.profiler_cmd_queue = RouterProfilerCmdQueue()
 
         return
@@ -587,14 +584,8 @@ class RouterManager:
         return
 
     async def _process_special_reqs(self):
-        # master: 从 rpyc 队列里取出 (req, future) — slave 的队列恒为空(无 rpyc service)
-        pairs: List[Tuple[GeneralHttpToModelRpcReq, concurrent.futures.Future]] = []
-        while True:
-            try:
-                pair = self._control_op_queue.get_nowait()
-                pairs.append(pair)
-            except queue.Empty:
-                break
+        # master: 从 RL rpyc 队列里取出 (req, future) — slave 的队列恒为空(无 rpyc service)
+        pairs = self.rl_op_queue.pop_all()
 
         reqs: List[GeneralHttpToModelRpcReq] = [req for req, _ in pairs]
 
@@ -639,9 +630,8 @@ class RouterManager:
         for model_rpc_client in self.model_rpc_clients:
             forward_to_model_tasks.append(model_rpc_client.forward_to_model(req))
         all_ret = await asyncio.gather(*forward_to_model_tasks)
-        succes = all(ret.success for ret in all_ret)
-        ret: GeneralModelToHttpRpcRsp = all_ret[0]
-        ret.success = succes
+        ret: GeneralModelToHttpRpcRsp = next((res for res in all_ret if not res.success), all_ret[0])
+        ret.success = all(res.success for res in all_ret)
         if self.is_multinode_tp:
             output_list = [None for _ in range(self.nnodes)] if self.node_rank == 0 else None
             dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
@@ -655,18 +645,6 @@ class RouterManager:
 
     def clean_up(self):
         return
-
-    def submit_control_op(self, func_name: str, func_args, timeout: float = 300.0) -> GeneralModelToHttpRpcRsp:
-        """从 rpyc 线程调用,把控制面操作投递到 asyncio 主循环,同步等结果返回。"""
-        req = GeneralHttpToModelRpcReq(func_name=func_name, func_args=func_args)
-        fut: concurrent.futures.Future = concurrent.futures.Future()
-        self._control_op_queue.put((req, fut))
-        try:
-            return fut.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            return GeneralModelToHttpRpcRsp(
-                success=False, msg=f"control op {func_name} timeout after {timeout}s", func_name=func_name
-            )
 
 
 def start_router_process(args, pipe_writer):
@@ -692,6 +670,10 @@ def start_router_process(args, pipe_writer):
             args,
             router.profiler_cmd_queue,
         )
+        router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(
+            args,
+            router.rl_op_queue,
+        )
     except:
         import traceback
         import sys
@@ -702,12 +684,6 @@ def start_router_process(args, pipe_writer):
         pipe_writer.send(err_str)
         router.clean_up()
         raise
-
-    # master node 启动控制面 rpyc service。slave 不需要,通过 NCCL 接收广播。
-    if args.node_rank == 0 and args.control_rpyc_port is not None:
-        from .control_rpyc import start_control_rpyc_server
-
-        start_control_rpyc_server(router, args.control_rpyc_port)
 
     pipe_writer.send("init ok")
     loop.run_until_complete(router.loop_for_fwd())

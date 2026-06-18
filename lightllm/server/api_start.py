@@ -365,8 +365,8 @@ def _launch_subprocesses(args: StartArgs):
     # 不应该把它加入端口锁定列表，否则单机多节点 tp 测试会冲突。
     if args.nccl_port is not None and args.node_rank == 0:
         already_uesd_ports.append(args.nccl_port)
-    if args.control_rpyc_port is not None:
-        already_uesd_ports.append(args.control_rpyc_port)
+    if args.rl_rpyc_port is not None:
+        already_uesd_ports.append(args.rl_rpyc_port)
     if args.visual_nccl_ports is not None:
         already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
     if not args.disable_audio and args.audio_nccl_ports is not None:
@@ -395,7 +395,7 @@ def _launch_subprocesses(args: StartArgs):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-        control_rpyc_port,
+        rl_rpyc_port,
     ) = can_use_ports[0:11]
     can_use_ports = can_use_ports[11:]
 
@@ -414,8 +414,8 @@ def _launch_subprocesses(args: StartArgs):
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
-    if args.control_rpyc_port is None:
-        args.control_rpyc_port = control_rpyc_port
+    if args.rl_rpyc_port is None:
+        args.rl_rpyc_port = rl_rpyc_port
 
     set_unique_server_name(args)
 

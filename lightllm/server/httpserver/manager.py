@@ -11,10 +11,8 @@ import hashlib
 import datetime
 import pickle
 from frozendict import frozendict
-from .control_rpyc_client import ControlRpycClient
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from contextlib import asynccontextmanager
 from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
@@ -46,10 +44,11 @@ from lightllm.server.io_struct import (
     UpdateWeightsFromIPCReq,
     GeneralModelToHttpRpcRsp,
 )
+from .rl_controller import HttpRlController
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken, ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -140,10 +139,8 @@ class HttpServerManager:
         # Cache routing config for MoE expert routing data extraction
         self._routing_shm = get_routing_config_shm() if args.enable_return_routed_experts else None
 
-        self._gen_pause = _GenerationPauseGate()
+        self.rl_controller = HttpRlController(self)
 
-        # 控制面 rpyc client: 到 master router 的 rpyc service, 懒初始化 + 自动重连
-        self._control_rpyc_client = ControlRpycClient(host="127.0.0.1", port=args.control_rpyc_port)
         self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)
 
@@ -371,7 +368,7 @@ class HttpServerManager:
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
 
-            await self._gen_pause.wait_until_running()
+            await self.rl_controller.wait_until_generation_allowed()
 
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
@@ -836,47 +833,8 @@ class HttpServerManager:
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
 
-    async def _wait_for_abort_released(
-        self, request_id: Optional[int], abort_all: bool, timeout: float = 60.0
-    ) -> Tuple[bool, str]:
-        start_time = time.time()
-        empty_since = None
-        while True:
-            if abort_all:
-                if len(self.req_id_to_out_inf) == 0:
-                    empty_since = empty_since or time.time()
-                    if time.time() - empty_since >= 1.0:
-                        return True, ""
-                else:
-                    empty_since = None
-                for group_req_id, req_status in list(self.req_id_to_out_inf.items()):
-                    if req_status is not None and any(
-                        not req.is_aborted for req in req_status.group_req_objs.shm_req_objs
-                    ):
-                        await self.abort(group_req_id)
-            elif request_id not in self.req_id_to_out_inf:
-                return True, ""
-
-            if time.time() - start_time > timeout:
-                error_msg = (
-                    f"abort request wait release timeout, request_id={request_id}, abort_all={abort_all}, "
-                    f"timeout={timeout}s"
-                )
-                logger.error(error_msg)
-                return False, error_msg
-
-            await asyncio.sleep(0.02)
-        return True, ""
-
     async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
-        request_id = request.request_id
-        abort_all = request.abort_all
-        if request_id is not None and not abort_all:
-            await self.abort(request_id)
-        if abort_all:
-            for group_req_id in list(self.req_id_to_out_inf.keys()):
-                await self.abort(group_req_id)
-        return await self._wait_for_abort_released(request_id=None, abort_all=True)
+        return await self.rl_controller.abort_request(request)
 
     def _get_router_profiler_client(self):
         router_profiler_client = getattr(self, "router_profiler_client", None)
@@ -1038,66 +996,34 @@ class HttpServerManager:
         return
 
     async def pause_generation(self, reject_new: bool = False):
-        # 因为请求是从master node转发到slave node的
-        # 所以只要master暂停了，slave自然暂停。
-        async with self._gen_pause.pause_and_abort_context(reject_new) as do_abort:
-            if not do_abort:
-                return
-            while True:
-                success, msg = await self.abort_request(AbortReq(request_id=None, abort_all=True))
-                if success:
-                    break
-                logger.warning(f"pause_generation abort_all still waiting: {msg}")
-                await asyncio.sleep(1.0)
+        return await self.rl_controller.pause_generation(reject_new=reject_new)
 
     async def continue_generation(self):
-        await self._gen_pause.resume()
-
-    # -------- master router 控制面 rpyc 调用 --------
+        return await self.rl_controller.continue_generation()
 
     async def flush_cache(self, request: FlushCacheReq):
-        return await self._control_rpyc_client.call("flush_cache", request)
+        return await self.rl_controller.flush_cache(request)
 
     async def release_memory_occupation(self, request: ReleaseMemoryReq):
-        assert len(self.req_id_to_out_inf) == 0, "there are still requests running, cannot release memory occupation"
-        return await self._control_rpyc_client.call("release_memory_occupation", request.tags)
+        return await self.rl_controller.release_memory_occupation(request)
 
     async def resume_memory_occupation(self, request: ResumeMemoryReq):
-        ret = await self._control_rpyc_client.call("resume_memory_occupation", request.tags)
-        return ret
+        return await self.rl_controller.resume_memory_occupation(request)
 
     async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
-        return await self._control_rpyc_client.call("init_weights_update_group", request)
+        return await self.rl_controller.init_weights_update_group(request)
 
     async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
-        return await self._control_rpyc_client.call("destroy_weights_update_group", request)
+        return await self.rl_controller.destroy_weights_update_group(request)
 
     async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
-        if request.abort_all_requests:
-            success, msg = await self.abort_request(AbortReq(abort_all=True))
-            if not success:
-                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_distributed")
-        if request.flush_cache:
-            await self.flush_cache(FlushCacheReq())
-        return await self._control_rpyc_client.call("update_weights_from_distributed", request)
+        return await self.rl_controller.update_weights_from_distributed(request)
 
     async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
-        if request.abort_all_requests:
-            success, msg = await self.abort_request(AbortReq(abort_all=True))
-            if not success:
-                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_tensor")
-        if request.flush_cache:
-            await self.flush_cache(FlushCacheReq())
-        return await self._control_rpyc_client.call("update_weights_from_tensor", request)
+        return await self.rl_controller.update_weights_from_tensor(request)
 
     async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
-        if request.abort_all_requests:
-            success, msg = await self.abort_request(AbortReq(abort_all=True))
-            if not success:
-                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_ipc")
-        if request.flush_cache:
-            await self.flush_cache(FlushCacheReq())
-        return await self._control_rpyc_client.call("update_weights_from_ipc", request)
+        return await self.rl_controller.update_weights_from_ipc(request)
 
 
 class ReqStatus:
@@ -1118,37 +1044,3 @@ class ReqStatus:
             if not req.can_release():
                 return False
         return True
-
-
-class _GenerationPauseGate:
-    """生成暂停门控：RUNNING / PAUSED(新请求排队) / PAUSED_REJECT(新请求直接拒绝)。"""
-
-    _RUNNING = 0
-    _PAUSED = 1
-    _PAUSED_REJECT = 2
-
-    def __init__(self) -> None:
-        self._state = self._RUNNING
-        self._cond = asyncio.Condition()
-
-    @asynccontextmanager
-    async def pause_and_abort_context(self, reject_new: bool):
-        async with self._cond:
-            if self._state != self._RUNNING:
-                if reject_new:
-                    self._state = self._PAUSED_REJECT
-                yield False
-                return
-            self._state = self._PAUSED_REJECT if reject_new else self._PAUSED
-            yield True
-
-    async def wait_until_running(self) -> None:
-        if self._state == self._PAUSED_REJECT:
-            raise ServerBusyError("Generation is paused, new requests are rejected")
-        async with self._cond:
-            await self._cond.wait_for(lambda: self._state == self._RUNNING)
-
-    async def resume(self) -> None:
-        async with self._cond:
-            self._state = self._RUNNING
-            self._cond.notify_all()

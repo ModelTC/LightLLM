@@ -28,6 +28,7 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
+from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -48,6 +49,8 @@ class ModelRpcServer(rpyc.Service):
 
         self.rank = rank
         self.rank_in_node = rank_in_node
+        self.backend = None
+        self.rl_backend_ops = None
         logger.info(f"Initialized RPC server for rank {self.rank}.")
         return
 
@@ -101,6 +104,7 @@ class ModelRpcServer(rpyc.Service):
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
+        self.rl_backend_ops = RlBackendOps(self.backend)
 
         # only deepseekv3 can support auto_update_redundancy_expert
         if self.args.auto_update_redundancy_expert:
@@ -113,13 +117,17 @@ class ModelRpcServer(rpyc.Service):
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
-
     def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
         try:
             req = obtain(req)
-            if self.backend is None or not hasattr(self.backend, req.func_name):
-                raise ValueError(f"Backend does not support function {req.func_name}")
-            success, ret = getattr(self.backend, req.func_name)(req.func_args)
+            if self.rl_backend_ops is None:
+                raise ValueError("RL backend ops is not initialized")
+            if not RlBackendOps.supports(req.func_name):
+                raise ValueError(
+                    f"Unsupported RL backend function {req.func_name}. "
+                    f"Supported functions: {sorted(RlBackendOps.SUPPORTED)}"
+                )
+            success, ret = self.rl_backend_ops.dispatch(req.func_name, req.func_args)
             return GeneralModelToHttpRpcRsp(success=success, msg=str(ret), func_name=req.func_name, func_rsp=ret)
         except BaseException as e:
             logger.exception(f"forward to model backend failed: {str(e)}")

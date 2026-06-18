@@ -6,7 +6,7 @@ from lightllm.utils.log_utils import init_logger
 try:
     from torch_memory_saver import (
         torch_memory_saver,
-        configure_subprocess,
+        configure_subprocess as tms_configure_subprocess,
     )
 
     HAS_TORCH_MEMORY_SAVER = True
@@ -48,8 +48,10 @@ class TorchMemorySaverWrapper:
 
 
 class _TorchMemorySaver:
+    @contextmanager
     def configure_subprocess(self):
-        return configure_subprocess()
+        with tms_configure_subprocess():
+            yield
 
     def region(self, tag: MemoryTag, enable_cpu_backup: bool = False):
         return torch_memory_saver.region(tag=tag.value, enable_cpu_backup=enable_cpu_backup)
