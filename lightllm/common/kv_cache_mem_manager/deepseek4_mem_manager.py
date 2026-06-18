@@ -31,6 +31,7 @@ DSV4_FP8_SCALE_MIN = 1e-4
 DSV4_SWA_PAGE_SIZE = 128
 DSV4_C4_PAGE_SIZE = 64
 DSV4_C128_PAGE_SIZE = 2
+DSV4_PROMPT_CACHE_PAGE_SIZE = DSV4_C4_PAGE_SIZE * 4
 # compressor state ring: c4 overlap 对为每页 2 个分组槽 × ratio 4 行;c128 离线聚合为每页 1 组。
 DSV4_C4_STATE_RING = 8
 DSV4_C128_STATE_RING = 128
@@ -194,11 +195,12 @@ class DeepseekV4MemoryManager(MemoryManager):
     # ------------------------------------------------------------------ sizing
     def _swa_per_req_budget(self) -> int:
         # 活跃请求保留 window + 一个 radix 页(req_manager._swa_retain_len: 让最近完成的
-        # 128 边界的结尾页恒驻留,prompt cache 插入门才能放行),即 v5 §2 的「活跃窗口跨页 ≤2」。
-        return int(self.sliding_window) + DSV4_SWA_PAGE_SIZE
+        # prompt-cache 边界的结尾页恒驻留)。V4 的 prompt-cache 边界取 256 token,
+        # 避免 radix 共享前缀落在 c4 物理页(64 c4 entry = 256 token)中间。
+        return int(self.sliding_window) + DSV4_PROMPT_CACHE_PAGE_SIZE
 
     def _planned_swa_size(self, full_size: int) -> int:
-        # swa 池按页分配(页 = 128 = sliding_window = radix 页),容量向上取整到整页。
+        # swa 池按页分配(页 = 128 = sliding_window),容量向上取整到整页。
         if self.max_request_num is None or self.sliding_window is None:
             return _ceil_div(full_size, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
         cap = int(self.max_request_num) * self._swa_per_req_budget() + self.swa_extra_token_num
@@ -335,6 +337,8 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.c4_pool: Optional[PackedPagePool] = None
         self.c4_indexer_pool: Optional[PackedPagePool] = None
         self.c4_allocator: Optional[KvCacheAllocator] = None
+        self.c4_page_allocator: Optional[KvCacheAllocator] = None
+        self.c4_page_live_count: Optional[torch.Tensor] = None
         self.c128_pool: Optional[PackedPagePool] = None
         self.c128_allocator: Optional[KvCacheAllocator] = None
         self.c4_state_buffer: Optional[torch.Tensor] = None
@@ -360,9 +364,12 @@ class DeepseekV4MemoryManager(MemoryManager):
                 data_bytes=self.indexer_head_dim,
                 scale_bytes=DSV4_INDEXER_SCALE_BYTES,
             )
-            self.c4_allocator = KvCacheAllocator(
-                self.c4_size, shared_name=f"{server}_dsv4_c4_can_use_token_num_{rank_in_node}"
+            self.c4_num_pages = self.c4_size // DSV4_C4_PAGE_SIZE
+            assert self.c4_num_pages > 0, "DeepSeek-V4 c4 pool must have at least one usable full page"
+            self.c4_page_allocator = KvCacheAllocator(
+                self.c4_num_pages, shared_name=f"{server}_dsv4_c4_can_use_page_num_{rank_in_node}"
             )
+            self.c4_page_live_count = torch.zeros((self.c4_pool.num_pages,), dtype=torch.int32, device="cuda")
             self.full_to_c4_indexs = torch.full((size + 1,), -1, dtype=torch.int32, device="cuda")
             self.full_to_c4_indexs[size] = self.c4_pool.HOLD_TOKEN_MEMINDEX
             # c4 compressor 在途状态(attention + indexer): swa 页派生寻址(翻译③),随 swa 页
@@ -588,11 +595,36 @@ class DeepseekV4MemoryManager(MemoryManager):
         mapping[full_slots[valid]] = -1
         return
 
+    def alloc_c4_pages(self, need_pages: int) -> torch.Tensor:
+        assert self.c4_page_allocator is not None, "DeepSeek-V4 c4 page allocator is not initialized"
+        return self.c4_page_allocator.alloc(need_pages)
+
+    def count_c4_slots(self, c4_slots: torch.Tensor, delta: int) -> torch.Tensor:
+        """按 c4 slot 所在页更新存活计数,返回触达的页(去重)。"""
+        assert self.c4_page_live_count is not None, "DeepSeek-V4 c4 page live count is not initialized"
+        pages = torch.div(c4_slots.long(), DSV4_C4_PAGE_SIZE, rounding_mode="floor")
+        ones = torch.full(pages.shape, delta, dtype=torch.int32, device=pages.device)
+        self.c4_page_live_count.index_add_(0, pages, ones)
+        return torch.unique(pages)
+
     def evict_c4(self, full_slots: torch.Tensor) -> None:
         """回收 full 槽位(组末 token)映射的 c4 槽。非组末/未映射(-1)的槽位跳过。"""
-        if self.c4_allocator is None or full_slots.numel() == 0:
+        if self.c4_page_allocator is None or full_slots.numel() == 0:
             return
-        self._evict_compress(full_slots, self.full_to_c4_indexs, self.c4_allocator)
+        full_slots = full_slots.cuda().long().reshape(-1)
+        full_slots = torch.unique(full_slots[full_slots != self.HOLD_TOKEN_MEMINDEX])
+        if full_slots.numel() == 0:
+            return
+        slots = self.full_to_c4_indexs[full_slots]
+        valid = slots >= 0
+        valid_slots = slots[valid]
+        if valid_slots.numel() == 0:
+            return
+        self.full_to_c4_indexs[full_slots[valid]] = -1
+        touched = self.count_c4_slots(valid_slots, -1)
+        empty = touched[self.c4_page_live_count[touched] == 0]
+        if empty.numel() > 0:
+            self.c4_page_allocator.free(empty.to(torch.int32))
         return
 
     def evict_c128(self, full_slots: torch.Tensor) -> None:
@@ -623,8 +655,9 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.swa_page_live_count.zero_()
         self.full_to_swa_indexs.fill_(-1)
         self.full_to_swa_indexs[self.HOLD_TOKEN_MEMINDEX] = self.swa_pool.HOLD_TOKEN_MEMINDEX
-        if self.c4_allocator is not None:
-            self.c4_allocator.free_all()
+        if self.c4_page_allocator is not None:
+            self.c4_page_allocator.free_all()
+            self.c4_page_live_count.zero_()
             self.full_to_c4_indexs.fill_(-1)
             self.full_to_c4_indexs[self.HOLD_TOKEN_MEMINDEX] = self.c4_pool.HOLD_TOKEN_MEMINDEX
         if self.c128_allocator is not None:
@@ -634,13 +667,13 @@ class DeepseekV4MemoryManager(MemoryManager):
         return
 
     def alloc_c4(self, need_size) -> torch.Tensor:
-        return self.c4_allocator.alloc(need_size)
+        raise AssertionError("DeepSeek-V4 c4 uses page-safe allocation; call alloc_c4_pages instead")
 
     def alloc_c128(self, need_size) -> torch.Tensor:
         return self.c128_allocator.alloc(need_size)
 
     def free_c4(self, free_index) -> None:
-        self.c4_allocator.free(free_index)
+        raise AssertionError("DeepSeek-V4 c4 uses page live-count release; call evict_c4 instead")
 
     def free_c128(self, free_index) -> None:
         self.c128_allocator.free(free_index)

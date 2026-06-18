@@ -8,7 +8,7 @@ import pickle
 from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any, Union
-from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -177,6 +177,7 @@ class InferenceContext:
         # 载荷只剩按页 bitmap(compressor 状态随 swa 页生灭/边界自然归零,不进载荷),
         # 任意 128 对齐前缀皆可插入——含生成段(floor(cur_kv_len) 边界,回收保留尾页保证其驻留)。
         cache_len = self.radix_cache.align_len(req.cur_kv_len)
+        self.req_manager: DeepseekV4ReqManager
         if cache_len > old_prefix_len:
             payload = self.req_manager.build_prompt_cache_payload(req.req_idx, cache_len)
             value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()

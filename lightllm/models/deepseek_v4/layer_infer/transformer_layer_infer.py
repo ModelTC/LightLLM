@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.distributed as dist
 from lightllm.common.basemodel import TransformerLayerInferTpl
@@ -585,13 +586,26 @@ class DeepseekV4IndexInfer:
             )
             return slots.unsqueeze(1), lengths
 
-        import deep_gemm
-        from ..triton_kernel.gather_c4_indexer_k_dsv4 import gather_c4_indexer_k_ragged
-
         b_req_idx = infer_state.b_req_idx
         batch = b_req_idx.shape[0]
         device = positions.device
         c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)  # entries/req
+
+        if os.getenv("LIGHTLLM_DSV4_PAGED_INDEXER", "0") == "1":
+            out = self._c4_indices_paged(
+                infer_state=infer_state,
+                idx_q_fp8=idx_q_fp8,
+                weights=weights,
+                positions=positions,
+                c4_len=c4_len,
+                c4_cap=c4_cap,
+            )
+            if out is not None:
+                return out
+
+        import deep_gemm
+        from ..triton_kernel.gather_c4_indexer_k_dsv4 import gather_c4_indexer_k_ragged
+
         k_fp8, k_scale, ragged_slots = gather_c4_indexer_k_ragged(
             mem_manager,
             self.layer_idx_,
@@ -620,5 +634,74 @@ class DeepseekV4IndexInfer:
         top_slots = ragged_slots[abs_idx.long()]  # compact row -> c4 pool slot
         invalid = top >= valid_len.unsqueeze(1)  # topk over -inf padding when valid_len < index_topk
         top_slots = torch.where(invalid, torch.full_like(top_slots, -1), top_slots)
+        topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
+        return top_slots.unsqueeze(1), topk_lengths.contiguous()
+
+    def _c4_indices_paged(self, infer_state, idx_q_fp8, weights, positions, c4_len, c4_cap):
+        import deep_gemm
+        from sglang.jit_kernel.dsv4 import topk_transform_512
+        from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
+
+        mem_manager = infer_state.mem_manager
+        index_topk = self.index_topk
+        device = positions.device
+        b_req_idx = infer_state.b_req_idx
+        batch = b_req_idx.shape[0]
+        validate = os.getenv("LIGHTLLM_DSV4_PAGED_INDEXER_VALIDATE", "0") == "1"
+        validate_now = validate and not torch.cuda.is_current_stream_capturing()
+
+        page_table, valid_flag = build_c4_indexer_page_table(
+            mem_manager,
+            b_req_idx,
+            c4_len,
+            c4_cap,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.req_manager.HOLD_REQUEST_ID,
+            validate=validate_now,
+        )
+        if validate_now and int(valid_flag.item()) == 0:
+            if os.getenv("LIGHTLLM_DSV4_PAGED_INDEXER_STRICT", "0") == "1":
+                raise RuntimeError("DeepSeek-V4 paged indexer requires page-aligned c4 slots")
+            return None
+
+        if infer_state.is_prefill:
+            token_batch_pos = torch.repeat_interleave(
+                torch.arange(batch, device=device, dtype=torch.int32), infer_state.b_q_seq_len
+            )
+            row_page_table = page_table[token_batch_pos.long()].contiguous()
+        else:
+            row_page_table = page_table
+
+        valid_len = ((positions + 1) // 4).to(torch.int32)
+        ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1).contiguous()
+        kv_cache = mem_manager.c4_indexer_pool.get_layer_buffer(mem_manager.layer_to_c4_idx[self.layer_idx_]).view(
+            mem_manager.c4_indexer_pool.num_pages,
+            mem_manager.c4_indexer_pool.page_size,
+            1,
+            self.index_head_dim + 4,
+        )
+        metadata = deep_gemm.get_paged_mqa_logits_metadata(
+            ctx_lens,
+            mem_manager.c4_indexer_pool.page_size,
+            deep_gemm.get_num_sms(),
+        )
+        logits = deep_gemm.fp8_paged_mqa_logits(
+            idx_q_fp8.unsqueeze(1),
+            kv_cache,
+            weights,
+            ctx_lens,
+            row_page_table,
+            metadata,
+            c4_cap,
+            False,
+        )
+        top_slots = torch.empty((idx_q_fp8.shape[0], index_topk), dtype=torch.int32, device=device)
+        topk_transform_512(
+            logits,
+            valid_len,
+            row_page_table,
+            top_slots,
+            mem_manager.c4_indexer_pool.page_size,
+        )
         topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
         return top_slots.unsqueeze(1), topk_lengths.contiguous()

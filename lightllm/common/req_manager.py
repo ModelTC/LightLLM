@@ -17,6 +17,10 @@ from lightllm.common.linear_att_cache_manager.layer_cache import LayerCache
 from lightllm.common.linear_att_cache_manager.linear_att_buffer_manager import (
     LinearAttCacheManager,
 )
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+    DSV4_C4_PAGE_SIZE,
+    DSV4_PROMPT_CACHE_PAGE_SIZE,
+)
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -30,10 +34,11 @@ class DeepseekV4PromptCachePayload:
 
     槽位与 compressor 状态都不进载荷: full_to_swa/full_to_c4/full_to_c128 以 full token 槽位
     为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4/c128 compressor 状态以 swa
-    页派生寻址(随 swa 页生灭,命中零拷贝续算)。c128 partial state 不跨 radix 的 128 边界保存。
+    页派生寻址(随 swa 页生灭,命中零拷贝续算)。prompt cache 对齐到 256 token,
+    避免共享前缀停在 c4 物理页中间。
 
     * ``swa_page_valid``: cpu bool [cache_len // page]，插入时按当下 full_to_swa 映射写定
-      (页内 128 个映射全有效才为 True)。匹配层据此把命中裁剪到"结尾页有效"的 128 边界,
+      (页内 token 映射全有效才为 True)。匹配层据此把命中裁剪到"结尾页有效"的 page 边界,
       swa 压力阀回收节点页时清零。"""
 
     cache_len: int
@@ -61,7 +66,7 @@ class DeepseekV4PromptCacheValueOps:
         return
 
     def valid_match_length(self, payload: Optional[DeepseekV4PromptCachePayload], natural_len: int) -> int:
-        """radix 匹配裁剪: 返回 <= natural_len 的最大 128 边界 L'，使结尾页(bitmap[L'/128-1])有效。
+        """radix 匹配裁剪: 返回 <= natural_len 的最大 prompt-cache 边界 L'，使结尾页有效。
 
         有效性可能非单调(owner 生前从左驱逐、后续阀从尾回收)，按候选边界回查 bitmap;
         中段 invalid 页不挡更靠后的有效命中(注意力只回看最后一个窗口)。"""
@@ -441,10 +446,9 @@ class DeepseekV4ReqManager(ReqManager):
     def _swa_retain_len(self) -> int:
         """出窗回收的保留长度 = window + 一个 radix 页。
 
-        多留一页使「最近一个完成的 128 边界」的结尾页恒驻留: prompt cache 只能在 floor(cur/128)
-        边界入树(radix page=128)，若回收只留 window，则任何非对齐时刻该边界的结尾页都已被
-        部分回收，插入门会把所有插入裁到 0(prompt cache 形同虚设)。预算即 v5 §2 的每请求
-        「活跃窗口跨页 ≤2」。驻留证明要求 window >= page-1(DSV4 实际 window == page == 128)。"""
+        多留一页使「最近一个完成的 prompt-cache 边界」的结尾页恒驻留: 若回收只留 window，
+        则任何非对齐时刻该边界的结尾页都已被部分回收，插入门会把所有插入裁到 0。
+        V4 prompt-cache 页取 256 token，正好覆盖一个 c4 物理页对应的 token 范围。"""
         return int(self.sliding_window) + self.get_prompt_cache_page_size()
 
     def prepare_prefill_swa(
@@ -535,10 +539,132 @@ class DeepseekV4ReqManager(ReqManager):
     def _compress_mapping_alloc(self, ratio: int):
         assert self.mem_manager is not None, "DeepSeek-V4 mem manager is not bound yet"
         if ratio == 4:
-            return self.mem_manager.full_to_c4_indexs, self.mem_manager.alloc_c4
+            raise AssertionError("DeepSeek-V4 c4 uses page-safe allocation")
         if ratio == 128:
             return self.mem_manager.full_to_c128_indexs, self.mem_manager.alloc_c128
         raise AssertionError(f"invalid DeepSeek-V4 compress ratio {ratio}")
+
+    def _scatter_c4_prefill_slots_slow(self, req_idx: int, first: int, last: int) -> None:
+        """Idempotence fallback for overlapped/repeated c4 prep."""
+        page = DSV4_C4_PAGE_SIZE
+        mapping = self.mem_manager.full_to_c4_indexs
+        for page_base in range((first // page) * page, last, page):
+            e0 = max(first, page_base)
+            e1 = min(last, page_base + page)
+            entries = torch.arange(e0, e1, dtype=torch.long, device="cuda")
+            full_slots = self.req_to_token_indexs[req_idx, entries * 4 + 3].long()
+            existing = mapping[full_slots]
+            missing = existing < 0
+            if not bool(missing.any()):
+                continue
+
+            mapped = torch.nonzero(existing >= 0, as_tuple=False)
+            if mapped.numel() > 0:
+                j = int(mapped[0].item())
+                base = int(existing[j].item()) - ((e0 + j) % page)
+            elif e0 > page_base:
+                prev_full = self.req_to_token_indexs[req_idx, e0 * 4 - 1].long()
+                prev_slot = int(mapping[prev_full].item())
+                assert prev_slot >= 0 and prev_slot % page == (e0 - 1) % page
+                base = prev_slot - ((e0 - 1) % page)
+            else:
+                base = int(self.mem_manager.alloc_c4_pages(1)[0].item()) * page
+
+            slots = (base + entries % page).to(torch.int32)
+            if mapped.numel() > 0:
+                assert bool((existing[existing >= 0] == slots[existing >= 0]).all())
+            mapping[full_slots[missing]] = slots[missing]
+            self.mem_manager.count_c4_slots(slots[missing], 1)
+        return
+
+    def _scatter_c4_prefill_slots(self, req_idx: int, first: int, last: int) -> None:
+        """为 logical c4 entry [first, last) 分配 page-safe c4 槽。
+
+        不变式: logical entry e 映射到 physical_page * 64 + e % 64，同一 logical page
+        内 entry 共享 physical_page。这是 DeepGEMM paged MQA logits 直接消费 page table 的前提。
+        """
+        if last <= first:
+            return
+        page = DSV4_C4_PAGE_SIZE
+        mapping = self.mem_manager.full_to_c4_indexs
+        entries = torch.arange(first, last, dtype=torch.long, device="cuda")
+        full_slots = self.req_to_token_indexs[req_idx, entries * 4 + 3].long()
+        need = mapping[full_slots] < 0
+        if not bool(need.any()):
+            return
+        if not bool(need.all()):
+            self._scatter_c4_prefill_slots_slow(req_idx, first, last)
+            return
+
+        first_page = first // page
+        last_page = (last - 1) // page
+        n_pages = last_page - first_page + 1
+        bases = torch.empty((n_pages,), dtype=torch.long, device="cuda")
+
+        base_start = 0
+        if first % page != 0:
+            prev_full = self.req_to_token_indexs[req_idx, first * 4 - 1].long()
+            prev_slot = int(mapping[prev_full].item())
+            assert prev_slot >= 0 and prev_slot % page == (first - 1) % page
+            bases[0] = prev_slot - ((first - 1) % page)
+            base_start = 1
+
+        new_page_count = n_pages - base_start
+        if new_page_count > 0:
+            new_pages = self.mem_manager.alloc_c4_pages(new_page_count).cuda(non_blocking=True).long()
+            bases[base_start:] = new_pages * page
+
+        page_local = torch.div(entries, page, rounding_mode="floor") - first_page
+        slots = (bases[page_local] + entries % page).to(torch.int32)
+        mapping[full_slots] = slots
+        self.mem_manager.count_c4_slots(slots, 1)
+        return
+
+    def _scatter_c4_decode_slots(
+        self,
+        b_req_idx_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
+        mem_indexes: torch.Tensor,
+    ) -> None:
+        page = DSV4_C4_PAGE_SIZE
+        mapping = self.mem_manager.full_to_c4_indexs
+        req_list = b_req_idx_cpu.tolist()
+        seq_list = b_seq_len_cpu.tolist()
+        mem_indexes = mem_indexes.cuda().long().reshape(-1)
+
+        cont_rows, cont_prev_pos, cont_offsets = [], [], []
+        new_rows = []
+        for i, (req_idx, seq_len) in enumerate(zip(req_list, seq_list)):
+            req_idx, seq_len = int(req_idx), int(seq_len)
+            if req_idx == self.HOLD_REQUEST_ID or seq_len <= 0 or seq_len % 4 != 0:
+                continue
+            entry = seq_len // 4 - 1
+            offset = entry % page
+            if offset == 0:
+                new_rows.append(i)
+            else:
+                cont_rows.append(i)
+                cont_prev_pos.append(entry * 4 - 1)
+                cont_offsets.append(offset)
+
+        if cont_rows:
+            req_rows = torch.tensor([req_list[i] for i in cont_rows], dtype=torch.long, device="cuda")
+            prev_pos = torch.tensor(cont_prev_pos, dtype=torch.long, device="cuda")
+            prev_full = self.req_to_token_indexs[req_rows, prev_pos].long()
+            prev_slots = mapping[prev_full]
+            offsets = torch.tensor(cont_offsets, dtype=torch.int32, device="cuda")
+            assert bool((prev_slots >= 0).all())
+            assert bool(((prev_slots % page) == (offsets - 1)).all())
+            slots = (prev_slots + 1).to(torch.int32)
+            mapping[mem_indexes[cont_rows]] = slots
+            self.mem_manager.count_c4_slots(slots, 1)
+
+        if new_rows:
+            pages = self.mem_manager.alloc_c4_pages(len(new_rows)).cuda(non_blocking=True).long()
+            slots = (pages * page).to(torch.int32)
+            mapping[mem_indexes[new_rows]] = slots
+            self.mem_manager.count_c4_slots(slots, 1)
+        return
 
     def _scatter_compress_slots(self, ratio: int, full_slots: torch.Tensor) -> None:
         """为组末 full 槽位分配压缩槽并写入映射。已映射(>=0)的行跳过——重复 prep 幂等。"""
@@ -568,9 +694,15 @@ class DeepseekV4ReqManager(ReqManager):
         req_list = b_req_idx.detach().cpu().tolist()
         ready_list = b_ready_cache_len.detach().cpu().tolist()
         seq_list = b_seq_len.detach().cpu().tolist()
-        for ratio, n_layers in ((4, self.n_c4), (128, self.n_c128)):
-            if n_layers == 0:
-                continue
+        if self.n_c4 > 0:
+            for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
+                req_idx = int(req_idx)
+                if req_idx == self.HOLD_REQUEST_ID:
+                    continue
+                self._scatter_c4_prefill_slots(req_idx, int(ready_len) // 4, int(seq_len) // 4)
+
+        if self.n_c128 > 0:
+            ratio = 128
             end_slots = []
             for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
                 req_idx = int(req_idx)
@@ -597,9 +729,11 @@ class DeepseekV4ReqManager(ReqManager):
             return
         req_list = b_req_idx_cpu.tolist()
         seq_list = b_seq_len_cpu.tolist()
-        for ratio, n_layers in ((4, self.n_c4), (128, self.n_c128)):
-            if n_layers == 0:
-                continue
+        if self.n_c4 > 0:
+            self._scatter_c4_decode_slots(b_req_idx_cpu, b_seq_len_cpu, mem_indexes)
+
+        if self.n_c128 > 0:
+            ratio = 128
             rows = [
                 i
                 for i, (req_idx, seq_len) in enumerate(zip(req_list, seq_list))
@@ -624,7 +758,7 @@ class DeepseekV4ReqManager(ReqManager):
         return DeepseekV4PromptCacheValueOps(self)
 
     def get_prompt_cache_page_size(self):
-        return 128
+        return DSV4_PROMPT_CACHE_PAGE_SIZE
 
     def compute_swa_page_valid(self, full_slots: torch.Tensor) -> torch.Tensor:
         """按当下 full_to_swa 映射给出按页有效性: full_slots [L](L 为 page 整数倍) ->
@@ -654,7 +788,7 @@ class DeepseekV4ReqManager(ReqManager):
         start = int(start)
         end = int(end)
         page = self.get_prompt_cache_page_size()
-        # radix page=128 保证分裂点页对齐，bitmap 可整页切分。
+        # radix page 保证分裂点页对齐，bitmap 可整页切分。
         return DeepseekV4PromptCachePayload(
             cache_len=end - start,
             swa_page_valid=payload.swa_page_valid[start // page : end // page].clone()
