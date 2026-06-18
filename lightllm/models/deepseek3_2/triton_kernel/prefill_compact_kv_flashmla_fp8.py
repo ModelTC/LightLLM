@@ -111,15 +111,12 @@ def get_prefill_kv_cache_and_remap_indices_triton(
     prefill_mem_index: torch.Tensor,
     prefill_cache_kv: torch.Tensor,
     prefill_dtype: torch.dtype,
+    ragged_mem_index: torch.Tensor = None,
 ):
     squeeze_h_kv = topk_mem_indices.ndim == 2
     if squeeze_h_kv:
         topk_mem_indices = topk_mem_indices.unsqueeze(1)
 
-    original_shape = topk_mem_indices.shape
-    flat_topk = topk_mem_indices.reshape(-1).contiguous().to(torch.int32)
-    valid_mask = flat_topk != -1
-    valid_topk = flat_topk[valid_mask]
     table_size = packed_kv.shape[0]
 
     prefill_row_table = torch.full((table_size,), -1, dtype=torch.int32, device=packed_kv.device)
@@ -130,11 +127,21 @@ def get_prefill_kv_cache_and_remap_indices_triton(
         num_warps=4,
     )
 
-    unique_mem_index, inverse = torch.unique(valid_topk, sorted=False, return_inverse=True)
-    unique_mem_index = unique_mem_index.to(torch.int32)
-    unique_count = unique_mem_index.numel()
-    remapped_flat = torch.full_like(flat_topk, -1)
-    remapped_flat[valid_mask] = inverse.to(torch.int32)
+    if ragged_mem_index is None:
+        original_shape = topk_mem_indices.shape
+        flat_topk = topk_mem_indices.reshape(-1).contiguous().to(torch.int32)
+        valid_mask = flat_topk != -1
+        valid_topk = flat_topk[valid_mask]
+        unique_mem_index, inverse = torch.unique(valid_topk, sorted=False, return_inverse=True)
+        unique_mem_index = unique_mem_index.to(torch.int32)
+        unique_count = unique_mem_index.numel()
+        remapped_flat = torch.full_like(flat_topk, -1)
+        remapped_flat[valid_mask] = inverse.to(torch.int32)
+        remapped = remapped_flat.view(original_shape)
+    else:
+        unique_mem_index = ragged_mem_index.contiguous().to(torch.int32)
+        unique_count = unique_mem_index.numel()
+        remapped = topk_mem_indices
 
     compact_kv = torch.empty((unique_count, 1, 576), dtype=prefill_dtype, device=packed_kv.device)
     packed_nope = packed_kv[:, :, :512].view(torch.float8_e4m3fn).view(-1, 512)
@@ -169,7 +176,6 @@ def get_prefill_kv_cache_and_remap_indices_triton(
         num_warps=4,
     )
 
-    remapped = remapped_flat.view(original_shape)
     if squeeze_h_kv:
         remapped = remapped.squeeze(1)
     return compact_kv, remapped

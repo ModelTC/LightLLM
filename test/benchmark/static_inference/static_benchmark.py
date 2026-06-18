@@ -30,6 +30,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models import get_model
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.glm5_2_mtp.model import Glm5_2MTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.server.api_cli import make_argument_parser
@@ -1194,6 +1195,12 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
                 "eagle_with_att",
             }, f"{model_type} MTP requires *_with_att mode"
             draft_models.append(Glm4MoeLiteMTPModel(mtp_kvargs))
+        elif model_type == "glm_moe_dsa":
+            assert args.mtp_mode in {
+                "vanilla_with_att",
+                "eagle_with_att",
+            }, f"{model_type} MTP requires *_with_att mode"
+            draft_models.append(Glm5_2MTPModel(mtp_kvargs))
         else:
             raise ValueError(f"unsupported MTP draft model_type={model_type} from {draft_dir}")
     return draft_models
