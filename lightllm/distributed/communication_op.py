@@ -100,6 +100,14 @@ class CustomProcessGroup:
             return
         return dist.all_reduce(input_, group=self.device_group)
 
+    def all_reduce_residual_rmsnorm(self, inp, residual, rms_weight, eps, alloc_func):
+        # Fused AR + residual-add + RMSNorm via flashinfer when the message is small enough
+        # for the oneshot-lamport fast path; otherwise return None so the caller falls back to
+        # a plain all_reduce + a separate (fused_add) rmsnorm.
+        if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(inp):
+            return self.flashinfer_reduce.allreduce_residual_rmsnorm(inp, residual, rms_weight, eps, alloc_func)
+        return None
+
     def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
         return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
@@ -233,6 +241,26 @@ def all_reduce(
             return group.all_reduce(input_)
         return dist.all_reduce(input_, op, group.device_group, async_op)
     return dist.all_reduce(input_, op, group, async_op)
+
+
+def all_reduce_residual_rmsnorm(
+    inp: torch.Tensor,
+    residual: torch.Tensor,
+    rms_weight: torch.Tensor,
+    eps: float,
+    group: Optional[Union[ProcessGroup, CustomProcessGroup]],
+    alloc_func,
+):
+    """Fused all-reduce + residual-add + RMSNorm (SGLang #22390).
+
+    Returns ``(norm_out, residual_out)`` when a fused fast path (flashinfer) is available,
+    otherwise ``None`` so the caller can fall back to ``all_reduce`` + a separate
+    (fused-add) RMSNorm. ``inp`` is the un-reduced tensor; ``residual`` is added after the
+    reduction.
+    """
+    if isinstance(group, CustomProcessGroup):
+        return group.all_reduce_residual_rmsnorm(inp, residual, rms_weight, eps, alloc_func)
+    return None
 
 
 def all_gather_into_tensor(

@@ -45,6 +45,7 @@ from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.glm5_2_mtp.model import Glm5_2MTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
@@ -342,6 +343,9 @@ class ModeBackend:
             elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif mtp_model_cfg["model_type"] == "glm_moe_dsa":
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                self.draft_models.append(Glm5_2MTPModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 
@@ -584,7 +588,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -787,7 +790,6 @@ class ModeBackend:
         b_prefill_has_output_cpu: torch.Tensor = None,
         mask_func: Optional[Callable] = None,
     ):
-
         if mask_func is not None:
             assert len(run_reqs) == logits.shape[0]
             mask_func(run_reqs, logits)
