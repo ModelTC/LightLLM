@@ -839,6 +839,25 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Comma-separated Python modules to import for external @register_att_backend implementations.""",
     )
     parser.add_argument(
+        "--extra_sampling_plugins",
+        type=str,
+        default=None,
+        help="""Comma-separated pip sampling plugin names (entry point group: lightllm.sampling_plugins).""",
+    )
+    parser.add_argument(
+        "--extra_sampling_fallback",
+        type=str,
+        default=None,
+        help="""Comma-separated impl families prepended to the platform sampling fallback chain.
+        Use with --extra_sampling_modules for local sampling kernel overrides without a pip plugin package.""",
+    )
+    parser.add_argument(
+        "--extra_sampling_modules",
+        type=str,
+        default=None,
+        help="""Comma-separated Python modules to import for external @register_sampling_op implementations.""",
+    )
+    parser.add_argument(
         "--enable_torch_fallback",
         action="store_true",
         help="""Whether to enable torch naive implementation for the op.

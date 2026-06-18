@@ -9,6 +9,12 @@ from lightllm.platform.plugins.att import (
     configure_att_plugins,
     get_att_plugin_config,
 )
+from lightllm.platform.plugins.sampling import (
+    SamplingPluginConfig,
+    configure_sampling_plugins,
+    get_sampling_plugin_config,
+    resolve_sampling_fallback,
+)
 
 __all__ = [
     "OpsPluginConfig",
@@ -18,4 +24,8 @@ __all__ = [
     "AttPluginConfig",
     "configure_att_plugins",
     "get_att_plugin_config",
+    "SamplingPluginConfig",
+    "configure_sampling_plugins",
+    "get_sampling_plugin_config",
+    "resolve_sampling_fallback",
 ]

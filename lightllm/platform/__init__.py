@@ -10,10 +10,11 @@ def get_backend() -> Backend:
     if _backend is not None:
         return _backend
 
-    from lightllm.platform.plugins import configure_ops_plugins
+    from lightllm.platform.plugins import configure_ops_plugins, configure_sampling_plugins
     from lightllm.utils.envs_utils import get_env_start_args
 
     configure_ops_plugins()
+    configure_sampling_plugins()
 
     platform_name = get_env_start_args().hardware_platform
     spec = get_platform_spec(platform_name)

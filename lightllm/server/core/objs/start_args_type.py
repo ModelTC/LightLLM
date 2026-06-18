@@ -218,3 +218,15 @@ class StartArgs:
         default=None,
         metadata={"help": "Comma-separated Python modules to import for external @register_att_backend implementations"},
     )
+    extra_sampling_plugins: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated lightllm.sampling_plugins entry point names"},
+    )
+    extra_sampling_fallback: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated impl families prepended to the platform sampling fallback chain"},
+    )
+    extra_sampling_modules: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated Python modules to import for external @register_sampling_op implementations"},
+    )

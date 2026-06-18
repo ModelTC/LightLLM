@@ -7,6 +7,7 @@ from lightllm.platform.base.runtime import BackendRuntime
 
 if TYPE_CHECKING:
     from lightllm.platform.base.ops.base import OpsProtocol
+    from lightllm.platform.base.sampling.base import SamplingProtocol
 
 PLATFORMS: dict[str, "PlatformSpec"] = {}
 
@@ -18,6 +19,7 @@ class PlatformSpec:
     name: str
     backend_cls: Type["Backend"]
     op_fallback: tuple[str, ...]
+    sampling_fallback: tuple[str, ...]
 
 
 class Backend(ABC):
@@ -25,6 +27,7 @@ class Backend(ABC):
     _runtime: BackendRuntime
     _graph: BackendGraph
     _ops: "OpsProtocol"
+    _sampling: "SamplingProtocol"
 
     @property
     def name(self) -> str:
@@ -42,17 +45,29 @@ class Backend(ABC):
     def ops(self) -> "OpsProtocol":
         return self._ops
 
+    @property
+    def sampling(self) -> "SamplingProtocol":
+        return self._sampling
 
-def register_platform(name: str, *, op_fallback: tuple[str, ...]):
+
+def register_platform(
+    name: str,
+    *,
+    op_fallback: tuple[str, ...],
+    sampling_fallback: tuple[str, ...] | None = None,
+):
     def decorator(backend_cls: Type[Backend]) -> Type[Backend]:
         if name in PLATFORMS:
             raise ValueError(f"Platform already registered: {name}")
         # set platform name to the backend class
         backend_cls.platform_name = name
+        if sampling_fallback is None:
+            sampling_fallback = op_fallback
         PLATFORMS[name] = PlatformSpec(
             name=name,
             backend_cls=backend_cls,
             op_fallback=op_fallback,
+            sampling_fallback=sampling_fallback,
         )
         return backend_cls
 

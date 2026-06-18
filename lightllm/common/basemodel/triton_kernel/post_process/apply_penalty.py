@@ -2,7 +2,6 @@ import torch
 import triton
 import triton.language as tl
 import numpy as np
-from lightllm.common.req_manager import ReqSamplingParamsManager
 
 
 @triton.jit
@@ -76,7 +75,11 @@ def apply_penalty(
     p_token_counts: torch.Tensor,
     p_cumsum_seq_len: torch.Tensor,
     eos_ids: torch.Tensor,
-    sampling_params_manager: ReqSamplingParamsManager,
+    req_to_presence_penalty: torch.Tensor,
+    req_to_frequency_penalty: torch.Tensor,
+    req_to_repetition_penalty: torch.Tensor,
+    req_to_exponential_decay_length_penalty: torch.Tensor,
+    vocab_size: int,
 ):
     assert Logits.is_contiguous()
     BLOCK_P = 1024
@@ -86,17 +89,17 @@ def apply_penalty(
         stride_logit_b=Logits.stride(0),
         stride_logit_s=Logits.stride(1),
         b_req_idx=b_req_idx,
-        req_to_presence_penalty=sampling_params_manager.req_to_presence_penalty,
-        req_to_frequency_penalty=sampling_params_manager.req_to_frequency_penalty,
-        req_to_repetition_penalty=sampling_params_manager.req_to_repetition_penalty,
-        req_to_exponential_decay_length_penalty=sampling_params_manager.req_to_exponential_decay_length_penalty,
+        req_to_presence_penalty=req_to_presence_penalty,
+        req_to_frequency_penalty=req_to_frequency_penalty,
+        req_to_repetition_penalty=req_to_repetition_penalty,
+        req_to_exponential_decay_length_penalty=req_to_exponential_decay_length_penalty,
         b_length_penalty_param=b_length_penalty_param,
         p_token_ids=p_token_ids,
         p_token_counts=p_token_counts,
         p_cumsum_seq_len=p_cumsum_seq_len,
         eos_ids=eos_ids,
         b_mask_eos_reqs=b_mask_eos_reqs,
-        vocab_size=sampling_params_manager.vocab_size,
+        vocab_size=vocab_size,
         num_warps=num_warps,
         BLOCK_P=BLOCK_P,
         EOS_ID_NUM=eos_ids.shape[0],
