@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -11,6 +12,8 @@ from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import 
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
+
+_ENABLE_PAGED_INDEXER_LOGITS = os.environ.get("LIGHTLLM_PAGED_INDEXER_LOGITS", "1") == "1"
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -120,7 +123,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         # 计算 topk mem indices
         att_state = infer_state.decode_att_state
-        topk_mem_indices, _ = self.indexer._get_indices(
+        topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
@@ -135,6 +138,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             nsa_decode_dict={
                 "layer_index": self.layer_num_,
                 "topk_mem_indices": topk_mem_indices,
+                "topk_indices": topk_indices,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
                 "qk_rope_head_dim": self.qk_rope_head_dim,
@@ -160,13 +164,15 @@ class NsaInfer:
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.index_head_dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
-        self.block_size = network_config["quantization_config"]["weight_block_size"][0]
-        self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
+        quantization_config = network_config.get("quantization_config") or {}
+        self.block_size = quantization_config.get("weight_block_size", [128, 128])[0]
+        self.scale_fmt = quantization_config.get("scale_fmt", "ue8m0")
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
+        self.index_n_heads_scale = (self.index_n_heads**-0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
+        self.indexer_rope_interleave = network_config.get("indexer_rope_interleave", False)
 
     def _get_indices(
         self,
@@ -176,12 +182,11 @@ class NsaInfer:
         att_state: Any,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
             q_merge = torch.empty(
-                size=(self.tp_world_size_ * q.numel()),
+                size=(self.tp_world_size_ * q.numel(),),
                 dtype=q.dtype,
                 device=q.device,
             )
@@ -214,28 +219,44 @@ class NsaInfer:
             mtp_step = 0
         else:
             mtp_step = get_env_start_args().mtp_step
-        # Use efficient Triton kernel to extract FP8 keys and scales from buffer
-        k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
-            b_seq_len=infer_state.b_seq_len,
-            b_req_idx=infer_state.b_req_idx,
-            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-            out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
-            max_kv_seq_len=infer_state.max_kv_seq_len,
-            mtp_step=mtp_step,
-        )
 
-        import deep_gemm
+        if not infer_state.is_prefill and _ENABLE_PAGED_INDEXER_LOGITS:
+            # Decode: compute logits directly on the paged indexer-K pool through
+            # ragged_mem_index — skips materializing a dense [batch * max_kv_seq_len] K copy.
+            from ..triton_kernel.fp8_mqa_logits import fp8_paged_mqa_logits
 
-        logits = deep_gemm.fp8_mqa_logits(
-            q_fp8,
-            (k_fp8_, k_scale_),
-            weights.squeeze(-1),
-            ks,
-            ke,
-            clean_logits=False,
-            max_seqlen_k=infer_state.max_kv_seq_len,
-        )
+            logits = fp8_paged_mqa_logits(
+                q_fp8=q_fp8,
+                indexer_k_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+                weights=weights.squeeze(-1).float(),
+                ragged_mem_index=att_state.ragged_mem_index,
+                cu_seqlen_ks=ks,
+                cu_seqlen_ke=ke,
+                max_kv_seq_len=infer_state.max_kv_seq_len,
+            )
+        else:
+            # Use efficient Triton kernel to extract FP8 keys and scales from buffer
+            k_fp8_, k_scale_ = extract_indexer_ks(
+                I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+                b_seq_len=infer_state.b_seq_len,
+                b_req_idx=infer_state.b_req_idx,
+                req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+                out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
+                max_kv_seq_len=infer_state.max_kv_seq_len,
+                mtp_step=mtp_step,
+            )
+
+            import deep_gemm
+
+            logits = deep_gemm.fp8_mqa_logits(
+                q_fp8,
+                (k_fp8_, k_scale_),
+                weights.squeeze(-1),
+                ks,
+                ke,
+                clean_logits=False,
+                max_seqlen_k=infer_state.max_kv_seq_len,
+            )
 
         from sgl_kernel import fast_topk_v2
 
@@ -262,7 +283,7 @@ class NsaInfer:
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size ** -0.5)
+        return hadamard_transform(x, scale=hidden_size**-0.5)
 
     def _get_q_k_bf16(
         self,
@@ -276,8 +297,11 @@ class NsaInfer:
 
         k = layer_weight.k_norm_(k, eps=self.eps)
 
-        # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
-        from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+        if self.indexer_rope_interleave:
+            from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+        else:
+            # DeepSeek-V3.2 indexer RoPE uses the non-interleaved layout.
+            from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],
