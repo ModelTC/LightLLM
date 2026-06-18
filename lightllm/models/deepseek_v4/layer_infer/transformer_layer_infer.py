@@ -144,7 +144,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
-        from sglang.jit_kernel.dsv4 import fused_q_norm_rope
+        from lightllm.third_party.sglang_jit.dsv4 import fused_q_norm_rope
 
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         T = input.shape[0]
@@ -639,7 +639,7 @@ class DeepseekV4IndexInfer:
 
     def _c4_indices_paged(self, infer_state, idx_q_fp8, weights, positions, c4_len, c4_cap):
         import deep_gemm
-        from sglang.jit_kernel.dsv4 import topk_transform_512
+        from lightllm.third_party.sglang_jit.dsv4 import topk_transform_512
         from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
 
         mem_manager = infer_state.mem_manager
