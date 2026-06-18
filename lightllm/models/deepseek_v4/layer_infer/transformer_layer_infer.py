@@ -166,7 +166,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             freqs_cis=self.freqs_cis,
             positions=infer_state.position_ids,
         )
-        return q, qa
+        return q, qa, input
 
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
@@ -185,8 +185,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         # _get_qkv writes the chunk's packed latent into the swa pool (fused kernel) before
         # attention reads it back via full_to_swa indices (this custom forward bypasses the
         # tpl _post_cache_kv path).
-        q, q_lora = self._get_qkv(x, infer_state, layer_weight)
-        o = self._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
+        q, q_lora, full_x = self._get_qkv(x, infer_state, layer_weight)
+        o = self._context_attention_wrapper_run(q, q_lora, full_x, infer_state, layer_weight)
         return self._get_o(o, infer_state, layer_weight)
 
     def _context_attention_wrapper_run(
@@ -262,8 +262,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def token_attention_forward(
         self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        q, q_lora = self._get_qkv(x, infer_state, layer_weight)
-        o = self._token_attention_kernel(q, q_lora, x, infer_state, layer_weight)
+        q, q_lora, full_x = self._get_qkv(x, infer_state, layer_weight)
+        o = self._token_attention_kernel(q, q_lora, full_x, infer_state, layer_weight)
         return self._get_o(o, infer_state, layer_weight)
 
     def _token_attention_kernel(
@@ -552,7 +552,12 @@ class DeepseekV4IndexInfer:
 
         cos_tok = infer_state.position_cos_compress
         sin_tok = infer_state.position_sin_compress
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(x.shape[0], self.index_n_heads, self.index_head_dim)
+        token_num = q_lora.shape[0]
+        if x.shape[0] != token_num:
+            raise RuntimeError(
+                f"DeepSeek-V4 indexer expects full-token hidden states, got x={x.shape[0]} q_lora={token_num}"
+            )
+        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(token_num, self.index_n_heads, self.index_head_dim)
         rotary_emb_fwd(idx_q[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok)
         idx_q = hadamard_transform(idx_q, scale=self.index_head_dim ** -0.5)
         idx_q_fp8, q_scale = act_quant(idx_q, self.index_head_dim, None)  # fp8 [T,H,d], scale [T,H,1]
