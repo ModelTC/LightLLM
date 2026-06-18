@@ -1177,7 +1177,7 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        is_mtp_draft_model = (
+        is_mtp_draft_model = getattr(self, "is_mtp_draft_model", False) or (
             "Deepseek3MTPModel" in str(self.__class__)
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)

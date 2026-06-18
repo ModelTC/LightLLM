@@ -120,7 +120,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
 
         # 计算 topk mem indices
         att_state = infer_state.decode_att_state
-        topk_mem_indices, _ = self.indexer._get_indices(
+        topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
             q_lora=infer_state.get_topk_indices_params["q_lora"],
             infer_state=infer_state,
@@ -135,6 +135,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             nsa_decode_dict={
                 "layer_index": self.layer_num_,
                 "topk_mem_indices": topk_mem_indices,
+                "topk_indices": topk_indices,
                 "softmax_scale": self.softmax_scale,
                 "kv_lora_rank": self.kv_lora_rank,
                 "qk_rope_head_dim": self.qk_rope_head_dim,
@@ -160,13 +161,15 @@ class NsaInfer:
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.index_head_dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
-        self.block_size = network_config["quantization_config"]["weight_block_size"][0]
-        self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
+        quantization_config = network_config.get("quantization_config") or {}
+        self.block_size = quantization_config.get("weight_block_size", [128, 128])[0]
+        self.scale_fmt = quantization_config.get("scale_fmt", "ue8m0")
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
+        self.index_n_heads_scale = (self.index_n_heads**-0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
+        self.indexer_rope_interleave = network_config.get("indexer_rope_interleave", False)
 
     def _get_indices(
         self,
@@ -176,12 +179,11 @@ class NsaInfer:
         att_state: Any,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
             q_merge = torch.empty(
-                size=(self.tp_world_size_ * q.numel()),
+                size=(self.tp_world_size_ * q.numel(),),
                 dtype=q.dtype,
                 device=q.device,
             )
@@ -262,7 +264,7 @@ class NsaInfer:
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size ** -0.5)
+        return hadamard_transform(x, scale=hidden_size**-0.5)
 
     def _get_q_k_bf16(
         self,
@@ -276,8 +278,11 @@ class NsaInfer:
 
         k = layer_weight.k_norm_(k, eps=self.eps)
 
-        # 为什么 indexer 和主模型用的q k 的 rotary的排布方式不一样，这不是脱裤子放屁麻。
-        from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
+        if self.indexer_rope_interleave:
+            from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+        else:
+            # DeepSeek-V3.2 indexer RoPE uses the non-interleaved layout.
+            from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 
         rotary_emb_fwd(
             q[:, :, : self.qk_rope_head_dim],

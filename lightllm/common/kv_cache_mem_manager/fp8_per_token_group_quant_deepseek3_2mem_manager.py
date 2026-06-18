@@ -27,24 +27,42 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
     # 132 bytes = 128 + 4
     indexer_bytes_per_token = indexer_head_dim + 4
 
-    # 16-byte 对齐，满足FlashMLA的对齐要求
-    alignment = 16
-    total_bytes_per_token = (
-        (flashmla_bytes_per_token + indexer_bytes_per_token + alignment - 1) // alignment * alignment
-    )
-
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         assert head_num == 1, "DeepSeek-V3.2 DSA FP8 path expects MQA-style head_num == 1"
         self.prefill_dtype = dtype
-        super().__init__(size, torch.uint8, head_num, self.total_bytes_per_token, layer_num, always_copy, mem_fraction)
+        super().__init__(size, torch.uint8, head_num, self.flashmla_bytes_per_token, layer_num, always_copy, mem_fraction)
+
+    def get_cell_size(self):
+        return self.layer_num * (self.flashmla_bytes_per_token + self.indexer_bytes_per_token)
+
+    def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
+        self.kv_buffer = torch.empty(
+            (layer_num, size + 1, head_num, self.flashmla_bytes_per_token),
+            dtype=dtype,
+            device="cuda",
+        )
+        self.indexer_k_buffer = torch.empty(
+            (layer_num, size + 1, head_num, self.indexer_bytes_per_token),
+            dtype=dtype,
+            device="cuda",
+        )
 
     def get_att_input_params(self, layer_index: int) -> Any:
-        return self.kv_buffer[layer_index][:, :, : self.flashmla_bytes_per_token]
+        return self.kv_buffer[layer_index]
 
     def get_indexer_k_buffer(self, layer_index: int) -> torch.Tensor:
-        begin = self.flashmla_bytes_per_token
-        end = begin + self.indexer_bytes_per_token
-        return self.kv_buffer[layer_index][:, :, begin:end]
+        return self.indexer_k_buffer[layer_index]
+
+    def _free_buffers(self):
+        self.kv_buffer = None
+        self.indexer_k_buffer = None
+
+    def get_index_kv_buffer(self, index):
+        return {"kv_buffer": self.kv_buffer[:, index], "indexer_k_buffer": self.indexer_k_buffer[:, index]}
+
+    def load_index_kv_buffer(self, index, load_tensor_dict):
+        self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
+        self.indexer_k_buffer[:, index].copy_(load_tensor_dict["indexer_k_buffer"])
 
     def get_prefill_kv_cache_and_remap_indices(
         self,
