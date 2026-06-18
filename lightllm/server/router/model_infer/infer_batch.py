@@ -916,10 +916,16 @@ class InferReq:
         page_size = getattr(radix_cache, "page_size", 1) if radix_cache is not None else 1
         if page_size <= 1 or self.sampling_param.disable_prompt_cache:
             return chunked_end
-        prompt_end = self.shm_req.input_len
-        next_page_end = ((int(chunked_start) // page_size) + 1) * page_size
-        if int(chunked_start) < next_page_end < int(chunked_end) and next_page_end <= prompt_end:
-            return next_page_end
+        prompt_end = int(self.shm_req.input_len)
+        chunked_start = int(chunked_start)
+        chunked_end = int(chunked_end)
+        if chunked_end >= prompt_end:
+            return chunked_end
+
+        assert self.args.chunked_prefill_size % page_size == 0, (
+            f"chunked_prefill_size={self.args.chunked_prefill_size} must be divisible by "
+            f"prompt-cache page_size={page_size}"
+        )
         return chunked_end
 
     def get_chuncked_input_token_len_for_linear_att(self):
