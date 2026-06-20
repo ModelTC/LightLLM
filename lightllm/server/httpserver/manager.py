@@ -353,6 +353,11 @@ class HttpServerManager:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
+            if await self.rl_controller.wait_until_generation_allowed(group_request_id):
+                for output in self._build_aborted_generation_outputs(group_request_id, sampling_params):
+                    yield output
+                return
+
             original_multimodal_params = None
             if self.is_multinode_tp_master:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
@@ -367,8 +372,6 @@ class HttpServerManager:
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
-
-            await self.rl_controller.wait_until_generation_allowed()
 
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
@@ -506,6 +509,15 @@ class HttpServerManager:
             async with self._run_reqs_count_lock:
                 self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
+
+    def _build_aborted_generation_outputs(self, group_request_id: int, sampling_params: SamplingParams):
+        # Paused requests never enter router queues, so synthesize an aborted empty
+        # result that both stream and non-stream APIs can consume normally.
+        finish_status = FinishStatus()
+        finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+        metadata = {"prompt_tokens": 0, "count_output_tokens": 0}
+        for i in range(sampling_params.n):
+            yield group_request_id + i, "", metadata, finish_status
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
@@ -995,8 +1007,8 @@ class HttpServerManager:
             self.recycle_event.set()
         return
 
-    async def pause_generation(self, reject_new: bool = False):
-        return await self.rl_controller.pause_generation(reject_new=reject_new)
+    async def pause_generation(self):
+        return await self.rl_controller.pause_generation()
 
     async def continue_generation(self):
         return await self.rl_controller.continue_generation()

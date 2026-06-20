@@ -20,42 +20,89 @@ from lightllm.server.io_struct import (
     UpdateWeightsFromIPCReq,
     UpdateWeightsFromTensorReq,
 )
-from lightllm.utils.error_utils import ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 
 class _GenerationPauseGate:
-    """Generation pause gate: RUNNING / PAUSED(queue new requests) / PAUSED_REJECT(reject new requests)."""
+    """Generation pause gate.
+
+    Pending requests are tracked only while they are waiting at the pause gate.
+    Once generation is allowed, the request leaves this lightweight path and
+    continues as a normal request managed by req_id_to_out_inf.
+    """
 
     _RUNNING = 0
     _PAUSED = 1
-    _PAUSED_REJECT = 2
 
     def __init__(self) -> None:
         self._state = self._RUNNING
+        self._pending_request_abort_events = {}
         self._cond = asyncio.Condition()
 
     @asynccontextmanager
-    async def pause_and_abort_context(self, reject_new: bool):
+    async def pause_and_abort_context(self):
         async with self._cond:
             if self._state != self._RUNNING:
-                if reject_new and self._state != self._PAUSED_REJECT:
-                    self._state = self._PAUSED_REJECT
-                    self._cond.notify_all()
-                yield False
-                return
-            self._state = self._PAUSED_REJECT if reject_new else self._PAUSED
-            if reject_new:
-                self._cond.notify_all()
-            yield True
+                do_abort = False
+            else:
+                self._state = self._PAUSED
+                do_abort = True
+        yield do_abort
 
-    async def wait_until_running(self) -> None:
+    async def register_pending_request(self, request_id: int):
+        async with self._cond:
+            self._pending_request_abort_events[request_id] = asyncio.Event()
+
+    async def unregister_pending_request(self, request_id: int):
+        async with self._cond:
+            self._pending_request_abort_events.pop(request_id, None)
+
+    async def wait_until_running_or_aborted(self, request_id: int) -> bool:
+        """Returns True when the pending request should finish as aborted."""
+        async with self._cond:
+            abort_event = self._pending_request_abort_events.get(request_id)
+            if abort_event is None:
+                return False
+            if abort_event.is_set():
+                return True
+            if self._state == self._RUNNING:
+                return False
+
+        resume_task = asyncio.create_task(self._wait_until_running())
+        abort_task = asyncio.create_task(abort_event.wait())
+        done, pending = await asyncio.wait({resume_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        return abort_task in done and abort_event.is_set()
+
+    async def abort_pending_request(self, request_id: int) -> bool:
+        async with self._cond:
+            abort_event = self._pending_request_abort_events.get(request_id)
+            if abort_event is None:
+                return False
+            abort_event.set()
+            return True
+
+    async def abort_all_pending_requests(self):
+        async with self._cond:
+            for abort_event in self._pending_request_abort_events.values():
+                abort_event.set()
+
+    async def is_pending_request(self, request_id: int) -> bool:
+        async with self._cond:
+            return request_id in self._pending_request_abort_events
+
+    async def get_pending_request_count(self) -> int:
+        async with self._cond:
+            return len(self._pending_request_abort_events)
+
+    async def _wait_until_running(self) -> None:
         async with self._cond:
             while self._state != self._RUNNING:
-                if self._state == self._PAUSED_REJECT:
-                    raise ServerBusyError("Generation is paused, new requests are rejected")
                 await self._cond.wait()
 
     async def resume(self) -> None:
@@ -70,8 +117,12 @@ class HttpRlController:
         self.args = manager.args
         self._generation_gate = _GenerationPauseGate()
 
-    async def wait_until_generation_allowed(self) -> None:
-        await self._generation_gate.wait_until_running()
+    async def wait_until_generation_allowed(self, request_id: int) -> bool:
+        await self._generation_gate.register_pending_request(request_id)
+        try:
+            return await self._generation_gate.wait_until_running_or_aborted(request_id)
+        finally:
+            await self._generation_gate.unregister_pending_request(request_id)
 
     async def _wait_for_abort_released(
         self, request_id: Optional[int], abort_all: bool, timeout: float = 60.0
@@ -80,19 +131,26 @@ class HttpRlController:
         empty_since = None
         while True:
             if abort_all:
-                if len(self.manager.req_id_to_out_inf) == 0:
+                pending_request_count = await self._generation_gate.get_pending_request_count()
+                if len(self.manager.req_id_to_out_inf) == 0 and pending_request_count == 0:
                     empty_since = empty_since or time.time()
                     if time.time() - empty_since >= 1.0:
                         return True, ""
                 else:
                     empty_since = None
+                    await self._generation_gate.abort_all_pending_requests()
                     for group_req_id, req_status in list(self.manager.req_id_to_out_inf.items()):
                         if req_status is not None and any(
                             not req.is_aborted for req in req_status.group_req_objs.shm_req_objs
                         ):
                             await self.manager.abort(group_req_id)
-            elif request_id not in self.manager.req_id_to_out_inf:
-                return True, ""
+            else:
+                req_status = self.manager.req_id_to_out_inf.get(request_id, None)
+                if req_status is not None:
+                    if any(not req.is_aborted for req in req_status.group_req_objs.shm_req_objs):
+                        await self.manager.abort(request_id)
+                elif not await self._generation_gate.is_pending_request(request_id):
+                    return True, ""
 
             if time.time() - start_time > timeout:
                 error_msg = (
@@ -108,6 +166,7 @@ class HttpRlController:
     async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
         request_id = request.request_id
         if request.abort_all:
+            await self._generation_gate.abort_all_pending_requests()
             for group_req_id in list(self.manager.req_id_to_out_inf.keys()):
                 await self.manager.abort(group_req_id)
             return await self._wait_for_abort_released(request_id=None, abort_all=True)
@@ -115,12 +174,12 @@ class HttpRlController:
         if request_id is None:
             return True, ""
 
+        await self._generation_gate.abort_pending_request(request_id)
         await self.manager.abort(request_id)
         return await self._wait_for_abort_released(request_id=request_id, abort_all=False)
 
-    async def pause_generation(self, reject_new: bool = False):
-        # In multinode TP mode, the master HTTP node gates incoming requests before they reach slave nodes.
-        async with self._generation_gate.pause_and_abort_context(reject_new) as do_abort:
+    async def pause_generation(self):
+        async with self._generation_gate.pause_and_abort_context() as do_abort:
             if not do_abort:
                 return
             while True:
