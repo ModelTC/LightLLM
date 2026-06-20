@@ -22,13 +22,16 @@ Usage:
   python test/test_api/test_rl_endpoints.py \
       --url http://127.0.0.1:8000 \
       --model_dir /nvme/models/Qwen3.5-35B-A3B \
-      --tp 2 \
-      --client_device 2
+      --tp 4 \
+      --server_devices 0,1,2,3 \
+      --client_device 4
 
 Notes:
   - This script must run on the same machine as the server (CUDA IPC).
-  - --client_device picks a free GPU for the in-process trainer; must differ from
-    the TP worker GPUs (workers occupy 0..tp-1 in the user's launch command).
+  - --server_devices are nvidia-smi GPU indices for the TP workers. If omitted,
+    the script infers them from the top --tp memory consumers before release.
+  - --client_device picks a free CUDA device for the in-process trainer; it is
+    independent from --server_devices and should not overlap the TP workers.
 """
 
 import argparse
@@ -74,6 +77,32 @@ def fail(msg: str):
 def gpu_mem_used_mib() -> List[int]:
     out = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]).decode()
     return [int(x.strip()) for x in out.strip().splitlines()]
+
+
+def _select_gpu_mem(mem: List[int], devices: List[int]) -> List[int]:
+    return [mem[i] for i in devices]
+
+
+def _resolve_server_devices(server_devices: str, tp: int, mem: List[int]) -> List[int]:
+    if tp <= 0:
+        raise ValueError(f"--tp must be positive, got {tp}")
+    if tp > len(mem):
+        raise ValueError(f"--tp={tp} but nvidia-smi only returned {len(mem)} GPUs")
+
+    value = server_devices.strip()
+    if value.lower() == "auto":
+        return sorted(range(len(mem)), key=lambda i: mem[i], reverse=True)[:tp]
+
+    devices = [int(x.strip()) for x in value.split(",") if x.strip()]
+    if len(devices) != tp:
+        raise ValueError(f"--server_devices must contain exactly --tp entries; got {devices} for tp={tp}")
+    if len(set(devices)) != len(devices):
+        raise ValueError(f"--server_devices contains duplicates: {devices}")
+
+    bad = [i for i in devices if i < 0 or i >= len(mem)]
+    if bad:
+        raise ValueError(f"--server_devices contains invalid GPU indices {bad}; nvidia-smi returned {len(mem)} GPUs")
+    return devices
 
 
 def post(url: str, path: str, payload=None, timeout=600):
@@ -224,6 +253,11 @@ def main():
     ap.add_argument("--model_dir", required=True)
     ap.add_argument("--tp", type=int, required=True)
     ap.add_argument(
+        "--server_devices",
+        default="auto",
+        help="comma-separated nvidia-smi GPU indices used by the server, or 'auto' to infer from memory usage",
+    )
+    ap.add_argument(
         "--client_device",
         type=int,
         default=2,
@@ -245,7 +279,13 @@ def main():
     # ---------------- stage 2: release ----------------
     banner("release_memory_occupation")
     before = gpu_mem_used_mib()
-    print(f"  GPU mem before: {before[: max(args.tp, 4)]}")
+    try:
+        server_devices = _resolve_server_devices(args.server_devices, args.tp, before)
+    except ValueError as e:
+        fail(str(e))
+        sys.exit(1)
+    print(f"  server GPUs   : {server_devices}")
+    print(f"  GPU mem before: {_select_gpu_mem(before, server_devices)}")
     code, body = post(args.url, "/release_memory_occupation", {})
     print(f"  resp: {code} {body}")
     if code != 200:
@@ -253,8 +293,8 @@ def main():
         sys.exit(1)
     time.sleep(2)
     after = gpu_mem_used_mib()
-    print(f"  GPU mem after : {after[: max(args.tp, 4)]}")
-    drop = sum(before[: args.tp]) - sum(after[: args.tp])
+    print(f"  GPU mem after : {_select_gpu_mem(after, server_devices)}")
+    drop = sum(_select_gpu_mem(before, server_devices)) - sum(_select_gpu_mem(after, server_devices))
     if drop < 10_000:
         fail(f"release did not free much memory (delta={drop} MiB)")
         sys.exit(1)
@@ -268,7 +308,7 @@ def main():
         fail("resume failed")
         sys.exit(1)
     time.sleep(2)
-    print(f"  GPU mem after : {gpu_mem_used_mib()[: max(args.tp, 4)]}")
+    print(f"  GPU mem after : {_select_gpu_mem(gpu_mem_used_mib(), server_devices)}")
     ok("resume returned success")
 
     banner("post-resume generate (likely garbage without weight cpu backup)")

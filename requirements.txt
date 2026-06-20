@@ -98,4 +98,4 @@ nixl==1.2.0
 xformers==0.0.35
 redis==7.3.0
 litellm>=1.52.0,<1.85
-torch_memory_saver==0.0.9
+torch_memory_saver==0.0.9.post1

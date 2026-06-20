@@ -72,6 +72,7 @@ class StartArgs:
                 "step3",
                 "nano_v3",
                 "interns1",
+                "gemma4",
             ]
         },
     )

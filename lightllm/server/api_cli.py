@@ -80,6 +80,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         proxy module use config server to find  remote vit infer nodes to infer img""",
     )
     parser.add_argument(
+        "--rl_rpyc_port",
+        type=int,
+        default=None,
+        help="The router RL control RPyC port. If unset, LightLLM will allocate one automatically.",
+    )
+    parser.add_argument(
         "--pd_kv_page_num",
         type=int,
         default=16,
