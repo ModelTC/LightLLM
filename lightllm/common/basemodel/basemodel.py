@@ -123,6 +123,7 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
+        self._init_routing_capture()
         self.load_weights(self.weight_dict)
 
         self._init_att_backend()
@@ -298,6 +299,17 @@ class TpPartBaseModel:
 
     def _init_custom(self):
         pass
+
+    def _init_routing_capture(self):
+        if not self.args.enable_return_routed_experts:
+            return
+        if _routing_mgr.g_routing_capture_manager is not None:
+            # MTP draft models share the main model process and KV cache, so they
+            # should reuse the routing capture manager initialized by the main model.
+            logger.info("RoutingCaptureManager already initialized, skip routing capture init.")
+            return
+        _routing_mgr.init_routing_capture(self)
+        return
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):

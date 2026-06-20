@@ -39,6 +39,7 @@ class DiversehBackend(ChunkedPrefillBackend):
         )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 

@@ -742,6 +742,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         b_mtp_index_cpu0 = model_input0.b_mtp_index
         b_mtp_index_cpu1 = model_input1.b_mtp_index
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
             logits0 = model_output0.logits
             logits1 = model_output1.logits

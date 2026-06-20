@@ -139,7 +139,6 @@ class ChunkedPrefillBackend(ModeBackend):
             extra_post_req_handle_func=self.extra_post_req_handle_func,
             pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
         )
-
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
@@ -266,7 +265,6 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="mtp_accept_len",
                 gpu_tensor=mtp_accept_len,
             )
-
             verify_event = torch.cuda.Event()
             verify_event.record()
 
