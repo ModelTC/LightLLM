@@ -1,5 +1,14 @@
-# copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/common.py
+"""
+Serialization helpers for RL weight-update requests.
 
+The tensor update endpoint passes CUDA tensors across processes by serializing
+their multiprocessing IPC handles rather than copying tensor data into the HTTP
+payload. This module wraps ForkingPickler for that handoff and uses a guarded
+unpickler because the payload may come from a trainer process.
+
+Copied from:
+https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/common.py
+"""
 import base64
 import pickle
 import io

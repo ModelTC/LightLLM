@@ -1,6 +1,13 @@
-# copy from
-# https://raw.githubusercontent.com/sgl-project/sglang/refs/heads/main/python/sglang/
-# srt/weight_sync/tensor_bucket.py
+"""
+Flattened tensor buckets used by RL weight-update requests.
+
+Some trainer-side integrations send many named tensors as one flattened byte
+tensor plus metadata. The server reconstructs the named tensors before passing
+them to model weight loading.
+
+Copied from:
+https://raw.githubusercontent.com/sgl-project/sglang/refs/heads/main/python/sglang/srt/weight_sync/tensor_bucket.py
+"""
 from dataclasses import dataclass
 from typing import List, Tuple
 

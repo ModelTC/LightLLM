@@ -3,9 +3,9 @@ from typing import List
 import torch
 
 from lightllm.utils.dist_utils import init_custom_process_group
-from lightllm.utils.serializer import LocalSerializedTensor, MultiprocessingSerializer
-from lightllm.utils.patch_torch import cuda_rebuild_device_fallback, monkey_patch_torch_reductions
-from lightllm.utils.tensor_bucket import FlattenedTensorBucket, FlattenedTensorMetadata
+from lightllm.utils.rl.serialization import LocalSerializedTensor, MultiprocessingSerializer
+from lightllm.utils.rl.tensor_bucket import FlattenedTensorBucket, FlattenedTensorMetadata
+from lightllm.utils.rl.torch_cuda_ipc import cuda_rebuild_device_fallback, monkey_patch_torch_reductions
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from lightllm.server.io_struct import (
     FlushCacheReq,
@@ -287,7 +287,7 @@ class RlBackendOps:
 
     def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq):
         try:
-            from .bucketed_weight_transfer import BucketedWeightReceiver, get_zmq_handle
+            from lightllm.utils.rl.bucketed_weight_transfer import BucketedWeightReceiver, get_zmq_handle
 
             zmq_handle = request.ipc_handle
             if isinstance(zmq_handle, dict):

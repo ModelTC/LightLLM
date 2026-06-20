@@ -12,63 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Bucketed weight transfer via ZMQ + IPC (or shared memory fallback).
-copy from https://github.com/verl-project/verl/blob/main/verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py
+Bucketed RL weight transfer via ZMQ plus CUDA IPC or shared memory fallback.
+
+This module builds on torch_cuda_ipc.py for CUDA IPC device handling. It owns
+the higher-level transfer protocol: the sender publishes one reusable
+communication buffer, and the receiver rebuilds that buffer on its target
+device before applying each metadata-described bucket to model weights.
+
+Copied from:
+https://github.com/verl-project/verl/blob/main/verl/workers/rollout/vllm_rollout/bucketed_weight_transfer.py
 """
 
 import gc
-import logging
-import os
 from multiprocessing import shared_memory
-from typing import Callable, TypedDict
+from typing import TypedDict
 
 import torch
 import zmq
 from torch.multiprocessing.reductions import reduce_tensor
-from lightllm.utils.patch_torch import _device_to_uuid as get_device_uuid
-
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-
-
-is_cuda_available = torch.cuda.is_available()
-
-def get_device_name() -> str:
-    """Function that gets the torch.device based on the current machine.
-    This currently only supports CPU, CUDA, NPU.
-    Returns:
-        device
-    """
-    if is_cuda_available:
-        device = "cuda"
-    else:
-        device = "cpu"
-    return device
-
-
-def get_torch_device() -> any:
-    """Return the corresponding torch attribute based on the device type string.
-    Returns:
-        module: The corresponding torch device namespace, or torch.cuda if not found.
-    """
-    device_name = get_device_name()
-    try:
-        return getattr(torch, device_name)
-    except AttributeError:
-        logger.warning(f"Device namespace '{device_name}' not found in torch, try to load torch.cuda.")
-        return torch.cuda
-
-def get_device_id() -> int:
-    """Return current device id based on the device type.
-    Returns:
-        device index
-    """
-    return get_torch_device().current_device()
+from lightllm.utils.rl.torch_cuda_ipc import (
+    cuda_device_to_uuid,
+    get_current_device_id,
+    get_current_device_name,
+    rebuild_cuda_ipc_tensor,
+)
 
 
 def get_zmq_handle() -> str:
-    return f"ipc:///tmp/rl-colocate-zmq-{get_device_uuid(get_device_id())}.sock"
-
+    return f"ipc:///tmp/rl-colocate-zmq-{cuda_device_to_uuid(get_current_device_id())}.sock"
 
 
 class TensorMetadata(TypedDict):
@@ -76,18 +47,6 @@ class TensorMetadata(TypedDict):
     shape: torch.Size
     dtype: torch.dtype
     offset: int
-
-
-# copy from https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/rlhf_utils.py
-def rebuild_ipc(handle: tuple[Callable, tuple], device_id: int | None = None) -> torch.Tensor:
-    func, args = handle
-    list_args = list(args)
-    if device_id is not None:
-        # the key is to change device id to the current device id
-        # in case two processes have different CUDA_VISIBLE_DEVICES
-        list_args[6] = device_id
-    buffer = func(*list_args)
-    return buffer
 
 
 def create_shared_memory(size: int, name: str):
@@ -200,7 +159,11 @@ class BucketedWeightSender:
         """build communication buffer"""
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
+            buffer = torch.empty(
+                self.bucket_size,
+                dtype=torch.uint8,
+                device=f"{get_current_device_name()}:{get_current_device_id()}",
+            )
             handle = reduce_tensor(buffer)
             self.socket.send_pyobj(handle)
         else:
@@ -310,7 +273,7 @@ class BucketedWeightReceiver:
         buffer, shm = None, None
         if not self.use_shm:
             handle = comm_metadata
-            buffer = rebuild_ipc(handle, self.device.index)
+            buffer = rebuild_cuda_ipc_tensor(handle, self.device.index)
             assert buffer.dtype == torch.uint8
         else:
             shm_name = comm_metadata["name"]
