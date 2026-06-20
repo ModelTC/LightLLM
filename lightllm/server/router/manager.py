@@ -494,8 +494,7 @@ class RouterManager:
                         # 释放多节点abort 请求，如果select == 0， is_aborted 一定为False
                         if is_aborted and select == 1:
                             req = new_batch.pop_req(req_id)
-                            self.req_queue.free_aborted_req(req)
-                            self.shm_req_manager.put_back_req_obj(req)
+                            self.req_queue.release_aborted_req(req)
                             continue
                         if select == 0:
                             req = new_batch.pop_req(req_id)
@@ -532,8 +531,6 @@ class RouterManager:
                             if is_aborted:
                                 # 把 rank 0 的 abort 状态写回本机 shm，便于本机 httpserver recycle loop 看到一致状态
                                 req.is_aborted = True
-                                self.req_queue.free_aborted_req(req)
-                                self.shm_req_manager.put_back_req_obj(req)
                                 aborted_reqs.append(req)
                                 continue
                             select_reqs.append(req)
@@ -541,6 +538,7 @@ class RouterManager:
                         self.req_queue.waiting_req_list.remove(req)
                     for req in aborted_reqs:
                         self.req_queue.waiting_req_list.remove(req)
+                        self.req_queue.release_aborted_req(req)
                     if select_reqs:
                         new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
                     else:
