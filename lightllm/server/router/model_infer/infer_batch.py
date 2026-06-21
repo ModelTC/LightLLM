@@ -123,7 +123,7 @@ class InferenceContext:
         return req_objs
 
     def _extract_routing_data(self, req: "InferReq"):
-        if req.shm_req.shm_routing_num_tokens > 0:
+        if not (req.shm_req.finish_status.is_finished() or req.shm_req.stop_str_matched):
             return
         mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
         mgr = _routing_mgr.g_routing_capture_manager
@@ -285,6 +285,8 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
+            if _routing_mgr.g_routing_capture_manager is not None:
+                g_infer_context._extract_routing_data(req)
             self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
@@ -951,8 +953,6 @@ class InferReqUpdatePack:
             shm_req.shm_cur_output_len = self.output_len
 
             if finish_status.is_finished():
-                if _routing_mgr.g_routing_capture_manager is not None:
-                    g_infer_context._extract_routing_data(req_obj)
                 shm_req.finish_token_index = shm_req.input_len + self.output_len - 1
                 shm_req.finish_status = req_obj.finish_status
 

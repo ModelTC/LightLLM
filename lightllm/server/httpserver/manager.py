@@ -10,6 +10,7 @@ import copy
 import hashlib
 import datetime
 import pickle
+import base64
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -29,7 +30,7 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
-from lightllm.common.basemodel.routing_manager import get_routing_config_shm
+from lightllm.common.basemodel.routing_manager import get_routing_config_from_model_dir, routing_dtype_id_to_np
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.server.io_struct import (
@@ -135,9 +136,11 @@ class HttpServerManager:
         # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
-
-        # Cache routing config for MoE expert routing data extraction
-        self._routing_shm = get_routing_config_shm() if args.enable_return_routed_experts else None
+        self._routing_config = (
+            get_routing_config_from_model_dir(args.model_dir)
+            if args.enable_return_routed_experts and args.node_rank == 0
+            else None
+        )
 
         self.rl_controller = HttpRlController(self)
 
@@ -533,6 +536,43 @@ class HttpServerManager:
 
         return image_tokens, audio_tokens
 
+    def _read_routed_experts_metadata(self, req: Req):
+        if self._routing_config is None:
+            return None
+        num_moe_layers, topk, dtype_id = self._routing_config
+        num_tokens = req.input_len + req.shm_cur_output_len
+        if num_tokens <= 0:
+            return None
+
+        try:
+            routing_data = req.link_routing_data_shm_array(
+                num_moe_layers, num_tokens, topk, np_dtype=routing_dtype_id_to_np(dtype_id)
+            )
+            if routing_data is None:
+                return None
+            return {
+                "shape": list(routing_data.shape),
+                "dtype": str(routing_data.dtype),
+                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to read routing data for req {req.request_id}: {e}")
+            return None
+
+    async def _wait_and_read_routed_experts_metadata(self, req: Req, timeout: float = 60.0):
+        if not await self.rl_controller.wait_until_can_released_mark(req, timeout=timeout):
+            return None
+
+        start_time = time.time()
+        while True:
+            routing_meta = self._read_routed_experts_metadata(req)
+            if routing_meta is not None:
+                return routing_meta
+            if time.time() - start_time > timeout:
+                logger.warning(f"wait routing data shm timeout, req_id={req.request_id}, timeout={timeout}s")
+                return None
+            await asyncio.sleep(0.005)
+
     async def _log_req_header(self, request_headers, group_request_id: int):
 
         x_request_id = request_headers.get("X-Request-Id", "")
@@ -887,11 +927,10 @@ class HttpServerManager:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
-                    if hasattr(req, "shm_routing_data") and req.shm_routing_data is not None:
-                        try:
-                            req.close_routing_data_shm_array()
-                        except Exception as e:
-                            logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
+                    try:
+                        req.close_routing_data_shm_array()
+                    except Exception as e:
+                        logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
                     _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
@@ -984,14 +1023,10 @@ class HttpServerManager:
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
 
-                                    if self._routing_shm is not None:
-                                        _num_moe = int(self._routing_shm.arr[0])
-                                        _topk = int(self._routing_shm.arr[1])
-                                        _dtype_id = int(self._routing_shm.arr[2])
-                                        if _num_moe > 0:
-                                            routing_meta = req.get_routing_metadata(_num_moe, _topk, dtype_id=_dtype_id)
-                                            if routing_meta is not None:
-                                                metadata["routed_experts"] = routing_meta
+                                    if self._routing_config is not None:
+                                        routing_meta = await self._wait_and_read_routed_experts_metadata(req)
+                                        if routing_meta is not None:
+                                            metadata["routed_experts"] = routing_meta
 
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:

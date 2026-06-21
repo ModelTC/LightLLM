@@ -1,12 +1,13 @@
 import atexit
+import json
+import os
 import torch
 import numpy as np
 from multiprocessing import shared_memory
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.routing_capture import scatter_routing_topk_to_cpu
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_rank_in_dp
-from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
 from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
@@ -20,9 +21,52 @@ def routing_dtype_id_to_np(dtype_id: int):
     return np.int32
 
 
-def get_routing_config_shm() -> SharedArray:
-    service_name = get_unique_server_name()
-    return SharedArray(f"{service_name}_routing_config", shape=(4,), dtype=np.int32)
+def _get_model_text_config(config: dict) -> dict:
+    return config.get("text_config", config)
+
+
+def _get_num_moe_layers_from_config(config: dict) -> int:
+    num_layers = config.get("num_hidden_layers", config.get("n_layer", config.get("num_layers", 0)))
+    num_experts = config.get("n_routed_experts", config.get("num_experts", config.get("num_local_experts", 0)))
+    if num_layers <= 0 or not num_experts:
+        return 0
+
+    if "first_k_dense_replace" in config:
+        first_k_dense_replace = config.get("first_k_dense_replace", 0)
+        moe_layer_freq = config.get("moe_layer_freq", 1)
+        return sum(
+            1
+            for layer_num in range(num_layers)
+            if layer_num >= first_k_dense_replace and layer_num % moe_layer_freq == 0
+        )
+
+    if "mlp_only_layers" in config or "decoder_sparse_step" in config:
+        mlp_only_layers = set(config.get("mlp_only_layers", []))
+        decoder_sparse_step = config.get("decoder_sparse_step", 1)
+        return sum(
+            1
+            for layer_num in range(num_layers)
+            if layer_num not in mlp_only_layers and (layer_num + 1) % decoder_sparse_step == 0
+        )
+
+    if config.get("enable_moe_block", False):
+        return num_layers
+
+    return num_layers
+
+
+def get_routing_config_from_model_dir(model_dir: str) -> Optional[Tuple[int, int, int]]:
+    with open(os.path.join(model_dir, "config.json"), "r") as json_file:
+        config = _get_model_text_config(json.load(json_file))
+
+    num_moe_layers = _get_num_moe_layers_from_config(config)
+    topk = config.get("num_experts_per_tok", config.get("top_k_experts", 0))
+    num_experts = config.get("n_routed_experts", config.get("num_experts", config.get("num_local_experts", 0)))
+    if num_moe_layers <= 0 or topk <= 0 or not num_experts:
+        return None
+
+    dtype_id = 1 if num_experts <= 256 else 2
+    return num_moe_layers, topk, dtype_id
 
 
 class RoutingCaptureManager:
@@ -225,19 +269,8 @@ def init_routing_capture(model, num_moe_layers: Optional[int] = None) -> None:
         layer_num_to_moe_index=layer_num_to_moe_index,
     )
 
-    mgr = g_routing_capture_manager
-    dtype_id = mgr.dtype_id
-
-    max_req_total_len = args.max_req_total_len
-
-    # Write config to cross-process SHM
-    shm = get_routing_config_shm()
-    shm.arr[0] = num_moe_layers
-    shm.arr[1] = topk
-    shm.arr[2] = dtype_id
-    shm.arr[3] = max_req_total_len
     logger.info(
-        f"Shared routing config set: num_moe_layers={num_moe_layers}, topk={topk}, "
-        f"dtype_id={dtype_id}, max_tokens={max_req_total_len}"
+        f"Routing capture config set: num_moe_layers={num_moe_layers}, topk={topk}, "
+        f"dtype_id={g_routing_capture_manager.dtype_id}, max_tokens={args.max_req_total_len}"
     )
     atexit.register(cleanup_routing_shm_pool)

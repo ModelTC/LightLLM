@@ -1,9 +1,9 @@
 import os
 import math
 import ctypes
-import base64
 import numpy as np
 import time
+from multiprocessing import shared_memory
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
@@ -130,8 +130,6 @@ class Req(ctypes.Structure):
         ("token_hash_page_len_list", TokenPageLenList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
-        # Number of tokens in routing data SHM, written by model worker, read by HTTP server.
-        ("shm_routing_num_tokens", ctypes.c_int),
     ]
 
     def get_str(self):
@@ -189,7 +187,6 @@ class Req(ctypes.Structure):
         self._mtp_step = get_env_start_args().mtp_step
         self.stop_str_matched = False
         self.stop_str_matched_token_index = -1
-        self.shm_routing_num_tokens = 0
 
         self.post_init()
 
@@ -285,36 +282,27 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
-    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.int8):
-        """Create routing SHM at actual size (on-demand, not pre-allocated).
-
-        Uses smart mode: links if same-sized SHM exists, otherwise creates new.
-        """
+    def get_routing_data_shm_name(self):
         service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-        shape = (num_tokens, num_moe_layers, topk)
-        self.shm_routing_data = ShmArray(name, shape, dtype=np_dtype)
+        return f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+
+    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.uint8):
+        """Create routing SHM at actual size."""
+        self.shm_routing_data = ShmArray(
+            self.get_routing_data_shm_name(), (num_tokens, num_moe_layers, topk), dtype=np_dtype
+        )
         self.shm_routing_data.create_shm()
-        self.shm_routing_num_tokens = num_tokens
         return
 
-    def link_routing_data_shm_array(self, num_moe_layers: int, topk: int, np_dtype=np.int8):
-        """Link to routing SHM from the reader side (HTTP server)."""
-        if num_moe_layers == 0:
-            return
-        num_tokens = self.shm_routing_num_tokens
-        if num_tokens <= 0:
-            return
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-        shape = (num_tokens, num_moe_layers, topk)
-        self.shm_routing_data = ShmArray(name, shape, dtype=np_dtype)
-        self.shm_routing_data.link_shm()
-        return
-
-    def get_routing_data(self):
-        if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
+    def link_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.uint8):
+        """Link routing SHM at actual size."""
+        if num_moe_layers <= 0 or num_tokens <= 0 or topk <= 0:
             return None
+        shm_routing_data = ShmArray(
+            self.get_routing_data_shm_name(), (num_tokens, num_moe_layers, topk), dtype=np_dtype
+        )
+        shm_routing_data.link_shm()
+        self.shm_routing_data = shm_routing_data
         return self.shm_routing_data.arr
 
     def close_routing_data_shm_array(self):
@@ -322,31 +310,14 @@ class Req(ctypes.Structure):
         if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
             self.shm_routing_data.close_shm()
             self.shm_routing_data = None
-        self.shm_routing_num_tokens = 0
+        else:
+            try:
+                shm = shared_memory.SharedMemory(name=self.get_routing_data_shm_name())
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
         return
-
-    def get_routing_metadata(self, num_moe_layers: int, topk: int, dtype_id: int = 1):
-        if num_moe_layers == 0 or topk == 0:
-            return None
-        if self.shm_routing_num_tokens <= 0:
-            return None
-        try:
-            from lightllm.common.basemodel.routing_manager import routing_dtype_id_to_np
-
-            np_dtype = routing_dtype_id_to_np(dtype_id)
-            if not hasattr(self, "shm_routing_data") or self.shm_routing_data is None:
-                self.link_routing_data_shm_array(num_moe_layers, topk, np_dtype=np_dtype)
-            routing_data = self.get_routing_data()
-            if routing_data is None:
-                return None
-            return {
-                "shape": list(routing_data.shape),
-                "dtype": str(routing_data.dtype),
-                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
-            }
-        except Exception as e:
-            logger.warning(f"Failed to read routing data for req {self.request_id}: {e}")
-            return None
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
