@@ -85,9 +85,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         compress_rates = getattr(self, "_dsv4_compress_rates", self._get_compress_rates(layer_num))
         sliding_window = int(self.config["sliding_window"])
-        # 活跃窗口之外的 swa 余量: 在途 prefill chunk 的瞬时占用(出窗槽位到下一次 prep 才回收)
-        # + radix cache 持有的窗口尾部(每条缓存序列约一个 window)。
-        swa_extra_token_num = int(self.batch_max_tokens or 0) + self.max_req_num * sliding_window
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
@@ -98,11 +95,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
             sliding_window=sliding_window,
-            swa_extra_token_num=swa_extra_token_num,
             mem_fraction=self.mem_fraction,
         )
-        assert isinstance(self.req_manager, DeepseekV4ReqManager)
-        self.req_manager.bind_mem_manager(self.mem_manager)
+        self.req_manager.mem_manager = self.mem_manager
         return
 
     def _init_cudagraph(self):

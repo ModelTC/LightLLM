@@ -398,16 +398,6 @@ class DeepseekV4ReqManager(ReqManager):
     ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
 
-        self.mem_manager = mem_manager
-        if mem_manager is not None:
-            if compress_rates is None:
-                compress_rates = mem_manager.compress_rates
-            if head_dim is None:
-                head_dim = mem_manager.head_dim
-            if indexer_head_dim is None:
-                indexer_head_dim = mem_manager.indexer_head_dim
-            if sliding_window is None:
-                sliding_window = mem_manager.sliding_window
         self.sliding_window = sliding_window
         # 出窗回收水位线: -1 表示该 req 尚未见过 prefill chunk(首个 chunk 的 ready_cache_len
         # 即共享前缀边界，作为永不下探的回收下界)。
@@ -428,18 +418,6 @@ class DeepseekV4ReqManager(ReqManager):
                 self.layer_to_c128_idx[lid] = c128
                 c128 += 1
 
-        return
-
-    def bind_mem_manager(self, mem_manager: DeepseekV4MemoryManager):
-        assert isinstance(mem_manager, DeepseekV4MemoryManager)
-        assert self.compress_rates == mem_manager.compress_rates
-        assert self.head_dim == mem_manager.head_dim
-        assert self.indexer_head_dim == mem_manager.indexer_head_dim
-        if self.sliding_window is None:
-            self.sliding_window = mem_manager.sliding_window
-        else:
-            assert mem_manager.sliding_window is None or self.sliding_window == mem_manager.sliding_window
-        self.mem_manager = mem_manager
         return
 
     # ------------------------------------------------------------------ swa slot prep (per step)

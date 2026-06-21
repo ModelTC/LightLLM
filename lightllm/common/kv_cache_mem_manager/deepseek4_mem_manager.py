@@ -1,13 +1,11 @@
 import torch
-import torch.distributed as dist
 from typing import List, Optional, Union
 from .mem_manager import MemoryManager
 from .operator import DeepseekV4MemOperator
 from .allocator import KvCacheAllocator
-from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_node
+from lightllm.utils.dist_utils import get_current_rank_in_node
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
 
 logger = init_logger(__name__)
 
@@ -15,30 +13,29 @@ logger = init_logger(__name__)
 # fp8_ds_mla packed-latent byte layout (ABI shared with the flash_mla extra-cache fork and
 # sglang/vllm): 448B NoPE fp8 + 64*2B RoPE bf16 + 7B ue8m0 scale + 1B pad = 584B per token,
 # stored in page slabs whose tail carries the per-token scale bytes.
-DSV4_MLA_NOPE_DIM = 448
-DSV4_MLA_ROPE_DIM = 64
-DSV4_MLA_HEAD_DIM = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM
-DSV4_MLA_QUANT_GROUP_SIZE = 64
-DSV4_MLA_SCALE_BYTES = DSV4_MLA_NOPE_DIM // DSV4_MLA_QUANT_GROUP_SIZE + 1
-DSV4_MLA_BYTES_PER_TOKEN = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM * 2 + DSV4_MLA_SCALE_BYTES
-DSV4_MLA_DATA_BYTES_PER_TOKEN = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM * 2
-DSV4_MLA_PAGE_ALIGN_BYTES = DSV4_MLA_DATA_BYTES_PER_TOKEN
-DSV4_INDEXER_HEAD_DIM = 128
-DSV4_INDEXER_SCALE_BYTES = 4
-DSV4_INDEXER_BYTES_PER_TOKEN = DSV4_INDEXER_HEAD_DIM + DSV4_INDEXER_SCALE_BYTES
-DSV4_FP8_E4M3_MAX = 448.0
-DSV4_FP8_SCALE_MIN = 1e-4
-DSV4_SWA_PAGE_SIZE = 128
-DSV4_C4_PAGE_SIZE = 64
-DSV4_C128_PAGE_SIZE = 2
-DSV4_PROMPT_CACHE_PAGE_SIZE = DSV4_C4_PAGE_SIZE * 4
+DSV4_MLA_NOPE_DIM = 448  # 448B
+DSV4_MLA_ROPE_DIM = 64  # 64 dim
+DSV4_MLA_HEAD_DIM = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM  # 512
+DSV4_MLA_QUANT_GROUP_SIZE = 64  # 64
+DSV4_MLA_SCALE_BYTES = DSV4_MLA_NOPE_DIM // DSV4_MLA_QUANT_GROUP_SIZE + 1  # 8 (7 ue8m0 + 1 pad)
+DSV4_MLA_BYTES_PER_TOKEN = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM * 2 + DSV4_MLA_SCALE_BYTES  # 584
+DSV4_MLA_DATA_BYTES_PER_TOKEN = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM * 2  # 576
+DSV4_MLA_PAGE_ALIGN_BYTES = DSV4_MLA_DATA_BYTES_PER_TOKEN  # 576
+DSV4_INDEXER_HEAD_DIM = 128  # 128
+DSV4_INDEXER_SCALE_BYTES = 4  # 4B fp32 scale
+DSV4_INDEXER_BYTES_PER_TOKEN = DSV4_INDEXER_HEAD_DIM + DSV4_INDEXER_SCALE_BYTES  # 132
+DSV4_FP8_E4M3_MAX = 448.0  # 448.0
+DSV4_FP8_SCALE_MIN = 1e-4  # 1e-4
+DSV4_SWA_PAGE_SIZE = 128  # 128 slots/page
+DSV4_C4_PAGE_SIZE = 64  # 64 slots/page
+DSV4_C128_PAGE_SIZE = 2  # 2 slots/page
+DSV4_PROMPT_CACHE_PAGE_SIZE = DSV4_C4_PAGE_SIZE * 4  # 256 (= c4 ratio)
 # compressor state ring: c4 overlap 对为每页 2 个分组槽 × ratio 4 行;c128 离线聚合为每页 1 组。
-DSV4_C4_STATE_RING = 8
-DSV4_C128_STATE_RING = 128
-# swa 池占 full token 空间的比例下限(sglang swa_full_tokens_ratio=0.1 同值)。
-# v5 的 swa 压力阀(借页/驱逐)已覆盖 radix 树与准入波次的瞬时增长,结构性预算
-# (max_req×window + batch_max_tokens 余量)另行叠加,0.1 仅作 full 池比例下限。
-DSV4_SWA_FULL_TOKENS_RATIO = 0.1
+DSV4_C4_STATE_RING = 8  # 8 rows/page
+DSV4_C128_STATE_RING = 128  # 128 rows/page
+# swa 池占 full token 空间的比例(sglang DSV4 默认 swa_full_tokens_ratio=0.1 同值)。
+# 瞬时借页/驱逐走 swa 压力阀;池子大小仅按 ratio 切分,不再叠加结构性余量。
+DSV4_SWA_FULL_TOKENS_RATIO = 0.1  # 0.1
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -134,14 +131,14 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     operator_class = DeepseekV4MemOperator
 
-    mla_nope_dim = DSV4_MLA_NOPE_DIM
-    mla_rope_dim = DSV4_MLA_ROPE_DIM
-    mla_head_dim = DSV4_MLA_HEAD_DIM
-    mla_quant_group_size = DSV4_MLA_QUANT_GROUP_SIZE
-    mla_scale_bytes = DSV4_MLA_SCALE_BYTES
-    mla_bytes_per_token = DSV4_MLA_BYTES_PER_TOKEN
-    indexer_head_dim_default = DSV4_INDEXER_HEAD_DIM
-    indexer_bytes_per_token = DSV4_INDEXER_BYTES_PER_TOKEN
+    mla_nope_dim = DSV4_MLA_NOPE_DIM  # 448
+    mla_rope_dim = DSV4_MLA_ROPE_DIM  # 64
+    mla_head_dim = DSV4_MLA_HEAD_DIM  # 512
+    mla_quant_group_size = DSV4_MLA_QUANT_GROUP_SIZE  # 64
+    mla_scale_bytes = DSV4_MLA_SCALE_BYTES  # 8
+    mla_bytes_per_token = DSV4_MLA_BYTES_PER_TOKEN  # 584
+    indexer_head_dim_default = DSV4_INDEXER_HEAD_DIM  # 128
+    indexer_bytes_per_token = DSV4_INDEXER_BYTES_PER_TOKEN  # 132
 
     def __init__(
         self,
@@ -154,7 +151,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         indexer_head_dim: int = 128,
         max_request_num: Optional[int] = None,
         sliding_window: Optional[int] = None,
-        swa_extra_token_num: int = 0,
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
@@ -173,9 +169,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.indexer_head_dim = indexer_head_dim
         self.max_request_num = max_request_num
         self.sliding_window = sliding_window
-        # 活跃窗口(max_request_num * sliding_window)之外的余量: 在途 prefill chunk 的瞬时占用
-        # (出窗槽位要到下一次 prep 才回收) + radix cache 持有的窗口尾部。
-        self.swa_extra_token_num = int(swa_extra_token_num)
         self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
 
         # 全局层号 -> 各压缩池内的压实层号(同 qwen3next 的层号压实手法)
@@ -193,25 +186,11 @@ class DeepseekV4MemoryManager(MemoryManager):
         super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
 
     # ------------------------------------------------------------------ sizing
-    def _swa_per_req_budget(self) -> int:
-        # 活跃请求保留 window + 一个 radix 页(req_manager._swa_retain_len: 让最近完成的
-        # prompt-cache 边界的结尾页恒驻留)。V4 的 prompt-cache 边界取 256 token,
-        # 避免 radix 共享前缀落在 c4 物理页(64 c4 entry = 256 token)中间。
-        return int(self.sliding_window) + DSV4_PROMPT_CACHE_PAGE_SIZE
-
     def _planned_swa_size(self, full_size: int) -> int:
-        # swa 池按页分配(页 = 128 = sliding_window),容量向上取整到整页。
-        if self.max_request_num is None or self.sliding_window is None:
-            return _ceil_div(full_size, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
-        cap = int(self.max_request_num) * self._swa_per_req_budget() + self.swa_extra_token_num
-        cap = max(cap, int(full_size * self.swa_full_tokens_ratio))
+        # swa 池 = full * ratio,按 SWA 物理页(128)向上取整;与 sglang DSV4PoolConfigurator 同思路。
+        cap = int(full_size * self.swa_full_tokens_ratio)
         cap = max(1, min(full_size, cap))
         return _ceil_div(cap, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
-
-    @staticmethod
-    def _slab_bytes_per_slot(page_size: int, data_bytes: int, scale_bytes: int, align_bytes: int = 1) -> float:
-        bytes_per_page = _ceil_div(page_size * (data_bytes + scale_bytes), align_bytes) * align_bytes
-        return bytes_per_page / page_size
 
     @staticmethod
     def _paged_state_rows(num_swa_pages: int, ring: int, ratio: int) -> int:
@@ -225,79 +204,20 @@ class DeepseekV4MemoryManager(MemoryManager):
         buffer[:, -1, half:].fill_(float("-inf"))
         return
 
-    def _paged_state_bytes_per_swa_slot(self) -> float:
-        """c4/c128 compressor state(swa 页派生寻址)摊到每个 swa 槽的字节数。"""
-        per_page = 0.0
-        if self.n_c4 > 0:
-            per_page += DSV4_C4_STATE_RING * (4 * self.head_dim + 4 * self.indexer_head_dim) * 4 * self.n_c4
-        if self.n_c128 > 0:
-            per_page += DSV4_C128_STATE_RING * (2 * self.head_dim) * 4 * self.n_c128
-        return per_page / DSV4_SWA_PAGE_SIZE
-
-    def _swa_slot_bytes(self) -> float:
-        per_layer = self._slab_bytes_per_slot(
-            DSV4_SWA_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
-        )
-        return per_layer * self.layer_num + self._paged_state_bytes_per_swa_slot()
-
-    def _compressed_cell_size(self) -> float:
-        """每个 full token 摊到压缩池上的精确字节数(按 page-slab 对齐后)。"""
-        c4_latent = self._slab_bytes_per_slot(
-            DSV4_C4_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
-        )
-        c128_latent = self._slab_bytes_per_slot(
-            DSV4_C128_PAGE_SIZE, DSV4_MLA_DATA_BYTES_PER_TOKEN, self.mla_scale_bytes, DSV4_MLA_PAGE_ALIGN_BYTES
-        )
-        c4_indexer = self._slab_bytes_per_slot(DSV4_C4_PAGE_SIZE, self.indexer_head_dim, DSV4_INDEXER_SCALE_BYTES)
-        return (c4_latent + c4_indexer) * self.n_c4 / 4 + c128_latent * self.n_c128 / 128
-
     def get_cell_size(self):
-        compressed = self._compressed_cell_size()
-        if self.size is None:
-            return self._swa_slot_bytes() + compressed
-        swa_ratio = self._planned_swa_size(self.size) / max(1, self.size)
-        return self._swa_slot_bytes() * swa_ratio + compressed
-
-    def profile_size(self, mem_fraction):
-        if self.size is not None:
-            return
-
-        torch.cuda.empty_cache()
-        world_size = dist.get_world_size()
-        available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
-        available_bytes = available_memory * 1024 ** 3
-        swa_slot_bytes = self._swa_slot_bytes()
-        compressed_cell = self._compressed_cell_size()
-
-        if self.max_request_num is not None and self.sliding_window is not None and compressed_cell > 0:
-            swa_budget = int(self.max_request_num) * self._swa_per_req_budget() + self.swa_extra_token_num
-            full_cell = swa_slot_bytes + compressed_cell
-            if available_bytes <= full_cell * swa_budget:
-                # 小显存: full token 数还到不了 swa 预算，swa 池跟随 full token 数(每 token 一个 swa 槽)。
-                self.size = max(1, int(available_bytes / full_cell))
-            else:
-                size_budget = max(1, int((available_bytes - swa_slot_bytes * swa_budget) / compressed_cell))
-                if size_budget * self.swa_full_tokens_ratio > swa_budget:
-                    # 比例下限生效(_planned_swa_size 会取 ratio*full),按该机制反解 full。
-                    self.size = max(
-                        1, int(available_bytes / (swa_slot_bytes * self.swa_full_tokens_ratio + compressed_cell))
-                    )
-                else:
-                    self.size = size_budget
-        else:
-            self.size = max(1, int(available_bytes / (swa_slot_bytes + compressed_cell)))
-
-        if world_size > 1:
-            tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
-            dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
-            self.size = tensor.item()
-
-        logger.info(
-            f"{str(available_memory)} GB space is available after load the model weight\n"
-            f"{str(self.get_cell_size() / 1024 ** 2)} MB is the conservative size of one token kv cache\n"
-            f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
+        kv_bytes = self.mla_bytes_per_token
+        indexer_bytes = self.indexer_bytes_per_token
+        state_dtype_bytes = torch._utils._element_size(torch.float32)
+        c4_state_width = 4 * self.head_dim + 4 * self.indexer_head_dim
+        c128_state_width = 2 * self.head_dim
+        c4_state_bytes = DSV4_C4_STATE_RING / DSV4_SWA_PAGE_SIZE * c4_state_width * state_dtype_bytes * self.n_c4
+        c128_state_bytes = (
+            DSV4_C128_STATE_RING / DSV4_SWA_PAGE_SIZE * c128_state_width * state_dtype_bytes * self.n_c128
         )
-        return
+        swa_slot = kv_bytes * self.layer_num + c4_state_bytes + c128_state_bytes
+        compressed = (kv_bytes + indexer_bytes) * self.n_c4 / 4 + kv_bytes * self.n_c128 / 128
+
+        return swa_slot * self.swa_full_tokens_ratio + compressed
 
     # ------------------------------------------------------------------ buffers
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
@@ -305,7 +225,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         server = get_unique_server_name()
 
         self.swa_size = self._planned_swa_size(size)
-        assert self.swa_size % DSV4_SWA_PAGE_SIZE == 0
         self.swa_pool = PackedPagePool(
             size=self.swa_size,
             page_size=DSV4_SWA_PAGE_SIZE,
@@ -777,7 +696,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         省掉 bf16 kv 中间量。kv 为 wkv 投影原始输出 [T, head_dim+rope_dim]。"""
         if kv.shape[0] == 0:
             return
-        from sglang.jit_kernel.dsv4 import fused_k_norm_rope_flashmla
+        from lightllm.third_party.sglang_jit.dsv4 import fused_k_norm_rope_flashmla
 
         swa_slots = self.full_to_swa_indexs[mem_index.cuda().long().reshape(-1)]
         # 未映射槽位(-1, 如 decode 图 warmup 的 HOLD 行: prep 跳过 alloc_swa)对老 triton
