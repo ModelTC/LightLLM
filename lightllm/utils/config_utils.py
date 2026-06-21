@@ -146,6 +146,45 @@ def auto_set_max_req_total_len(args) -> None:
     logger.info(f"auto derived max_req_total_len={args.max_req_total_len} from model config")
 
 
+FUSED_SHARED_EXPERT_MODEL_TYPES = {
+    "deepseek_v2",
+    "deepseek_v3",
+    "deepseek_v31",
+    "deepseek_v32",
+    "qwen3_next",
+    "qwen3_5",
+    "qwen3_5_text",
+    "qwen3_5_moe",
+    "qwen3_5_moe_text",
+}
+
+
+def auto_set_fused_shared_experts(args) -> None:
+    """
+    Route fused shared experts to supported model families and write the final
+    decision to `args.enable_fused_shared_experts`.
+    """
+
+    args.enable_fused_shared_experts = False
+
+    if getattr(args, "enable_ep_moe", False):
+        logger.info("do not enable fused shared experts: EP MoE uses a separate implementation")
+        return
+
+    model_dir = getattr(args, "model_dir", None)
+    if not model_dir:
+        logger.info("do not enable fused shared experts: model_dir is empty")
+        return
+
+    model_type = get_model_type(model_dir)
+    if model_type not in FUSED_SHARED_EXPERT_MODEL_TYPES:
+        logger.info(f"do not enable fused shared experts: unsupported model_type={model_type}")
+        return
+
+    args.enable_fused_shared_experts = True
+    logger.info(f"auto enable fused shared experts for model_type={model_type}")
+
+
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
     for key in key_name:

@@ -38,6 +38,7 @@ def _conv_pack_gdn_decode_kernel(
     v_dim: tl.constexpr,
     gate_dim: tl.constexpr,
     conv_dim: tl.constexpr,
+    KERNEL_SIZE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     APPLY_SILU: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -49,29 +50,33 @@ def _conv_pack_gdn_decode_kernel(
     state_idx = tl.load(conv_state_indices + row)
 
     x = tl.load(mixed_qkv + row * stride_m_b + offs * stride_m_d, mask=mask, other=0.0).to(tl.float32)
-    s0 = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + 0 * stride_s_w, mask=mask, other=0.0).to(
+    # KERNEL_SIZE is a constexpr, so Triton fully unrolls these loops for each conv size.
+    y = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+    for i in tl.static_range(0, KERNEL_SIZE - 1):
+        s = tl.load(
+            conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, mask=mask, other=0.0
+        ).to(tl.float32)
+        w = tl.load(conv_weight + offs * stride_w_d + i * stride_w_w, mask=mask, other=0.0).to(tl.float32)
+        y += s * w
+
+    w = tl.load(conv_weight + offs * stride_w_d + (KERNEL_SIZE - 1) * stride_w_w, mask=mask, other=0.0).to(
         tl.float32
     )
-    s1 = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + 1 * stride_s_w, mask=mask, other=0.0).to(
-        tl.float32
-    )
-    s2 = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + 2 * stride_s_w, mask=mask, other=0.0).to(
-        tl.float32
-    )
-    w0 = tl.load(conv_weight + offs * stride_w_d + 0 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    w1 = tl.load(conv_weight + offs * stride_w_d + 1 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    w2 = tl.load(conv_weight + offs * stride_w_d + 2 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    w3 = tl.load(conv_weight + offs * stride_w_d + 3 * stride_w_w, mask=mask, other=0.0).to(tl.float32)
-    y = s0 * w0 + s1 * w1 + s2 * w2 + x * w3
+    y += x * w
     if HAS_BIAS:
         bias = tl.load(conv_bias + offs, mask=mask, other=0.0).to(tl.float32)
         y += bias
     if APPLY_SILU:
         y = y * tl.sigmoid(y)
 
-    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + 0 * stride_s_w, s1, mask=mask)
-    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + 1 * stride_s_w, s2, mask=mask)
-    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + 2 * stride_s_w, x, mask=mask)
+    for i in tl.static_range(0, KERNEL_SIZE - 2):
+        next_s = tl.load(
+            conv_state + state_idx * stride_s_b + offs * stride_s_d + (i + 1) * stride_s_w, mask=mask, other=0.0
+        )
+        tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, next_s, mask=mask)
+    tl.store(
+        conv_state + state_idx * stride_s_b + offs * stride_s_d + (KERNEL_SIZE - 2) * stride_s_w, x, mask=mask
+    )
 
     q_mask = offs < q_dim
     k_mask = (offs >= q_dim) & (offs < q_dim + k_dim)
@@ -102,6 +107,7 @@ def conv_pack_gdn_decode_inputs(
     conv_bias: torch.Tensor,
     conv_state_indices: torch.Tensor,
     activation: str,
+    conv_size: int,
     num_k_heads: int,
     head_k_dim: int,
     num_v_heads: int,
@@ -113,6 +119,15 @@ def conv_pack_gdn_decode_inputs(
     v_dim = num_v_heads * head_v_dim
     gate_dim = num_v_heads
     conv_dim = q_dim + k_dim + v_dim
+
+    assert conv_size >= 2, f"conv kernel size must be at least 2, got {conv_size}"
+    assert mixed_qkv.shape[1] == conv_dim, f"mixed_qkv shape mismatch: {mixed_qkv.shape[1]} != {conv_dim}"
+    assert conv_weight.shape[0] == conv_dim, f"conv_weight shape mismatch: {conv_weight.shape[0]} != {conv_dim}"
+    assert conv_weight.shape[1] == conv_size, f"conv_weight kernel mismatch: {conv_weight.shape[1]} != {conv_size}"
+    assert conv_state.shape[1] == conv_dim, f"conv_state shape mismatch: {conv_state.shape[1]} != {conv_dim}"
+    assert conv_state.shape[2] >= conv_size - 1, (
+        f"conv_state width must be at least conv_size - 1, got {conv_state.shape[2]} and {conv_size}"
+    )
 
     q = torch.empty((batch, 1, num_k_heads, head_k_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
     k = torch.empty_like(q)
@@ -157,6 +172,7 @@ def conv_pack_gdn_decode_inputs(
         v_dim,
         gate_dim,
         conv_dim,
+        conv_size,
         HAS_BIAS=conv_bias is not None,
         APPLY_SILU=activation in ["silu", "swish"],
         BLOCK_SIZE=block_size,

@@ -191,7 +191,7 @@ class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
 
     def _can_fuse_shared_expert_as_moe(self):
         start_args = get_env_start_args()
-        if not self.is_moe or start_args.enable_ep_moe or start_args.disable_fused_shared_experts:
+        if not self.is_moe or start_args.enable_ep_moe or not getattr(start_args, "enable_fused_shared_experts", False):
             return False
         return (
             self.network_config_.get("shared_expert_intermediate_size") == self.network_config_["moe_intermediate_size"]

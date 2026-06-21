@@ -129,7 +129,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         router_logits = layer_weight.moe_gate.mm(hidden_states)
         if getattr(layer_weight, "num_fused_shared_experts", 0) > 0:
             shared_expert_gate = layer_weight.ffn_gate.mm(hidden_states)
-            layer_weight.experts.fused_shared_experts(
+            layer_weight.experts.experts(
                 hidden_states,
                 router_logits=router_logits,
                 top_k=self.num_experts_per_tok,
@@ -137,7 +137,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 use_grouped_topk=False,
                 topk_group=None,
                 num_expert_group=None,
-                shared_expert_weight=shared_expert_gate,
+                shared_expert_gate=shared_expert_gate,
             )
             hidden_states = hidden_states.view(num_tokens, hidden_dim)
             return hidden_states
@@ -465,6 +465,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.bias,
             infer_state.b_buffer_idx,
             self.activation,
+            self.conv_kernel_dim,
             self.tp_num_k_heads,
             self.head_k_dim,
             self.tp_num_v_heads,

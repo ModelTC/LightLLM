@@ -23,6 +23,7 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    auto_set_fused_shared_experts,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -76,6 +77,7 @@ def normal_or_p_d_start(args):
     args: StartArgs = args
 
     auto_set_max_req_total_len(args)
+    auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
