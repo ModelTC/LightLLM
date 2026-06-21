@@ -383,6 +383,8 @@ def _launch_subprocesses(args: StartArgs):
         instance_id=args.lightllm_instance_id,
         used_ports=already_uesd_ports,
     )
+    auto_ports_locker = PortLocker(can_use_ports)
+    auto_ports_locker.lock_port()
     logger.info(f"alloced ports: {can_use_ports}")
     (
         nccl_port,
@@ -458,6 +460,7 @@ def _launch_subprocesses(args: StartArgs):
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
+    auto_ports_locker.release_port()
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -590,13 +593,16 @@ def pd_master_start(args: StartArgs):
     logger.info(f"all start args:{args}")
 
     can_use_ports = alloc_can_use_network_port(
-        num=1, used_nccl_ports=[args.nccl_port, args.port], instance_id=args.lightllm_instance_id
+        num=1, used_ports=[args.nccl_port, args.port], instance_id=args.lightllm_instance_id
     )
+    auto_ports_locker = PortLocker(can_use_ports)
+    auto_ports_locker.lock_port()
     metric_port = can_use_ports[0]
 
     args.metric_port = metric_port
 
     set_env_start_args(args)
+    auto_ports_locker.release_port()
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -646,7 +652,10 @@ def visual_only_start(args):
     can_use_ports = alloc_can_use_network_port(
         num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
         used_ports=already_uesd_ports,
+        instance_id=args.lightllm_instance_id,
     )
+    auto_ports_locker = PortLocker(can_use_ports)
+    auto_ports_locker.lock_port()
 
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -667,6 +676,7 @@ def visual_only_start(args):
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
+    auto_ports_locker.release_port()
 
     from .visualserver.visual_only_manager import start_visual_process
 

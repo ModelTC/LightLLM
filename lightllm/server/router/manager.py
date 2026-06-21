@@ -357,31 +357,43 @@ class RouterManager:
                 self.running_batch = None
         return
 
+    def _sync_abort_req_ids_from_master(self, reqs: List[Req]):
+        local_aborted_req_ids = [req.request_id for req in reqs if req.is_aborted]
+        if not self.is_multinode_tp:
+            return set(local_aborted_req_ids)
+
+        # 多节点 TP 下 abort 只以 rank 0 httpserver 看到的状态为准。
+        if not self.is_multinode_tp_master:
+            local_aborted_req_ids = []
+
+        aborted_req_num = torch.tensor([len(local_aborted_req_ids)], dtype=torch.int64, device="cpu")
+        dist.broadcast(aborted_req_num, src=0, group=self.mulitnode_group)
+        aborted_req_num = int(aborted_req_num.item())
+        if aborted_req_num == 0:
+            return set()
+
+        if self.is_multinode_tp_master:
+            aborted_req_ids = torch.tensor(local_aborted_req_ids, dtype=torch.int64, device="cpu")
+        else:
+            aborted_req_ids = torch.empty(aborted_req_num, dtype=torch.int64, device="cpu")
+        dist.broadcast(aborted_req_ids, src=0, group=self.mulitnode_group)
+        return {int(req_id) for req_id in aborted_req_ids.tolist()}
+
+    def _mark_reqs_aborted(self, reqs: List[Req], aborted_req_ids):
+        if not aborted_req_ids:
+            return
+        for req in reqs:
+            if req.request_id in aborted_req_ids:
+                req.is_aborted = True
+        return
+
     def _get_aborted_reqs_from_running_batch(self) -> List[Req]:
         ans = []
-        if self.running_batch is None:
-            return ans
-        if self.is_multinode_tp:
-            # 多节点 TP 模式下，abort 只在 master httpserver 接收，由 rank 0 broadcast 给 slave，
-            # 不再依赖 httpserver 层的 zmq 转发把每个节点的 shm 都先标记一次。
-            if self.is_multinode_tp_master:
-                aborted_req_mask = torch.tensor(
-                    [req.is_aborted for req in self.running_batch.reqs], dtype=torch.bool, device="cpu"
-                )
-            else:
-                aborted_req_mask = torch.zeros(len(self.running_batch.reqs), dtype=torch.bool, device="cpu")
-            dist.broadcast(aborted_req_mask, src=0, group=self.mulitnode_group)
-            if not self.is_multinode_tp_master:
-                # 把 rank 0 的 abort 状态写回本机 shm，便于本机 httpserver recycle loop 看到一致状态
-                for req, is_aborted in zip(self.running_batch.reqs, aborted_req_mask.numpy()):
-                    if is_aborted:
-                        req.is_aborted = True
-        else:
-            aborted_req_mask = torch.tensor(
-                [req.is_aborted for req in self.running_batch.reqs], dtype=torch.bool, device="cpu"
-            )
-        for req, is_aborted in zip(self.running_batch.reqs, aborted_req_mask.numpy()):
-            if is_aborted and req._router_aborted is False:
+        running_reqs = [] if self.running_batch is None else self.running_batch.reqs
+        aborted_req_ids = self._sync_abort_req_ids_from_master(running_reqs)
+        self._mark_reqs_aborted(running_reqs, aborted_req_ids)
+        for req in running_reqs:
+            if req.is_aborted and req._router_aborted is False:
                 req._router_aborted = True
                 ans.append(req)
         return ans
@@ -482,22 +494,17 @@ class RouterManager:
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
                     # select_mark 仍需 MIN allreduce: slave 是否已经从 httpserver 收到 generate 请求
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-                    # abort 状态以 rank 0 为准 broadcast 给 slave，httpserver 层不再转发 AbortReq
-                    aborted_req_mask = torch.tensor(
-                        [req.is_aborted for req in new_batch.reqs], dtype=torch.bool, device="cpu"
-                    )
-                    dist.broadcast(aborted_req_mask, src=0, group=self.mulitnode_group)
+                    aborted_req_ids = self._sync_abort_req_ids_from_master(new_batch.reqs)
                     back_req_list = []
-                    for req_id, select, is_aborted in zip(
-                        req_ids, req_id_select_mark.numpy(), aborted_req_mask.numpy()
-                    ):
-                        # 释放多节点abort 请求，如果select == 0， is_aborted 一定为False
-                        if is_aborted and select == 1:
-                            req = new_batch.pop_req(req_id)
-                            self.req_queue.release_aborted_req(req)
+                    for req_id, select in zip(req_ids, req_id_select_mark.tolist()):
+                        is_aborted = req_id in aborted_req_ids
+                        if select == 1 and not is_aborted:
                             continue
-                        if select == 0:
-                            req = new_batch.pop_req(req_id)
+                        req = new_batch.pop_req(req_id)
+                        if is_aborted and select == 1:
+                            req.is_aborted = True
+                            self.req_queue.release_aborted_req(req)
+                        else:
                             back_req_list.append(req)
                     self.req_queue.waiting_req_list = back_req_list + self.req_queue.waiting_req_list
                     if new_batch.is_clear():
@@ -511,33 +518,29 @@ class RouterManager:
                 else:
                     req_ids = [None for _ in range(req_num)]
                     dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-                    # all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
                     id_to_req_obj = {req.request_id: req for req in self.req_queue.waiting_req_list}
                     req_id_select_mark = []
                     for req_id in req_ids:
                         req_id_select_mark.append(1 if req_id in id_to_req_obj else 0)
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-                    # abort 状态以 rank 0 为准 broadcast 给 slave，httpserver 层不再转发 AbortReq
-                    aborted_req_mask = torch.zeros(len(req_ids), dtype=torch.bool, device="cpu")
-                    dist.broadcast(aborted_req_mask, src=0, group=self.mulitnode_group)
+                    aborted_req_ids = self._sync_abort_req_ids_from_master([])
                     select_reqs = []
                     aborted_reqs = []
-                    for req_id, select, is_aborted in zip(
-                        req_ids, req_id_select_mark.numpy(), aborted_req_mask.numpy()
-                    ):
+                    for req_id, select in zip(req_ids, req_id_select_mark.tolist()):
                         if select == 1:
                             req = id_to_req_obj[req_id]
-                            if is_aborted:
-                                # 把 rank 0 的 abort 状态写回本机 shm，便于本机 httpserver recycle loop 看到一致状态
+                            if req_id in aborted_req_ids:
                                 req.is_aborted = True
                                 aborted_reqs.append(req)
                                 continue
                             select_reqs.append(req)
-                    for req in select_reqs:
-                        self.req_queue.waiting_req_list.remove(req)
+                    handled_req_ids = {req.request_id for req in select_reqs + aborted_reqs}
+                    if handled_req_ids:
+                        self.req_queue.waiting_req_list = [
+                            req for req in self.req_queue.waiting_req_list if req.request_id not in handled_req_ids
+                        ]
                     for req in aborted_reqs:
-                        self.req_queue.waiting_req_list.remove(req)
                         self.req_queue.release_aborted_req(req)
                     if select_reqs:
                         new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)

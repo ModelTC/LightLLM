@@ -7,7 +7,7 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List, Optional
+from typing import final, List
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
@@ -1216,72 +1216,3 @@ class TpPartBaseModel:
             special_model_input["mtp_draft_input_hiddens"] = None
 
         return special_model_input
-
-    def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
-        torch.cuda.synchronize()
-        if tags is None:
-            self.release_all()
-            return
-        if MemoryTag.WEIGHT in tags:
-            self.release_weight()
-        if MemoryTag.KV_CACHE in tags:
-            self.release_kv_cache()
-        if MemoryTag.GRAPH in tags:
-            self.release_graph()
-        return
-
-    def resume_memory_occupation(self, tags: Optional[List[MemoryTag]]):
-        if tags is None:
-            self.resume_all()
-            return
-        if MemoryTag.WEIGHT in tags:
-            self.resume_weight()
-        if MemoryTag.KV_CACHE in tags:
-            self.resume_kv_cache()
-        if MemoryTag.GRAPH in tags:
-            self.resume_graph()
-        return
-
-    def release_weight(self):
-        self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
-        torch.cuda.empty_cache()
-        gc.collect()
-
-    def release_kv_cache(self):
-        self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
-        torch.cuda.empty_cache()
-        gc.collect()
-
-    def release_graph(self):
-        self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
-        torch.cuda.empty_cache()
-        gc.collect()
-
-    def release_all(self):
-        self.torch_memory_saver.pause(tag=MemoryTag.WEIGHT)
-        self.torch_memory_saver.pause(tag=MemoryTag.KV_CACHE)
-        self.torch_memory_saver.pause(tag=MemoryTag.GRAPH)
-        torch.cuda.empty_cache()
-        gc.collect()
-
-    def resume_weight(self):
-        torch.cuda.empty_cache()
-        gc.collect()
-        self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
-
-    def resume_kv_cache(self):
-        torch.cuda.empty_cache()
-        gc.collect()
-        self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
-
-    def resume_graph(self):
-        torch.cuda.empty_cache()
-        gc.collect()
-        self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)
-
-    def resume_all(self):
-        torch.cuda.empty_cache()
-        gc.collect()
-        self.torch_memory_saver.resume(tag=MemoryTag.WEIGHT)
-        self.torch_memory_saver.resume(tag=MemoryTag.KV_CACHE)
-        self.torch_memory_saver.resume(tag=MemoryTag.GRAPH)

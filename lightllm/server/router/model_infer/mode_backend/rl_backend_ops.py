@@ -1,4 +1,5 @@
-from typing import List
+import gc
+from typing import List, Optional
 
 import torch
 
@@ -18,6 +19,8 @@ from lightllm.server.io_struct import (
 
 
 class RlBackendOps:
+    MEMORY_TAG_ORDER = (MemoryTag.WEIGHT, MemoryTag.KV_CACHE, MemoryTag.GRAPH)
+
     SUPPORTED = frozenset(
         {
             "flush_cache",
@@ -51,18 +54,36 @@ class RlBackendOps:
             self.backend.radix_cache.flush_cache()
         return True, "Succeeded to flush cache."
 
-    def release_memory_occupation(self, tags: List[MemoryTag]):
+    def _iter_memory_tags(self, tags: Optional[List[MemoryTag]]):
+        return self.MEMORY_TAG_ORDER if tags is None else tags
+
+    def _clear_cuda_cache(self):
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    def _pause_memory_tags(self, tags: Optional[List[MemoryTag]]):
+        torch.cuda.synchronize()
+        for tag in self._iter_memory_tags(tags):
+            self.backend.model.torch_memory_saver.pause(tag=tag)
+        self._clear_cuda_cache()
+
+    def _resume_memory_tags(self, tags: Optional[List[MemoryTag]]):
+        self._clear_cuda_cache()
+        for tag in self._iter_memory_tags(tags):
+            self.backend.model.torch_memory_saver.resume(tag=tag)
+
+    def release_memory_occupation(self, tags: Optional[List[MemoryTag]]):
         try:
-            self.backend.model.release_memory_occupation(tags)
+            self._pause_memory_tags(tags)
             self.flush_cache(request=None)
             return True, "Succeeded to release memory occupation."
         except Exception as e:
             self.logger.error(f"release memory occupation failed: {str(e)}")
             return False, f"release memory occupation failed: {str(e)}"
 
-    def resume_memory_occupation(self, tags: List[MemoryTag]):
+    def resume_memory_occupation(self, tags: Optional[List[MemoryTag]]):
         try:
-            self.backend.model.resume_memory_occupation(tags)
+            self._resume_memory_tags(tags)
             return True, "Succeeded to resume memory occupation."
         except Exception as e:
             self.logger.error(f"resume memory occupation failed: {str(e)}")
