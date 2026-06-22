@@ -5,7 +5,7 @@ from lightllm.platform.graph.cuda import CudaGraphBackend
 from lightllm.platform.runtime.cuda import CudaRuntime
 
 
-@register_platform("cuda", op_fallback=("cuda_like",))
+@register_platform("cuda", ops_fallback=("cuda_like",))
 class CudaBackend(Backend):
 
     def __init__(self) -> None:

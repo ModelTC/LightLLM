@@ -5,7 +5,7 @@ from lightllm.platform.graph.ascend import AscendGraphBackend
 from lightllm.platform.runtime.ascend import AscendRuntime
 
 
-@register_platform("ascend", op_fallback=("ascend",), sampling_fallback=("cuda_like",))
+@register_platform("ascend", ops_fallback=("ascend",), sampling_fallback=("cuda_like",))
 class AscendBackend(Backend):
 
     def __init__(self) -> None:

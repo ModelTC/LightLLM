@@ -1,5 +1,8 @@
 from typing import Optional
+
 from lightllm.platform.base.registry import Backend, get_platform_spec
+from lightllm.platform.plugins import configure_plugins
+from lightllm.utils.envs_utils import get_env_start_args
 
 _backend: Optional[Backend] = None
 
@@ -10,11 +13,7 @@ def get_backend() -> Backend:
     if _backend is not None:
         return _backend
 
-    from lightllm.platform.plugins import configure_ops_plugins, configure_sampling_plugins
-    from lightllm.utils.envs_utils import get_env_start_args
-
-    configure_ops_plugins()
-    configure_sampling_plugins()
+    configure_plugins()
 
     platform_name = get_env_start_args().hardware_platform
     spec = get_platform_spec(platform_name)

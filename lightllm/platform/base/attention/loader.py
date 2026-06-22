@@ -1,8 +1,8 @@
 import importlib
 import pkgutil
 
-from lightllm.platform.plugins.att import ENTRY_POINT_GROUP
-from lightllm.platform.plugins.common import list_installed_plugin_names
+from lightllm.platform.plugins import ATT
+from lightllm.platform.plugins.registration_validation import validate_extra_modules_registered
 
 
 _ATT_ROOT = "lightllm.common.basemodel.attention"
@@ -27,10 +27,7 @@ def _load_att_backends(extra_modules: tuple[str, ...] = ()) -> None:
     _load_builtin_att_backends()
     for module_name in extra_modules:
         importlib.import_module(module_name)
-    _validate_extra_att_modules_loaded(extra_modules)
 
-
-def _validate_extra_att_modules_loaded(extra_modules: tuple[str, ...]) -> None:
     if not extra_modules:
         return
 
@@ -39,49 +36,22 @@ def _validate_extra_att_modules_loaded(extra_modules: tuple[str, ...]) -> None:
     registered_modules = {
         spec.backend_cls.__module__ for spec in att_backend_registry.list_specs()
     }
-    missing = [
-        module_name
-        for module_name in extra_modules
-        if module_name not in registered_modules
-    ]
-    if not missing:
-        return
-
-    hints = _format_extra_att_module_hints()
-    raise RuntimeError(
-        "External attention modules configured in extra_att_modules / extra_att_plugins "
-        f"did not register any @register_att_backend implementations after loading: "
-        f"{missing}. {hints}"
+    validate_extra_modules_registered(
+        kind_spec=ATT.spec,
+        register_decorator="@register_att_backend",
+        extra_modules=extra_modules,
+        registered_module_names=registered_modules,
+        installed_plugins=ATT.installed(),
     )
-
-
-def _format_extra_att_module_hints() -> str:
-    hints = [
-        "Check that --extra_att_modules / plugin extra_modules import paths are correct "
-        "and modules define @register_att_backend."
-    ]
-    available = list_installed_plugin_names(ENTRY_POINT_GROUP)
-    if available:
-        hints.append(f"Installed att plugins: {available}.")
-    else:
-        hints.append(
-            "No att plugins installed; use --extra_att_plugins <name> with a package "
-            f"registered under entry point group {ENTRY_POINT_GROUP!r}."
-        )
-    return " ".join(hints)
 
 
 _att_backends_loaded = False
 
 
 def ensure_att_backends_loaded() -> None:
-    """ Load attention backends once per process (idempotent). """
     global _att_backends_loaded
     if _att_backends_loaded:
         return
 
-    from lightllm.platform.plugins import configure_att_plugins, get_att_plugin_config
-
-    configure_att_plugins()
-    _load_att_backends(get_att_plugin_config().extra_modules)
+    _load_att_backends(ATT.get().extra_modules)
     _att_backends_loaded = True

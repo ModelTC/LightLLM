@@ -18,7 +18,7 @@ _platforms_loaded = False
 class PlatformSpec:
     name: str
     backend_cls: Type["Backend"]
-    op_fallback: tuple[str, ...]
+    ops_fallback: tuple[str, ...]
     sampling_fallback: tuple[str, ...]
 
 
@@ -53,21 +53,21 @@ class Backend(ABC):
 def register_platform(
     name: str,
     *,
-    op_fallback: tuple[str, ...],
+    ops_fallback: tuple[str, ...],
     sampling_fallback: tuple[str, ...] | None = None,
 ):
     def decorator(backend_cls: Type[Backend]) -> Type[Backend]:
         if name in PLATFORMS:
             raise ValueError(f"Platform already registered: {name}")
-        # set platform name to the backend class
+        # Set platform name to the backend class
         backend_cls.platform_name = name
-        if sampling_fallback is None:
-            sampling_fallback = op_fallback
+        # If sampling_fallback is not provided, use ops_fallback
+        resolved_sampling_fallback = sampling_fallback or ops_fallback
         PLATFORMS[name] = PlatformSpec(
             name=name,
             backend_cls=backend_cls,
-            op_fallback=op_fallback,
-            sampling_fallback=sampling_fallback,
+            ops_fallback=ops_fallback,
+            sampling_fallback=resolved_sampling_fallback,
         )
         return backend_cls
 

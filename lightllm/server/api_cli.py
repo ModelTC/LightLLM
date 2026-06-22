@@ -808,20 +808,20 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Hardware platform: cuda | musa | ascend | maca""",
     )
     parser.add_argument(
-        "--extra_op_plugins",
+        "--extra_ops_plugins",
         type=str,
         default=None,
-        help="""Comma-separated pip op plugin names (entry point group: lightllm.op_plugins).""",
+        help="""Comma-separated pip ops plugin names (entry point group: lightllm.ops_plugins).""",
     )
     parser.add_argument(
-        "--extra_op_fallback",
+        "--extra_ops_fallback",
         type=str,
         default=None,
         help="""Comma-separated impl families prepended to the platform op fallback chain.
-        Use with --extra_op_modules for local kernel overrides without a pip plugin package.""",
+        Use with --extra_ops_modules for local kernel overrides without a pip plugin package.""",
     )
     parser.add_argument(
-        "--extra_op_modules",
+        "--extra_ops_modules",
         type=str,
         default=None,
         help="""Comma-separated Python modules to import for external @register_op implementations.""",

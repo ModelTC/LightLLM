@@ -1,31 +1,18 @@
-from lightllm.platform.plugins.ops import (
-    OpsPluginConfig,
-    configure_ops_plugins,
-    get_ops_plugin_config,
-    resolve_ops_fallback,
-)
-from lightllm.platform.plugins.att import (
-    AttPluginConfig,
-    configure_att_plugins,
-    get_att_plugin_config,
-)
-from lightllm.platform.plugins.sampling import (
-    SamplingPluginConfig,
-    configure_sampling_plugins,
-    get_sampling_plugin_config,
-    resolve_sampling_fallback,
-)
+from lightllm.platform.plugins.att import ATT
+from lightllm.platform.plugins.ops import OPS
+from lightllm.platform.plugins.sampling import SAMPLING
+
+ALL_PLUGINS = (OPS, SAMPLING, ATT)
+
+
+def configure_plugins() -> None:
+    for plugin in ALL_PLUGINS:
+        plugin.configure()
+
 
 __all__ = [
-    "OpsPluginConfig",
-    "configure_ops_plugins",
-    "get_ops_plugin_config",
-    "resolve_ops_fallback",
-    "AttPluginConfig",
-    "configure_att_plugins",
-    "get_att_plugin_config",
-    "SamplingPluginConfig",
-    "configure_sampling_plugins",
-    "get_sampling_plugin_config",
-    "resolve_sampling_fallback",
+    "OPS",
+    "SAMPLING",
+    "ATT",
+    "configure_plugins",
 ]
