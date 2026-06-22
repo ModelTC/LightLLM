@@ -102,7 +102,7 @@ def top_p_top_k_sample(
     top_ks: torch.Tensor,
     generators: List[Optional[torch.Generator]] | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return top_p_top_k_sample_triton(probs, top_ps, top_ks, generators)
+    return top_p_top_k_sample_triton(probs=probs, top_ps=top_ps, top_ks=top_ks, generators=generators)
 
 
 @register_sampling_op("cuda_like", sampling_backend="sglang_kernel")
@@ -113,4 +113,4 @@ def top_p_top_k_sample(
     top_ks: torch.Tensor,
     generators: List[Optional[torch.Generator]] | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return top_p_top_k_sample_sglang_kernel(probs, top_ps, top_ks, generators)
+    return top_p_top_k_sample_sglang_kernel(probs=probs, top_ps=top_ps, top_ks=top_ks, generators=generators)
