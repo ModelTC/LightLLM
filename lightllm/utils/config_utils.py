@@ -147,7 +147,6 @@ def auto_set_max_req_total_len(args) -> None:
 
 
 FUSED_SHARED_EXPERT_MODEL_TYPES = {
-    "deepseek_v2",
     "deepseek_v3",
     "deepseek_v31",
     "deepseek_v32",
