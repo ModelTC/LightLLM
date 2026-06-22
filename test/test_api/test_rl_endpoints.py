@@ -14,7 +14,7 @@ Sequence:
   5. final generate -> should produce a sensible answer again
 
 The "trainer" runs in this same process: it holds tensors on a free GPU, serialises
-them via lightllm.utils.serializer.MultiprocessingSerializer (CUDA IPC handles, not
+them via lightllm.utils.rl.serialization.MultiprocessingSerializer (CUDA IPC handles, not
 data), then asks the server to clone them into its weight buffers. No NCCL group
 is required, so this is safe to interrupt without leaving the server hung.
 
@@ -52,8 +52,8 @@ import requests
 import torch
 from safetensors import safe_open
 
-from lightllm.utils.patch_torch import monkey_patch_torch_reductions
-from lightllm.utils.serializer import MultiprocessingSerializer
+from lightllm.utils.rl.serialization import MultiprocessingSerializer
+from lightllm.utils.rl.torch_cuda_ipc import monkey_patch_torch_reductions
 
 
 GREEN = "\033[32m"
