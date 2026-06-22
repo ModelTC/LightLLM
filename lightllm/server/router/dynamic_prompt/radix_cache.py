@@ -147,6 +147,28 @@ class RadixCache:
             f"{unique_name}_tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64
         )
         self.tree_total_tokens_num.arr[0] = 0
+        self.swa_tree_total_pages_num = 0
+        self.swa_refed_pages_num = 0
+        # 每个 prompt-cache 页折算多少 swa 页(DSV4 为 256/128=2);非 swa 场景为 0,_node_swa_pages_num 退化为常数 0。
+        self._swa_pages_per_prompt_page = self._probe_swa_pages_per_prompt_page()
+
+    def _probe_swa_pages_per_prompt_page(self) -> int:
+        """构造期探测一次 mem_manager 是否带 swa_pool,缓存折算系数,避免热路径反复 getattr。"""
+        if self.mem_manager is None or self.extra_value_ops is None:
+            return 0
+        swa_pool = getattr(self.mem_manager, "swa_pool", None)
+        swa_page_size = getattr(swa_pool, "page_size", None)
+        if swa_page_size is None:
+            return 0
+        return (self.page_size + int(swa_page_size) - 1) // int(swa_page_size)
+
+    def _node_swa_pages_num(self, node: TreeNode) -> int:
+        if self._swa_pages_per_prompt_page == 0 or node.token_extra_value is None:
+            return 0
+        valid = node.token_extra_value.swa_page_valid
+        if valid is None:
+            return 0
+        return int(valid.sum().item()) * self._swa_pages_per_prompt_page
 
     def _align_len(self, length: int) -> int:
         if self.page_size <= 1:
@@ -281,6 +303,7 @@ class RadixCache:
                 )
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
+                self.swa_tree_total_pages_num += self._node_swa_pages_num(new_node)
 
                 if split_parent_node.is_leaf():
                     self.evict_tree_set.add(split_parent_node)
@@ -310,6 +333,7 @@ class RadixCache:
             )
             # update total token num
             self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
+            self.swa_tree_total_pages_num += self._node_swa_pages_num(new_node)
             if new_node.is_leaf():
                 self.evict_tree_set.add(new_node)
             return 0, new_node
@@ -399,6 +423,7 @@ class RadixCache:
             # from 0 to 1 need update refs token num
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+                self.swa_refed_pages_num += self._node_swa_pages_num(node)
 
         if len(key) == 0:
             return node
@@ -428,6 +453,7 @@ class RadixCache:
                     # from 0 to 1 need update refs token num
                     if split_parent_node.ref_counter == 1:
                         self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
+                        self.swa_refed_pages_num += self._node_swa_pages_num(split_parent_node)
 
                 if child.is_leaf():
                     self.evict_tree_set.add(child)
@@ -455,6 +481,7 @@ class RadixCache:
                 self.extra_value_ops.free(node.token_extra_value)
             # update total token num
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+            self.swa_tree_total_pages_num -= self._node_swa_pages_num(node)
             parent_node: TreeNode = node.parent
             parent_node.remove_child(node)
             if parent_node.is_leaf():
@@ -537,6 +564,8 @@ class RadixCache:
 
         self.tree_total_tokens_num.arr[0] = 0
         self.refed_tokens_num.arr[0] = 0
+        self.swa_tree_total_pages_num = 0
+        self.swa_refed_pages_num = 0
         return
 
     def dec_node_ref_counter(self, node: TreeNode):
@@ -550,6 +579,7 @@ class RadixCache:
         while node is not None:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
+                self.swa_refed_pages_num -= self._node_swa_pages_num(node)
             node.ref_counter -= 1
             node = node.parent
 
@@ -569,6 +599,7 @@ class RadixCache:
         while node is not None:
             if node.ref_counter == 0:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+                self.swa_refed_pages_num += self._node_swa_pages_num(node)
             node.ref_counter += 1
             node = node.parent
 
@@ -608,6 +639,9 @@ class RadixCache:
     def get_tree_total_tokens_num(self):
         return self.tree_total_tokens_num.arr[0]
 
+    def get_unrefed_swa_pages_num(self):
+        return self.swa_tree_total_pages_num - self.swa_refed_pages_num
+
     def print_self(self, indent=0):
         self._print_helper(self.root_node, indent)
 
@@ -644,9 +678,11 @@ class RadixCache:
             # 每回收一个节点就复查目标,避免多回收(无谓削减命中可用性)。
             while node is not None and node is not self.root_node and node.ref_counter == 0:
                 if len(node.token_mem_index_value) > 0:
+                    old_pages = self._node_swa_pages_num(node)
                     self.mem_manager.evict_swa(node.token_mem_index_value)
                     if node.token_extra_value is not None:
                         invalidate(node.token_extra_value)
+                    self.swa_tree_total_pages_num -= old_pages - self._node_swa_pages_num(node)
                     if allocator.can_use_mem_size >= target:
                         return
                 node = node.parent

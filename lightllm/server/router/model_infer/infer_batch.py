@@ -1,4 +1,5 @@
 import enum
+from functools import lru_cache
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -436,6 +437,51 @@ class InferenceContext:
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
+
+    def get_can_alloc_dsv4_swa_page_num(self):
+        mem_manager = self.req_manager.mem_manager
+        allocator = getattr(mem_manager, "swa_page_allocator", None)
+        if allocator is None:
+            return None
+
+        radix_cache_unref_page_num = 0
+        if self.radix_cache is not None:
+            radix_cache_unref_page_num = self.radix_cache.get_unrefed_swa_pages_num()
+        return int(allocator.can_use_mem_size) + radix_cache_unref_page_num
+
+    def get_dsv4_swa_prefill_need_page_num(self, req: "InferReq", is_chuncked_prefill: bool):
+        page_size = self._get_dsv4_swa_page_size()
+        if page_size is None:
+            return 0
+
+        start = int(req.cur_kv_len)
+        if is_chuncked_prefill:
+            end = int(req.get_chuncked_input_token_len())
+        else:
+            end = int(req.get_cur_total_len())
+        if end <= start:
+            return 0
+        first_new_page = (start + page_size - 1) // page_size
+        last_page = (end - 1) // page_size
+        return last_page - first_new_page + 1
+
+    def get_dsv4_swa_decode_need_page_num(self, req: "InferReq"):
+        page_size = self._get_dsv4_swa_page_size()
+        if page_size is None:
+            return 0
+
+        seq_len = int(req.get_cur_total_len())
+        if seq_len <= 0:
+            return 0
+        return 1 if (seq_len - 1) % page_size == 0 else 0
+
+    @lru_cache
+    def _get_dsv4_swa_page_size(self):
+        mem_manager = self.req_manager.mem_manager
+        allocator = getattr(mem_manager, "swa_page_allocator", None)
+        if allocator is None:
+            return None
+        return mem_manager.swa_pool.page_size
 
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """

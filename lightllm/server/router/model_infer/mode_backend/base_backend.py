@@ -597,6 +597,7 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
+        can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
 
         for req_obj in ready_reqs:
 
@@ -630,9 +631,14 @@ class ModeBackend:
 
             if is_decode:
                 token_num = req_obj.decode_need_token_num()
-                if token_num <= can_alloc_token_num:
+                swa_page_num = g_infer_context.get_dsv4_swa_decode_need_page_num(req_obj)
+                if token_num <= can_alloc_token_num and (
+                    can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num
+                ):
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
+                    if can_alloc_dsv4_swa_page_num is not None:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -647,10 +653,17 @@ class ModeBackend:
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                if token_num <= can_alloc_token_num:
+                swa_page_num = g_infer_context.get_dsv4_swa_prefill_need_page_num(
+                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
+                )
+                if token_num <= can_alloc_token_num and (
+                    can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num
+                ):
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
+                    if can_alloc_dsv4_swa_page_num is not None:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
