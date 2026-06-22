@@ -1,5 +1,4 @@
 import enum
-from functools import lru_cache
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -475,7 +474,6 @@ class InferenceContext:
             return 0
         return 1 if (seq_len - 1) % page_size == 0 else 0
 
-    @lru_cache
     def _get_dsv4_swa_page_size(self):
         mem_manager = self.req_manager.mem_manager
         allocator = getattr(mem_manager, "swa_page_allocator", None)
