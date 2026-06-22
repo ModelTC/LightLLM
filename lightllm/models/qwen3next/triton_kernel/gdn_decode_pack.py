@@ -53,15 +53,13 @@ def _conv_pack_gdn_decode_kernel(
     # KERNEL_SIZE is a constexpr, so Triton fully unrolls these loops for each conv size.
     y = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
     for i in tl.static_range(0, KERNEL_SIZE - 1):
-        s = tl.load(
-            conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, mask=mask, other=0.0
-        ).to(tl.float32)
+        s = tl.load(conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, mask=mask, other=0.0).to(
+            tl.float32
+        )
         w = tl.load(conv_weight + offs * stride_w_d + i * stride_w_w, mask=mask, other=0.0).to(tl.float32)
         y += s * w
 
-    w = tl.load(conv_weight + offs * stride_w_d + (KERNEL_SIZE - 1) * stride_w_w, mask=mask, other=0.0).to(
-        tl.float32
-    )
+    w = tl.load(conv_weight + offs * stride_w_d + (KERNEL_SIZE - 1) * stride_w_w, mask=mask, other=0.0).to(tl.float32)
     y += x * w
     if HAS_BIAS:
         bias = tl.load(conv_bias + offs, mask=mask, other=0.0).to(tl.float32)
@@ -74,9 +72,7 @@ def _conv_pack_gdn_decode_kernel(
             conv_state + state_idx * stride_s_b + offs * stride_s_d + (i + 1) * stride_s_w, mask=mask, other=0.0
         )
         tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + i * stride_s_w, next_s, mask=mask)
-    tl.store(
-        conv_state + state_idx * stride_s_b + offs * stride_s_d + (KERNEL_SIZE - 2) * stride_s_w, x, mask=mask
-    )
+    tl.store(conv_state + state_idx * stride_s_b + offs * stride_s_d + (KERNEL_SIZE - 2) * stride_s_w, x, mask=mask)
 
     q_mask = offs < q_dim
     k_mask = (offs >= q_dim) & (offs < q_dim + k_dim)
@@ -125,9 +121,9 @@ def conv_pack_gdn_decode_inputs(
     assert conv_weight.shape[0] == conv_dim, f"conv_weight shape mismatch: {conv_weight.shape[0]} != {conv_dim}"
     assert conv_weight.shape[1] == conv_size, f"conv_weight kernel mismatch: {conv_weight.shape[1]} != {conv_size}"
     assert conv_state.shape[1] == conv_dim, f"conv_state shape mismatch: {conv_state.shape[1]} != {conv_dim}"
-    assert conv_state.shape[2] >= conv_size - 1, (
-        f"conv_state width must be at least conv_size - 1, got {conv_state.shape[2]} and {conv_size}"
-    )
+    assert (
+        conv_state.shape[2] >= conv_size - 1
+    ), f"conv_state width must be at least conv_size - 1, got {conv_state.shape[2]} and {conv_size}"
 
     q = torch.empty((batch, 1, num_k_heads, head_k_dim), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
     k = torch.empty_like(q)
