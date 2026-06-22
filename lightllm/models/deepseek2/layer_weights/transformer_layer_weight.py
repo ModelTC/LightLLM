@@ -38,7 +38,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.kv_lora_rank = self.network_config_["kv_lora_rank"]
         self.num_fused_shared_experts = 0
         start_args = get_env_start_args()
-        if getattr(start_args, "enable_fused_shared_experts", False) and not start_args.enable_ep_moe and self.is_moe:
+        if start_args.enable_fused_shared_experts and not start_args.enable_ep_moe and self.is_moe:
             # fused shared experts can only work with tensor parallelism
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
         self.n_embed = self.network_config_["hidden_size"]
