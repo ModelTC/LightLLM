@@ -40,7 +40,7 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
             [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
 
-        infer_state.gate_value = o_gate
+        infer_state.gate_logics_value = o_gate
         layer_weight.qk_norm_weight_(
             q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],

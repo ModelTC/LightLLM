@@ -197,7 +197,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             [self.tp_q_head_num_ * self.head_dim_ * 2, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_],
             dim=-1,
         )
-        infer_state.gate_value = o_gate
+        infer_state.gate_logics_value = o_gate
         layer_weight.qk_norm_weight_(
             q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
@@ -226,8 +226,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        sigmoid_mul_(input, infer_state.gate_value)
-        infer_state.gate_value = None
+        sigmoid_mul_(input, infer_state.gate_logics_value)
+        infer_state.gate_logics_value = None
         o_tensor = layer_weight.o_proj.mm(input)
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
