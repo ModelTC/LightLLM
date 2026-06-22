@@ -120,7 +120,7 @@ class DeepseekV4MemoryManager(MemoryManager):
       映射记录到 ``full_to_swa_indexs``(以 full token 槽位为键)。出窗槽位由 DeepseekV4ReqManager
       在 prep 阶段批量惰性回收(``evict_swa``,页存活计数减到 0 才整页归还)；full 槽位释放时
       ``free`` 级联回收对应 swa 槽，所以 radix 驱逐/请求释放/暂停无需任何额外协议。
-      页 allocator 触底时先走压力阀(radix 对 ref==0 节点回收)再 assert。
+      页 allocator 触底时先走 swa free hook(radix 对 ref==0 节点 free)再 assert。
       没有 ring buffer，prefill chunk 大小不受 sliding_window 限制。
     - ``c4_pool``/``c128_pool``: 压缩 latent，按 qwen3next 的层号压实手法只为压缩层建层；
       c4 另带 packed indexer-K 池。槽位映射(``full_to_c4/c128_indexs``)以组末 token 的 full
@@ -187,10 +187,7 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     # ------------------------------------------------------------------ sizing
     def _planned_swa_size(self, full_size: int) -> int:
-        # swa 池 = full * ratio,按 SWA 物理页(128)向上取整;与 sglang DSV4PoolConfigurator 同思路。
-        cap = int(full_size * self.swa_full_tokens_ratio)
-        cap = max(1, min(full_size, cap))
-        return _ceil_div(cap, DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
+        return _ceil_div(int(full_size * self.swa_full_tokens_ratio), DSV4_SWA_PAGE_SIZE) * DSV4_SWA_PAGE_SIZE
 
     @staticmethod
     def _paged_state_rows(num_swa_pages: int, ring: int, ratio: int) -> int:
@@ -245,9 +242,9 @@ class DeepseekV4MemoryManager(MemoryManager):
         # 页存活计数 = 指向该页的有效 full_to_swa 行数;减到 0 归还 allocator(出窗逐 token
         # 回收下,「部分出窗页」计数 > 0 自然受保护)。下标含 HOLD 页(只读不增减)。
         self.swa_page_live_count = torch.zeros((self.swa_pool.num_pages,), dtype=torch.int32, device="cuda")
-        # swa 压力阀(可选): 页 allocator 触底时回调(radix 对 ref==0 节点回收 swa 页),
-        # 由 backend 在 radix cache 创建后注入;assert 仍是最后防线。
-        self._swa_pressure_valve = None
+        # swa free hook(可选): 页 allocator 触底时回调(radix 对 ref==0 节点 free swa 页),
+        # 由 backend 在 radix cache 创建后 register;assert 仍是最后防线。
+        self._free_radix_unreferenced_swa_fn = None
         self.full_to_swa_indexs = torch.full((size + 1,), -1, dtype=torch.int32, device="cuda")
         self.full_to_swa_indexs[size] = self.swa_pool.HOLD_TOKEN_MEMINDEX
 
@@ -365,14 +362,14 @@ class DeepseekV4MemoryManager(MemoryManager):
         return self.c128_state_buffer[self.layer_to_c128_idx[layer_index]]
 
     # ------------------------------------------------------------------ swa slot lifecycle
-    def set_swa_pressure_valve(self, valve) -> None:
-        """valve(need_pages): 在页 allocator 不足时尝试腾页(radix 对 ref==0 节点回收 swa)。"""
-        self._swa_pressure_valve = valve
+    def register_swa_free_hook(self, fn) -> None:
+        """fn(need_pages): 在页 allocator 不足时尝试腾页(radix 对 ref==0 节点 free swa)。"""
+        self._free_radix_unreferenced_swa_fn = fn
         return
 
     def _alloc_swa_pages(self, need_pages: int) -> torch.Tensor:
-        if need_pages > self.swa_page_allocator.can_use_mem_size and self._swa_pressure_valve is not None:
-            self._swa_pressure_valve(need_pages - self.swa_page_allocator.can_use_mem_size)
+        if need_pages > self.swa_page_allocator.can_use_mem_size and self._free_radix_unreferenced_swa_fn is not None:
+            self._free_radix_unreferenced_swa_fn(need_pages - self.swa_page_allocator.can_use_mem_size)
         return self.swa_page_allocator.alloc(need_pages)
 
     def _count_swa_pages(self, swa_slots: torch.Tensor, delta: int) -> torch.Tensor:

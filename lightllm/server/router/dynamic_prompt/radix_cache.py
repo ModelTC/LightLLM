@@ -656,9 +656,9 @@ class RadixCache:
             self._print_helper(child, indent=indent + 2)
         return
 
-    def reclaim_unreferenced_swa_pages(self, need_pages: int) -> None:
-        """DeepSeek-V4 swa 压力阀: 页 allocator 触底时，沿 LRU 序(evict_tree_set)只对
-        ref_count==0 的节点链回收其 swa 页(full 槽与压缩条目保留——节点仍可服务更长前缀的
+    def free_unreferenced_swa_pages(self, need_pages: int) -> None:
+        """DeepSeek-V4 swa free hook: 页 allocator 触底时，沿 LRU 序(evict_tree_set)只对
+        ref_count==0 的节点链 free 其 swa 页(full 槽与压缩条目保留——节点仍可服务更长前缀的
         中段命中)，并清载荷 bitmap 位使后续命中按缩短语义裁剪。所有权判定直接复用 radix
         引用计数: 节点被任何活跃请求借用即 ref>0，其页不可达。不够时由 allocator 的 assert
         兜底(最后防线)。"""

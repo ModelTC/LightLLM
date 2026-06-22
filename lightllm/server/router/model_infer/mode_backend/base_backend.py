@@ -194,9 +194,9 @@ class ModeBackend:
                     page_size=radix_page_size,
                     extra_value_ops=radix_extra_value_ops,
                 )
-                if radix_extra_value_ops is not None and hasattr(self.model.mem_manager, "set_swa_pressure_valve"):
-                    # swa 页 allocator 触底时让 radix 对 ref==0 节点回收 swa 页(DeepSeek-V4)。
-                    self.model.mem_manager.set_swa_pressure_valve(self.radix_cache.reclaim_unreferenced_swa_pages)
+                if radix_extra_value_ops is not None and hasattr(self.model.mem_manager, "register_swa_free_hook"):
+                    # swa 页 allocator 触底时让 radix 对 ref==0 节点 free swa 页(DeepSeek-V4)。
+                    self.model.mem_manager.register_swa_free_hook(self.radix_cache.free_unreferenced_swa_pages)
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
