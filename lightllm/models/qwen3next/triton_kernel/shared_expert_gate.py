@@ -36,14 +36,14 @@ def sigmoid_mul_(x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     _, n = x_arg.shape
     block_n = triton.next_power_of_2(n)
     _sigmoid_mul_kernel[(x_arg.shape[0],)](
-        x_arg,
-        gate_arg,
-        x_arg.stride(0),
-        x_arg.stride(1),
-        gate_arg.stride(0),
-        gate_arg.stride(1),
-        n,
-        gate_arg.shape[1],
+        x=x_arg,
+        gate=gate_arg,
+        stride_x_m=x_arg.stride(0),
+        stride_x_n=x_arg.stride(1),
+        stride_g_m=gate_arg.stride(0),
+        stride_g_n=gate_arg.stride(1),
+        N=n,
+        GATE_N=gate_arg.shape[1],
         BLOCK_N=block_n,
         num_warps=8,
     )
