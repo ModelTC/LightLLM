@@ -152,7 +152,9 @@ def auto_set_fused_shared_experts(args) -> None:
     decision to `args.enable_fused_shared_experts`.
     """
 
-    args.enable_fused_shared_experts = False
+    if args.enable_fused_shared_experts:
+        logger.info("skip auto setting fused shared experts: already enabled")
+        return
 
     if args.enable_ep_moe:
         logger.info("do not enable fused shared experts: EP MoE uses a separate implementation")
