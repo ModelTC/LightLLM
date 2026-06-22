@@ -222,16 +222,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> torch.Tensor:
-        o_tensor = self._get_o_local(input=input, infer_state=infer_state, layer_weight=layer_weight)
-        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
-        return o_tensor
-
-    def _get_o_local(
-        self,
-        input,
-        infer_state: Qwen3NextInferStateInfo,
-        layer_weight: Qwen3NextTransformerLayerWeight,
-    ) -> torch.Tensor:
         """Output projection with gating (in-place multiply to save one allocation)."""
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
@@ -239,6 +229,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         sigmoid_mul_(input, infer_state.gate_value)
         infer_state.gate_value = None
         o_tensor = layer_weight.o_proj.mm(input)
+        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
     # ==================== GDN Helper Methods ====================
