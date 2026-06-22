@@ -5,7 +5,10 @@ from typing import Optional, List, Union, Tuple
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
-from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
+from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
+    per_token_group_quant_fp8,
+    lightllm_per_token_group_quant_fp8,
+)
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 
@@ -282,9 +285,14 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
     ) -> torch.Tensor:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
-        x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
         m = input_tensor.shape[0]
+        k = input_tensor.shape[-1]
         n = qweight.shape[1]
+        # direct triton call: the per_token_group_quant_fp8 wrapper picks sgl, which rejects group_size == k
+        alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
+        x_q = alloc_func((m, k), dtype=torch.float8_e4m3fn, device=input_tensor.device)
+        x_scale = alloc_func((m, 1), dtype=torch.float32, device=input_tensor.device)
+        lightllm_per_token_group_quant_fp8(input_tensor, k, x_q, x_scale)
         if out is None:
             if use_custom_tensor_mananger:
                 out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
