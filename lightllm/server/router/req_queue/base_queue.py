@@ -4,6 +4,9 @@ from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.config_utils import get_fixed_kv_len
 from lightllm.server.core.objs import StartArgs
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class BaseQueue:
@@ -31,6 +34,30 @@ class BaseQueue:
             self.router.cpu_cache_client.deref_pages(req.cpu_cache_match_page_indexes.get_all())
             req.cpu_cache_match_page_indexes.clear()
             self.router.cpu_cache_client.lock.release()
+
+    def should_release_aborted_req_in_queue(self, req: Req):
+        # 多节点 TP 的 waiting req abort 状态必须先由 rank 0 broadcast 对齐，
+        # 不能在各节点本地调度队列里提前按各自 shm 状态释放。
+        return req.is_aborted and not self.router.is_multinode_tp
+
+    def mark_aborted_req_finished(self, req: Req):
+        # 未开始推理的请求没有生成 token；这里写入一个 EOS 位置和 aborted 状态，
+        # 让 httpserver recycle loop 能正常结束请求并返回空字符串。
+        input_len = req.input_len
+        req.link_prompt_ids_shm_array()
+        req.link_logprobs_shm_array()
+        req.candetoken_out_len = 1
+        req.finish_token_index = input_len
+        req.shm_prompt_ids.arr[input_len] = self.args.eos_id[0]
+        req.shm_logprobs.arr[input_len] = 0
+        req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+
+    def release_aborted_req(self, req: Req):
+        logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
+        self.free_aborted_req_cpu_cache_pages(req)
+        self.mark_aborted_req_finished(req)
+        self.router.shm_req_manager.put_back_req_obj(req)
+        return
 
     def extend(self, req_group: List[Req]):
         for req in req_group:

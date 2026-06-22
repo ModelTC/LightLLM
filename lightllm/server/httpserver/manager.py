@@ -3,13 +3,14 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
-import rpyc
 import socket
+import rpyc
 import time
 import copy
 import hashlib
 import datetime
 import pickle
+import base64
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -29,8 +30,22 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+from lightllm.common.basemodel.routing_manager import get_routing_config_from_model_dir, routing_dtype_id_to_np
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
+from lightllm.server.io_struct import (
+    AbortReq,
+    FlushCacheReq,
+    ReleaseMemoryReq,
+    ResumeMemoryReq,
+    InitWeightsUpdateGroupReq,
+    DestroyWeightsUpdateGroupReq,
+    UpdateWeightsFromDistributedReq,
+    UpdateWeightsFromTensorReq,
+    UpdateWeightsFromIPCReq,
+    GeneralModelToHttpRpcRsp,
+)
+from .rl_controller import HttpRlController
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -56,7 +71,6 @@ class HttpServerManager:
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self._run_reqs_count_lock = AsyncLock(self._shm_lock_pool.get_lock_context(1))
         self.node_rank = args.node_rank
-        self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.is_multinode_tp_master = args.dp == 1 and args.nnodes > 1 and args.node_rank == 0
         self.is_multinode_tp_slave = args.dp == 1 and args.nnodes > 1 and args.node_rank > 0
@@ -75,7 +89,7 @@ class HttpServerManager:
                 self.multinode_req_manager = context.socket(zmq.PULL)
                 self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
                 logger.info(
-                    f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
+                    f"HttpServerManager listening for master node requests on *:{args.multinode_httpmanager_port}"
                 )
 
         self.enable_multimodal = args.enable_multimodal
@@ -122,6 +136,13 @@ class HttpServerManager:
         # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+        self._routing_config = (
+            get_routing_config_from_model_dir(args.model_dir)
+            if args.enable_return_routed_experts and args.node_rank == 0
+            else None
+        )
+
+        self.rl_controller = HttpRlController(self)
 
         self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)
@@ -335,6 +356,11 @@ class HttpServerManager:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
+            if await self.rl_controller.wait_until_generation_allowed(group_request_id):
+                for output in self._build_aborted_generation_outputs(group_request_id, sampling_params):
+                    yield output
+                return
+
             original_multimodal_params = None
             if self.is_multinode_tp_master:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
@@ -349,6 +375,7 @@ class HttpServerManager:
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
+
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             self._log_stage_timing(
@@ -486,6 +513,15 @@ class HttpServerManager:
                 self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
 
+    def _build_aborted_generation_outputs(self, group_request_id: int, sampling_params: SamplingParams):
+        # Paused requests never enter router queues, so synthesize an aborted empty
+        # result that both stream and non-stream APIs can consume normally.
+        finish_status = FinishStatus()
+        finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+        metadata = {"prompt_tokens": 0, "count_output_tokens": 0}
+        for i in range(sampling_params.n):
+            yield group_request_id + i, "", metadata, finish_status
+
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
         audio_tokens = 0
@@ -499,6 +535,43 @@ class HttpServerManager:
                     audio_tokens += audio.token_num
 
         return image_tokens, audio_tokens
+
+    def _read_routed_experts_metadata(self, req: Req):
+        if self._routing_config is None:
+            return None
+        num_moe_layers, topk, dtype_id = self._routing_config
+        num_tokens = req.input_len + req.shm_cur_output_len
+        if num_tokens <= 0:
+            return None
+
+        try:
+            routing_data = req.link_routing_data_shm_array(
+                num_moe_layers, num_tokens, topk, np_dtype=routing_dtype_id_to_np(dtype_id)
+            )
+            if routing_data is None:
+                return None
+            return {
+                "shape": list(routing_data.shape),
+                "dtype": str(routing_data.dtype),
+                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to read routing data for req {req.request_id}: {e}")
+            return None
+
+    async def _wait_and_read_routed_experts_metadata(self, req: Req, timeout: float = 60.0):
+        if not await self.rl_controller.wait_until_can_released_mark(req, timeout=timeout):
+            return None
+
+        start_time = time.time()
+        while True:
+            routing_meta = self._read_routed_experts_metadata(req)
+            if routing_meta is not None:
+                return routing_meta
+            if time.time() - start_time > timeout:
+                logger.warning(f"wait routing data shm timeout, req_id={req.request_id}, timeout={timeout}s")
+                return None
+            await asyncio.sleep(0.005)
 
     async def _log_req_header(self, request_headers, group_request_id: int):
 
@@ -562,6 +635,18 @@ class HttpServerManager:
                 else:
                     raise ValueError("prompt List[int] format contain id > vocab_size")
             else:
+                if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
+                    assert (
+                        len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
+                    ), "too many multimodal items!"
+                    if multimodal_params.audios:
+                        assert not self.args.disable_audio, "audio multimodal not enabled"
+                    await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                    return self.tokenizer.encode(
+                        prompt,
+                        multimodal_params,
+                        add_special_tokens=sampling_params.add_special_tokens,
+                    )
                 return prompt
         else:
             raise ValueError(f"prompt format error, get type{type(prompt)}")
@@ -688,7 +773,7 @@ class HttpServerManager:
             if req_status.aborted:
                 raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
 
-            if not self.disable_abort and request is not None and await request.is_disconnected():
+            if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise ClientDisconnected(
                     group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
@@ -800,6 +885,9 @@ class HttpServerManager:
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
 
+    async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
+        return await self.rl_controller.abort_request(request)
+
     def _get_router_profiler_client(self):
         router_profiler_client = getattr(self, "router_profiler_client", None)
         if router_profiler_client is None or getattr(router_profiler_client, "closed", False):
@@ -839,6 +927,10 @@ class HttpServerManager:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
+                    try:
+                        req.close_routing_data_shm_array()
+                    except Exception as e:
+                        logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
                     _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
@@ -931,6 +1023,11 @@ class HttpServerManager:
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
 
+                                    if self._routing_config is not None:
+                                        routing_meta = await self._wait_and_read_routed_experts_metadata(req)
+                                        if routing_meta is not None:
+                                            metadata["routed_experts"] = routing_meta
+
                                     token_list.append((req_id, text, metadata, finish_status))
                             else:
                                 break
@@ -944,6 +1041,36 @@ class HttpServerManager:
 
             self.recycle_event.set()
         return
+
+    async def pause_generation(self):
+        return await self.rl_controller.pause_generation()
+
+    async def continue_generation(self):
+        return await self.rl_controller.continue_generation()
+
+    async def flush_cache(self, request: FlushCacheReq):
+        return await self.rl_controller.flush_cache(request)
+
+    async def release_memory_occupation(self, request: ReleaseMemoryReq):
+        return await self.rl_controller.release_memory_occupation(request)
+
+    async def resume_memory_occupation(self, request: ResumeMemoryReq):
+        return await self.rl_controller.resume_memory_occupation(request)
+
+    async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
+        return await self.rl_controller.init_weights_update_group(request)
+
+    async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
+        return await self.rl_controller.destroy_weights_update_group(request)
+
+    async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
+        return await self.rl_controller.update_weights_from_distributed(request)
+
+    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
+        return await self.rl_controller.update_weights_from_tensor(request)
+
+    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
+        return await self.rl_controller.update_weights_from_ipc(request)
 
 
 class ReqStatus:

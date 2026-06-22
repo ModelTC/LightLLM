@@ -33,8 +33,13 @@ from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
 from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.torch_memory_saver_utils import (
+    TorchMemorySaverWrapper,
+    MemoryTag,
+)
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
+from . import routing_manager as _routing_mgr
 
 logger = init_logger(__name__)
 
@@ -90,6 +95,7 @@ class TpPartBaseModel:
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.is_mtp_mode = self.args.mtp_mode in [
             "vanilla_with_att",
             "eagle_with_att",
@@ -103,18 +109,22 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
-        self._init_weights()
-        self._init_req_manager()
-        self._init_mem_manager()
+        enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
+        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
+            self._init_weights()
+        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            self._init_req_manager()
+            self._init_mem_manager()
+
         # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
         self.req_manager.mem_manager = self.mem_manager
-
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._load_hf_weights()
+        self._init_routing_capture()
+        self.load_weights(self.weight_dict)
 
         self._init_att_backend()
         self._init_att_backend1()
@@ -172,13 +182,14 @@ class TpPartBaseModel:
         ]
         return
 
-    def _load_hf_weights(self):
+    def load_weights(self, weight_dict: dict):
+        assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
-            self.data_type,
+            data_type=self.data_type,
             weight_dir=self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
+            weight_dict=weight_dict,
         )
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
@@ -289,6 +300,17 @@ class TpPartBaseModel:
     def _init_custom(self):
         pass
 
+    def _init_routing_capture(self):
+        if not self.args.enable_return_routed_experts:
+            return
+        if _routing_mgr.g_routing_capture_manager is not None:
+            # MTP draft models share the main model process and KV cache, so they
+            # should reuse the routing capture manager initialized by the main model.
+            logger.info("RoutingCaptureManager already initialized, skip routing capture init.")
+            return
+        _routing_mgr.init_routing_capture(self)
+        return
+
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
         model_input.to_cuda()
@@ -333,6 +355,11 @@ class TpPartBaseModel:
         infer_state.mem_index = model_input.mem_indexes
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
+        mgr = _routing_mgr.g_routing_capture_manager
+        if mgr is not None:
+            # Build a callback that records each MoE layer's top-k experts into
+            # the routing buffer at this forward's KV-cache positions.
+            infer_state.make_routing_capture_callback = mgr.make_capture_callback_factory(infer_state.mem_index)
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
@@ -1031,6 +1058,7 @@ class TpPartBaseModel:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
+        torch.cuda.empty_cache()
         return
 
     def autotune_layers(self):
@@ -1165,6 +1193,9 @@ class TpPartBaseModel:
         del b_seq_len
         del b_ready_cache_len
         del model_output
+        del b_mtp_index
+        del b_prefill_start_loc
+        del b_q_seq_len
         torch.cuda.empty_cache()
         return
 

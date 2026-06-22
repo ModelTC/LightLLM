@@ -144,9 +144,14 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        infer_state=None,
     ):
 
         topk_weights, topk_ids = self._router(router_logits, top_k)
+
+        routing_capture_callback = self._make_routing_capture_callback(infer_state)
+        if routing_capture_callback is not None:
+            routing_capture_callback(topk_ids)
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2

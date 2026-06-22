@@ -34,6 +34,9 @@ class ReqIDGenerator:
         logger.info("ReqIDGenerator init finished")
 
     def _wait_all_workers_ready(self):
+        if self.args.httpserver_workers == 1:
+            return
+        
         from lightllm.utils.envs_utils import get_unique_server_name
         from lightllm.server.core.objs.shm_array import ShmArray
 

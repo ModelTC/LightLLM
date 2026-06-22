@@ -2,9 +2,6 @@ import uuid
 import numpy as np
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class ChunkedPrefillQueue(BaseQueue):
@@ -73,21 +70,20 @@ class ChunkedPrefillQueue(BaseQueue):
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
         abort_req_list = []
-        aborted_count = 0
+        consumed_req_count = 0
 
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
-            if req.is_aborted:
-                # 由于管理的复杂性，只有没有被调度运行过的请求可以因为abort直接在队列中忽略掉.
-                # 暂停的请求需要恢复后，由 router manager 部分来过滤。暂时保持这种处理方法, 否则会导致管理token的泄漏
-                aborted_count += 1
+            if self.should_release_aborted_req_in_queue(req):
+                consumed_req_count += 1
                 abort_req_list.append(req)
                 continue
             ok_insert, new_batch_first_router_need_tokens = self._can_add_new_req(
                 req, is_busy, new_batch_first_router_need_tokens
             )
             if ok_insert:
+                consumed_req_count += 1
                 can_run_list.append(req)
             else:
                 break
@@ -95,11 +91,8 @@ class ChunkedPrefillQueue(BaseQueue):
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
         for req in abort_req_list:
-            req: Req = req
-            logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
-            self.free_aborted_req_cpu_cache_pages(req)
-            self.router.shm_req_manager.put_back_req_obj(req)
-        self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count :]
+            self.release_aborted_req(req)
+        self.waiting_req_list = self.waiting_req_list[consumed_req_count:]
         return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):

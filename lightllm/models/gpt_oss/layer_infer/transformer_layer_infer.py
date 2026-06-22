@@ -52,6 +52,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_grouped_topk=False,
             topk_group=None,
             num_expert_group=None,
+            infer_state=infer_state,
         )
         hidden_states = hidden_states.view(num_tokens, hidden_dim)
         return self._tpsp_reduce(input=hidden_states, infer_state=infer_state)

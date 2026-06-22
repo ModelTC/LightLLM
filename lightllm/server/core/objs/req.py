@@ -3,6 +3,7 @@ import math
 import ctypes
 import numpy as np
 import time
+from multiprocessing import shared_memory
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
@@ -14,6 +15,7 @@ from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 
 logger = init_logger(__name__)
 
@@ -25,19 +27,20 @@ class FinishStatus(ctypes.Structure):
     NO_FINISH = 0
     FINISHED_STOP = 1
     FINISHED_LENGTH = 2
+    FINISHED_ABORTED = 3
 
     def __init__(self, init_state=NO_FINISH):
         self.status = init_state
 
     def set_status(self, new_status):
-        assert 0 <= new_status <= 2
+        assert 0 <= new_status <= 3
         self.status = new_status
 
     def get_status(self):
         return self.status
 
     def is_finished(self):
-        return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
+        return self.FINISHED_STOP <= self.status <= self.FINISHED_ABORTED
 
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
@@ -50,6 +53,8 @@ class FinishStatus(ctypes.Structure):
             return "stop"
         elif self.status == self.FINISHED_LENGTH:
             return "length"
+        elif self.status == self.FINISHED_ABORTED:
+            return "abort"
         return None
 
 
@@ -277,6 +282,43 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
+    def get_routing_data_shm_name(self):
+        service_uni_name = get_unique_server_name()
+        return f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
+
+    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.uint8):
+        """Create routing SHM at actual size."""
+        self.shm_routing_data = ShmArray(
+            self.get_routing_data_shm_name(), (num_tokens, num_moe_layers, topk), dtype=np_dtype
+        )
+        self.shm_routing_data.create_shm()
+        return
+
+    def link_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.uint8):
+        """Link routing SHM at actual size."""
+        if num_moe_layers <= 0 or num_tokens <= 0 or topk <= 0:
+            return None
+        shm_routing_data = ShmArray(
+            self.get_routing_data_shm_name(), (num_tokens, num_moe_layers, topk), dtype=np_dtype
+        )
+        shm_routing_data.link_shm()
+        self.shm_routing_data = shm_routing_data
+        return self.shm_routing_data.arr
+
+    def close_routing_data_shm_array(self):
+        """Close and unlink routing SHM (on-demand, no longer pooled)."""
+        if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
+            self.shm_routing_data.close_shm()
+            self.shm_routing_data = None
+        else:
+            try:
+                shm = shared_memory.SharedMemory(name=self.get_routing_data_shm_name())
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        return
+
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
 
@@ -297,9 +339,8 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        if self.is_aborted and can_released_mark and ref_count_ok:
-            return True
-
+        # if self.is_aborted and can_released_mark and ref_count_ok:
+        #     return True
         ok_finished_gen_req = self.finish_status.is_finished() or self.stop_str_matched
 
         if ok_finished_gen_req and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():

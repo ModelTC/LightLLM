@@ -12,7 +12,7 @@ import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import multiprocessing
-from typing import Dict, List, Optional
+from typing import List
 from .batch import Batch, Req
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import build_req_queue
@@ -29,6 +29,10 @@ from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
+from lightllm.server.io_struct import (
+    GeneralHttpToModelRpcReq,
+    GeneralModelToHttpRpcRsp,
+)
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -36,6 +40,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
+from .rl_rpyc import RouterRlOpQueue, start_router_rl_rpyc_server
 
 logger = init_logger(__name__)
 
@@ -104,6 +109,9 @@ class RouterManager:
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
         self.router_statics = RouterStatics(self.args)
+
+        # RL 管理 rpyc 队列:rpyc 线程把请求放进来,asyncio 主循环每个 step 取出处理
+        self.rl_op_queue = RouterRlOpQueue()
         self.profiler_cmd_queue = RouterProfilerCmdQueue()
 
         return
@@ -349,11 +357,42 @@ class RouterManager:
                 self.running_batch = None
         return
 
+    def _sync_abort_req_ids_from_master(self, reqs: List[Req]):
+        local_aborted_req_ids = [req.request_id for req in reqs if req.is_aborted]
+        if not self.is_multinode_tp:
+            return set(local_aborted_req_ids)
+
+        # 多节点 TP 下 abort 只以 rank 0 httpserver 看到的状态为准。
+        if not self.is_multinode_tp_master:
+            local_aborted_req_ids = []
+
+        aborted_req_num = torch.tensor([len(local_aborted_req_ids)], dtype=torch.int64, device="cpu")
+        dist.broadcast(aborted_req_num, src=0, group=self.mulitnode_group)
+        aborted_req_num = int(aborted_req_num.item())
+        if aborted_req_num == 0:
+            return set()
+
+        if self.is_multinode_tp_master:
+            aborted_req_ids = torch.tensor(local_aborted_req_ids, dtype=torch.int64, device="cpu")
+        else:
+            aborted_req_ids = torch.empty(aborted_req_num, dtype=torch.int64, device="cpu")
+        dist.broadcast(aborted_req_ids, src=0, group=self.mulitnode_group)
+        return {int(req_id) for req_id in aborted_req_ids.tolist()}
+
+    def _mark_reqs_aborted(self, reqs: List[Req], aborted_req_ids):
+        if not aborted_req_ids:
+            return
+        for req in reqs:
+            if req.request_id in aborted_req_ids:
+                req.is_aborted = True
+        return
+
     def _get_aborted_reqs_from_running_batch(self) -> List[Req]:
         ans = []
-        if self.running_batch is None:
-            return ans
-        for req in self.running_batch.reqs:
+        running_reqs = [] if self.running_batch is None else self.running_batch.reqs
+        aborted_req_ids = self._sync_abort_req_ids_from_master(running_reqs)
+        self._mark_reqs_aborted(running_reqs, aborted_req_ids)
+        for req in running_reqs:
             if req.is_aborted and req._router_aborted is False:
                 req._router_aborted = True
                 ans.append(req)
@@ -453,11 +492,19 @@ class RouterManager:
                     dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
                     req_id_select_mark = [1 for _ in range(len(req_ids))]
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
+                    # select_mark 仍需 MIN allreduce: slave 是否已经从 httpserver 收到 generate 请求
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
+                    aborted_req_ids = self._sync_abort_req_ids_from_master(new_batch.reqs)
                     back_req_list = []
-                    for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
-                        if select == 0:
-                            req = new_batch.pop_req(req_id)
+                    for req_id, select in zip(req_ids, req_id_select_mark.tolist()):
+                        is_aborted = req_id in aborted_req_ids
+                        if select == 1 and not is_aborted:
+                            continue
+                        req = new_batch.pop_req(req_id)
+                        if is_aborted and select == 1:
+                            req.is_aborted = True
+                            self.req_queue.release_aborted_req(req)
+                        else:
                             back_req_list.append(req)
                     self.req_queue.waiting_req_list = back_req_list + self.req_queue.waiting_req_list
                     if new_batch.is_clear():
@@ -471,25 +518,30 @@ class RouterManager:
                 else:
                     req_ids = [None for _ in range(req_num)]
                     dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-                    all_req_id_set = set([req.request_id for req in self.req_queue.waiting_req_list])
+                    id_to_req_obj = {req.request_id: req for req in self.req_queue.waiting_req_list}
                     req_id_select_mark = []
                     for req_id in req_ids:
-                        req_id_select_mark.append(1 if req_id in all_req_id_set else 0)
+                        req_id_select_mark.append(1 if req_id in id_to_req_obj else 0)
                     req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
                     dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-                    select_req_ids = []
-                    for req_id, select in zip(req_ids, req_id_select_mark.numpy()):
-                        if select == 1:
-                            select_req_ids.append(req_id)
-
+                    aborted_req_ids = self._sync_abort_req_ids_from_master([])
                     select_reqs = []
-                    for req_id in select_req_ids:
-                        for req in self.req_queue.waiting_req_list:
-                            if req.request_id == req_id:
-                                select_reqs.append(req)
-
-                    for req in select_reqs:
-                        self.req_queue.waiting_req_list.remove(req)
+                    aborted_reqs = []
+                    for req_id, select in zip(req_ids, req_id_select_mark.tolist()):
+                        if select == 1:
+                            req = id_to_req_obj[req_id]
+                            if req_id in aborted_req_ids:
+                                req.is_aborted = True
+                                aborted_reqs.append(req)
+                                continue
+                            select_reqs.append(req)
+                    handled_req_ids = {req.request_id for req in select_reqs + aborted_reqs}
+                    if handled_req_ids:
+                        self.req_queue.waiting_req_list = [
+                            req for req in self.req_queue.waiting_req_list if req.request_id not in handled_req_ids
+                        ]
+                    for req in aborted_reqs:
+                        self.req_queue.release_aborted_req(req)
                     if select_reqs:
                         new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
                     else:
@@ -514,7 +566,7 @@ class RouterManager:
                 if isinstance(recv_req, GroupReqIndexes):
                     self._add_req(recv_req)
                 else:
-                    assert False, f"Error Req Inf {recv_req}"
+                    raise ValueError(f"Unknown request type: {type(recv_req)}")
 
             # 当队列中存在较多的请求时，将一次接受的数量上调
             self.recv_max_count = min(int(self.recv_max_count * 1.3), 256)
@@ -523,12 +575,74 @@ class RouterManager:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
+        await self._process_special_reqs()
+
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
         else:
             if self._get_paused_req_num() == 0:
                 self._generate_new_batch()
         return
+
+    async def _process_special_reqs(self):
+        # master: 从 RL rpyc 队列里取出 (req, future) — slave 的队列恒为空(无 rpyc service)
+        pairs = self.rl_op_queue.pop_all()
+
+        reqs: List[GeneralHttpToModelRpcReq] = [req for req, _ in pairs]
+
+        # 多机 TP:master 通过 NCCL 广播 req 到 slave router;slave 在自己的主循环里到达此处时,会从 broadcast 收到 master 的 reqs
+        if self.is_multinode_tp:
+            reqs = self.broadcast_reqs_to_other_nodes(reqs)
+
+        for i, req in enumerate(reqs):
+            assert isinstance(req, GeneralHttpToModelRpcReq), "special request must be GeneralHttpToModelRpcReq"
+            try:
+                ret = await self.forward_to_model(req)
+            except BaseException as e:
+                logger.exception(f"forward_to_model failed for {req.func_name}: {e}")
+                ret = GeneralModelToHttpRpcRsp(
+                    success=False, msg=f"forward_to_model error: {e}", func_name=req.func_name
+                )
+            # 只有 master 持有 future,slave 的 pairs 始终为空
+            if i < len(pairs):
+                _, fut = pairs[i]
+                if not fut.done():
+                    fut.set_result(ret)
+
+    def broadcast_reqs_to_other_nodes(self, reqs: List[GeneralHttpToModelRpcReq]):
+        req_num = len(reqs)
+        if self.node_rank == 0:
+            req_nums = [len(reqs)]
+            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
+            req_num = req_nums[0]
+            if req_num > 0:
+                dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
+        else:
+            req_nums = [None]
+            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
+            req_num = req_nums[0]
+            if req_num > 0:
+                reqs = [None for _ in range(req_num)]
+                dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
+        return reqs
+
+    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        forward_to_model_tasks = []
+        for model_rpc_client in self.model_rpc_clients:
+            forward_to_model_tasks.append(model_rpc_client.forward_to_model(req))
+        all_ret = await asyncio.gather(*forward_to_model_tasks)
+        ret: GeneralModelToHttpRpcRsp = next((res for res in all_ret if not res.success), all_ret[0])
+        ret.success = all(res.success for res in all_ret)
+        if self.is_multinode_tp:
+            output_list = [None for _ in range(self.nnodes)] if self.node_rank == 0 else None
+            dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
+            if self.node_rank == 0:
+                for res in output_list:
+                    res: GeneralModelToHttpRpcRsp
+                    if not res.success:
+                        ret = res
+                        break
+        return ret
 
     def clean_up(self):
         return
@@ -556,6 +670,10 @@ def start_router_process(args, pipe_writer):
         router.profiler_rpyc_server, router.profiler_rpyc_thread = start_router_profiler_server(
             args,
             router.profiler_cmd_queue,
+        )
+        router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(
+            args,
+            router.rl_op_queue,
         )
     except:
         import traceback

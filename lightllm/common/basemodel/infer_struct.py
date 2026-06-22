@@ -100,6 +100,9 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
+        # Optional hook for recording MoE routing top-k ids during forward.
+        self.make_routing_capture_callback = None
+
     def init_some_extra_state(self, model):
         if self.is_prefill:
             (

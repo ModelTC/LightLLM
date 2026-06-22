@@ -230,5 +230,32 @@ def test_case9():
     assert torch.equal(unmerged_node_d.token_id_key, torch.tensor([6], dtype=torch.int64))
 
 
+def test_case10():
+    """
+    测试场景：测试 flush_cache 函数
+    """
+    print("\nTest Case 10: Testing flush_cache function\n")
+    tree = RadixCache("unique_name", 100, 0)
+    tree.insert(torch.tensor([1, 2, 3], dtype=torch.int64))
+    tree.insert(torch.tensor([1, 2, 3, 4, 5], dtype=torch.int64))
+    tree_node, size, values = tree.match_prefix(
+        torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
+    )
+    assert tree_node is not None
+    assert size == 3
+    tree.flush_cache()
+    tree_node, size, values = tree.match_prefix(
+        torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
+    )
+    assert tree_node is None
+    assert size == 0
+    assert tree.get_tree_total_tokens_num() == 0
+    assert tree.get_refed_tokens_num() == 0
+    assert len(tree.root_node.children) == 0
+    assert tree.root_node.token_id_key.numel() == 0
+    assert tree.root_node.token_mem_index_value.numel() == 0
+    assert tree.root_node.ref_counter == 1
+
+
 if __name__ == "__main__":
     pytest.main()

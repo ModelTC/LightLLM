@@ -2,14 +2,28 @@ import socket
 import subprocess
 import ipaddress
 import random
+import os
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+DEFAULT_BASE_PORT = 10000
+PORTS_PER_INSTANCE = 1000
+MAX_INSTANCE_ID = 7
 
-def alloc_can_use_network_port(num=3, used_ports=None, from_port_num=10000):
+
+def alloc_can_use_network_port(num=3, used_ports=None, from_port_num=DEFAULT_BASE_PORT, instance_id=0):
+    if instance_id < 0 or instance_id > MAX_INSTANCE_ID:
+        raise ValueError(f"instance_id must be in range [0, {MAX_INSTANCE_ID}], got {instance_id}")
+
+    base_port = int(os.environ.get("LIGHTLLM_BASE_PORT", from_port_num))
+    # Keep independent launchers away from the same free-port window, especially for NCCL TCPStore ports.
+    range_start = base_port + instance_id * PORTS_PER_INSTANCE
+    range_end = range_start + PORTS_PER_INSTANCE
+    used_ports = used_ports or []
+
     port_list = []
-    for port in range(from_port_num, 65536):
+    for port in range(range_start, range_end):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             result = s.connect_ex(("localhost", port))
             if result != 0 and port not in used_ports:

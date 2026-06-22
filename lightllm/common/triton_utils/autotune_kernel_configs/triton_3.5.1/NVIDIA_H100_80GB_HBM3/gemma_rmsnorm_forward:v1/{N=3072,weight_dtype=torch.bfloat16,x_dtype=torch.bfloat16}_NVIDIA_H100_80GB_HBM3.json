@@ -1,0 +1,7 @@
+{
+  "3072": {
+    "BLOCK_SIZE": 2048,
+    "num_stages": 1,
+    "num_warps": 8
+  }
+}

@@ -4,7 +4,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
@@ -33,8 +33,8 @@ from lightllm.utils.envs_utils import (
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
 )
+from lightllm.distributed import dist_group_manager
 from lightllm.distributed.communication_op import (
-    dist_group_manager,
     all_gather_into_tensor,
     all_reduce,
     broadcast,
@@ -597,7 +597,7 @@ class ModeBackend:
                 paused_reqs.append(req_obj)
                 continue
 
-            if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+            if req_obj.finish_status.is_finished():
                 if support_overlap:
                     # 延迟处理
                     req_obj.filter_mark = True

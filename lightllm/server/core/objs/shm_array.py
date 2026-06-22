@@ -26,6 +26,13 @@ class ShmArray:
         self.arr = np.ndarray(self.shape, dtype=self.dtype, buffer=self.shm.buf)
         return
 
+    def detach_shm(self):
+        """Close handle without unlinking (SHM persists for reuse)."""
+        if self.shm is not None:
+            self.shm.close()
+            self.shm = None
+            self.arr = None
+
     def close_shm(self):
         if self.shm is not None:
             self.shm.close()

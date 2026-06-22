@@ -1,8 +1,7 @@
 import argparse
 
 
-def make_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--run_mode",
@@ -79,6 +78,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""when run_mode is config_server, set this params will start a redis server,
         when a llm infer node start to set this params, the visual infer module will start a
         proxy module use config server to find  remote vit infer nodes to infer img""",
+    )
+    parser.add_argument(
+        "--rl_rpyc_port",
+        type=int,
+        default=None,
+        help="The router RL control RPyC port. If unset, LightLLM will allocate one automatically.",
     )
     parser.add_argument(
         "--pd_kv_page_num",
@@ -255,6 +260,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--nccl_port", type=int, default=None, help="the nccl_port to build a distributed environment for PyTorch"
+    )
+    parser.add_argument(
+        "--lightllm_instance_id",
+        type=int,
+        default=0,
+        help="Instance ID (0~7) for multi-instance port isolation. Each ID maps to a dedicated port range.",
     )
     parser.add_argument(
         "--use_config_server_to_init_nccl",
@@ -770,6 +781,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
     parser.add_argument(
+        "--enable_torch_memory_saver",
+        action="store_true",
+        help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",
+    )
+    parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
+    parser.add_argument(
         "--disk_cache_dir",
         type=str,
         default=None,
@@ -843,6 +860,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         it will use triton implementation.""",
     )
     parser.add_argument(
+        "--enable_return_routed_experts",
+        action="store_true",
+        default=False,
+        help="Enable returning routed expert indices for MoE models (R3 feature).",
+    )
+    parser.add_argument(
         "--enable_profiling",
         type=str,
         choices=["torch_profiler", "nvtx"],
@@ -858,3 +881,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
     return parser
+
+
+def make_argument_parser() -> argparse.ArgumentParser:
+    return add_cli_args(argparse.ArgumentParser())

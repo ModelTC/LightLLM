@@ -28,11 +28,14 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
+from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
+from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
 
 logger = init_logger(__name__)
 
@@ -46,6 +49,8 @@ class ModelRpcServer(rpyc.Service):
 
         self.rank = rank
         self.rank_in_node = rank_in_node
+        self.backend = None
+        self.rl_backend_ops = None
         logger.info(f"Initialized RPC server for rank {self.rank}.")
         return
 
@@ -99,6 +104,7 @@ class ModelRpcServer(rpyc.Service):
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
+        self.rl_backend_ops = RlBackendOps(self.backend)
 
         # only deepseekv3 can support auto_update_redundancy_expert
         if self.args.auto_update_redundancy_expert:
@@ -110,6 +116,24 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
+
+    def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        try:
+            req = obtain(req)
+            if self.rl_backend_ops is None:
+                raise ValueError("RL backend ops is not initialized")
+            if not RlBackendOps.supports(req.func_name):
+                raise ValueError(
+                    f"Unsupported RL backend function {req.func_name}. "
+                    f"Supported functions: {sorted(RlBackendOps.SUPPORTED)}"
+                )
+            success, ret = self.rl_backend_ops.dispatch(req.func_name, req.func_args)
+            return GeneralModelToHttpRpcRsp(success=success, msg=str(ret), func_name=req.func_name, func_rsp=ret)
+        except BaseException as e:
+            logger.exception(f"forward to model backend failed: {str(e)}")
+            return GeneralModelToHttpRpcRsp(
+                success=False, msg=f"forward to model backend failed: {str(e)}", func_name=req.func_name
+            )
 
 
 class ModelRpcClient:
@@ -134,6 +158,7 @@ class ModelRpcClient:
 
         self._init_model = async_wrap(self.conn.root.init_model)
         self._get_max_total_token_num = async_wrap(self.conn.root.get_max_total_token_num)
+        self._forward_to_model = async_wrap(self.conn.root.forward_to_model)
         return
 
     async def init_model(self, kvargs):
@@ -143,6 +168,10 @@ class ModelRpcClient:
 
     async def get_max_total_token_num(self):
         ans = self._get_max_total_token_num()
+        return obtain(await ans)
+
+    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+        ans = self._forward_to_model(req)
         return obtain(await ans)
 
 
@@ -197,7 +226,11 @@ async def start_model_process(
             success_event,
         ),
     )
-    proc.start()
+    from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
+
+    torch_memory_saver = TorchMemorySaverWrapper(args.enable_torch_memory_saver)
+    with torch_memory_saver.configure_subprocess():
+        proc.start()
 
     # Use asyncio.to_thread to make the blocking wait non-blocking
     await asyncio.to_thread(success_event.wait, timeout=40)
