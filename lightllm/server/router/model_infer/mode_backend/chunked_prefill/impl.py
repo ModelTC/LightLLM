@@ -402,6 +402,7 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             draft_model_input.b_seq_len += 1
+            draft_model_input.b_seq_len_cpu += 1
             draft_model_input.max_kv_seq_len += 1
             eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
             draft_model_input.mem_indexes = torch.cat(

@@ -291,11 +291,15 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
-        # decode 槽位 prep: 放在 to_cuda 前 (b_req_idx/b_seq_len/mem_indexes_cpu 还是原生 CPU 张量),
+        # decode 槽位 prep: 放在 to_cuda 前, 优先使用 b_req_idx/b_seq_len 的 CPU mirror,
         # 且此刻已在 forward 的 CUDA stream 上 -> 与后续 attention 同流, 无跨流竞态、无 D2H。
         # mem_indexes_cpu is None 时跳过: cudagraph warmup 的输入全在 CUDA 且 b_req_idx 全为 HOLD, prep 本就是 no-op。
         if not model_input.is_prefill and model_input.mem_indexes_cpu is not None:
-            self.req_manager.prepare_decode(model_input.b_req_idx, model_input.b_seq_len, model_input.mem_indexes_cpu)
+            self.req_manager.prepare_decode(
+                model_input.b_req_idx_cpu,
+                model_input.b_seq_len_cpu,
+                model_input.mem_indexes_cpu,
+            )
         model_input.to_cuda()
         assert model_input.mem_indexes.is_cuda
 
@@ -376,6 +380,15 @@ class TpPartBaseModel:
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
+        new_model_input.b_req_idx_cpu = F.pad(
+            new_model_input.b_req_idx_cpu,
+            (0, padded_batch_size),
+            mode="constant",
+            value=self.req_manager.HOLD_REQUEST_ID,
+        )
+        new_model_input.b_seq_len_cpu = F.pad(
+            new_model_input.b_seq_len_cpu, (0, padded_batch_size), mode="constant", value=2
+        )
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_batch_size),
@@ -433,6 +446,15 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
         new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
+        new_model_input.b_req_idx_cpu = F.pad(
+            new_model_input.b_req_idx_cpu, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+        )
+        new_model_input.b_seq_len_cpu = F.pad(
+            new_model_input.b_seq_len_cpu, (0, 1), mode="constant", value=padded_token_num
+        )
+        new_model_input.b_ready_cache_len_cpu = F.pad(
+            new_model_input.b_ready_cache_len_cpu, (0, 1), mode="constant", value=0
+        )
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
@@ -526,17 +548,14 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
-        if hasattr(self.req_manager, "prepare_prefill_swa"):
-            self.req_manager.prepare_prefill_swa(
+        if model_input.b_req_idx_cpu is not None:
+            self.req_manager.prepare_prefill(
                 b_req_idx=infer_state.b_req_idx,
                 b_ready_cache_len=infer_state.b_ready_cache_len,
                 b_seq_len=infer_state.b_seq_len,
-            )
-        if hasattr(self.req_manager, "prepare_prefill_compress_slots"):
-            self.req_manager.prepare_prefill_compress_slots(
-                b_req_idx=infer_state.b_req_idx,
-                b_ready_cache_len=infer_state.b_ready_cache_len,
-                b_seq_len=infer_state.b_seq_len,
+                b_req_idx_cpu=model_input.b_req_idx_cpu,
+                b_ready_cache_len_cpu=model_input.b_ready_cache_len_cpu,
+                b_seq_len_cpu=model_input.b_seq_len_cpu,
             )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
@@ -758,17 +777,14 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state0.mem_index,
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
-        if hasattr(self.req_manager, "prepare_prefill_swa"):
-            self.req_manager.prepare_prefill_swa(
+        if model_input0.b_req_idx_cpu is not None:
+            self.req_manager.prepare_prefill(
                 b_req_idx=infer_state0.b_req_idx,
                 b_ready_cache_len=infer_state0.b_ready_cache_len,
                 b_seq_len=infer_state0.b_seq_len,
-            )
-        if hasattr(self.req_manager, "prepare_prefill_compress_slots"):
-            self.req_manager.prepare_prefill_compress_slots(
-                b_req_idx=infer_state0.b_req_idx,
-                b_ready_cache_len=infer_state0.b_ready_cache_len,
-                b_seq_len=infer_state0.b_seq_len,
+                b_req_idx_cpu=model_input0.b_req_idx_cpu,
+                b_ready_cache_len_cpu=model_input0.b_ready_cache_len_cpu,
+                b_seq_len_cpu=model_input0.b_seq_len_cpu,
             )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
@@ -783,17 +799,14 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state1.mem_index,
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
-        if hasattr(self.req_manager, "prepare_prefill_swa"):
-            self.req_manager.prepare_prefill_swa(
+        if model_input1.b_req_idx_cpu is not None:
+            self.req_manager.prepare_prefill(
                 b_req_idx=infer_state1.b_req_idx,
                 b_ready_cache_len=infer_state1.b_ready_cache_len,
                 b_seq_len=infer_state1.b_seq_len,
-            )
-        if hasattr(self.req_manager, "prepare_prefill_compress_slots"):
-            self.req_manager.prepare_prefill_compress_slots(
-                b_req_idx=infer_state1.b_req_idx,
-                b_ready_cache_len=infer_state1.b_ready_cache_len,
-                b_seq_len=infer_state1.b_seq_len,
+                b_req_idx_cpu=model_input1.b_req_idx_cpu,
+                b_ready_cache_len_cpu=model_input1.b_ready_cache_len_cpu,
+                b_seq_len_cpu=model_input1.b_seq_len_cpu,
             )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
@@ -822,10 +835,14 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
-        # decode 槽位 prep: 在 to_cuda 前 (原生 CPU 张量)、且已在 forward 的 CUDA stream 上 (见 forward 注释)。
+        # decode 槽位 prep: 在 to_cuda 前使用 CPU mirror, 且已在 forward 的 CUDA stream 上 (见 forward 注释)。
         for mi in (model_input0, model_input1):
             if mi.mem_indexes_cpu is not None:
-                self.req_manager.prepare_decode(mi.b_req_idx, mi.b_seq_len, mi.mem_indexes_cpu)
+                self.req_manager.prepare_decode(
+                    mi.b_req_idx_cpu,
+                    mi.b_seq_len_cpu,
+                    mi.mem_indexes_cpu,
+                )
         model_input0.to_cuda()
         model_input1.to_cuda()
         assert self.args.enable_tpsp_mix_mode

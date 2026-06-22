@@ -385,6 +385,9 @@ class DeepseekV4MemoryManager(MemoryManager):
         b_ready_cache_len: torch.Tensor,
         b_seq_len: torch.Tensor,
         req_to_token_indexs: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_ready_cache_len_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
     ) -> None:
         """prefill prep: 为各请求位置 [ready, seq) 的新 token 分配位置对齐的 swa 槽。
 
@@ -396,9 +399,10 @@ class DeepseekV4MemoryManager(MemoryManager):
         """
         page = DSV4_SWA_PAGE_SIZE
         hold_req_id = self.max_request_num  # padding 行的请求 id(req_manager.HOLD_REQUEST_ID)
-        req_list = b_req_idx.detach().cpu().tolist()
-        ready_list = b_ready_cache_len.detach().cpu().tolist()
-        seq_list = b_seq_len.detach().cpu().tolist()
+
+        req_list = b_req_idx_cpu.tolist()
+        ready_list = b_ready_cache_len_cpu.tolist()
+        seq_list = b_seq_len_cpu.tolist()
 
         segs = []  # (req_idx, start, end, n_new_pages, has_cont_page)
         total_new_pages = 0

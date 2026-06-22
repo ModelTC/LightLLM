@@ -161,8 +161,21 @@ class ReqManager:
         self.req_list = _ReqLinkedList(self.max_request_num)
         return
 
+    def prepare_prefill(
+        self,
+        b_req_idx,
+        b_ready_cache_len,
+        b_seq_len,
+        b_req_idx_cpu=None,
+        b_ready_cache_len_cpu=None,
+        b_seq_len_cpu=None,
+    ):
+        """prefill 在 init_req_to_token_indexes 之后调用的钩子。基类 no-op; 需要
+        prefill KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
+        return
+
     def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu):
-        """每个 decode step 在 to_cuda 之前调用的钩子 (数据为原生 CPU 张量, 且已在 forward 的
+        """每个 decode step 在 to_cuda 之前调用的钩子 (优先使用 CPU mirror, 且已在 forward 的
         CUDA stream 上)。基类 no-op; 需要 per-step KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
         return
 
@@ -375,7 +388,7 @@ class DeepseekV4ReqManager(ReqManager):
     真实 mem_manager 会在 `_init_mem_manager()` 后通过 `bind_mem_manager()` 接入。
 
       * 压缩槽位不在本类: ``full_to_c4/c128_indexs``(mem manager)以组末 token 的 full 槽位为键。
-        本类只负责 prep 阶段的分配与 scatter(``prepare_prefill_compress_slots`` /
+        本类只负责 prep 阶段的分配与 scatter(``prepare_prefill`` /
         ``prepare_decode_compress_slots``)——必须先于 attention metadata 构建/图捕获;
         条目内容由 layer-infer 的 compressor 前向写入。
       * compressor 在途状态不在本类: c4/c128 都在 mem manager 的 swa 页派生池,
@@ -434,6 +447,9 @@ class DeepseekV4ReqManager(ReqManager):
         b_req_idx: torch.Tensor,
         b_ready_cache_len: torch.Tensor,
         b_seq_len: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_ready_cache_len_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
     ) -> None:
         """prefill prep: 为本 chunk 全部新 token(位置 [ready, seq))分配位置对齐的 swa 槽，
         并回收已出窗位置的槽。
@@ -445,8 +461,8 @@ class DeepseekV4ReqManager(ReqManager):
         if self.sliding_window is not None:
             retain = self._swa_retain_len()
             evict_slots = []
-            req_list = b_req_idx.detach().cpu().tolist()
-            ready_list = b_ready_cache_len.detach().cpu().tolist()
+            req_list = b_req_idx_cpu.tolist()
+            ready_list = b_ready_cache_len_cpu.tolist()
             for req_idx, ready_len in zip(req_list, ready_list):
                 req_idx = int(req_idx)
                 if req_idx == self.HOLD_REQUEST_ID:
@@ -463,14 +479,51 @@ class DeepseekV4ReqManager(ReqManager):
                     self._swa_evict_marks[req_idx] = evict_end
             if evict_slots:
                 self.mem_manager.evict_swa(torch.cat(evict_slots))
-        self.mem_manager.alloc_swa_prefill(b_req_idx, b_ready_cache_len, b_seq_len, self.req_to_token_indexs)
+        self.mem_manager.alloc_swa_prefill(
+            b_req_idx,
+            b_ready_cache_len,
+            b_seq_len,
+            self.req_to_token_indexs,
+            b_req_idx_cpu=b_req_idx_cpu,
+            b_ready_cache_len_cpu=b_ready_cache_len_cpu,
+            b_seq_len_cpu=b_seq_len_cpu,
+        )
         return
 
     def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu):
         """decode 每步槽位 prep: 先 swa 再 compress。由 BaseModel.forward / microbatch_overlap_decode
-        在 to_cuda 之前调用 (CPU 数据 + forward 的 CUDA stream); 不再放在 _decode 里。"""
+        在 to_cuda 之前调用 (CPU mirror + forward 的 CUDA stream); 不再放在 _decode 里。"""
         self.prepare_decode_swa(b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu)
         self.prepare_decode_compress_slots(b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu)
+        return
+
+    def prepare_prefill(
+        self,
+        b_req_idx: torch.Tensor,
+        b_ready_cache_len: torch.Tensor,
+        b_seq_len: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_ready_cache_len_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
+    ) -> None:
+        """prefill 槽位 prep: 先 swa 再 compress。由 BaseModel 在
+        init_req_to_token_indexes 之后、attention metadata 构建之前调用。"""
+        self.prepare_prefill_swa(
+            b_req_idx,
+            b_ready_cache_len,
+            b_seq_len,
+            b_req_idx_cpu=b_req_idx_cpu,
+            b_ready_cache_len_cpu=b_ready_cache_len_cpu,
+            b_seq_len_cpu=b_seq_len_cpu,
+        )
+        self.prepare_prefill_compress_slots(
+            b_req_idx,
+            b_ready_cache_len,
+            b_seq_len,
+            b_req_idx_cpu=b_req_idx_cpu,
+            b_ready_cache_len_cpu=b_ready_cache_len_cpu,
+            b_seq_len_cpu=b_seq_len_cpu,
+        )
         return
 
     def prepare_decode_swa(
@@ -663,15 +716,18 @@ class DeepseekV4ReqManager(ReqManager):
         b_req_idx: torch.Tensor,
         b_ready_cache_len: torch.Tensor,
         b_seq_len: torch.Tensor,
+        b_req_idx_cpu: torch.Tensor,
+        b_ready_cache_len_cpu: torch.Tensor,
+        b_seq_len_cpu: torch.Tensor,
     ) -> None:
         """prefill prep: 为本 chunk 内的组末 token(位置 (g+1)*ratio-1 ∈ [ready, seq))分配压缩槽，
         scatter 进 full_to_c4/c128_indexs。必须在 init_req_to_token_indexes 之后(组末 full 槽
         从 req_to_token_indexs 取)、attention metadata 构建之前调用。"""
         if self.n_c4 == 0 and self.n_c128 == 0:
             return
-        req_list = b_req_idx.detach().cpu().tolist()
-        ready_list = b_ready_cache_len.detach().cpu().tolist()
-        seq_list = b_seq_len.detach().cpu().tolist()
+        req_list = b_req_idx_cpu.tolist()
+        ready_list = b_ready_cache_len_cpu.tolist()
+        seq_list = b_seq_len_cpu.tolist()
         if self.n_c4 > 0:
             for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
                 req_idx = int(req_idx)
