@@ -33,7 +33,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
-DSV4_DECODE_CUDAGRAPH_MAX_LEN = 8192
 
 
 @ModelRegistry("deepseek_v4")
@@ -99,17 +98,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         self.req_manager.mem_manager = self.mem_manager
         return
-
-    def _init_cudagraph(self):
-        if not self.disable_cudagraph and self.graph_max_len_in_batch > DSV4_DECODE_CUDAGRAPH_MAX_LEN:
-            logger.info(
-                "DeepSeek-V4 caps decode cudagraph max_len_in_batch from %s to %s for the current "
-                "graph-safe sparse-attention path; longer decode batches run eager.",
-                self.graph_max_len_in_batch,
-                DSV4_DECODE_CUDAGRAPH_MAX_LEN,
-            )
-            self.graph_max_len_in_batch = DSV4_DECODE_CUDAGRAPH_MAX_LEN
-        return super()._init_cudagraph()
 
     def _init_att_backend(self):
         args = get_env_start_args()
