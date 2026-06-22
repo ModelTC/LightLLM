@@ -34,16 +34,12 @@ class QKVGatedROWNMMWeight(MMWeightTpl):
         self.tp_rank_ = tp_rank if tp_rank is not None else get_current_rank_in_dp()
         self.tp_world_size_ = tp_world_size if tp_world_size is not None else get_dp_world_size()
         self.q_repeat_times = 1
-        self.kv_repeat_times = 1
+        self.kv_repeat_times = self._get_kv_repeat_times(kv_head_num)
         assert (
             q_head_num % self.tp_world_size_ == 0
         ), f"q_head_num must be divisible by tp_world_size_, found {q_head_num} % {self.tp_world_size_}"
-        assert kv_head_num % self.tp_world_size_ == 0 or self.tp_world_size_ % kv_head_num == 0, (
-            f"kv_head_num must be divisible by tp_world_size_ or vice versa, "
-            f"found {kv_head_num} % {self.tp_world_size_}"
-        )
         q_hidden_size = (q_head_num // self.tp_world_size_) * head_dim
-        kv_hidden_size = self._get_tp_padded_head_num(kv_head_num) * head_dim
+        kv_hidden_size = self._get_tp_padded_head_num(kv_head_num, self.kv_repeat_times) * head_dim
         super().__init__(
             in_dim=in_dim,
             out_dims=[q_hidden_size, kv_hidden_size, kv_hidden_size, q_hidden_size],
@@ -80,15 +76,17 @@ class QKVGatedROWNMMWeight(MMWeightTpl):
                     self.bias_list[sub_child_index].zero_()
                     self.bias_list[sub_child_index].load_ok = True
 
-    def _get_tp_padded_head_num(self, head_num):
-        if head_num % self.tp_world_size_ == 0:
-            return head_num // self.tp_world_size_
-        if self.tp_world_size_ % head_num == 0:
-            self.kv_repeat_times = self.tp_world_size_ // head_num
-            return self.kv_repeat_times * head_num // self.tp_world_size_
-        raise ValueError(
-            f"head_num must be divisible by tp_world_size_ or vice versa, found {head_num} % {self.tp_world_size_}"
+    def _get_kv_repeat_times(self, kv_head_num):
+        assert kv_head_num % self.tp_world_size_ == 0 or self.tp_world_size_ % kv_head_num == 0, (
+            f"kv_head_num must be divisible by tp_world_size_ or vice versa, "
+            f"found {kv_head_num} % {self.tp_world_size_}"
         )
+        if kv_head_num % self.tp_world_size_ == 0:
+            return 1
+        return self.tp_world_size_ // kv_head_num
+
+    def _get_tp_padded_head_num(self, head_num, repeat_times):
+        return repeat_times * head_num // self.tp_world_size_
 
 
 class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
