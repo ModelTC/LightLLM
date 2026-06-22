@@ -21,11 +21,41 @@ LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM
     "1",
 ]
 
+FP8_E4M3_MAX = 448.0
+
+
+def _fp8_per_tensor_quant(weight: torch.Tensor, device_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    weight = weight.float().cuda(device_id)
+    if weight.ndim == 3:
+        scale = weight.abs().amax(dim=(-1, -2)) / FP8_E4M3_MAX
+    else:
+        scale = weight.abs().max() / FP8_E4M3_MAX
+    scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
+    scale_view = scale.reshape(-1, 1, 1) if weight.ndim == 3 else scale
+    qweight = _fp8_quant_with_scale(weight, scale_view)
+    return qweight, scale.reshape(-1)
+
+
+def _fp8_quant_with_scale(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return (weight / scale).clamp(min=-FP8_E4M3_MAX, max=FP8_E4M3_MAX).to(dtype=torch.float8_e4m3fn)
+
+
+def _copy_scale_with_broadcast(dst: torch.Tensor, src: torch.Tensor) -> None:
+    if dst.numel() == src.numel():
+        dst.copy_(src.reshape_as(dst))
+    elif src.numel() == 1:
+        if dst.dim() == 0:
+            dst.copy_(src.reshape(()))
+        else:
+            dst.copy_(src.reshape(1).expand_as(dst))
+    else:
+        raise ValueError(f"can not copy scale with shape {tuple(src.shape)} to {tuple(dst.shape)}")
+
 
 class BaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
-        assert HAS_VLLM, "vllm are not installed, you can't use quant api of them."
+        # assert HAS_VLLM, "vllm are not installed, you can't use quant api of them."
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         self.cache_manager = g_cache_manager
@@ -124,7 +154,6 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-
         qweight, weight_scale = scaled_fp8_quant(
             weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
         )
@@ -178,6 +207,147 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
             weight_scale_out_dims=out_dims,
             weight_scale_split_dim=-1,
         )
+        return mm_param, mm_param_list
+
+
+@QUANTMETHODS.register(
+    ["triton-fp8w8a8-pertensor", "fp8w8a8-pertensor", "triton-fp8w8a8-pt", "fp8w8a8-pt"],
+    platform="cuda",
+)
+class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
+
+    def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
+        if weight.ndim == 3 and output.weight_scale is not None and output.weight_scale.numel() == weight.shape[0]:
+            for expert_idx in range(weight.shape[0]):
+                qweight, weight_scale = _fp8_per_tensor_quant(weight[expert_idx], self.device_id_)
+                output.weight[expert_idx].copy_(qweight)
+                output.weight_scale[expert_idx].copy_(weight_scale.reshape(()))
+            return
+
+        qweight, weight_scale = _fp8_per_tensor_quant(weight, self.device_id_)
+        output.weight.copy_(qweight)
+        _copy_scale_with_broadcast(output.weight_scale, weight_scale)
+        return
+
+    def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
+        parent_pack = getattr(weight_pack, "_fp8_pt_parent_pack", None)
+        if parent_pack is None:
+            super().load_weight(weight, weight_pack)
+            return
+
+        staged_weight = weight_pack._fp8_pt_staged_weight
+        staged_weight.copy_(weight.to(device=staged_weight.device, dtype=staged_weight.dtype, non_blocking=True))
+        loaded_index = weight_pack._fp8_pt_child_index
+        if hasattr(weight_pack, "_fp8_pt_expert_index"):
+            loaded_index = (weight_pack._fp8_pt_expert_index, loaded_index)
+        parent_pack._fp8_pt_staged_loaded[loaded_index] = True
+        self._try_finalize_deferred_weight(parent_pack)
+        return
+
+    def _try_finalize_deferred_weight(self, parent_pack: WeightPack) -> bool:
+        if getattr(parent_pack, "_fp8_pt_finalized", False):
+            return True
+        staged_loaded = parent_pack._fp8_pt_staged_loaded
+        if isinstance(staged_loaded, torch.Tensor):
+            all_loaded = bool(staged_loaded.all().item())
+        else:
+            all_loaded = all(staged_loaded)
+        if not all_loaded:
+            return False
+
+        self.quantize(parent_pack._fp8_pt_staged_weight, parent_pack)
+        parent_pack.load_ok = [True, True, True]
+        parent_pack._fp8_pt_finalized = True
+        parent_pack._fp8_pt_staged_weight = None
+        for child_pack in parent_pack._fp8_pt_child_packs:
+            child_pack.load_ok = [True, True, True]
+            child_pack._fp8_pt_staged_weight = None
+            for expert_child_pack in getattr(child_pack, "_fp8_pt_expert_child_packs", []):
+                expert_child_pack.load_ok = [True, True, True]
+                expert_child_pack._fp8_pt_staged_weight = None
+        return True
+
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qweight = weight_pack.weight.t()
+        weight_scale = weight_pack.weight_scale
+        x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
+        m = input_tensor.shape[0]
+        n = qweight.shape[1]
+        if out is None:
+            if use_custom_tensor_mananger:
+                out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
+            else:
+                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
+        assert bias is None, "Bias addition is not supported in triton-fp8w8a8-pertensor for now"
+        return fp8_scaled_mm_per_token(
+            x_q,
+            qweight,
+            x_scale,
+            weight_scale,
+            input_tensor.dtype,
+            out,
+        )
+
+    @property
+    def method_name(self):
+        return "triton-fp8w8a8-pertensor"
+
+    def _create_weight(
+        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+    ) -> Tuple[WeightPack, List[WeightPack]]:
+        if isinstance(out_dims, int):
+            out_dims = [out_dims]
+        out_dim = sum(out_dims)
+        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+
+        weight_scale = torch.empty(expert_prefix or (1,), dtype=torch.float32, device=f"cuda:{device_id}")
+        mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
+        weight_splits = torch.split(weight, out_dims, dim=-2)
+        mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
+
+        if len(out_dims) > 1:
+            staged_weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype, device="cpu")
+            staged_splits = torch.split(staged_weight, out_dims, dim=-2)
+            mm_param._fp8_pt_staged_weight = staged_weight
+            if num_experts > 1:
+                mm_param._fp8_pt_staged_loaded = torch.zeros(
+                    (num_experts, len(mm_param_list)), dtype=torch.bool, device="cpu"
+                )
+            else:
+                mm_param._fp8_pt_staged_loaded = [False] * len(mm_param_list)
+            mm_param._fp8_pt_child_packs = mm_param_list
+            mm_param._fp8_pt_finalized = False
+            for idx, (child_pack, staged_split) in enumerate(zip(mm_param_list, staged_splits)):
+                child_pack._fp8_pt_parent_pack = mm_param
+                child_pack._fp8_pt_child_index = idx
+                child_pack._fp8_pt_staged_weight = staged_split
+                if num_experts > 1:
+                    child_pack._fp8_pt_expert_child_packs = []
+                    child_pack._fp8_pt_get_expert = child_pack.get_expert
+
+                    def _get_deferred_expert(expert_idx, _child_pack=child_pack):
+                        expert_child_pack = _child_pack._fp8_pt_get_expert(expert_idx)
+                        expert_child_pack._fp8_pt_parent_pack = _child_pack._fp8_pt_parent_pack
+                        expert_child_pack._fp8_pt_child_index = _child_pack._fp8_pt_child_index
+                        expert_child_pack._fp8_pt_expert_index = expert_idx
+                        expert_child_pack._fp8_pt_staged_weight = _child_pack._fp8_pt_staged_weight[expert_idx]
+                        _child_pack._fp8_pt_expert_child_packs.append(expert_child_pack)
+                        return expert_child_pack
+
+                    child_pack.get_expert = _get_deferred_expert
         return mm_param, mm_param_list
 
 

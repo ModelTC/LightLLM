@@ -603,7 +603,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
+        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | triton-fp8w8a8-pertensor | vllm-fp8w8a8-b128
                         | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin |
                         | triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
                         triton-fp8w8a8g64 (weight perchannel quantization with group size 64)""",

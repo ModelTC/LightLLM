@@ -114,7 +114,6 @@ def moe_align1_kernel(
     TOKEN_BLOCK_SIZE: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
-
     expert_id = tl.program_id(axis=0)
 
     off_n = tl.arange(0, TOKEN_BLOCK_SIZE)
@@ -308,7 +307,6 @@ def moe_align2_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_EXPERT: tl.constexpr,
 ):
-
     expert_id = tl.program_id(axis=0)
     off_expert = tl.arange(0, BLOCK_EXPERT)
     expert_to_token_num = tl.load(experts_token_num_ptr + off_expert, mask=off_expert < expert_num, other=0)
@@ -417,6 +415,7 @@ def grouped_matmul_kernel(
     n_block_num,  # int
     compute_type: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
+    WEIGHT_SCALE_PER_TENSOR: tl.constexpr,
     block_size_n: tl.constexpr,
     block_size_k: tl.constexpr,
     # tile sizes
@@ -504,10 +503,13 @@ def grouped_matmul_kernel(
                 a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num)[:, None]
 
             a_scale = tl.load(a_scale_ptrs, mask=token_mask[:, None], other=0.0, eviction_policy="evict_last")
-            b_scale = tl.load(
-                weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bn[None, :] * weight_scale_stride1,
-                eviction_policy="evict_last",
-            )
+            if WEIGHT_SCALE_PER_TENSOR:
+                b_scale = tl.load(weight_scale_ptr + expert_id * weight_scale_stride0, eviction_policy="evict_last")
+            else:
+                b_scale = tl.load(
+                    weight_scale_ptr + expert_id * weight_scale_stride0 + offs_bn[None, :] * weight_scale_stride1,
+                    eviction_policy="evict_last",
+                )
             ab_scale = a_scale * b_scale
 
     if NEED_TRANS:
@@ -702,7 +704,7 @@ def grouped_matmul(
     expert_to_token_num is tensor shape [expert_num],
     expert_to_token_index is tensor shape [expert_num, token_num * topk_num],
     expert_weights is tensor shape [expert_num, out_dim, hidden_dim]
-    expert_to_weights_scale is tensor shape [expert_num] or
+    expert_to_weights_scale is tensor shape [expert_num], [expert_num, 1], [expert_num, out_dim] or
     [expert_num, out_dim // block_size_, hidden_dim // block_size_k],
     when use_fp8_w8a8 is False, it must be None
     out is tensor shape [token_num * topk_num, out_dim]
@@ -723,6 +725,9 @@ def grouped_matmul(
         if expert_to_weights_scale.ndim == 3:
             block_size_n = expert_weights.shape[1] // expert_to_weights_scale.shape[1]
             block_size_k = expert_weights.shape[2] // expert_to_weights_scale.shape[2]
+    weight_scale_per_tensor = (
+        use_fp8_w8a8 and expert_to_weights_scale is not None and expert_to_weights_scale.numel() == expert_num
+    )
 
     if run_config is None:
         if token_inputs.shape[0] <= expert_num:
@@ -872,6 +877,7 @@ def grouped_matmul(
         n_block_num=triton.cdiv(n, BLOCK_SIZE_N),
         compute_type=compute_type,
         use_fp8_w8a8=use_fp8_w8a8,
+        WEIGHT_SCALE_PER_TENSOR=weight_scale_per_tensor,
         block_size_n=block_size_n,
         block_size_k=block_size_k,
         BLOCK_SIZE_M=BLOCK_SIZE_M,

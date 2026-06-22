@@ -8,7 +8,6 @@ from lightllm.utils.device_utils import triton_support_tensor_descriptor, is_509
 
 @triton.jit
 def grouped_launch(pid, m_block_num, n_block_num, group_m: tl.constexpr):
-
     num_pid_in_group = group_m * n_block_num
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * group_m
@@ -45,6 +44,7 @@ def _scaled_mm_per_token(
     stride_cn,
     USE_TMA: tl.constexpr,
     B_IS_TRANS: tl.constexpr,
+    B_SCALE_IS_TENSOR: tl.constexpr,
     NEED_N_MASK: tl.constexpr,
     NEED_K_MASK: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -77,9 +77,11 @@ def _scaled_mm_per_token(
         b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
     Ascale_ptrs = Ascale + offs_am
-    Bscale_ptrs = Bscale + offs_bn
     a_s = tl.load(Ascale_ptrs)
-    b_s = tl.load(Bscale_ptrs)
+    if B_SCALE_IS_TENSOR:
+        b_s = tl.load(Bscale)
+    else:
+        b_s = tl.load(Bscale + offs_bn)
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_DTYPE)
 
@@ -143,12 +145,13 @@ def get_test_configs():
     return fp8_gemm_configs
 
 
-def _get_static_key(A, B, out_dtype):
+def _get_static_key(A, B, Bscale, out_dtype):
     M, K = A.shape
     _, N = B.shape
     return {
         "N": N,
         "K": K,
+        "b_scale_kind": "tensor" if Bscale.numel() == 1 else "channel",
         "out_dtype": str(out_dtype),
     }
 
@@ -175,7 +178,8 @@ def scaled_mm_per_token(
         A: Matrix A with shape of [M, K].
         B: Matrix B with shape of [K, N].
         Ascale: per-token Quantization scale for A: [M] or [M, 1].
-        Bscale: per-channel Quantization scale for B: [N] or [1, N].
+        Bscale: per-channel Quantization scale for B: [N] or [1, N],
+            or per-tensor scale [1].
         out_dtype: The data type of out.
         out: The output matrix with the shape of [M, N].
     Returns:
@@ -239,6 +243,7 @@ def scaled_mm_per_token(
         out_desc = None
 
     ACC_DTYPE = tl.int32 if A.dtype == torch.int8 else tl.float32
+    B_SCALE_IS_TENSOR = Bscale.numel() == 1
 
     _scaled_mm_per_token[grid](
         A=A,
@@ -260,6 +265,7 @@ def scaled_mm_per_token(
         stride_cn=out.stride(1),
         USE_TMA=support_tma,
         B_IS_TRANS=B_is_trans,
+        B_SCALE_IS_TENSOR=B_SCALE_IS_TENSOR,
         NEED_N_MASK=NEED_N_MASK,
         NEED_K_MASK=NEED_K_MASK,
         ACC_DTYPE=ACC_DTYPE,
