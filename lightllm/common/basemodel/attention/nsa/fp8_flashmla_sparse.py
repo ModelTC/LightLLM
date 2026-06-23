@@ -85,9 +85,11 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
+    flashmla_sched_meta: object = None
 
     def init_state(self):
         self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
+        self.flashmla_sched_meta = {}
         return
 
     def ensure_nsa_ks_ke(self):
@@ -114,6 +116,15 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         return
+
+    def _get_flashmla_sched_meta(self, compress_ratio: int):
+        sched_meta = self.flashmla_sched_meta.get(compress_ratio)
+        if sched_meta is None:
+            import flash_mla
+
+            sched_meta = flash_mla.get_mla_metadata()[0]
+            self.flashmla_sched_meta[compress_ratio] = sched_meta
+        return sched_meta
 
     def prefill_att(
         self,
@@ -196,7 +207,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         q_4d = q.unsqueeze(1).contiguous()
         q_4d, attn_sink, num_real_heads = _pad_q_heads(q_4d, attn_sink)
         k_cache = _view_dsv4_flashmla_cache(packed_kv, DSV4_SWA_PAGE_SIZE)
-        sched_meta, _ = flash_mla.get_mla_metadata()
+        sched_meta = self._get_flashmla_sched_meta(nsa_dict["compress_ratio"])
         out, _ = flash_mla.flash_mla_with_kvcache(
             q=q_4d,
             k_cache=k_cache,
