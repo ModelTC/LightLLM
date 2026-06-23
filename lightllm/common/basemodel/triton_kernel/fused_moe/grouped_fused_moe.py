@@ -221,10 +221,18 @@ def moe_align_fused_kernel(
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
     token_num,
+    expert_num: tl.constexpr,
     topk_num: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    INIT_EXPERT_TOKEN_NUM_IN_KERNEL: tl.constexpr,
+    BLOCK_EXPERT: tl.constexpr,
 ):
     token_block = tl.program_id(0)
+    if INIT_EXPERT_TOKEN_NUM_IN_KERNEL:
+        expert_offs = tl.arange(0, BLOCK_EXPERT)
+        tl.store(expert_token_num_ptr + expert_offs, 0, mask=expert_offs < expert_num)
+        tl.debug_barrier()
+
     offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < token_num * topk_num
 
@@ -283,6 +291,15 @@ def moe_align_fused(
     BLOCK_SIZE = run_config.get("BLOCK_SIZE", 256)
     num_warps = run_config.get("num_warps", 4)
 
+    # For small inputs the align kernel has a single program, so it can initialize
+    # expert_token_num itself and avoid an extra zero_ kernel launch.
+    expert_num = expert_token_num.shape[0]
+    init_expert_token_num_in_kernel = token_num * topk_num <= BLOCK_SIZE
+    if not init_expert_token_num_in_kernel:
+        # Multiple align programs may update expert_token_num concurrently; initialize
+        # it before launch to avoid races between clear and atomic_add.
+        expert_token_num.zero_()
+
     grid = (triton.cdiv(token_num * topk_num, BLOCK_SIZE),)
     moe_align_fused_kernel[grid](
         topk_ids,
@@ -291,8 +308,11 @@ def moe_align_fused(
         expert_to_weight,
         expert_token_num,
         token_num,
+        expert_num,
         topk_num,
         BLOCK_SIZE=BLOCK_SIZE,
+        INIT_EXPERT_TOKEN_NUM_IN_KERNEL=init_expert_token_num_in_kernel,
+        BLOCK_EXPERT=triton.next_power_of_2(expert_num),
         num_warps=num_warps,
     )
     return expert_to_token_index, expert_to_weight, expert_token_num
@@ -957,7 +977,7 @@ def fused_experts_impl(
 
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
-        expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
+        expert_to_token_num = torch.empty((E,), dtype=torch.int32, device="cuda")
         moe_align_fused(
             expert_to_token_index=expert_to_tokens,
             expert_to_weight=expert_to_weights,
