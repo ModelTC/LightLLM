@@ -1,0 +1,79 @@
+[
+  {
+    "dataset": "drop",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.234281461108142,
+    "avg_accepted_draft_tokens_per_step": 1.2342814611081445,
+    "avg_mtp_avg_verify_tokens_per_step": 4.005657601034063,
+    "min_mtp_avg_token_per_step": 1.8285714285714285,
+    "max_mtp_avg_token_per_step": 2.723404255319149,
+    "min_mtp_avg_verify_tokens_per_step": 3.9183673469387754,
+    "max_mtp_avg_verify_tokens_per_step": 4.166666666666667
+  },
+  {
+    "dataset": "openbookqa",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.1823840045375476,
+    "avg_accepted_draft_tokens_per_step": 1.182384004537548,
+    "avg_mtp_avg_verify_tokens_per_step": 3.9804949599503545,
+    "min_mtp_avg_token_per_step": 1.8823529411764706,
+    "max_mtp_avg_token_per_step": 2.6122448979591835,
+    "min_mtp_avg_verify_tokens_per_step": 3.9245283018867925,
+    "max_mtp_avg_verify_tokens_per_step": 4.163265306122449
+  },
+  {
+    "dataset": "pubmedqa",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.239484515599939,
+    "avg_accepted_draft_tokens_per_step": 1.239484515599942,
+    "avg_mtp_avg_verify_tokens_per_step": 4.000434377096314,
+    "min_mtp_avg_token_per_step": 1.8285714285714285,
+    "max_mtp_avg_token_per_step": 2.6666666666666665,
+    "min_mtp_avg_verify_tokens_per_step": 3.9166666666666665,
+    "max_mtp_avg_verify_tokens_per_step": 4.166666666666667
+  },
+  {
+    "dataset": "qasc",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.191924930903752,
+    "avg_accepted_draft_tokens_per_step": 1.1919249309037534,
+    "avg_mtp_avg_verify_tokens_per_step": 4.002737530953038,
+    "min_mtp_avg_token_per_step": 1.7066666666666668,
+    "max_mtp_avg_token_per_step": 2.6122448979591835,
+    "min_mtp_avg_verify_tokens_per_step": 3.9245283018867925,
+    "max_mtp_avg_verify_tokens_per_step": 4.150943396226415
+  },
+  {
+    "dataset": "quartz",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.1910324880767447,
+    "avg_accepted_draft_tokens_per_step": 1.1910324880767469,
+    "avg_mtp_avg_verify_tokens_per_step": 3.977925686726279,
+    "min_mtp_avg_token_per_step": 1.8823529411764706,
+    "max_mtp_avg_token_per_step": 2.5098039215686274,
+    "min_mtp_avg_verify_tokens_per_step": 3.9215686274509802,
+    "max_mtp_avg_verify_tokens_per_step": 4.1568627450980395
+  },
+  {
+    "dataset": "sciq",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.203617098329637,
+    "avg_accepted_draft_tokens_per_step": 1.2036170983296386,
+    "avg_mtp_avg_verify_tokens_per_step": 3.9889098248743267,
+    "min_mtp_avg_token_per_step": 1.7534246575342465,
+    "max_mtp_avg_token_per_step": 2.723404255319149,
+    "min_mtp_avg_verify_tokens_per_step": 3.9215686274509802,
+    "max_mtp_avg_verify_tokens_per_step": 4.153846153846154
+  },
+  {
+    "dataset": "truthfulqa",
+    "count": 100,
+    "avg_mtp_avg_token_per_step": 2.047067623081882,
+    "avg_accepted_draft_tokens_per_step": 1.047067623081883,
+    "avg_mtp_avg_verify_tokens_per_step": 3.9913316543656463,
+    "min_mtp_avg_token_per_step": 1.6842105263157894,
+    "max_mtp_avg_token_per_step": 2.4150943396226414,
+    "min_mtp_avg_verify_tokens_per_step": 3.9245283018867925,
+    "max_mtp_avg_verify_tokens_per_step": 4.150943396226415
+  }
+]

@@ -18,6 +18,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import random
 import time
@@ -83,7 +84,7 @@ def sample_requests(
         return "assistant"
 
     # Build messages and targets
-    built_examples: List[Tuple[List[dict], str]] = []
+    built_examples: List[Tuple[List[dict], str, str]] = []
     for data in dataset:
         convs = data.get("conversations", [])
         if not convs:
@@ -113,11 +114,20 @@ def sample_requests(
             messages.append({"role": to_openai_role(role_val), "content": content_val})
         if not messages:
             continue
-        built_examples.append((messages, completion_text))
+        stable_payload = json.dumps(
+            {
+                "messages": messages,
+                "completion": completion_text,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        stable_key = hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()
+        built_examples.append((messages, completion_text, stable_key))
 
     # Render prompts using chat template when possible
     rendered_prompts: List[str] = []
-    for messages, _ in built_examples:
+    for messages, _, _ in built_examples:
         rendered_text = None
         try:
             # Prefer using the tokenizer's chat template
@@ -137,33 +147,39 @@ def sample_requests(
 
     # Tokenize the prompts and completions.
     prompt_token_ids = tokenizer(rendered_prompts).input_ids if rendered_prompts else []
-    completion_texts = [completion for _, completion in built_examples]
+    completion_texts = [completion for _, completion, _ in built_examples]
     completion_token_ids = tokenizer(completion_texts).input_ids if completion_texts else []
 
     tokenized_dataset: List[Tuple[List[dict], str, int, int]] = []
     for i in range(len(built_examples)):
-        messages, _ = built_examples[i]
+        messages, _, stable_key = built_examples[i]
         prompt_len = len(prompt_token_ids[i])
         # output_len = min(len(completion_token_ids[i]), 128)
         output_len = 128
-        tokenized_dataset.append((messages, rendered_prompts[i], prompt_len, output_len))
+        tokenized_dataset.append((messages, rendered_prompts[i], prompt_len, output_len, stable_key))
 
     # Filter out too long or too short sequences.
     filtered_dataset: List[Tuple[List[dict], str, int, int]] = []
-    for messages, rendered_prompt, prompt_len, output_len in tokenized_dataset:
+    for messages, rendered_prompt, prompt_len, output_len, stable_key in tokenized_dataset:
         if prompt_len < 4 or output_len < 4:
             continue
         if (prompt_len + output_len) >= max_total_tokens:
             continue
-        filtered_dataset.append((messages, rendered_prompt, prompt_len, output_len))
+        filtered_dataset.append((messages, rendered_prompt, prompt_len, output_len, stable_key))
 
     # Sample the requests.
+    filtered_dataset.sort(key=lambda item: item[4])
     sampled_requests = filtered_dataset[:num_requests]
+    if len(sampled_requests) != num_requests:
+        raise ValueError(
+            f"Need exactly {num_requests} requests, but only found {len(sampled_requests)} after filtering. "
+            "Please choose a larger dataset or relax the filtering constraints."
+        )
     sum_len = 0
-    for _, _, prompt_len, output_len in sampled_requests:
+    for _, _, prompt_len, output_len, _ in sampled_requests:
         sum_len += prompt_len + output_len
     print("total tokens:", sum_len)
-    return sampled_requests
+    return [(messages, rendered_prompt, prompt_len, output_len) for messages, rendered_prompt, prompt_len, output_len, _ in sampled_requests]
 
 
 async def get_request(

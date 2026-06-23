@@ -65,6 +65,27 @@ class ChunkedPrefillBackend(ModeBackend):
             logger.info(f"mtp_gloo_group ranks {dist.get_rank(self.mtp_gloo_group)}")
         return
 
+    def _update_decode_exec_stats_for_round(self, decode_reqs: List[InferReq], old_output_lens: List[int]):
+        decode_exec_time_ms = float(getattr(self, "_last_decode_exec_time_ms", 0.0))
+        if decode_exec_time_ms <= 0.0:
+            return
+
+        decode_token_nums = [max(req.cur_output_len - old_output_len, 0) for req, old_output_len in zip(decode_reqs, old_output_lens)]
+        total_decode_token_num = sum(decode_token_nums)
+        if total_decode_token_num <= 0:
+            return
+
+        # Distribute one batch decode round's GPU time to requests by generated-token share,
+        # so summed request stats exactly match engine-side total decode time and token count.
+        for req, decode_token_num in zip(decode_reqs, decode_token_nums):
+            if decode_token_num <= 0:
+                continue
+            req.update_decode_exec_stats(
+                decode_exec_time_ms=decode_exec_time_ms * decode_token_num / total_decode_token_num,
+                decode_exec_token_num=decode_token_num,
+            )
+        return
+
     def infer_loop(self):
         torch.cuda.set_device(get_current_device_id())
         try:
@@ -99,10 +120,13 @@ class ChunkedPrefillBackend(ModeBackend):
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    old_output_lens = [req.cur_output_len for req in decode_reqs]
+                    self._last_decode_exec_time_ms = 0.0
                     self.decode(
                         event_pack=event_pack,
                         decode_reqs=decode_reqs,
                     )
+                    self._update_decode_exec_stats_for_round(decode_reqs=decode_reqs, old_output_lens=old_output_lens)
                     continue
                 elif run_way.is_pass():
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
@@ -162,6 +186,9 @@ class ChunkedPrefillBackend(ModeBackend):
     ):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            decode_start_event = torch.cuda.Event(enable_timing=True)
+            decode_end_event = torch.cuda.Event(enable_timing=True)
+            decode_start_event.record()
             model_output = self.model.forward(model_input)
             _, next_token_ids_cpu, next_token_logprobs_cpu = self._sample_and_scatter_token(
                 logits=model_output.logits,
@@ -171,6 +198,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 is_prefill=False,
                 mask_func=self.decode_mask_func,
             )
+            decode_end_event.record()
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -181,6 +209,7 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
+        self._last_decode_exec_time_ms = decode_start_event.elapsed_time(decode_end_event)
         self._post_handle(
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
@@ -255,6 +284,9 @@ class ChunkedPrefillBackend(ModeBackend):
         skip_verify_sync = False
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            decode_start_event = torch.cuda.Event(enable_timing=True)
+            decode_end_event = torch.cuda.Event(enable_timing=True)
+            decode_start_event.record()
 
             if self.enable_dynamic_mtp:
                 pre_draft_step = g_infer_context.dynamic_mtp_planner.pre_draft_step
@@ -384,6 +416,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 gpu_tensor=mtp_accept_len,
             )
 
+            decode_end_event.record()
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -401,9 +434,14 @@ class ChunkedPrefillBackend(ModeBackend):
             update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
         else:
             verify_event.synchronize()
-            run_reqs, verify_ok_reqs = self.build_mtp_dynamic_reqs(
-                original_run_reqs, selected_run_reqs_cpu, accepted_index_cpu
-            )
+            if self.enable_dynamic_mtp:
+                run_reqs, verify_ok_reqs = self.build_mtp_dynamic_reqs(
+                    original_run_reqs, selected_run_reqs_cpu, accepted_index_cpu
+                )
+            else:
+                run_reqs, verify_ok_reqs = self.build_mtp_dynamic_reqs(
+                    original_run_reqs, None, accepted_index_cpu
+                )
             self._update_mtp_verify_token_num(
                 decode_reqs=decode_reqs,
                 dynamic_mtp_run_reqs=run_reqs if self.enable_dynamic_mtp else None,
@@ -413,6 +451,7 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
         sync_event.synchronize()
+        self._last_decode_exec_time_ms = decode_start_event.elapsed_time(decode_end_event)
 
         if self.enable_dynamic_mtp:
             # 更新 动态verify token 数据到 planner 中去
@@ -450,11 +489,12 @@ class ChunkedPrefillBackend(ModeBackend):
     def build_mtp_dynamic_reqs(
         self,
         original_run_reqs: List[InferReq],
-        selected_run_reqs_cpu: torch.Tensor,
+        selected_run_reqs_cpu: Optional[torch.Tensor],
         accepted_index_cpu: torch.Tensor,
     ) -> Tuple[List[InferReq], List[InferReq]]:
         """从 GPU 同步后的结果构建过滤后的 run_reqs 和 verify_ok_reqs（纯过滤，不更新统计）。"""
         if self.enable_dynamic_mtp:
+            assert selected_run_reqs_cpu is not None
             selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
             run_reqs = [
                 original_run_reqs[i] for i in range(len(original_run_reqs)) if selected_run_reqs_cpu_numpy[i] == 1

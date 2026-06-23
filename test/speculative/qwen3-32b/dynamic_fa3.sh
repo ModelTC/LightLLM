@@ -11,7 +11,6 @@ MEM_FRACTION=""
 MAX_TOTAL_TOKEN_NUM=""
 MAX_REQ_TOTAL_LEN=""
 BATCH_MAX_TOKENS=""
-export CUDA_VISIBLE_DEVICES=3,4
 # 解析命名参数
 while [[ $# -gt 0 ]]; do
     case $1 in

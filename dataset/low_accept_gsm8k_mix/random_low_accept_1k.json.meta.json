@@ -1,0 +1,148 @@
+{
+  "probe_metrics": "dataset/low_accept_gsm8k_mix/probe_metrics.json",
+  "target_size": 1000,
+  "unique_samples": 16,
+  "candidate_pool_size": 64,
+  "trials": 5000,
+  "seed": 0,
+  "dataset_allowlist": null,
+  "max_token_threshold": null,
+  "max_verify_threshold": null,
+  "selected_subset_stats": {
+    "avg_token": 1.8422818640853942,
+    "avg_verify": 3.9743507845398036,
+    "min_token": 1.6842105263157894,
+    "max_token": 1.9393939393939394
+  },
+  "selected_subset": [
+    {
+      "request_id": "low-accept-probe-655",
+      "dataset": "truthfulqa",
+      "sample_index": 55,
+      "mtp_avg_token_per_step": 1.6842105263157894,
+      "mtp_avg_verify_tokens_per_step": 3.9473684210526314,
+      "accepted_draft_tokens_per_step": 0.6842105263157894
+    },
+    {
+      "request_id": "low-accept-probe-312",
+      "dataset": "sciq",
+      "sample_index": 12,
+      "mtp_avg_token_per_step": 1.7534246575342465,
+      "mtp_avg_verify_tokens_per_step": 4.054794520547945,
+      "accepted_draft_tokens_per_step": 0.7534246575342465
+    },
+    {
+      "request_id": "low-accept-probe-657",
+      "dataset": "truthfulqa",
+      "sample_index": 57,
+      "mtp_avg_token_per_step": 1.7777777777777777,
+      "mtp_avg_verify_tokens_per_step": 4.055555555555555,
+      "accepted_draft_tokens_per_step": 0.7777777777777777
+    },
+    {
+      "request_id": "low-accept-probe-693",
+      "dataset": "truthfulqa",
+      "sample_index": 93,
+      "mtp_avg_token_per_step": 1.8028169014084507,
+      "mtp_avg_verify_tokens_per_step": 4.0,
+      "accepted_draft_tokens_per_step": 0.8028169014084507
+    },
+    {
+      "request_id": "low-accept-probe-690",
+      "dataset": "truthfulqa",
+      "sample_index": 90,
+      "mtp_avg_token_per_step": 1.8285714285714285,
+      "mtp_avg_verify_tokens_per_step": 3.942857142857143,
+      "accepted_draft_tokens_per_step": 0.8285714285714285
+    },
+    {
+      "request_id": "low-accept-probe-550",
+      "dataset": "pubmedqa",
+      "sample_index": 50,
+      "mtp_avg_token_per_step": 1.8285714285714285,
+      "mtp_avg_verify_tokens_per_step": 4.0,
+      "accepted_draft_tokens_per_step": 0.8285714285714285
+    },
+    {
+      "request_id": "low-accept-probe-691",
+      "dataset": "truthfulqa",
+      "sample_index": 91,
+      "mtp_avg_token_per_step": 1.8285714285714285,
+      "mtp_avg_verify_tokens_per_step": 4.0,
+      "accepted_draft_tokens_per_step": 0.8285714285714285
+    },
+    {
+      "request_id": "low-accept-probe-46",
+      "dataset": "drop",
+      "sample_index": 46,
+      "mtp_avg_token_per_step": 1.855072463768116,
+      "mtp_avg_verify_tokens_per_step": 3.9420289855072466,
+      "accepted_draft_tokens_per_step": 0.855072463768116
+    },
+    {
+      "request_id": "low-accept-probe-313",
+      "dataset": "sciq",
+      "sample_index": 13,
+      "mtp_avg_token_per_step": 1.855072463768116,
+      "mtp_avg_verify_tokens_per_step": 3.9420289855072466,
+      "accepted_draft_tokens_per_step": 0.855072463768116
+    },
+    {
+      "request_id": "low-accept-probe-378",
+      "dataset": "sciq",
+      "sample_index": 78,
+      "mtp_avg_token_per_step": 1.855072463768116,
+      "mtp_avg_verify_tokens_per_step": 3.9420289855072466,
+      "accepted_draft_tokens_per_step": 0.855072463768116
+    },
+    {
+      "request_id": "low-accept-probe-206",
+      "dataset": "quartz",
+      "sample_index": 6,
+      "mtp_avg_token_per_step": 1.8823529411764706,
+      "mtp_avg_verify_tokens_per_step": 3.9411764705882355,
+      "accepted_draft_tokens_per_step": 0.8823529411764706
+    },
+    {
+      "request_id": "low-accept-probe-320",
+      "dataset": "sciq",
+      "sample_index": 20,
+      "mtp_avg_token_per_step": 1.8823529411764706,
+      "mtp_avg_verify_tokens_per_step": 3.9411764705882355,
+      "accepted_draft_tokens_per_step": 0.8823529411764706
+    },
+    {
+      "request_id": "low-accept-probe-656",
+      "dataset": "truthfulqa",
+      "sample_index": 56,
+      "mtp_avg_token_per_step": 1.8823529411764706,
+      "mtp_avg_verify_tokens_per_step": 4.0,
+      "accepted_draft_tokens_per_step": 0.8823529411764706
+    },
+    {
+      "request_id": "low-accept-probe-43",
+      "dataset": "drop",
+      "sample_index": 43,
+      "mtp_avg_token_per_step": 1.9104477611940298,
+      "mtp_avg_verify_tokens_per_step": 3.9402985074626864,
+      "accepted_draft_tokens_per_step": 0.9104477611940298
+    },
+    {
+      "request_id": "low-accept-probe-602",
+      "dataset": "truthfulqa",
+      "sample_index": 2,
+      "mtp_avg_token_per_step": 1.9104477611940298,
+      "mtp_avg_verify_tokens_per_step": 3.9402985074626864,
+      "accepted_draft_tokens_per_step": 0.9104477611940298
+    },
+    {
+      "request_id": "low-accept-probe-226",
+      "dataset": "quartz",
+      "sample_index": 26,
+      "mtp_avg_token_per_step": 1.9393939393939394,
+      "mtp_avg_verify_tokens_per_step": 4.0,
+      "accepted_draft_tokens_per_step": 0.9393939393939394
+    }
+  ],
+  "output_dataset": "dataset/low_accept_gsm8k_mix/random_low_accept_1k.json"
+}

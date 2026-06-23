@@ -56,6 +56,7 @@ usage() {
     echo "  --concurrency NUM        Concurrency (default: ${CONCURRENCY})"
     echo "  --mtp-steps STEPS        MTP step list, comma separated (default: 4,8,12)"
     echo "  --modes MODES            Run mode list, comma separated (default: dynamic_triton,static_triton,static_fa3)"
+    echo "                           Supported extra mode: no_mtp_fa3"
     echo "  --port PORT              API server port (default: ${PORT})"
     echo "  --results-dir DIR        Result output directory (default: ${RESULTS_DIR})"
     echo "  --help                   Show this help message"
@@ -127,7 +128,7 @@ done
 mkdir -p "${EXPERIMENT_SUBDIR}"
 
 # Write CSV header
-echo "timestamp,mode,mtp_step,dataset,samples,concurrency,throughput,avg_latency,avg_ttft,avg_inter_token_latency,mtp_avg_token_per_step,mtp_avg_verify_tokens_per_step" > "${RESULTS_FILE}"
+echo "timestamp,mode,mtp_step,dataset,samples,concurrency,throughput,avg_latency,avg_ttft,avg_inter_token_latency,mtp_avg_token_per_step,mtp_avg_verify_tokens_per_step,pure_decode_time_per_token_ms,pure_decode_throughput" > "${RESULTS_FILE}"
 
 echo "=============================================="
 echo "MTP Automated Experiment Started"
@@ -185,6 +186,8 @@ extract_mtp_metrics() {
     local log_file="$1"
     local mtp_avg_token_per_step=""
     local mtp_avg_verify_tokens_per_step=""
+    local pure_decode_time_per_token_ms=""
+    local pure_decode_throughput=""
 
     # Use helper.py to extract, parse from output
     local helper_output
@@ -196,7 +199,10 @@ extract_mtp_metrics() {
     # Extract mtp_avg_verify_tokens_per_step average
     mtp_avg_verify_tokens_per_step=$(echo "$helper_output" | grep "mtp_avg_verify_tokens_per_step.avg =" | awk -F'= ' '{print $2}')
 
-    echo "${mtp_avg_token_per_step:-NA},${mtp_avg_verify_tokens_per_step:-NA}"
+    pure_decode_time_per_token_ms=$(echo "$helper_output" | grep "pure_decode_time_per_token_ms.global =" | awk -F'= ' '{print $2}')
+    pure_decode_throughput=$(echo "$helper_output" | grep "pure_decode_throughput.global =" | awk -F'= ' '{print $2}')
+
+    echo "${mtp_avg_token_per_step:-NA},${mtp_avg_verify_tokens_per_step:-NA},${pure_decode_time_per_token_ms:-NA},${pure_decode_throughput:-NA}"
 }
 
 # Kill lightllm process
@@ -235,6 +241,8 @@ for MODE in "${MODES[@]}"; do
             STARTUP_SCRIPT="${SCRIPTS_DIR}/static_triton.sh"
         elif [[ "${MODE}" == "static_fa3" ]]; then
             STARTUP_SCRIPT="${SCRIPTS_DIR}/static_fa3.sh"
+        elif [[ "${MODE}" == "no_mtp_fa3" ]]; then
+            STARTUP_SCRIPT="${SCRIPTS_DIR}/no_mtp_fa3.sh"
         else
             echo "Unknown mode: ${MODE}"
             continue
@@ -252,11 +260,19 @@ for MODE in "${MODES[@]}"; do
         kill_lightllm
 
         # Start server (redirect log)
-        echo "Starting server: ${STARTUP_SCRIPT} --mtp-step ${MTP_STEP}"
+        if [[ "${MODE}" == "no_mtp_fa3" ]]; then
+            echo "Starting server: ${STARTUP_SCRIPT}"
+        else
+            echo "Starting server: ${STARTUP_SCRIPT} --mtp-step ${MTP_STEP}"
+        fi
         echo "Log file: ${LOG_FILE}"
 
-        # Use bash to start script, pass mtp-step parameter, redirect all output to log file
-        bash "${STARTUP_SCRIPT}" --mtp-step "${MTP_STEP}" > "${LOG_FILE}" 2>&1 &
+        # Use bash to start script, pass mtp-step parameter when needed, redirect all output to log file
+        STARTUP_ARGS=()
+        if [[ "${MODE}" != "no_mtp_fa3" ]]; then
+            STARTUP_ARGS+=(--mtp-step "${MTP_STEP}")
+        fi
+        bash "${STARTUP_SCRIPT}" "${STARTUP_ARGS[@]}" > "${LOG_FILE}" 2>&1 &
         SERVER_PID=$!
 
         # Wait for server to start

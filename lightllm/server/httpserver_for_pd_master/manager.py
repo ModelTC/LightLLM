@@ -364,6 +364,8 @@ class HttpServerManagerForPDMaster:
         unfinished_count = sampling_params.best_of
         is_first_token = True
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
+        sub_req_id_to_decode_exec_time_ms: Dict[int, float] = {}
+        sub_req_id_to_decode_exec_token_num: Dict[int, int] = {}
 
         client_mode: NodeRole = NodeRole(d_node.mode)
 
@@ -378,6 +380,8 @@ class HttpServerManagerForPDMaster:
             prompt_tokens = metadata["prompt_tokens"]
             out_token_counter += 1
             sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+            sub_req_id_to_decode_exec_time_ms[sub_req_id] = metadata.get("decode_exec_time_ms", 0.0)
+            sub_req_id_to_decode_exec_token_num[sub_req_id] = metadata.get("decode_exec_token_num", 0)
             if is_first_token:
                 first_token_cost_ms = (time.time() - start_time) * 1000
                 is_first_token = False
@@ -398,6 +402,10 @@ class HttpServerManagerForPDMaster:
         prompt_cache_ratio = prompt_cache_len / prompt_tokens
         mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
         mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
+        pure_decode_time_ms = sum(sub_req_id_to_decode_exec_time_ms.values())
+        pure_decode_token_num = sum(sub_req_id_to_decode_exec_token_num.values())
+        pure_decode_time_per_token_ms = pure_decode_time_ms / max(pure_decode_token_num, 1)
+        pure_decode_throughput = pure_decode_token_num * 1000.0 / max(pure_decode_time_ms, 1e-6)
         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             f"X-Request-Id:{x_request_id} "
@@ -409,6 +417,10 @@ class HttpServerManagerForPDMaster:
             f"prompt_cache_len:{prompt_cache_len} "
             f"prompt_cache_ratio:{prompt_cache_ratio} "
             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+            f"pure_decode_time_ms:{pure_decode_time_ms} "
+            f"pure_decode_token_num:{pure_decode_token_num} "
+            f"pure_decode_time_per_token_ms:{pure_decode_time_per_token_ms} "
+            f"pure_decode_throughput:{pure_decode_throughput} "
         )
         self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
         self.metric_client.histogram_observe(

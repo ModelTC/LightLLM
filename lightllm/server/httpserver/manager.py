@@ -633,6 +633,8 @@ class HttpServerManager:
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
+        sub_req_id_to_decode_exec_time_ms: Dict[int, float] = {}
+        sub_req_id_to_decode_exec_token_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -667,6 +669,8 @@ class HttpServerManager:
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
                     sub_req_id_to_mtp_verify_token_num[sub_req_id] = metadata.get("mtp_verify_token_num", 0)
+                    sub_req_id_to_decode_exec_time_ms[sub_req_id] = metadata.get("decode_exec_time_ms", 0.0)
+                    sub_req_id_to_decode_exec_token_num[sub_req_id] = metadata.get("decode_exec_token_num", 0)
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -698,6 +702,10 @@ class HttpServerManager:
                         mtp_avg_verify_tokens_per_step = sum(sub_req_id_to_mtp_verify_token_num.values()) / max(
                             mtp_total_step, 1
                         )
+                        pure_decode_time_ms = sum(sub_req_id_to_decode_exec_time_ms.values())
+                        pure_decode_token_num = sum(sub_req_id_to_decode_exec_token_num.values())
+                        pure_decode_time_per_token_ms = pure_decode_time_ms / max(pure_decode_token_num, 1)
+                        pure_decode_throughput = pure_decode_token_num * 1000.0 / max(pure_decode_time_ms, 1e-6)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "
@@ -717,6 +725,10 @@ class HttpServerManager:
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                             f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
+                            f"pure_decode_time_ms:{pure_decode_time_ms} "
+                            f"pure_decode_token_num:{pure_decode_token_num} "
+                            f"pure_decode_time_per_token_ms:{pure_decode_time_per_token_ms} "
+                            f"pure_decode_throughput:{pure_decode_throughput} "
                         )
                         if group_request_id < 0:
                             # health 探测请求，不记录日志和监控
@@ -849,6 +861,12 @@ class HttpServerManager:
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                     "mtp_verify_token_num": req.mtp_verify_token_num,
+                                    "decode_exec_time_ms": req.decode_exec_time_ms,
+                                    "decode_exec_token_num": req.decode_exec_token_num,
+                                    "decode_exec_time_per_token_ms": req.decode_exec_time_ms
+                                    / max(req.decode_exec_token_num, 1),
+                                    "decode_exec_throughput": req.decode_exec_token_num * 1000.0
+                                    / max(req.decode_exec_time_ms, 1e-6),
                                 }
                                 if self.args.return_all_prompt_logprobs:
                                     metadata.update(req.get_all_prompt_metadata())
