@@ -47,11 +47,7 @@ def _moe_sum_reduce_kernel(
 
 
 def _get_moe_sum_reduce_static_key(input: torch.Tensor, output: torch.Tensor):
-    return {
-        "topk_num": input.shape[1],
-        "hidden_dim": input.shape[2],
-        "out_dtype": str(output.dtype),
-    }
+    return {"topk_num": input.shape[1], "hidden_dim": input.shape[2], "out_dtype": str(output.dtype)}
 
 
 def _get_moe_sum_reduce_configs():
