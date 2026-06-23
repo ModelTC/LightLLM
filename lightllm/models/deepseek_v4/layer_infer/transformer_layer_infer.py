@@ -547,22 +547,22 @@ class DeepseekV4IndexInfer:
         Hadamard -> per-token fp8 quant. Returns (idx_q_fp8 [T,H,d], weights [T,H]); the per-token q
         fp8 scale and the head_dim^-0.5 * n_heads^-0.5 score scale are folded into weights -- the
         deep_gemm.fp8_mqa_logits contract (fp8 q carries no companion scale). Replicated -> full heads."""
-        from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
-        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
+        # Fused: wq_b mm -> rope(last rope dims) -> 1/sqrt(d) Hadamard -> per-token fp8 quant, with the
+        # per-token q scale + indexer_weight_scale folded into weights, all in ONE kernel (was 4 kernels:
+        # rotary_emb_fwd + hadamard_transform + act_quant + weights mul). freqs_cis is the compress rope
+        # table (same one the main compress-layer Q path uses); positions indexed inside the kernel.
+        from lightllm.third_party.sglang_jit.dsv4.elementwise import fused_q_indexer_rope_hadamard_quant
 
-        cos_tok = infer_state.position_cos_compress
-        sin_tok = infer_state.position_sin_compress
         token_num = q_lora.shape[0]
         if x.shape[0] != token_num:
             raise RuntimeError(
                 f"DeepSeek-V4 indexer expects full-token hidden states, got x={x.shape[0]} q_lora={token_num}"
             )
         idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(token_num, self.index_n_heads, self.index_head_dim)
-        rotary_emb_fwd(idx_q[..., -self.qk_rope_head_dim :], None, cos_tok, sin_tok)
-        idx_q = hadamard_transform(idx_q, scale=self.index_head_dim ** -0.5)
-        idx_q_fp8, q_scale = act_quant(idx_q, self.index_head_dim, None)  # fp8 [T,H,d], scale [T,H,1]
-        weights = layer_weight.idx_weights_proj_.mm(x).float() * self.indexer_weight_scale  # [T, H]
-        weights = weights.unsqueeze(-1) * q_scale  # fold per-token q scale
+        raw_w = layer_weight.idx_weights_proj_.mm(x).view(token_num, self.index_n_heads)  # [T, H] raw
+        idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
+            idx_q, raw_w, self.indexer_weight_scale, self.freqs_cis, infer_state.position_ids
+        )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1).contiguous()
 
     def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions):

@@ -168,6 +168,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             layer.freqs_cis = self._freqs_cis_compress if layer.compress_ratio else self._freqs_cis_sliding
             layer.cos_compress_table = self._cos_cached_compress
             layer.sin_compress_table = self._sin_cached_compress
+            # the indexer-Q fused kernel (compress rope) needs the complex compress freqs table.
+            if getattr(layer, "index_infer", None) is not None:
+                layer.index_infer.freqs_cis = self._freqs_cis_compress
         return
 
 
