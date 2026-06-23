@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.distributed as dist
 from lightllm.common.basemodel import TransformerLayerInferTpl
@@ -15,6 +14,8 @@ from .compressor import prepare_partial_states
 from .compressor import prepare_compress_states
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
+import deep_gemm
+from lightllm.third_party.sglang_jit.dsv4 import topk_transform_512
 
 
 class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
@@ -566,10 +567,9 @@ class DeepseekV4IndexInfer:
         return idx_q_fp8, weights.squeeze(-1).contiguous()
 
     def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions):
-        """c4 scorer via ds3.2-style gather + deep_gemm.fp8_mqa_logits. Gather each request's causal c4
-        keys into a padded-per-request ragged fp8 buffer (k row r*c4_cap+e), score every query token
-        over its absolute [ks, ke) range, then masked topk-512 -> c4 slots. Fixed shapes (c4_cap pinned
-        per graph bucket) keep the decode cuda graph capturable."""
+        """c4 scorer via the page-safe deep_gemm.fp8_paged_mqa_logits over the paged c4 indexer pool,
+        then masked topk-512 -> c4 slots. Fixed shapes (c4_cap pinned per graph bucket) keep the decode
+        cuda graph capturable."""
         mem_manager = infer_state.mem_manager
         index_topk = self.index_topk
         max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
@@ -591,104 +591,59 @@ class DeepseekV4IndexInfer:
             )
             return slots.unsqueeze(1), lengths
 
-        b_req_idx = infer_state.b_req_idx
-        batch = b_req_idx.shape[0]
-        device = positions.device
         c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)  # entries/req
 
-        if os.getenv("LIGHTLLM_DSV4_PAGED_INDEXER", "0") == "1":
-            out = self._c4_indices_paged(
-                infer_state=infer_state,
-                idx_q_fp8=idx_q_fp8,
-                weights=weights,
-                positions=positions,
-                c4_len=c4_len,
-                c4_cap=c4_cap,
-            )
-            if out is not None:
-                return out
-
-        import deep_gemm
-        from ..triton_kernel.gather_c4_indexer_k_dsv4 import gather_c4_indexer_k_ragged
-
-        k_fp8, k_scale, ragged_slots = gather_c4_indexer_k_ragged(
-            mem_manager,
-            self.layer_idx_,
-            b_req_idx,
-            c4_len,
-            c4_cap,
-            infer_state.req_manager.req_to_token_indexs,
-        )
-        # batch position of each query token -> absolute [ks, ke) into the padded buffer.
-        if infer_state.is_prefill:
-            token_batch_pos = torch.repeat_interleave(
-                torch.arange(batch, device=device, dtype=torch.int32), infer_state.b_q_seq_len
-            )
-        else:
-            token_batch_pos = torch.arange(batch, device=device, dtype=torch.int32)
-        valid_len = ((positions + 1) // 4).to(torch.int32)  # causal candidate count per query
-        ks = token_batch_pos * c4_cap
-        ke = ks + valid_len
-        logits = deep_gemm.fp8_mqa_logits(
-            idx_q_fp8, (k_fp8, k_scale), weights, ks, ke, clean_logits=False, max_seqlen_k=c4_cap
-        )  # [T, c4_cap] f32, left-aligned: logits[t, j] = q_t . k[ks[t]+j]
-        col = torch.arange(c4_cap, device=device)
-        logits = logits.masked_fill(col.unsqueeze(0) >= valid_len.unsqueeze(1), float("-inf"))
-        top = logits.topk(index_topk, dim=-1).indices.to(torch.int32)  # relative positions in [0, valid_len)
-        abs_idx = top + ks.unsqueeze(1)  # absolute compact row
-        top_slots = ragged_slots[abs_idx.long()]  # compact row -> c4 pool slot
-        invalid = top >= valid_len.unsqueeze(1)  # topk over -inf padding when valid_len < index_topk
-        top_slots = torch.where(invalid, torch.full_like(top_slots, -1), top_slots)
-        topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
-        return top_slots.unsqueeze(1), topk_lengths.contiguous()
-
-    def _c4_indices_paged(self, infer_state, idx_q_fp8, weights, positions, c4_len, c4_cap):
-        import deep_gemm
-        from lightllm.third_party.sglang_jit.dsv4 import topk_transform_512
-        from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
-
-        mem_manager = infer_state.mem_manager
-        index_topk = self.index_topk
         device = positions.device
-        b_req_idx = infer_state.b_req_idx
-        batch = b_req_idx.shape[0]
-        validate = os.getenv("LIGHTLLM_DSV4_PAGED_INDEXER_VALIDATE", "0") == "1"
-        validate_now = validate and not torch.cuda.is_current_stream_capturing()
+        page_size = mem_manager.c4_indexer_pool.page_size
 
-        page_table, valid_flag = build_c4_indexer_page_table(
-            mem_manager,
-            b_req_idx,
-            c4_len,
-            c4_cap,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.req_manager.HOLD_REQUEST_ID,
-            validate=validate_now,
-        )
-        if validate_now and int(valid_flag.item()) == 0:
-            if os.getenv("LIGHTLLM_DSV4_PAGED_INDEXER_STRICT", "0") == "1":
-                raise RuntimeError("DeepSeek-V4 paged indexer requires page-aligned c4 slots")
-            return None
+        # The page table / row_page_table / valid_len / ctx_lens / paged-logits metadata / topk_lengths
+        # are LAYER-INDEPENDENT (depend on request layout + c4_cap, not on weights/layer). Build them on
+        # the first c4 layer of the forward and reuse on the other ~20 c4 layers (was rebuilt per layer:
+        # build_c4_indexer_page_table + a [T,npages] gather + clamp/reshape + get_paged_mqa_logits_metadata
+        # each, i.e. ~20x redundant index/copy/clamp launches). Lazy (not init_some_extra_state) so it is
+        # computed inside the decode cuda graph with the capture-forced shapes -> no graph-cap mismatch.
+        cached = getattr(infer_state, "_c4_paged_meta", None)
+        if cached is None:
+            from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
 
-        if infer_state.is_prefill:
-            token_batch_pos = torch.repeat_interleave(
-                torch.arange(batch, device=device, dtype=torch.int32), infer_state.b_q_seq_len
+            b_req_idx = infer_state.b_req_idx
+            batch = b_req_idx.shape[0]
+            page_table = build_c4_indexer_page_table(
+                mem_manager,
+                b_req_idx,
+                c4_len,
+                c4_cap,
+                infer_state.req_manager.req_to_token_indexs,
+                infer_state.req_manager.HOLD_REQUEST_ID,
             )
-            row_page_table = page_table[token_batch_pos.long()].contiguous()
-        else:
-            row_page_table = page_table
 
-        valid_len = ((positions + 1) // 4).to(torch.int32)
-        ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1).contiguous()
+            if infer_state.is_prefill:
+                token_batch_pos = torch.repeat_interleave(
+                    torch.arange(batch, device=device, dtype=torch.int32), infer_state.b_q_seq_len
+                )
+                row_page_table = page_table[token_batch_pos.long()].contiguous()
+            else:
+                row_page_table = page_table
+
+            valid_len = ((positions + 1) // 4).to(torch.int32)
+            ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1).contiguous()
+            metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                ctx_lens,
+                page_size,
+                deep_gemm.get_num_sms(),
+            )
+            topk_lengths = torch.clamp(
+                torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1
+            ).contiguous()
+            cached = (row_page_table, valid_len, ctx_lens, metadata, topk_lengths)
+            infer_state._c4_paged_meta = cached
+
+        row_page_table, valid_len, ctx_lens, metadata, topk_lengths = cached
         kv_cache = mem_manager.c4_indexer_pool.get_layer_buffer(mem_manager.layer_to_c4_idx[self.layer_idx_]).view(
             mem_manager.c4_indexer_pool.num_pages,
-            mem_manager.c4_indexer_pool.page_size,
+            page_size,
             1,
             self.index_head_dim + 4,
-        )
-        metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            ctx_lens,
-            mem_manager.c4_indexer_pool.page_size,
-            deep_gemm.get_num_sms(),
         )
         logits = deep_gemm.fp8_paged_mqa_logits(
             idx_q_fp8.unsqueeze(1),
@@ -706,7 +661,6 @@ class DeepseekV4IndexInfer:
             valid_len,
             row_page_table,
             top_slots,
-            mem_manager.c4_indexer_pool.page_size,
+            page_size,
         )
-        topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
-        return top_slots.unsqueeze(1), topk_lengths.contiguous()
+        return top_slots.unsqueeze(1), topk_lengths

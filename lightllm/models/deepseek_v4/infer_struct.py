@@ -23,8 +23,13 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_sparse_req_idx = None
         self.dsv4_swa_indices = None
         self.dsv4_swa_lengths = None
+        # lazily-built (first c4 layer) cache of layer-independent paged-c4 metadata; reused by the
+        # other c4 layers in the same forward. Plain tuple (not a tensor attr) so copy_for_cuda_graph
+        # ignores it -- it's a capture-time wiring of layer0->others, not a staged graph input.
+        self._c4_paged_meta = None
 
     def init_some_extra_state(self, model):
+        self._c4_paged_meta = None  # reset per forward before any c4 layer runs
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
