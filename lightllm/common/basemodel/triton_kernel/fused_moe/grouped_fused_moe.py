@@ -233,14 +233,22 @@ def moe_align_fused_kernel(
         tl.store(expert_token_num_ptr + expert_offs, 0, mask=expert_offs < expert_num)
         tl.debug_barrier()
 
+    shared_expert_id = expert_num - 1
+    tl.store(expert_token_num_ptr + shared_expert_id, token_num, mask=token_block == 0)
+
     offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < token_num * topk_num
 
     expert_ids = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
     weights = tl.load(topk_weights_ptr + offs, mask=mask, other=0.0)
+    token_ids = offs // topk_num
+    topk_offsets = offs - token_ids * topk_num
+    is_shared_expert = topk_offsets == topk_num - 1
+    expert_ids = tl.where(is_shared_expert, shared_expert_id, expert_ids)
 
     # 用 atomic_add 给 expert 分配写位置
-    write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=mask)
+    routed_write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=mask & (is_shared_expert == 0))
+    write_pos = tl.where(is_shared_expert, token_ids, routed_write_pos)
 
     # 按 token 顺序写 index 和 weight
     tl.store(
