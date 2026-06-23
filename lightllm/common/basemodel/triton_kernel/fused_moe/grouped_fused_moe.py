@@ -217,51 +217,22 @@ def moe_align1(
 def moe_align_fused_kernel(
     topk_ids_ptr,  # [token_num, topk]
     topk_weights_ptr,  # [token_num, topk]
-    shared_expert_gate_ptr,  # [token_num, 1]
     expert_to_token_index_ptr,  # [expert_num, token_num * topk]
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
     token_num,
-    routed_topk_num: tl.constexpr,
-    expert_num: tl.constexpr,
     topk_num: tl.constexpr,
-    shared_expert_id: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    ZERO_EXPERT_TOKEN_NUM: tl.constexpr,
-    BLOCK_EXPERT: tl.constexpr,
-    HAS_SHARED_EXPERT_GATE: tl.constexpr,
 ):
     token_block = tl.program_id(0)
-    if ZERO_EXPERT_TOKEN_NUM:
-        expert_offs = tl.arange(0, BLOCK_EXPERT)
-        tl.store(expert_token_num_ptr + expert_offs, 0, mask=expert_offs < expert_num)
-        tl.debug_barrier()
-    if shared_expert_id >= 0:
-        tl.store(expert_token_num_ptr + shared_expert_id, token_num, mask=token_block == 0)
-
     offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < token_num * topk_num
 
-    token_ids = offs // topk_num
-    topk_offsets = offs - token_ids * topk_num
-    routed_offsets = token_ids * routed_topk_num + topk_offsets
-    is_shared_expert = topk_offsets >= routed_topk_num
+    expert_ids = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
+    weights = tl.load(topk_weights_ptr + offs, mask=mask, other=0.0)
 
-    expert_ids = tl.load(topk_ids_ptr + routed_offsets, mask=mask & (is_shared_expert == 0), other=0)
-    expert_ids = tl.where(is_shared_expert, shared_expert_id, expert_ids)
-    weights = tl.load(topk_weights_ptr + routed_offsets, mask=mask & (is_shared_expert == 0), other=0.0)
-    if HAS_SHARED_EXPERT_GATE:
-        shared_weights = tl.load(shared_expert_gate_ptr + token_ids, mask=mask & is_shared_expert, other=0.0).to(
-            tl.float32
-        )
-        shared_weights = tl.sigmoid(shared_weights)
-    else:
-        shared_weights = tl.full((BLOCK_SIZE,), 1.0, dtype=tl.float32)
-    weights = tl.where(is_shared_expert, shared_weights, weights)
-
-    # Shared expert appears exactly once per token, so its position is deterministic.
-    routed_write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=mask & (is_shared_expert == 0))
-    write_pos = tl.where(is_shared_expert, token_ids, routed_write_pos)
+    # 用 atomic_add 给 expert 分配写位置
+    write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=mask)
 
     # 按 token 顺序写 index 和 weight
     tl.store(
@@ -278,11 +249,8 @@ def moe_align_fused_kernel(
 
 def _get_moe_align_fused_static_key(
     topk_weights: torch.Tensor,
-    shared_expert_id: int = -1,
 ) -> dict:
     topk_num = topk_weights.shape[1]
-    if shared_expert_id >= 0:
-        topk_num += 1
     return {
         "topk_num": topk_num,
     }
@@ -307,43 +275,24 @@ def _get_moe_align_fused_configs():
     mutates_args=["expert_to_token_index", "expert_to_weight", "expert_token_num"],
 )
 def moe_align_fused(
-    expert_to_token_index,
-    expert_to_weight,
-    expert_token_num,
-    topk_ids,
-    topk_weights,
-    shared_expert_id: int = -1,
-    shared_expert_gate: Optional[torch.Tensor] = None,
-    run_config: Optional[dict] = None,
+    expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
 ):
-    token_num, routed_topk_num = topk_ids.shape
-    topk_num = routed_topk_num + (1 if shared_expert_id >= 0 else 0)
+    token_num, topk_num = topk_ids.shape
     if run_config is None:
         run_config = {}
     BLOCK_SIZE = run_config.get("BLOCK_SIZE", 256)
     num_warps = run_config.get("num_warps", 4)
-    expert_num = expert_token_num.shape[0]
-    zero_expert_token_num = token_num * topk_num <= BLOCK_SIZE
-    if shared_expert_gate is not None:
-        shared_expert_gate = shared_expert_gate.view(token_num, 1)
 
     grid = (triton.cdiv(token_num * topk_num, BLOCK_SIZE),)
     moe_align_fused_kernel[grid](
         topk_ids,
         topk_weights,
-        shared_expert_gate if shared_expert_gate is not None else topk_weights,
         expert_to_token_index,
         expert_to_weight,
         expert_token_num,
         token_num,
-        routed_topk_num,
-        expert_num,
         topk_num,
-        shared_expert_id,
         BLOCK_SIZE=BLOCK_SIZE,
-        ZERO_EXPERT_TOKEN_NUM=zero_expert_token_num,
-        BLOCK_EXPERT=triton.next_power_of_2(expert_num),
-        HAS_SHARED_EXPERT_GATE=shared_expert_gate is not None,
         num_warps=num_warps,
     )
     return expert_to_token_index, expert_to_weight, expert_token_num
@@ -962,8 +911,6 @@ def fused_experts_impl(
     layout="blocked",
     limit=None,
     alpha=None,
-    shared_expert_id: int = -1,
-    shared_expert_gate: Optional[torch.Tensor] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -975,8 +922,7 @@ def fused_experts_impl(
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
     CHUNK_SIZE = FFN_MOE_CHUNK_SIZE
-    routed_topk_num = topk_ids.shape[1]
-    topk_num = routed_topk_num + (1 if shared_expert_id >= 0 else 0)
+    topk_num = topk_ids.shape[1]
     M = min(num_tokens, CHUNK_SIZE)
 
     intermediate_cache13_shared = alloc_tensor_func(
@@ -1008,30 +954,20 @@ def fused_experts_impl(
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
-        curr_shared_expert_gate = (
-            shared_expert_gate[begin_chunk_idx:end_chunk_idx] if shared_expert_gate is not None else None
-        )
 
         expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
         expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
-        expert_token_count_in_align_kernel = topk_num * tokens_in_chunk <= 128
-        expert_to_token_num = (
-            torch.empty((E,), dtype=torch.int32, device="cuda")
-            if expert_token_count_in_align_kernel
-            else torch.zeros((E,), dtype=torch.int32, device="cuda")
-        )
+        expert_to_token_num = torch.zeros((E,), dtype=torch.int32, device="cuda")
         moe_align_fused(
             expert_to_token_index=expert_to_tokens,
             expert_to_weight=expert_to_weights,
             expert_token_num=expert_to_token_num,
             topk_ids=curr_topk_ids,
             topk_weights=curr_topk_weights,
-            shared_expert_id=shared_expert_id,
-            shared_expert_gate=curr_shared_expert_gate,
         )
 
         reused_mblock_infos = grouped_matmul(
-            tokens_in_chunk * topk_num,
+            curr_topk_ids.numel(),
             curr_hidden_states,
             a1_scale,
             expert_to_token_num,
@@ -1057,7 +993,7 @@ def fused_experts_impl(
         )
 
         grouped_matmul(
-            tokens_in_chunk * topk_num,
+            curr_topk_ids.numel(),
             intermediate_cache2.view(-1, N // 2),
             a2_scale,
             expert_to_token_num,
@@ -1076,8 +1012,7 @@ def fused_experts_impl(
         )
 
         moe_sum_reduce(
-            intermediate_cache3.view(*intermediate_cache3.shape),
-            out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            intermediate_cache3.view(*intermediate_cache3.shape), out_hidden_states[begin_chunk_idx:end_chunk_idx]
         )
     return out_hidden_states
 
@@ -1100,7 +1035,6 @@ def inplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    shared_expert_id: int = -1,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1120,7 +1054,6 @@ def inplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
-        shared_expert_id=shared_expert_id,
     )
 
 
@@ -1142,7 +1075,6 @@ def inplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    shared_expert_id: int = -1,
 ) -> None:
     pass
 
@@ -1173,8 +1105,7 @@ def outplace_fused_experts_impl(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    shared_expert_id: int = -1,
-) -> torch.Tensor:
+) -> None:
     return fused_experts_impl(
         hidden_states,
         w1,
@@ -1193,7 +1124,6 @@ def outplace_fused_experts_impl(
         layout=layout,
         alpha=alpha,
         limit=limit,
-        shared_expert_id=shared_expert_id,
     )
 
 
@@ -1215,8 +1145,7 @@ def outplace_fused_experts_impl_fake(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    shared_expert_id: int = -1,
-) -> torch.Tensor:
+) -> None:
     return torch.empty_like(hidden_states)
 
 
@@ -1247,32 +1176,7 @@ def fused_experts(
     layout: str = "blocked",
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
-    shared_expert_id: int = -1,
-    shared_expert_gate: Optional[torch.Tensor] = None,
 ):
-    if shared_expert_gate is not None:
-        return fused_experts_impl(
-            hidden_states,
-            w1,
-            w2,
-            topk_weights,
-            topk_ids,
-            inplace,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            w1_bias,
-            w2_bias,
-            w1_scale,
-            w2_scale,
-            a1_scale,
-            a2_scale,
-            layout=layout,
-            alpha=alpha,
-            limit=limit,
-            shared_expert_id=shared_expert_id,
-            shared_expert_gate=shared_expert_gate,
-        )
-
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
             hidden_states,
@@ -1291,7 +1195,6 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
-            shared_expert_id=shared_expert_id,
         )
         return hidden_states
     else:
@@ -1312,5 +1215,4 @@ def fused_experts(
             layout=layout,
             alpha=alpha,
             limit=limit,
-            shared_expert_id=shared_expert_id,
         )
