@@ -8,7 +8,7 @@ import pickle
 from sortedcontainers import SortedDict
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Callable, Any, Union
-from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
+from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManager, ReqManagerForMamba
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
@@ -50,7 +50,9 @@ class InferenceContext:
         vocab_size: int,
     ):
         self.args = get_env_start_args()
-        from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+        from lightllm.server.router.model_infer.mode_backend.base_backend import (
+            ModeBackend,
+        )
 
         self.backend: ModeBackend = backend
         self.req_manager = req_manager
@@ -122,16 +124,30 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
+        is_dsv4_req_manager = hasattr(self.req_manager, "build_prompt_cache_payload")
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
+            if is_dsv4_req_manager:
+                # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx,
+                # 必须在此复位出窗水位线 + 清 c128 在途状态(恢复命中走 extend,不会再有
+                # restore/zero 时机;c4 状态随 swa 页生灭,无需处理)。
+                self.req_manager.init_compress_state(req.req_idx)
         else:
             if not self.is_linear_att_mixed_model:
-                self._full_att_free_req(free_token_index=free_token_index, req=req)
+                if is_dsv4_req_manager:
+                    self._dsv4_full_att_free_req(free_token_index=free_token_index, req=req)
+                else:
+                    self._full_att_free_req(free_token_index=free_token_index, req=req)
             else:
                 self._linear_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.linear_att_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
+        return
+
+    def _append_free_token_index(self, free_token_index: List, tensor: torch.Tensor):
+        if tensor.numel() > 0:
+            free_token_index.append(tensor)
         return
 
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
@@ -145,6 +161,68 @@ class InferenceContext:
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
         if req.shared_kv_node is not None:
             assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
+        return
+
+    def _dsv4_full_att_free_req(self, free_token_index: List, req: "InferReq"):
+        if req.cur_kv_len == 0:
+            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0:0])
+            return
+
+        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        inserted_len = old_prefix_len
+        duplicate_prefix_len = old_prefix_len
+
+        # 载荷只剩按页 bitmap(compressor 状态随 swa 页生灭/边界自然归零,不进载荷),
+        # 任意 128 对齐前缀皆可插入——含生成段(floor(cur_kv_len) 边界,回收保留尾页保证其驻留)。
+        cache_len = self.radix_cache.align_len(req.cur_kv_len)
+        self.req_manager: DeepseekV4ReqManager
+        if cache_len > old_prefix_len:
+            payload = self.req_manager.build_prompt_cache_payload(req.req_idx, cache_len)
+            value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
+            # 按页有效性 bitmap 用插入时刻的映射写定(此后只会被阀清 0,不会复活)。水位线
+            # 纯 CPU 推导,避免 router 关键路径上的 GPU gather 同步(每插入一次要等全部在途
+            # decode kernel)。插入门: 截掉结尾的 invalid 页 —— 它们生来不可命中,还会永久
+            # 挡住后续更长前缀复用同一段 token(全量重插会因前缀已存在而保留旧 bitmap)。
+            page_size = self.req_manager.get_prompt_cache_page_size()
+            bitmap = self.req_manager.swa_page_valid_from_watermark(req.req_idx, cache_len)
+            n_pages = int(bitmap.numel())
+            while n_pages > 0 and not bool(bitmap[n_pages - 1]):
+                n_pages -= 1
+            gated_len = n_pages * page_size
+            if gated_len < cache_len:
+                logger.info(
+                    f"DeepSeek-V4 prompt cache insert gate: trailing swa pages already evicted, "
+                    f"shrink insert {cache_len} -> {gated_len}"
+                )
+                cache_len = gated_len
+                payload.cache_len = cache_len
+            payload.swa_page_valid = bitmap[:n_pages].clone()
+
+            if cache_len > old_prefix_len:
+                input_token_ids = req.get_input_token_ids()
+                key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
+                duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value[:cache_len], extra_value=payload)
+                inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
+                if inserted_len != cache_len:
+                    inserted_len = old_prefix_len
+                    duplicate_prefix_len = old_prefix_len
+
+        dense_row = self.req_manager.req_to_token_indexs[req.req_idx]
+        self._append_free_token_index(free_token_index, dense_row[old_prefix_len:duplicate_prefix_len])
+        self._append_free_token_index(free_token_index, dense_row[inserted_len : req.cur_kv_len])
+        if len(free_token_index) == 0:
+            free_token_index.append(dense_row[0:0])
+        # 释放的 full 槽经 mem_manager.free 级联回收 swa/c4/c128(映射键控,无需收集槽位)。
+
+        # pause 路径不会走 req_manager.free/init: 复位出窗水位线(残留水位线会破坏下一次
+        # prefill 的共享前缀保护)并清 c128 在途状态(恢复命中走 extend 续算,若残留暂停前的
+        # 半窗聚合会算错;c128 状态在 128 对齐命中边界本应为零)。
+        self.req_manager.init_compress_state(req.req_idx)
+
+        if req.shared_kv_node is not None:
+            assert req.shared_kv_node.node_prefix_total_len <= max(inserted_len, old_prefix_len)
             self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
             req.shared_kv_node = None
         return
@@ -325,7 +403,12 @@ class InferenceContext:
                 self.req_manager.free_token(free_token_index)
         return self
 
-    def recover_paused_reqs(self, paused_reqs: List["InferReq"], is_master_in_dp: bool, can_alloc_token_num: int):
+    def recover_paused_reqs(
+        self,
+        paused_reqs: List["InferReq"],
+        is_master_in_dp: bool,
+        can_alloc_token_num: int,
+    ):
         if paused_reqs:
 
             for req in paused_reqs:
@@ -353,6 +436,50 @@ class InferenceContext:
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
+
+    def get_can_alloc_dsv4_swa_page_num(self):
+        mem_manager = self.req_manager.mem_manager
+        allocator = getattr(mem_manager, "swa_page_allocator", None)
+        if allocator is None:
+            return None
+
+        radix_cache_unref_page_num = 0
+        if self.radix_cache is not None:
+            radix_cache_unref_page_num = self.radix_cache.get_unrefed_swa_pages_num()
+        return int(allocator.can_use_mem_size) + radix_cache_unref_page_num
+
+    def get_dsv4_swa_prefill_need_page_num(self, req: "InferReq", is_chuncked_prefill: bool):
+        page_size = self._get_dsv4_swa_page_size()
+        if page_size is None:
+            return 0
+
+        start = int(req.cur_kv_len)
+        if is_chuncked_prefill:
+            end = int(req.get_chuncked_input_token_len())
+        else:
+            end = int(req.get_cur_total_len())
+        if end <= start:
+            return 0
+        first_new_page = (start + page_size - 1) // page_size
+        last_page = (end - 1) // page_size
+        return last_page - first_new_page + 1
+
+    def get_dsv4_swa_decode_need_page_num(self, req: "InferReq"):
+        page_size = self._get_dsv4_swa_page_size()
+        if page_size is None:
+            return 0
+
+        seq_len = int(req.get_cur_total_len())
+        if seq_len <= 0:
+            return 0
+        return 1 if (seq_len - 1) % page_size == 0 else 0
+
+    def _get_dsv4_swa_page_size(self):
+        mem_manager = self.req_manager.mem_manager
+        allocator = getattr(mem_manager, "swa_page_allocator", None)
+        if allocator is None:
+            return None
+        return mem_manager.swa_pool.page_size
 
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """
@@ -382,7 +509,9 @@ class InferenceContext:
             )
             big_page_buffer_ids = big_page_buffer_ids.cuda(non_blocking=True)
 
-            from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+            from lightllm.common.basemodel.triton_kernel.linear_att_copy import (
+                copy_linear_att_state_to_kv_buffer,
+            )
 
             copy_linear_att_state_to_kv_buffer(
                 b_req_idx=b_req_idx,
@@ -412,9 +541,10 @@ class InferenceContext:
                         gpu_ssm_state = self.req_manager.req_to_ssm_state.buffer[:, src_buffer_idx, ...]
                         dst_buffer_idx = req.tail_linear_att_small_page_buffer_id
 
-                        dst_conv_state, dst_ssm_state = self.radix_cache.linear_att_small_page_buffers.get_state_cache(
-                            buffer_idx=dst_buffer_idx
-                        )
+                        (
+                            dst_conv_state,
+                            dst_ssm_state,
+                        ) = self.radix_cache.linear_att_small_page_buffers.get_state_cache(buffer_idx=dst_buffer_idx)
                         # TODO 对于非连续对象调用 copy_ 效率并不高
                         dst_conv_state.copy_(gpu_conv_state, non_blocking=True)
                         dst_ssm_state.copy_(gpu_ssm_state, non_blocking=True)
@@ -591,6 +721,8 @@ class InferReq:
         self.cur_output_len = 0
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
+        if hasattr(g_infer_context.req_manager, "init_compress_state"):
+            g_infer_context.req_manager.init_compress_state(req_idx=self.req_idx)
 
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
         # token healing mode 才被使用的管理对象
@@ -626,6 +758,9 @@ class InferReq:
                 ready_cache_len = share_node.node_prefix_total_len
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
+                # DeepSeek-V4 命中无需任何恢复: 槽位由 full_to_* 映射键控(radix 持有 full 槽即有效,
+                # 命中长度已在 match_prefix 内按 bitmap 裁剪),c4 compressor 状态随 swa 页常驻
+                # (零拷贝续算),c128 状态在 128 对齐边界自然归零(init_compress_state 已清)。
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
@@ -639,7 +774,10 @@ class InferReq:
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
         linear_hash_list = self.shm_req.linear_att_token_hash_list.get_all()
         linear_att_hash_page_size = self.args.linear_att_hash_page_size
-        match_tokens = min(len(linear_hash_list) * linear_att_hash_page_size, self.get_cur_total_len() - 1)
+        match_tokens = min(
+            len(linear_hash_list) * linear_att_hash_page_size,
+            self.get_cur_total_len() - 1,
+        )
         match_tokens = max(0, match_tokens)
         match_tokens = (match_tokens // linear_att_hash_page_size) * linear_att_hash_page_size
         match_block_num = match_tokens // linear_att_hash_page_size
@@ -705,7 +843,8 @@ class InferReq:
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
-                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
+                                value_tensor[cur_big_page_tokens:shared_kv_len],
+                                tail_mems,
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
@@ -736,7 +875,8 @@ class InferReq:
                                 assert self.tail_linear_att_small_page_buffer_id is None
                                 # 恢复linear att 状态
                                 g_infer_context.req_manager.copy_big_page_buffer_to_linear_att_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
+                                    big_page_buffer_idx=share_node.big_page_buffer_idx,
+                                    req=self,
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
@@ -792,6 +932,7 @@ class InferReq:
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        chunked_end = self._align_chuncked_end_for_prompt_cache(chunked_start, chunked_end)
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_linear_att(self):
@@ -812,6 +953,23 @@ class InferReq:
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        return self._align_chuncked_end_for_prompt_cache(chunked_start, chunked_end)
+
+    def _align_chuncked_end_for_prompt_cache(self, chunked_start: int, chunked_end: int):
+        radix_cache = g_infer_context.radix_cache
+        page_size = getattr(radix_cache, "page_size", 1) if radix_cache is not None else 1
+        if page_size <= 1 or self.sampling_param.disable_prompt_cache:
+            return chunked_end
+        prompt_end = int(self.shm_req.input_len)
+        chunked_start = int(chunked_start)
+        chunked_end = int(chunked_end)
+        if chunked_end >= prompt_end:
+            return chunked_end
+
+        assert self.args.chunked_prefill_size % page_size == 0, (
+            f"chunked_prefill_size={self.args.chunked_prefill_size} must be divisible by "
+            f"prompt-cache page_size={page_size}"
+        )
         return chunked_end
 
     def get_chuncked_input_token_len_for_linear_att(self):

@@ -153,6 +153,8 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+        if hasattr(self.model.req_manager, "build_prompt_cache_payload"):
+            self.support_overlap = False
 
         if self.is_linear_att_mixed_model:
             self.linear_att_cache_manager = LinearAttCacheManager(
@@ -164,6 +166,7 @@ class ModeBackend:
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
+            setattr(self.args, "dynamic_prompt_cache_page_size", 1)
         else:
             if self.is_linear_att_mixed_model:
                 self.radix_cache = LinearAttPagedRadixCache(
@@ -175,13 +178,25 @@ class ModeBackend:
                     kv_cache_mem_manager=self.model.mem_manager,
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
+                setattr(self.args, "dynamic_prompt_cache_page_size", 1)
             else:
+                radix_page_size = 1
+                radix_extra_value_ops = None
+                if hasattr(self.model.req_manager, "get_prompt_cache_value_ops"):
+                    radix_page_size = self.model.req_manager.get_prompt_cache_page_size()
+                    radix_extra_value_ops = self.model.req_manager.get_prompt_cache_value_ops()
+                setattr(self.args, "dynamic_prompt_cache_page_size", radix_page_size)
                 self.radix_cache = RadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    page_size=radix_page_size,
+                    extra_value_ops=radix_extra_value_ops,
                 )
+                if radix_extra_value_ops is not None and hasattr(self.model.mem_manager, "register_swa_free_hook"):
+                    # swa 页 allocator 触底时让 radix 对 ref==0 节点 free swa 页(DeepSeek-V4)。
+                    self.model.mem_manager.register_swa_free_hook(self.radix_cache.free_unreferenced_swa_pages)
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -582,6 +597,7 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
+        can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
 
         for req_obj in ready_reqs:
 
@@ -615,9 +631,14 @@ class ModeBackend:
 
             if is_decode:
                 token_num = req_obj.decode_need_token_num()
-                if token_num <= can_alloc_token_num:
+                swa_page_num = g_infer_context.get_dsv4_swa_decode_need_page_num(req_obj)
+                if token_num <= can_alloc_token_num and (
+                    can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num
+                ):
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
+                    if can_alloc_dsv4_swa_page_num is not None:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -632,10 +653,17 @@ class ModeBackend:
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                if token_num <= can_alloc_token_num:
+                swa_page_num = g_infer_context.get_dsv4_swa_prefill_need_page_num(
+                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
+                )
+                if token_num <= can_alloc_token_num and (
+                    can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num
+                ):
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
+                    if can_alloc_dsv4_swa_page_num is not None:
+                        can_alloc_dsv4_swa_page_num -= swa_page_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True

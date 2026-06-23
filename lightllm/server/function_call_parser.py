@@ -40,6 +40,7 @@ TOOLS_TAG_LIST = [
     "[TOOL_CALLS]",
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
+    "<｜DSML｜tool_calls>",
 ]
 
 
@@ -1480,11 +1481,14 @@ class DeepSeekV32Detector(BaseFormatDetector):
     Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
     """
 
-    def __init__(self):
+    def __init__(self, block_name: str = "function_calls"):
         super().__init__()
         self.dsml_token = "｜DSML｜"
-        self.bot_token = f"<{self.dsml_token}function_calls>"
-        self.eot_token = f"</{self.dsml_token}function_calls>"
+        # DeepSeek V3.2 wraps tool calls in a `function_calls` block; V4 uses
+        # `tool_calls`. Only the outer block name differs — the invoke/parameter
+        # grammar is identical — so subclasses just override block_name.
+        self.bot_token = f"<{self.dsml_token}{block_name}>"
+        self.eot_token = f"</{self.dsml_token}{block_name}>"
         self.invoke_start_prefix = f"<{self.dsml_token}invoke"
         self.invoke_end_token = f"</{self.dsml_token}invoke>"
         self.param_end_token = f"</{self.dsml_token}parameter>"
@@ -1962,6 +1966,32 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 
+class DeepSeekV4Detector(DeepSeekV32Detector):
+    """
+    Detector for DeepSeek V4 model function call format using DSML.
+
+    Identical grammar to V3.2 (``<｜DSML｜invoke name="...">`` blocks with
+    ``<｜DSML｜parameter name="k" string="true|false">v</｜DSML｜parameter>``
+    tags), except the outer block is named ``tool_calls`` instead of
+    ``function_calls`` — matching the model's own encoding (encoding_dsv4.py:
+    ``tool_calls_block_name = "tool_calls"``) and system prompt.
+
+    Format Structure:
+    ```
+    <｜DSML｜tool_calls>
+    <｜DSML｜invoke name="get_weather">
+    <｜DSML｜parameter name="location" string="true">Hangzhou</｜DSML｜parameter>
+    </｜DSML｜invoke>
+    </｜DSML｜tool_calls>
+    ```
+
+    Reference: https://huggingface.co/deepseek-ai/DeepSeek-V4
+    """
+
+    def __init__(self):
+        super().__init__(block_name="tool_calls")
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -1975,6 +2005,7 @@ class FunctionCallParser:
         "deepseekv3": DeepSeekV3Detector,
         "deepseekv31": DeepSeekV31Detector,
         "deepseekv32": DeepSeekV32Detector,
+        "deepseekv4": DeepSeekV4Detector,
         "glm47": Glm47Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,

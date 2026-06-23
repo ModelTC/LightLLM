@@ -90,6 +90,11 @@ def get_tokenizer(
         )
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
+    if model_type == "deepseek_v4":
+        from ..models.deepseek_v4.model import DeepSeekV4Tokenizer
+
+        logger.info("Using DeepSeek-V4 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV4Tokenizer(tokenizer, tokenizer_name)
 
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.qwen2_vl.vision_process import Qwen2VLImageProcessor

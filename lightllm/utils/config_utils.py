@@ -464,6 +464,10 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     if model_type == "deepseek_v32":
         return "deepseekv32"
 
+    # DeepSeek V4
+    if model_type == "deepseek_v4":
+        return "deepseekv4"
+
     return None
 
 
@@ -488,8 +492,8 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     ]:
         return "qwen3"
 
-    # DeepSeek V3
-    if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32"]:
+    # DeepSeek V3 / V4 (share the <think>...</think> reasoning format, request-gated)
+    if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32", "deepseek_v4"]:
         return "deepseek-v3"
 
     # DeepSeek R1

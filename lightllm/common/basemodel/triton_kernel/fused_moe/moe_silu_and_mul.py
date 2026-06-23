@@ -24,6 +24,7 @@ def _silu_and_mul_kernel_fast(
     NEED_MASK: tl.constexpr,
     layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
+    USE_LIMIT_ONLY: tl.constexpr = False,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
@@ -76,6 +77,11 @@ def _silu_and_mul_kernel_fast(
                 mask=mask,
             )
         else:
+            if USE_LIMIT_ONLY:
+                # clamped swiglu (DeepSeek-V4 swiglu_limit): clamp 后接标准 silu，
+                # 无 gpt-oss 的 alpha 缩放与 (up+1)。
+                gate = tl.minimum(gate, limit)
+                up = tl.minimum(tl.maximum(up, -limit), limit)
             if USE_TANH_APPROXIMATE_GELU:
                 # tanh-approx GELU, matching Gemma's gelu_pytorch_tanh MLP.
                 gate_cubed = gate * gate * gate
@@ -124,7 +130,8 @@ def silu_and_mul_fwd(
 ):
     assert input.is_contiguous()
     assert output.is_contiguous()
-    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    # limit+alpha: gpt-oss 语义 (up+1)*silu(alpha*gate); 仅 limit: clamp 后标准 silu (DeepSeek-V4)
+    assert alpha is None or limit is not None
 
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
@@ -147,6 +154,7 @@ def silu_and_mul_fwd(
     while triton.cdiv(size_m, BLOCK_M) > 8192:
         BLOCK_M *= 2
     USE_LIMIT_AND_ALPHA = limit is not None and alpha is not None
+    USE_LIMIT_ONLY = limit is not None and alpha is None
 
     grid = (
         triton.cdiv(size_n, BLOCK_N),
@@ -171,6 +179,7 @@ def silu_and_mul_fwd(
         num_warps=num_warps,
         layout=layout,
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
+        USE_LIMIT_ONLY=USE_LIMIT_ONLY,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
     )
     return

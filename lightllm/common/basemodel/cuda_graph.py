@@ -14,6 +14,20 @@ from .infer_struct import InferStateInfo
 logger = init_logger(__name__)
 
 
+def _reset_att_state_sched_meta(infer_state: InferStateInfo):
+    # capture 前调用: warmup 趟用 copy.copy 浅拷贝共享 decode_att_state,其内部惰性初始化的
+    # 调度对象(如 FlashMLASchedMeta,首次内核调用时按当时数据规划并回写)会被 warmup 的
+    # dummy 负载锁定;若不重置,捕获趟将绑定为 dummy 规划的调度张量,所有 replay 都用错误
+    # 的 tile schedule(DSV4 实测 gsm8k 0.96 -> 0.74)。重置后规划发生在捕获区内,随 replay 重算。
+    for att_state in (infer_state.decode_att_state, infer_state.decode_att_state1):
+        if att_state is None:
+            continue
+        reset_fn = getattr(att_state, "reset_sched_meta_for_capture", None)
+        if reset_fn is not None:
+            reset_fn()
+    return
+
+
 class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
@@ -94,6 +108,8 @@ class CudaGraph:
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
+        _reset_att_state_sched_meta(infer_state)
+
         with torch.cuda.graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
@@ -127,6 +143,9 @@ class CudaGraph:
             for para_name in set(vars(infer_state1).keys()):
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
+
+        _reset_att_state_sched_meta(infer_state)
+        _reset_att_state_sched_meta(infer_state1)
 
         with torch.cuda.graph(graph_obj, pool=self.mempool):
             model_output, model_output1 = decode_func(infer_state, infer_state1)

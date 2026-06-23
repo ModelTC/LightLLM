@@ -76,7 +76,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
+        clamp_limit: Optional[float] = None,
     ):
+        assert clamp_limit is None, "EP deepgemm fused MoE does not support clamp_limit yet"
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,

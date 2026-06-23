@@ -8,7 +8,9 @@ logger = init_logger(__name__)
 
 class Deepseek2MemOperator(NormalMemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.deepseek2_mem_manager import Deepseek2MemoryManager
+        from lightllm.common.kv_cache_mem_manager.deepseek2_mem_manager import (
+            Deepseek2MemoryManager,
+        )
 
         mem_manager: Deepseek2MemoryManager = self.mem_manager
 
@@ -30,7 +32,9 @@ class Deepseek2MemOperator(NormalMemOperator):
 
 class Deepseek3_2MemOperator(Deepseek2MemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.deepseek3_2mem_manager import Deepseek3_2MemoryManager
+        from lightllm.common.kv_cache_mem_manager.deepseek3_2mem_manager import (
+            Deepseek3_2MemoryManager,
+        )
 
         mem_manager: Deepseek3_2MemoryManager = self.mem_manager
         from ...basemodel.triton_kernel.kv_copy.mla_copy_kv import destindex_copy_kv
@@ -77,4 +81,15 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
             o_scale,
             o_rope,
         )
+        return
+
+
+class DeepseekV4MemOperator(BaseMemManagerOperator):
+    def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
+            DeepseekV4MemoryManager,
+        )
+
+        mem_manager: DeepseekV4MemoryManager = self.mem_manager
+        mem_manager.pack_mla_kv_to_cache(layer_index, mem_index, kv)
         return
