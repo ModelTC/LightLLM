@@ -37,8 +37,10 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         num_expert_group: int,
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         """Select experts and return topk weights and ids."""
+        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
 
         topk_weights, topk_ids = select_experts(
@@ -76,9 +78,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
-        assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,

@@ -86,17 +86,10 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
-        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn
-
-        if shared_expert_gate is not None:
-            assert (
-                type(self) is FuseMoeTriton
-            ), "fused shared expert as MoE is only supported by the Triton fused MoE implementation"
-            assert self.num_fused_shared_experts > 0, "shared_expert_gate requires fused shared experts"
 
         from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
 
@@ -151,6 +144,5 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_ids=topk_ids,
             router_logits=router_logits,
             is_prefill=is_prefill,
-            shared_expert_gate=shared_expert_gate,
         )
         return output
