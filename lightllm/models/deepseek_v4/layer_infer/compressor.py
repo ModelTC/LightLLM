@@ -330,7 +330,9 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         if token_to_batch_idx is None or token_to_batch_idx.numel() != infer_state.position_ids.numel():
             q_lens = (infer_state.b_seq_len - infer_state.b_ready_cache_len).to(torch.long)
             batch_idx = torch.arange(infer_state.b_req_idx.shape[0], device=infer_state.b_req_idx.device)
-            token_to_batch_idx = torch.repeat_interleave(batch_idx, q_lens).to(torch.int32)
+            token_to_batch_idx = torch.repeat_interleave(
+                batch_idx, q_lens, output_size=infer_state.position_ids.numel()
+            ).to(torch.int32)
             infer_state._dsv4_token_to_batch_idx = token_to_batch_idx
 
     return CoreCompressorMetadata(

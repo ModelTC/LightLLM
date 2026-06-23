@@ -23,6 +23,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_sparse_req_idx = None
         self.dsv4_swa_indices = None
         self.dsv4_swa_lengths = None
+        # token -> batch-position map for the compressor; built per prefill forward in init_some_extra_state.
+        self._dsv4_token_to_batch_idx = None
         # lazily-built (first c4 layer) cache of layer-independent paged-c4 metadata; reused by the
         # other c4 layers in the same forward. Plain tuple (not a tensor attr) so copy_for_cuda_graph
         # ignores it -- it's a capture-time wiring of layer0->others, not a staged graph input.
@@ -40,8 +42,14 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # Layer-independent; the swa kernel + build_metadata's c4/c128 readers all reuse it.
         if self.is_prefill:
             self.dsv4_sparse_req_idx = torch.repeat_interleave(self.b_req_idx, self.b_q_seq_len.long())
+            self._dsv4_token_to_batch_idx = torch.repeat_interleave(
+                torch.arange(self.b_req_idx.shape[0], device=self.b_req_idx.device),
+                self.b_q_seq_len.long(),
+                output_size=pos.numel(),
+            ).to(torch.int32)
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
+            self._dsv4_token_to_batch_idx = None
         # Sliding-window indices: layer-independent (full_to_swa is global, window is const), so build
         # once here via one fused kernel instead of recomputing per layer. const [T, window] shape is
         # cuda-graph-safe (no max_kv_seq_len dependence) and auto-staged by copy_for_cuda_graph.

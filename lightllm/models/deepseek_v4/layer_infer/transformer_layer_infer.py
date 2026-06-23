@@ -55,6 +55,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.index_infer = DeepseekV4IndexInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
+        self.dsv4_prefill_aux_stream = None
 
     # ------------------------------------------------------------------ forward (HC-threaded)
     def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
@@ -222,19 +223,44 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
 
         return self._context_attention_kernel(q, q_lora, x, infer_state, layer_weight)
 
+    def _compress_and_index(self, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
+        cos_table, sin_table = self.cos_compress_table, self.sin_compress_table
+        aux_stream = self.dsv4_prefill_aux_stream
+        if self.compress_ratio == 4 and aux_stream is not None and not torch.cuda.is_current_stream_capturing():
+            # _dsv4_token_to_batch_idx is built in init_some_extra_state (default stream, before this fork),
+            # so both the aux indexer-compressor and the main compressor read a ready, race-free tensor.
+            main_stream = torch.cuda.current_stream()
+            aux_stream.wait_stream(main_stream)  # fork: aux waits for x / q_lora produced on main
+            with torch.cuda.stream(aux_stream):
+                # x / q_lora are main-allocated and read here -> record so the allocator won't reuse them.
+                x.record_stream(aux_stream)
+                q_lora.record_stream(aux_stream)
+                self.index_infer.write_indexer_k(
+                    x, infer_state, layer_weight, cos_table, sin_table, use_custom_tensor_manager=False
+                )
+                meta = self.index_infer.build_metadata(
+                    x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=False
+                )
+            self.compressor.prepare_states(x, infer_state, layer_weight)
+            self.compressor.fused_compress(infer_state, layer_weight, cos_table, sin_table)
+            main_stream.wait_stream(aux_stream)  # join before prefill_att reads the indices / latent KV
+            # extra_indices / extra_lengths were allocated on aux -> record on main so they survive until consumed.
+            for _t in (meta.get("extra_indices"), meta.get("extra_lengths")):
+                if _t is not None:
+                    _t.record_stream(main_stream)
+            return meta
+
+        # serial fallback -- semantics identical to the original sequence.
+        self.compressor.prepare_states(x, infer_state, layer_weight)
+        self.compressor.fused_compress(infer_state, layer_weight, cos_table, sin_table)
+        # write c4 Lightning-Indexer keys BEFORE build_metadata so the scorer reads fresh+accumulated entries.
+        self.index_infer.write_indexer_k(x, infer_state, layer_weight, cos_table, sin_table)
+        return self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
+
     def _context_attention_kernel(
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        self.compressor.prepare_states(x, infer_state, layer_weight)
-        self.compressor.fused_compress(infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
-        # Write this step's c4 Lightning-Indexer keys (no-op off c4) BEFORE build_metadata so the
-        # scorer (gather + deep_gemm.fp8_mqa_logits) reads fresh+accumulated entries from the indexer pool.
-        self.index_infer.write_indexer_k(x, infer_state, layer_weight, self.cos_compress_table, self.sin_compress_table)
-        # Build the FINAL flash_mla index tensors here (model side), so att_control is a thin
-        # transport of ready-to-forward tensors -- not indexer raw material. Must stay after
-        # fused_compress (c4 reads the indexer-K pool it writes) and before prefill_att (keeps the
-        # c4 scorer/topk at the same cuda-graph capture position).
-        meta = self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
+        meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
         att_control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
@@ -391,7 +417,10 @@ class CompressorInfer:
         x: torch.Tensor,
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
+        use_custom_tensor_manager: bool = True,
     ):
+        # use_custom_tensor_manager=False routes the .mm outputs through torch.empty (stream-aware)
+        # instead of the stream-blind global cache -- required when this runs on the prefill aux stream.
         self._metadata = prepare_compress_states(
             infer_state=infer_state,
             layer_idx=self.layer_idx_,
@@ -402,8 +431,8 @@ class CompressorInfer:
             if self.is_in_indexer:
                 # indexer wkv/wgate are two separate replicated weights; cat -> [T, 2*coff*idx_hd]
                 # (same [kv | score] layout the fused compressor_wkv_gate_ produces for attention).
-                kv = layer_weight.idx_cmp_wkv_.mm(x)
-                gate = layer_weight.idx_cmp_wgate_.mm(x)
+                kv = layer_weight.idx_cmp_wkv_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager)
+                gate = layer_weight.idx_cmp_wgate_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager)
                 self._metadata.kv_score = torch.cat([kv, gate], dim=-1).float()
                 ape = layer_weight.idx_cmp_ape_.weight
             else:
@@ -483,14 +512,24 @@ class DeepseekV4IndexInfer:
             else None
         )
 
-    def write_indexer_k(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight, cos_table, sin_table):
+    def write_indexer_k(
+        self,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight,
+        cos_table,
+        sin_table,
+        use_custom_tensor_manager=True,
+    ):
         """c4-only: compress this step's tokens into per-c4-entry indexer keys and pack them into
         c4_indexer_pool. MUST run before build_metadata so the scorer (gather + deep_gemm.fp8_mqa_logits)
         reads the finished entries; runs every step (incl. in the decode graph) so keys accumulate for
         later long-context scoring. No-op on c128 / dense layers."""
         if self.compress_ratio != 4:
             return
-        self.indexer_compressor.prepare_states(x, infer_state, layer_weight)
+        self.indexer_compressor.prepare_states(
+            x, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
+        )
         self.indexer_compressor.fused_compress(infer_state, layer_weight, cos_table, sin_table)
         scratch = self.indexer_compressor._metadata.out_buffer  # [T, index_head_dim] bf16 (group-end rows valid)
         # Rotate K (post norm+rope) by the SAME 1/sqrt(d) Hadamard the q kernel applies, so
@@ -507,7 +546,9 @@ class DeepseekV4IndexInfer:
         masked_slots = torch.where(completed, out_slots, torch.full_like(out_slots, -1)).to(torch.int32)
         mem_manager.pack_indexer_k_to_cache(self.layer_idx_, masked_slots, scratch)
 
-    def build_metadata(self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def build_metadata(
+        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
+    ):
         """Return the final flash_mla index tensors for this layer's compress variant. swa indices and
         the per-token req_idx are layer-independent and precomputed once in init_some_extra_state
         (read here); only the c4 scorer / c128 gather is per-layer. The backend pairs these with the
@@ -518,7 +559,9 @@ class DeepseekV4IndexInfer:
         positions = infer_state.position_ids
         extra_indices = extra_lengths = None
         if self.compress_ratio == 4:
-            idx_q_fp8, weights = self._indexer_q_weight(x, q_lora, infer_state, layer_weight)
+            idx_q_fp8, weights = self._indexer_q_weight(
+                x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
+            )
             extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights, positions)
         elif self.compress_ratio == 128:
             extra_indices, extra_lengths = self._c128_indices(infer_state, req_idx, positions)
@@ -543,7 +586,9 @@ class DeepseekV4IndexInfer:
         )
         return indices.unsqueeze(1), lengths
 
-    def _indexer_q_weight(self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight):
+    def _indexer_q_weight(
+        self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
+    ):
         """fp8 indexer q (mirrors deepseek3_2 NsaInfer): wq_b -> rope(last rope dims) -> 1/sqrt(d)
         Hadamard -> per-token fp8 quant. Returns (idx_q_fp8 [T,H,d], weights [T,H]); the per-token q
         fp8 scale and the head_dim^-0.5 * n_heads^-0.5 score scale are folded into weights -- the
@@ -559,8 +604,12 @@ class DeepseekV4IndexInfer:
             raise RuntimeError(
                 f"DeepSeek-V4 indexer expects full-token hidden states, got x={x.shape[0]} q_lora={token_num}"
             )
-        idx_q = layer_weight.idx_wq_b_.mm(q_lora).view(token_num, self.index_n_heads, self.index_head_dim)
-        raw_w = layer_weight.idx_weights_proj_.mm(x).view(token_num, self.index_n_heads)  # [T, H] raw
+        idx_q = layer_weight.idx_wq_b_.mm(q_lora, use_custom_tensor_mananger=use_custom_tensor_manager).view(
+            token_num, self.index_n_heads, self.index_head_dim
+        )
+        raw_w = layer_weight.idx_weights_proj_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager).view(
+            token_num, self.index_n_heads
+        )  # [T, H] raw
         idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
             idx_q, raw_w, self.indexer_weight_scale, self.freqs_cis, infer_state.position_ids
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
@@ -619,7 +668,9 @@ class DeepseekV4IndexInfer:
 
             if infer_state.is_prefill:
                 token_batch_pos = torch.repeat_interleave(
-                    torch.arange(batch, device=device, dtype=torch.int32), infer_state.b_q_seq_len
+                    torch.arange(batch, device=device, dtype=torch.int32),
+                    infer_state.b_q_seq_len,
+                    output_size=positions.numel(),
                 )
                 row_page_table = page_table[token_batch_pos.long()].contiguous()
             else:

@@ -112,6 +112,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
+        if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1":
+            prefill_aux_stream = torch.cuda.Stream()
+            for layer in self.layers_infer:
+                layer.dsv4_prefill_aux_stream = prefill_aux_stream
         dist_group_manager.new_deepep_group(
             self.config["n_routed_experts"],
             self.config["hidden_size"],
