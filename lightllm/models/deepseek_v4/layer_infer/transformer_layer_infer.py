@@ -307,7 +307,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         if not self.enable_ep_moe:
             x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
-        logits = layer_weight.gate_weight_.mm(x.float()).contiguous()
+        logits = layer_weight.gate_weight_.mm(x).float().contiguous()
         weights, indices = self._select_experts(logits, infer_state, layer_weight)
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
         # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。

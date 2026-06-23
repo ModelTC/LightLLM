@@ -189,14 +189,13 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     # ------------------------------------------------------------------ moe
     def _init_moe(self):
         p = f"{self.prefix}.ffn"
-        # router gate (replicated). Stored as fp32: the topk_hash_softplus_sqrt router wants fp32 logits,
-        # so keep the gate matmul in fp32 — but store the (constant) weight as fp32 once here instead of
-        # re-casting it to fp32 on every forward in _ffn.
+        # Router gate in bf16 (matches the sglang/vLLM DeepSeek references, which run the gate GEMM in
+        # the model dtype); the bf16 GEMM output is cast back to fp32 in _ffn for topk_hash_softplus_sqrt.
         self.gate_weight_ = ROWMMWeight(
             in_dim=self.hidden,
             out_dims=[self.n_routed_experts],
             weight_names=f"{p}.gate.weight",
-            data_type=torch.float32,
+            data_type=torch.bfloat16,
             quant_method=None,
             tp_rank=0,
             tp_world_size=1,

@@ -88,6 +88,15 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
+        return
+
+    def ensure_nsa_ks_ke(self):
+        """Build the ragged ks/ke/lengths (+ ragged_mem_index) the DeepSeek-3.2 indexer consumes. The
+        indexer calls this explicitly before reading them; DeepSeek-V4 uses its own indexer and never
+        calls it, so V4 prefill skips the alloc + gen_nsa_ks_ke kernel. Idempotent + layer-independent:
+        the first call in a forward computes, the other layers reuse."""
+        if self.ks is not None:
+            return
         self.ragged_mem_index = torch.empty(
             self.infer_state.total_token_num,
             dtype=torch.int32,
@@ -169,7 +178,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         return mla_out
 
     def _flashmla_kvcache_prefill_att(self, q: torch.Tensor, packed_kv: torch.Tensor, nsa_dict: dict) -> torch.Tensor:
-        attn_sink = nsa_dict["attn_sink"].to(torch.float32).contiguous()
+        attn_sink = nsa_dict["attn_sink"]
         metadata = _metadata_from_dict(self.infer_state, nsa_dict)
         return self._flashmla_kvcache_att(q, packed_kv, metadata, attn_sink, nsa_dict)
 
@@ -252,6 +261,11 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         self.flashmla_sched_meta = {ratio: flash_mla.get_mla_metadata()[0] for ratio in (0, 4, 128)}
         return
 
+    def ensure_nsa_ks_ke(self):
+        # decode builds ks/ke eagerly in init_state (outside the cuda graph, for capture safety), so
+        # they are already available -- this satisfies the shared DeepSeek-3.2 indexer ensure contract.
+        return
+
     def reset_sched_meta_for_capture(self):
         # cuda-graph capture hook: the warmup pass already locked/stored sched meta on this
         # (shared) state object; reset so the capture pass re-plans INSIDE the graph and every
@@ -329,7 +343,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         return o_tensor[:, 0, :, :]  # [b, 1, h, d] -> [b, h, d]
 
     def _flashmla_kvcache_decode_att(self, q: torch.Tensor, packed_kv: torch.Tensor, nsa_dict: dict) -> torch.Tensor:
-        attn_sink = nsa_dict["attn_sink"].to(torch.float32).contiguous()
+        attn_sink = nsa_dict["attn_sink"]
         metadata = _metadata_from_dict(self.infer_state, nsa_dict)
         return self._flashmla_kvcache_att(q, packed_kv, metadata, attn_sink, nsa_dict)
 
