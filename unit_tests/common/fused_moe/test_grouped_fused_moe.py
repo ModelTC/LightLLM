@@ -4,6 +4,7 @@ import pytest
 import triton
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import (
     moe_align,
+    moe_align_fused,
     moe_align1,
     moe_align2,
     grouped_matmul,
@@ -72,6 +73,38 @@ def test_moe_align1():
     assert torch.allclose(true_experts_weights, experts_weights)
     assert torch.equal(experts_token_num, true_experts_token_num)
     assert torch.equal(experts_info, true_experts_info)
+
+
+def test_moe_align_fused():
+    expert_num = 5
+    topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda")
+    topk_weights = torch.tensor([[0.3, 0.7, 0.1], [0.2, 0.8, 0.4], [0.5, 0.6, 0.9]], dtype=torch.float32, device="cuda")
+    expert_to_token_index = torch.empty((expert_num, topk_ids.numel()), dtype=torch.int32, device="cuda")
+    expert_to_weight = torch.empty((expert_num, topk_ids.numel()), dtype=torch.float32, device="cuda")
+    expert_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
+
+    moe_align_fused(
+        expert_to_token_index,
+        expert_to_weight,
+        expert_token_num,
+        topk_ids,
+        topk_weights,
+        run_config={"BLOCK_SIZE": 1024, "num_warps": 8, "NUM_STAGE": 1},
+    )
+    torch.cuda.synchronize()
+
+    true_expert_token_num = torch.tensor([2, 3, 1, 2, 1], device="cuda", dtype=torch.int32)
+    assert torch.equal(expert_token_num, true_expert_token_num)
+
+    flat_topk_ids = topk_ids.flatten()
+    flat_topk_weights = topk_weights.flatten()
+    for expert_id in range(expert_num):
+        mask = flat_topk_ids == expert_id
+        true_index = torch.nonzero(mask, as_tuple=False).flatten().to(torch.int32)
+        true_weight = flat_topk_weights[mask]
+        token_num = true_expert_token_num[expert_id]
+        assert torch.equal(expert_to_token_index[expert_id, :token_num], true_index)
+        assert torch.allclose(expert_to_weight[expert_id, :token_num], true_weight)
 
 
 def test_moe_align2():

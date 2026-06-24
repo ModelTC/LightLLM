@@ -214,45 +214,43 @@ def moe_align1(
 
 
 @triton.jit
-def moe_align_fused_kernel(
+def moe_align_fused_deterministic_kernel(
     topk_ids_ptr,  # [token_num, topk]
     topk_weights_ptr,  # [token_num, topk]
     expert_to_token_index_ptr,  # [expert_num, token_num * topk]
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
-    token_num,
-    expert_num: tl.constexpr,
-    topk_num: tl.constexpr,
+    token_num_mul_topk,
     BLOCK_SIZE: tl.constexpr,
-    INIT_EXPERT_TOKEN_NUM_IN_KERNEL: tl.constexpr,
-    BLOCK_EXPERT: tl.constexpr,
+    NUM_STAGE: tl.constexpr,
 ):
-    token_block = tl.program_id(0)
-    if INIT_EXPERT_TOKEN_NUM_IN_KERNEL:
-        expert_offs = tl.arange(0, BLOCK_EXPERT)
-        tl.store(expert_token_num_ptr + expert_offs, 0, mask=expert_offs < expert_num)
-        tl.debug_barrier()
+    expert_id = tl.program_id(0)
+    block_offs = tl.arange(0, BLOCK_SIZE)
+    token_count = tl.full((), 0, tl.int32)
 
-    offs = token_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offs < token_num * topk_num
+    for start in tl.range(0, token_num_mul_topk, BLOCK_SIZE, num_stages=NUM_STAGE):
+        raw_offs = start + block_offs
+        valid = raw_offs < token_num_mul_topk
+        load_offs = tl.where(valid, raw_offs, 0)
+        expert_ids = tl.load(topk_ids_ptr + load_offs)
+        weights = tl.load(topk_weights_ptr + load_offs)
 
-    expert_ids = tl.load(topk_ids_ptr + offs, mask=mask, other=0)
-    weights = tl.load(topk_weights_ptr + offs, mask=mask, other=0.0)
+        expert_mask = (expert_ids == expert_id) & valid
+        local_pos = tl.cumsum(tl.where(expert_mask, 1, 0)) - 1
+        write_pos = token_count + local_pos
+        tl.store(
+            expert_to_token_index_ptr + expert_id * token_num_mul_topk + write_pos,
+            raw_offs,
+            mask=expert_mask,
+        )
+        tl.store(
+            expert_to_weight_ptr + expert_id * token_num_mul_topk + write_pos,
+            weights,
+            mask=expert_mask,
+        )
+        token_count += tl.sum(tl.where(expert_mask, 1, 0), axis=0)
 
-    # 用 atomic_add 给 expert 分配写位置
-    write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=mask)
-
-    # 按 token 顺序写 index 和 weight
-    tl.store(
-        expert_to_token_index_ptr + expert_ids * (token_num * topk_num) + write_pos,
-        offs,
-        mask=mask,
-    )
-    tl.store(
-        expert_to_weight_ptr + expert_ids * (token_num * topk_num) + write_pos,
-        weights,
-        mask=mask,
-    )
+    tl.store(expert_token_num_ptr + expert_id, token_count)
 
 
 def _get_moe_align_fused_static_key(
@@ -269,14 +267,16 @@ def _get_moe_align_fused_configs():
         {
             "BLOCK_SIZE": bt,
             "num_warps": nw,
+            "NUM_STAGE": ns,
         }
+        for ns in [1, 2, 4, 6]
         for nw in [1, 2, 4, 8]
-        for bt in [128, 256, 512, 1024, 2048]
+        for bt in [32, 64, 128, 256, 512, 1024, 2048]
     ]
 
 
 @autotune(
-    kernel_name="moe_align_fused:v1",
+    kernel_name="moe_align_fused:v2",
     configs_gen_func=_get_moe_align_fused_configs,
     static_key_func=_get_moe_align_fused_static_key,
     run_key_func=lambda topk_ids: topk_ids.shape[0],
@@ -286,34 +286,27 @@ def moe_align_fused(
     expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
 ):
     token_num, topk_num = topk_ids.shape
-    if run_config is None:
-        run_config = {}
-    BLOCK_SIZE = run_config.get("BLOCK_SIZE", 256)
-    num_warps = run_config.get("num_warps", 4)
-
-    # For small inputs the align kernel has a single program, so it can initialize
-    # expert_token_num itself and avoid an extra zero_ kernel launch.
     expert_num = expert_token_num.shape[0]
-    init_expert_token_num_in_kernel = token_num * topk_num <= BLOCK_SIZE
-    if not init_expert_token_num_in_kernel:
-        # Multiple align programs may update expert_token_num concurrently; initialize
-        # it before launch to avoid races between clear and atomic_add.
-        expert_token_num.zero_()
+    token_num_mul_topk = token_num * topk_num
 
-    grid = (triton.cdiv(token_num * topk_num, BLOCK_SIZE),)
-    moe_align_fused_kernel[grid](
+    if run_config is None:
+        if token_num_mul_topk <= 256:
+            run_config = {"BLOCK_SIZE": 256, "num_warps": 4, "NUM_STAGE": 4}
+        elif token_num_mul_topk <= 4096:
+            run_config = {"BLOCK_SIZE": 512, "num_warps": 8, "NUM_STAGE": 1}
+        else:
+            run_config = {"BLOCK_SIZE": 1024, "num_warps": 8, "NUM_STAGE": 1}
+
+    moe_align_fused_deterministic_kernel[(expert_num,)](
         topk_ids,
         topk_weights,
         expert_to_token_index,
         expert_to_weight,
         expert_token_num,
-        token_num,
-        expert_num,
-        topk_num,
-        BLOCK_SIZE=BLOCK_SIZE,
-        INIT_EXPERT_TOKEN_NUM_IN_KERNEL=init_expert_token_num_in_kernel,
-        BLOCK_EXPERT=triton.next_power_of_2(expert_num),
-        num_warps=num_warps,
+        token_num_mul_topk,
+        BLOCK_SIZE=run_config["BLOCK_SIZE"],
+        NUM_STAGE=run_config["NUM_STAGE"],
+        num_warps=run_config["num_warps"],
     )
     return expert_to_token_index, expert_to_weight, expert_token_num
 
