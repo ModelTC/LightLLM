@@ -458,6 +458,7 @@ class HttpServerManager:
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
+            await self.rl_controller.unregister_generation_admission(group_request_id)
 
             await self.transfer_to_next_module_or_node(
                 prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
@@ -506,6 +507,7 @@ class HttpServerManager:
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
             if group_request_id not in self.req_id_to_out_inf:
+                await self.rl_controller.unregister_generation_admission(group_request_id)
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e

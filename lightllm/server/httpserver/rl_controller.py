@@ -28,9 +28,7 @@ logger = init_logger(__name__)
 class _GenerationPauseGate:
     """Generation pause gate.
 
-    Pending requests are tracked only while they are waiting at the pause gate.
-    Once generation is allowed, the request leaves this lightweight path and
-    continues as a normal request managed by req_id_to_out_inf.
+    Requests are tracked from admission until req_id_to_out_inf takes over.
     """
 
     _RUNNING = 0
@@ -63,33 +61,26 @@ class _GenerationPauseGate:
             self._pending_request_abort_events.pop(request_id, None)
 
     async def wait_until_resumed_or_aborted(self, request_id: int) -> bool:
-        """Block a new generation while paused.
-
-        Returns True only if this pending request is explicitly aborted before
-        resume; otherwise False means the request may continue normally.
-        """
+        """Enter admission and return True if this request should abort."""
         async with self._lock:
+            abort_event = asyncio.Event()
+            self._pending_request_abort_events[request_id] = abort_event
             if self._state == self._RUNNING:
                 return False
 
-            # Register only while paused, so abort_all can snapshot the exact
-            # pending set that existed at call time.
-            abort_event = asyncio.Event()
-            self._pending_request_abort_events[request_id] = abort_event
-            if abort_event.is_set():
-                return True
+            resume_event = self._resume_event
 
-        try:
-            resume_task = asyncio.create_task(self._resume_event.wait())
-            abort_task = asyncio.create_task(abort_event.wait())
-            done, pending = await asyncio.wait({resume_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-            return abort_task in done and abort_event.is_set()
-        finally:
+        resume_task = asyncio.create_task(resume_event.wait())
+        abort_task = asyncio.create_task(abort_event.wait())
+        done, pending = await asyncio.wait({resume_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if abort_task in done and abort_event.is_set():
             await self.unregister_pending_request(request_id)
+            return True
+        return False
 
     async def abort_pending_requests(self, request_ids) -> None:
         async with self._lock:
@@ -98,9 +89,12 @@ class _GenerationPauseGate:
                 if abort_event is not None:
                     abort_event.set()
 
-    async def get_pending_request_ids(self):
+    async def snapshot_and_abort_pending_requests(self):
         async with self._lock:
-            return list(self._pending_request_abort_events.keys())
+            request_ids = list(self._pending_request_abort_events.keys())
+            for request_id in request_ids:
+                self._pending_request_abort_events[request_id].set()
+            return request_ids
 
     def has_pending_request(self, request_id: int) -> bool:
         return request_id in self._pending_request_abort_events
@@ -118,8 +112,11 @@ class HttpRlController:
         self._generation_gate = _GenerationPauseGate()
 
     async def wait_if_generation_paused(self, request_id: int) -> bool:
-        """Wait at the pause gate and return True if this request should abort."""
+        """Enter generation admission and return True if this request should abort."""
         return await self._generation_gate.wait_until_resumed_or_aborted(request_id)
+
+    async def unregister_generation_admission(self, request_id: int) -> None:
+        await self._generation_gate.unregister_pending_request(request_id)
 
     async def wait_until_can_released_mark(self, req, timeout: float = 60.0) -> bool:
         start_time = time.time()
@@ -133,6 +130,7 @@ class HttpRlController:
     async def _wait_for_abort_released(
         self,
         request_ids,
+        abort_when_running_request_ids=(),
         timeout: float = 60.0,
     ) -> Tuple[bool, str]:
         """Wait until aborted work has left both the pause gate and running map.
@@ -142,6 +140,7 @@ class HttpRlController:
         """
         start_time = time.time()
         request_ids = set(request_ids)
+        abort_when_running_request_ids = set(abort_when_running_request_ids)
         while True:
             has_unreleased_req = False
             for group_req_id in request_ids:
@@ -150,6 +149,9 @@ class HttpRlController:
                     break
 
                 if group_req_id in self.manager.req_id_to_out_inf:
+                    if group_req_id in abort_when_running_request_ids:
+                        await self.manager.abort(group_req_id)
+                        abort_when_running_request_ids.remove(group_req_id)
                     has_unreleased_req = True
                     break
 
@@ -172,13 +174,14 @@ class HttpRlController:
         if request.abort_all:
             # Snapshot before issuing aborts: this abort_all clears current
             # pending/running work, while future paused requests keep waiting.
-            pending_request_ids = set(await self._generation_gate.get_pending_request_ids())
+            pending_request_ids = set(await self._generation_gate.snapshot_and_abort_pending_requests())
             running_request_ids = set(self.manager.req_id_to_out_inf.keys())
             abort_request_ids = pending_request_ids | running_request_ids
-            await self._generation_gate.abort_pending_requests(pending_request_ids)
             for group_req_id in running_request_ids:
                 await self.manager.abort(group_req_id)
-            return await self._wait_for_abort_released(request_ids=abort_request_ids)
+            return await self._wait_for_abort_released(
+                request_ids=abort_request_ids, abort_when_running_request_ids=pending_request_ids
+            )
 
         if request_id is None:
             return True, ""
