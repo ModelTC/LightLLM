@@ -39,7 +39,7 @@ class Glm5_2TpPartModel(Deepseek3_2TpPartModel):
         return infer_state
 
     def _init_glm5_2_rotary(self):
-        rope_theta = self.config.get("rope_theta", 8000000.0)
+        rope_theta = self.config.get("rope_theta", 1000000.0)
         qk_rope_head_dim = self.config.get("qk_rope_head_dim", 64)
         max_position_embeddings = self.config.get("max_position_embeddings", 1048576)
 
