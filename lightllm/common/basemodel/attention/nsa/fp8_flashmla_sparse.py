@@ -91,7 +91,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             )
         else:
             kv = prefill_cache_kv
-            topk_indices = topk_mem_indices
+            topk_indices = nsa_dict["topk_indices"]
 
         if topk_indices.ndim == 2:
             topk_indices = topk_indices.unsqueeze(1)
@@ -118,7 +118,6 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
     ragged_mem_index: torch.Tensor = None
-    flashmla_sched_meta: object = None
 
     def init_state(self):
         self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
@@ -172,29 +171,28 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
 
         nsa_dict = att_control.nsa_decode_dict
         topk_mem_indices = nsa_dict["topk_mem_indices"]
-        topk_indices = nsa_dict.get("topk_indices", topk_mem_indices)
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
 
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)
-        if topk_indices.ndim == 2:
-            topk_indices = topk_indices.unsqueeze(1)
         assert topk_mem_indices.shape[1] == 1, "FlashMLA sparse decode path currently expects seq_len_q == 1"
-        assert topk_indices.shape[1] == 1, "FlashMLA sparse decode path currently expects seq_len_q == 1"
 
         q_nope, q_rope = q
         q_all = torch.cat([q_nope, q_rope], dim=-1).unsqueeze(1).contiguous()
+
+        real_head_num = q_all.shape[2]
+        if real_head_num <= 64:
+            padded_head_num = 64
+        elif real_head_num <= 128:
+            padded_head_num = 128
+        else:
+            padded_head_num = real_head_num
+        if padded_head_num != real_head_num:
+            q_all = F.pad(q_all, (0, 0, 0, padded_head_num - real_head_num))
+
         cache_seqlens = self.infer_state.b_seq_len.to(dtype=torch.int32)
         page_block_size = 64
-        max_seq_len = int(cache_seqlens.max().item())
-        max_block_num = (max_seq_len + page_block_size - 1) // page_block_size
-        block_table = (
-            self.infer_state.req_manager.req_to_token_indexs[
-                self.infer_state.b_req_idx, : max_block_num * page_block_size : page_block_size
-            ]
-            // page_block_size
-        ).to(dtype=torch.int32)
         num_heads_k = 1
         num_heads_q = q_all.shape[2]
         tile_scheduler_metadata, num_splits = get_mla_metadata(
@@ -215,6 +213,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
                 packed_kv.stride(-1),
             ),
         )
+        block_table = torch.empty((cache_seqlens.shape[0], 0), dtype=torch.int32, device=q_all.device)
 
         o_tensor, _ = flash_mla_with_kvcache(
             q=q_all,
@@ -227,6 +226,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             softmax_scale=softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
-            indices=topk_indices.to(dtype=torch.int32),
+            indices=topk_mem_indices.to(dtype=torch.int32),
         )
+        o_tensor = o_tensor[:, :, :real_head_num, :]
         return o_tensor[:, 0, :, :]  # [b, 1, h, d] -> [b, h, d]

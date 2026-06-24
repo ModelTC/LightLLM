@@ -36,13 +36,15 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
         return self.layer_num * (self.flashmla_bytes_per_token + self.indexer_bytes_per_token)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
+        page_block_size = 64
+        token_num = ((size + 1 + page_block_size - 1) // page_block_size) * page_block_size
         self.kv_buffer = torch.empty(
-            (layer_num, size + 1, head_num, self.flashmla_bytes_per_token),
+            (layer_num, token_num, head_num, self.flashmla_bytes_per_token),
             dtype=dtype,
             device="cuda",
         )
         self.indexer_k_buffer = torch.empty(
-            (layer_num, size + 1, head_num, self.indexer_bytes_per_token),
+            (layer_num, token_num, head_num, self.indexer_bytes_per_token),
             dtype=dtype,
             device="cuda",
         )
