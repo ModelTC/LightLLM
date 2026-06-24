@@ -356,7 +356,8 @@ class HttpServerManager:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
-            if await self.rl_controller.wait_until_generation_allowed(group_request_id):
+            should_abort = await self.rl_controller.wait_if_generation_paused(group_request_id)
+            if should_abort:
                 for output in self._build_aborted_generation_outputs(group_request_id, sampling_params):
                     yield output
                 return
