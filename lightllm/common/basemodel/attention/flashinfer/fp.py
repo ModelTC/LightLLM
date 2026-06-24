@@ -6,49 +6,6 @@ from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
 
 
-def _fast_plan_tensor_core_decode(
-    decode_wrapper,
-    num_qo_heads,
-    num_kv_heads,
-    head_dim,
-    page_size,
-    indptr_host,
-    kv_lens_arr_host,
-    max_kv_len,
-):
-    batch_size = len(kv_lens_arr_host)
-    qo_indptr_host = getattr(decode_wrapper, "_qo_indptr_host", None)
-    if qo_indptr_host is None or len(qo_indptr_host) != batch_size + 1:
-        from flashinfer.decode import _get_range_buf
-
-        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-        decode_wrapper._qo_indptr_host = qo_indptr_host
-
-    decode_wrapper._max_kv_len = max_kv_len
-
-    args = [
-        decode_wrapper._float_workspace_buffer,
-        decode_wrapper._int_workspace_buffer,
-        decode_wrapper._pin_memory_int_workspace_buffer,
-        qo_indptr_host,
-        indptr_host,
-        kv_lens_arr_host,
-        batch_size,
-        batch_size,
-        num_qo_heads,
-        num_kv_heads,
-        page_size,
-        decode_wrapper.is_cuda_graph_enabled,
-        head_dim,
-        head_dim,
-        False,
-        -1,
-    ]
-    if decode_wrapper._backend == "fa2":
-        args.extend([-1, False, 0])
-    decode_wrapper._plan_info = decode_wrapper._cached_module.plan(*args)
-
-
 class FlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
@@ -172,7 +129,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
     kv_starts_host: torch.Tensor = None
-    kv_seq_lens_host: torch.Tensor = None
     decode_wrapper: object = None
 
     def init_state(self):
@@ -204,7 +160,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         )
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
         if self.infer_state.b_seq_len_cpu is not None:
-            self.kv_seq_lens_host = self.infer_state.b_seq_len_cpu
             self.kv_starts_host = self.backend.kv_starts_host_buffer[self.infer_state.microbatch_index][
                 : self.infer_state.batch_size + 1
             ]
@@ -240,25 +195,23 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
-        if new_state.kv_seq_lens_host is not None:
-            # FlashInfer tensor-core decode updates its split-kv plan at 128-token
-            # boundaries for this path. page_size is 1 here, so pages == tokens.
-            skip_plan_key = tuple((seq_len + 127) // 128 for seq_len in new_state.kv_seq_lens_host.tolist())
-            if getattr(self.decode_wrapper, "_skip_plan_key", None) == skip_plan_key:
-                return
+        from flashinfer.decode import fast_decode_plan
 
-        _fast_plan_tensor_core_decode(
+        fast_decode_plan(
             self.decode_wrapper,
-            new_state.backend.tp_q_head_num,
-            new_state.backend.tp_kv_head_num,
-            new_state.backend.head_dim,
-            1,
-            new_state.kv_starts_host,
-            new_state.kv_seq_lens_host,
-            new_state.infer_state.max_kv_seq_len,
+            indptr=new_state.kv_starts,
+            indices=new_state.kv_indices,
+            last_page_len=new_state.kv_last_page_len_buffer,
+            num_qo_heads=new_state.backend.tp_q_head_num,
+            num_kv_heads=new_state.backend.tp_kv_head_num,
+            head_dim=new_state.backend.head_dim,
+            page_size=1,
+            q_data_type=new_state.backend.q_data_type,
+            kv_data_type=new_state.backend.kv_data_type,
+            non_blocking=True,
+            global_override_indptr_cpu=new_state.kv_starts_host,
         )
-        if new_state.kv_seq_lens_host is not None:
-            self.decode_wrapper._skip_plan_key = skip_plan_key
+        self.decode_wrapper._max_kv_len = new_state.infer_state.max_kv_seq_len
 
     def decode_att(
         self,
