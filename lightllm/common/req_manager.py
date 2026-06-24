@@ -422,6 +422,7 @@ class DeepseekV4ReqManager(ReqManager):
         self.indexer_head_dim = indexer_head_dim
         self.layer_to_c4_idx = {}
         self.layer_to_c128_idx = {}
+        self.mem_manager = mem_manager
         c4 = c128 = 0
         for lid, r in enumerate(self.compress_rates):
             if r == 4:
@@ -457,7 +458,7 @@ class DeepseekV4ReqManager(ReqManager):
         本 chunk 起点 L = ready_cache_len，首个新 token(位置 L)的窗口是 [L-W+1, L]；回收
         边界再额外保留一个 radix 页(_swa_retain_len)，即位置 < L-retain+1。先回收再分配。
         必须在 init_req_to_token_indexes 之后调用(位置对齐分配经 req_to_token 行派生/scatter)。"""
-        assert self.mem_manager is not None
+        self.mem_manager: DeepseekV4MemoryManager
         if self.sliding_window is not None:
             retain = self._swa_retain_len()
             evict_slots = []
@@ -575,6 +576,15 @@ class DeepseekV4ReqManager(ReqManager):
             return self.mem_manager.full_to_c128_indexs, self.mem_manager.alloc_c128
         raise AssertionError(f"invalid DeepSeek-V4 compress ratio {ratio}")
 
+    def _c4_group_end_full_slots(self, req_rows, entries: torch.Tensor) -> torch.Tensor:
+        """组末 token 的 full 槽位 id (token 位置 = entry*4+3)；req_rows 可为标量 req_idx 或行张量。"""
+        return self.req_to_token_indexs[req_rows, entries * 4 + 3].long()
+
+    def _register_c4_slots(self, full_slots: torch.Tensor, slots: torch.Tensor) -> None:
+        """写入 full->c4 槽映射并按页累加存活计数。"""
+        self.mem_manager.full_to_c4_indexs[full_slots] = slots
+        self.mem_manager.count_c4_slots(slots, 1)
+
     def _scatter_c4_prefill_slots_slow(self, req_idx: int, first: int, last: int) -> None:
         """Idempotence fallback for overlapped/repeated c4 prep."""
         page = DSV4_C4_PAGE_SIZE
@@ -583,7 +593,7 @@ class DeepseekV4ReqManager(ReqManager):
             e0 = max(first, page_base)
             e1 = min(last, page_base + page)
             entries = torch.arange(e0, e1, dtype=torch.long, device="cuda")
-            full_slots = self.req_to_token_indexs[req_idx, entries * 4 + 3].long()
+            full_slots = self._c4_group_end_full_slots(req_idx, entries)
             existing = mapping[full_slots]
             missing = existing < 0
             if not bool(missing.any()):
@@ -604,8 +614,7 @@ class DeepseekV4ReqManager(ReqManager):
             slots = (base + entries % page).to(torch.int32)
             if mapped.numel() > 0:
                 assert bool((existing[existing >= 0] == slots[existing >= 0]).all())
-            mapping[full_slots[missing]] = slots[missing]
-            self.mem_manager.count_c4_slots(slots[missing], 1)
+            self._register_c4_slots(full_slots[missing], slots[missing])
         return
 
     def _scatter_c4_prefill_slots(self, req_idx: int, first: int, last: int) -> None:
@@ -616,51 +625,132 @@ class DeepseekV4ReqManager(ReqManager):
         """
         if last <= first:
             return
-        page = DSV4_C4_PAGE_SIZE
         mapping = self.mem_manager.full_to_c4_indexs
-        entries = torch.arange(first, last, dtype=torch.long, device="cuda")
-        full_slots = self.req_to_token_indexs[req_idx, entries * 4 + 3].long()
+        full_slots = self._c4_group_end_full_slots(req_idx, torch.arange(first, last, device="cuda"))
         need = mapping[full_slots] < 0
         if not bool(need.any()):
             return
         if not bool(need.all()):
             self._scatter_c4_prefill_slots_slow(req_idx, first, last)
             return
-
-        first_page = first // page
-        last_page = (last - 1) // page
-        n_pages = last_page - first_page + 1
-        bases = torch.empty((n_pages,), dtype=torch.long, device="cuda")
-
-        base_start = 0
-        if first % page != 0:
-            prev_full = self.req_to_token_indexs[req_idx, first * 4 - 1].long()
-            prev_slot = int(mapping[prev_full].item())
-            assert prev_slot >= 0 and prev_slot % page == (first - 1) % page
-            bases[0] = prev_slot - ((first - 1) % page)
-            base_start = 1
-
-        new_page_count = n_pages - base_start
-        if new_page_count > 0:
-            new_pages = self.mem_manager.alloc_c4_pages(new_page_count).cuda(non_blocking=True).long()
-            bases[base_start:] = new_pages * page
-
-        page_local = torch.div(entries, page, rounding_mode="floor") - first_page
-        slots = (bases[page_local] + entries % page).to(torch.int32)
-        mapping[full_slots] = slots
-        self.mem_manager.count_c4_slots(slots, 1)
+        self._scatter_c4_prefill_slots_fresh(req_idx, first, last)
         return
 
-    def _scatter_c4_decode_slots(
-        self,
-        b_req_idx_cpu: torch.Tensor,
-        b_seq_len_cpu: torch.Tensor,
-        mem_indexes: torch.Tensor,
-    ) -> None:
+    def _scatter_c4_prefill_slots_fresh(self, req_idx: int, first: int, last: int) -> None:
+        """Sync-free fast path for entries [first, last) the caller already knows are all fresh:
+        page-safe alloc with the continuation base read on-GPU. KvCacheAllocator.alloc is CPU-side
+        (watermark + pinned buffer, no D2H), so this has no syncs."""
         page = DSV4_C4_PAGE_SIZE
         mapping = self.mem_manager.full_to_c4_indexs
-        req_list = b_req_idx_cpu.tolist()
-        seq_list = b_seq_len_cpu.tolist()
+        entries = torch.arange(first, last, dtype=torch.long, device="cuda")
+        full_slots = self._c4_group_end_full_slots(req_idx, entries)
+        first_page = first // page
+        n_pages = (last - 1) // page - first_page + 1
+        bases = torch.empty((n_pages,), dtype=torch.long, device="cuda")
+        base_start = 0
+        if first % page != 0:  # chunk starts mid-page -> continue the prev chunk's physical page
+            prev_full = self.req_to_token_indexs[req_idx, first * 4 - 1].long()
+            bases[0] = mapping[prev_full].long() - ((first - 1) % page)
+            base_start = 1
+        if n_pages - base_start > 0:
+            bases[base_start:] = (
+                self.mem_manager.alloc_c4_pages(n_pages - base_start).cuda(non_blocking=True).long() * page
+            )
+        page_local = torch.div(entries, page, rounding_mode="floor") - first_page
+        slots = (bases[page_local] + entries % page).to(torch.int32)
+        self._register_c4_slots(full_slots, slots)
+        return
+
+    def _scatter_c4_prefill_slots_batched(self, req_list, ready_list, seq_list) -> None:
+        """Whole-batch c4 prefill scatter in O(1) GPU ops (independent of request count). The per-req
+        loop cost O(N) launches + 2-3 D2H syncs each; here every request's group-end entries are
+        flattened (ragged) and processed in one gather / idempotency-check / page-alloc / scatter /
+        count. Falls back to the per-req idempotent path on partial/re-run; preserves the page
+        invariant (logical entry e -> physical_page*64 + e%64, same logical page shares a physical
+        page). KvCacheAllocator.alloc is CPU-side so one batched alloc has no D2H."""
+        page = DSV4_C4_PAGE_SIZE
+        mapping = self.mem_manager.full_to_c4_indexs
+        device = mapping.device
+
+        # host plan (cheap int arithmetic, no GPU). dup req in one call would break vectorized
+        # continuation ordering -> fall back to the safe per-req path.
+        plan, seen, duplicate_req = [], set(), False
+        for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
+            req_idx = int(req_idx)
+            if req_idx == self.HOLD_REQUEST_ID:
+                continue
+            first, last = int(ready_len) // 4, int(seq_len) // 4
+            if last <= first:
+                continue
+            duplicate_req |= req_idx in seen
+            seen.add(req_idx)
+            plan.append((req_idx, first, last))
+        if not plan:
+            return
+        if duplicate_req:
+            for req_idx, first, last in plan:
+                self._scatter_c4_prefill_slots(req_idx, first, last)
+            return
+
+        def to_cuda_long(key, data):
+            return g_pin_mem_manager.gen_from_list(key=key, data=data, dtype=torch.int64).to(device, non_blocking=True)
+
+        reqs, firsts, lasts = zip(*plan)
+        counts = [last - first for first, last in zip(firsts, lasts)]
+        first_pages = [first // page for first in firsts]
+        page_counts = [((last - 1) // page) - fp + 1 for last, fp in zip(lasts, first_pages)]
+        page_offsets, total_pages = [], 0
+        for n_pages in page_counts:
+            page_offsets.append(total_pages)
+            total_pages += n_pages
+        total_entries = sum(counts)
+
+        # one pinned H2D copy for all per-request metadata (5 cols), then per-entry ragged expansion
+        meta = to_cuda_long(
+            "dsv4_c4_prefill_meta",
+            [x for row in zip(reqs, firsts, first_pages, counts, page_offsets) for x in row],
+        ).view(-1, 5)
+        reqs_t, firsts_t, first_pages_t, counts_t, page_offsets_t = meta.unbind(1)
+        seg = torch.repeat_interleave(torch.arange(len(plan), device=device), counts_t, output_size=total_entries)
+        seg_starts = counts_t.cumsum(0) - counts_t
+        entries = firsts_t[seg] + torch.arange(total_entries, device=device) - seg_starts[seg]
+        full_slots = self._c4_group_end_full_slots(reqs_t[seg], entries)
+
+        if not bool((mapping[full_slots] < 0).all()):  # the single batched idempotency sync
+            for req_idx, first, last in plan:
+                self._scatter_c4_prefill_slots(req_idx, first, last)
+            return
+
+        # physical base per logical page: fresh pages from one alloc; mid-page continuations read prev
+        cont = [(off, req, first) for off, req, first in zip(page_offsets, reqs, firsts) if first % page != 0]
+        if not cont:
+            page_bases = self.mem_manager.alloc_c4_pages(total_pages).to(device, non_blocking=True).long() * page
+        else:
+            page_bases = torch.empty(total_pages, dtype=torch.long, device=device)
+            new_pos = [
+                pos
+                for off, n_pages, first in zip(page_offsets, page_counts, firsts)
+                for pos in range(off + int(first % page != 0), off + n_pages)
+            ]
+            if new_pos:
+                new_pos_t = to_cuda_long("dsv4_c4_prefill_new_pos", new_pos)
+                page_bases[new_pos_t] = (
+                    self.mem_manager.alloc_c4_pages(len(new_pos)).to(device, non_blocking=True).long() * page
+                )
+            cont_t = to_cuda_long("dsv4_c4_prefill_cont", [x for row in cont for x in row]).view(-1, 3)
+            prev_slot = mapping[self.req_to_token_indexs[cont_t[:, 1], cont_t[:, 2] * 4 - 1].long()].long()
+            cont_off = (cont_t[:, 2] - 1) % page
+            assert bool((prev_slot >= 0).all()) and bool(((prev_slot % page) == cont_off).all())
+            page_bases[cont_t[:, 0]] = prev_slot - cont_off
+
+        page_idx = page_offsets_t[seg] + torch.div(entries, page, rounding_mode="floor") - first_pages_t[seg]
+        slots = (page_bases[page_idx] + entries % page).to(torch.int32)
+        self._register_c4_slots(full_slots, slots)
+        return
+
+    def _scatter_c4_decode_slots(self, req_list, seq_list, mem_indexes: torch.Tensor) -> None:
+        page = DSV4_C4_PAGE_SIZE
+        mapping = self.mem_manager.full_to_c4_indexs
         mem_indexes = mem_indexes.cuda().long().reshape(-1)
 
         cont_rows, cont_prev_pos, cont_offsets = [], [], []
@@ -686,15 +776,11 @@ class DeepseekV4ReqManager(ReqManager):
             offsets = torch.tensor(cont_offsets, dtype=torch.int32, device="cuda")
             assert bool((prev_slots >= 0).all())
             assert bool(((prev_slots % page) == (offsets - 1)).all())
-            slots = (prev_slots + 1).to(torch.int32)
-            mapping[mem_indexes[cont_rows]] = slots
-            self.mem_manager.count_c4_slots(slots, 1)
+            self._register_c4_slots(mem_indexes[cont_rows], (prev_slots + 1).to(torch.int32))
 
         if new_rows:
             pages = self.mem_manager.alloc_c4_pages(len(new_rows)).cuda(non_blocking=True).long()
-            slots = (pages * page).to(torch.int32)
-            mapping[mem_indexes[new_rows]] = slots
-            self.mem_manager.count_c4_slots(slots, 1)
+            self._register_c4_slots(mem_indexes[new_rows], (pages * page).to(torch.int32))
         return
 
     def _scatter_compress_slots(self, ratio: int, full_slots: torch.Tensor) -> None:
@@ -729,11 +815,7 @@ class DeepseekV4ReqManager(ReqManager):
         ready_list = b_ready_cache_len_cpu.tolist()
         seq_list = b_seq_len_cpu.tolist()
         if self.n_c4 > 0:
-            for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
-                req_idx = int(req_idx)
-                if req_idx == self.HOLD_REQUEST_ID:
-                    continue
-                self._scatter_c4_prefill_slots(req_idx, int(ready_len) // 4, int(seq_len) // 4)
+            self._scatter_c4_prefill_slots_batched(req_list, ready_list, seq_list)
 
         if self.n_c128 > 0:
             ratio = 128
@@ -764,7 +846,7 @@ class DeepseekV4ReqManager(ReqManager):
         req_list = b_req_idx_cpu.tolist()
         seq_list = b_seq_len_cpu.tolist()
         if self.n_c4 > 0:
-            self._scatter_c4_decode_slots(b_req_idx_cpu, b_seq_len_cpu, mem_indexes)
+            self._scatter_c4_decode_slots(req_list, seq_list, mem_indexes)
 
         if self.n_c128 > 0:
             ratio = 128
