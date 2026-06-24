@@ -25,8 +25,9 @@ import requests
 import base64
 import os
 from io import BytesIO
-import pickle
+import pickle  # kept for non-network uses; WebSocket paths use safe_pickle
 import setproctitle
+from lightllm.utils.safe_pickle import safe_loads as _safe_pickle_loads
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
@@ -425,7 +426,7 @@ async def register_and_keep_alive(websocket: WebSocket):
         while True:
             # 等待接收消息，设置超时为10秒
             data = await websocket.receive_bytes()
-            obj = pickle.loads(data)
+            obj = _safe_pickle_loads(data)  # CVE-2026-26220: restricted unpickling
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except (WebSocketDisconnect, Exception, RuntimeError) as e:
@@ -446,7 +447,7 @@ async def kv_move_status(websocket: WebSocket):
         while True:
             # 等待接收消息，设置超时为10秒
             data = await websocket.receive_bytes()
-            upkv_status = pickle.loads(data)
+            upkv_status = _safe_pickle_loads(data)  # CVE-2026-26220: restricted unpickling
             logger.info(f"received upkv_status {upkv_status} from {(client_ip, client_port)}")
             await g_objs.httpserver_manager.update_req_status(upkv_status)
     except (WebSocketDisconnect, Exception, RuntimeError) as e:

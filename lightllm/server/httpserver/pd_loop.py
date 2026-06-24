@@ -1,6 +1,7 @@
 import asyncio
-import pickle
+import pickle  # kept for outbound pickle.dumps; inbound paths use safe_pickle
 import websockets
+from lightllm.utils.safe_pickle import safe_loads as _safe_pickle_loads
 import ujson as json
 import socket
 import httpx
@@ -111,7 +112,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
                 while True:
                     recv_bytes = await websocket.recv()
-                    obj = pickle.loads(recv_bytes)
+                    obj = _safe_pickle_loads(recv_bytes)  # CVE-2026-26220: restricted unpickling
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
                         group_req_id = sampling_params.group_request_id
@@ -191,7 +192,7 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
             response = await client.get(uri)
             if response.status_code == 200:
                 base64data = response.json()["data"]
-                id_to_pd_master_obj = pickle.loads(base64.b64decode(base64data))
+                id_to_pd_master_obj = _safe_pickle_loads(base64.b64decode(base64data))  # CVE-2026-26220: restricted unpickling
                 return id_to_pd_master_obj
             else:
                 logger.error(f"get pd_master_objs error {response.status_code}")
