@@ -1593,8 +1593,10 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
         try:
             # Try to find complete invoke blocks first
-            complete_invoke_match = self.invoke_regex.search(current_text)
-            if complete_invoke_match:
+            while True:
+                complete_invoke_match = self.invoke_regex.search(current_text)
+                if not complete_invoke_match:
+                    break
                 func_name = complete_invoke_match.group(1)
                 invoke_body = complete_invoke_match.group(2)
 
@@ -1658,8 +1660,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
                 self.current_tool_name_sent = False
                 self._accumulated_params = []
                 self.streamed_args_for_tool.append("")
-
-                return StreamingParseResult(normal_text="", calls=calls)
+                current_text = self._buffer
 
             # Partial invoke: name is known but parameters are still streaming
             partial_match = self.partial_invoke_regex.search(current_text)
