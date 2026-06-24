@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Dict, List
 from fastapi.responses import JSONResponse
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.access_log import _AccessLogMiddleware
 from lightllm.server.visualserver.objs import VIT_Obj
 from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
@@ -18,6 +19,7 @@ from lightllm.utils.process_check import start_parent_check_thread
 
 logger = init_logger(__name__)
 app = FastAPI()
+app.add_middleware(_AccessLogMiddleware, logger=logger)
 
 registered_pd_master_objs: Dict[str, PD_Master_Obj] = {}
 registered_visual_server_objs: Dict[str, VIT_Obj] = {}

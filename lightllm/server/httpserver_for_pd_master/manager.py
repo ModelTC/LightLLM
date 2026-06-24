@@ -19,6 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
+from lightllm.server.httpserver.prompt_utils import validate_prompt_text_length
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
 from .pd_selector import create_selector
@@ -73,6 +74,7 @@ class HttpServerManagerForPDMaster:
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
+        validate_prompt_text_length(prompt, self.max_req_total_len)
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
         img_count = 0
@@ -197,7 +199,7 @@ class HttpServerManagerForPDMaster:
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
+        logger.debug(
             f"received req X-Request-Id:{x_request_id} "
             f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
             f"lightllm_req_id:{group_request_id} "

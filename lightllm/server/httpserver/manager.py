@@ -22,6 +22,7 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .prompt_utils import validate_prompt_text_length
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -252,6 +253,7 @@ class HttpServerManager:
 
     def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
+        validate_prompt_text_length(prompt, self.max_req_total_len)
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
         img_count = 0
@@ -317,6 +319,8 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        group_request_id = None
+        validate_prompt_text_length(prompt, self.max_req_total_len)
 
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
@@ -467,6 +471,12 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
+        except ValueError as e:
+            logger.warning(f"group_request_id: {group_request_id} request invalid: {str(e)}")
+            if group_request_id not in self.req_id_to_out_inf:
+                await self._release_multimodal_resources(multimodal_params)
+            await self.abort(group_request_id)
+            raise e
         except (ClientDisconnected, Exception) as e:
             logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
 
@@ -506,7 +516,7 @@ class HttpServerManager:
         x_session_id = request_headers.get("X-Session-Id", "")
 
         format_in_time = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
+        logger.debug(
             f"received req X-Request-Id:{x_request_id} "
             f"X-Session-Id:{x_session_id} start_time:{format_in_time} "
             f"lightllm_req_id:{group_request_id} "
@@ -517,15 +527,7 @@ class HttpServerManager:
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
-            # pre-verify prompt length
-            # The average character length per token is always less than 8
-            # TODO: automatically calculate the average character length per token
-            max_prompt_chars = self.max_req_total_len * 8
-            if len(prompt) > max_prompt_chars:
-                raise ValueError(
-                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
-                    f"the request is rejected before tokenization."
-                )
+            validate_prompt_text_length(prompt, self.max_req_total_len)
             if self.enable_multimodal:
                 assert (
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
@@ -744,7 +746,7 @@ class HttpServerManager:
                             (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
+                        logger.debug(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
@@ -856,8 +858,8 @@ class HttpServerManager:
                     if req_status is None:
                         continue
 
-                    logger.info(
-                        f"left req id {req_status.group_req_objs.group_req_id}"
+                    logger.debug(
+                        f"left req id {req_status.group_req_objs.group_req_id} "
                         f"can release {req_status.group_req_objs.shm_req_objs[0].can_released_mark} "
                         f"refcount {req_status.group_req_objs.shm_req_objs[0].ref_count}"
                     )
