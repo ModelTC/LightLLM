@@ -175,6 +175,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         choices=[
             "deepseek-r1",
             "deepseek-v3",
+            "deepseek-v4",
             "glm45",
             "gpt-oss",
             "kimi",

@@ -255,13 +255,16 @@ class DeepSeekV4Tokenizer:
         if thinking is None:
             thinking = bool(enable_thinking) if enable_thinking is not None else False
         thinking_mode = "thinking" if thinking else "chat"
+        effort = kwargs.get("reasoning_effort")
+        if effort not in ("max", "high", None):
+            effort = None
         encoding = self._get_encoding_module()
         prompt = encoding.encode_messages(
             msgs,
             thinking_mode=thinking_mode,
             drop_thinking=kwargs.get("drop_thinking", True),
             add_default_bos_token=kwargs.get("add_default_bos_token", True),
-            reasoning_effort=kwargs.get("reasoning_effort"),
+            reasoning_effort=effort,
         )
 
         if tokenize:

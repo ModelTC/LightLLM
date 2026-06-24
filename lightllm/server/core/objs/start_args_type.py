@@ -42,6 +42,7 @@ class StartArgs:
             "choices": [
                 "deepseek-r1",
                 "deepseek-v3",
+                "deepseek-v4",
                 "glm45",
                 "gpt-oss",
                 "kimi",

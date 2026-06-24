@@ -1698,9 +1698,10 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     if param_matches and len(param_matches) > len(self._accumulated_params):
                         self._accumulated_params = param_matches
                         current_args_json = self._dsml_params_to_json(param_matches)
+                        open_args_json = current_args_json[:-1]  # drop trailing '}'
 
                         sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                        argument_diff = current_args_json[sent:]
+                        argument_diff = open_args_json[sent:]
 
                         if argument_diff:
                             calls.append(

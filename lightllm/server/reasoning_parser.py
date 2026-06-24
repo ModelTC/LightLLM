@@ -903,6 +903,7 @@ class ReasoningParser:
     DetectorMap: Dict[str, Type[BaseReasoningFormatDetector]] = {
         "deepseek-r1": DeepSeekR1Detector,
         "deepseek-v3": Qwen3Detector,
+        "deepseek-v4": Qwen3Detector,
         "glm45": Qwen3Detector,
         "gpt-oss": GptOssDetector,
         "kimi": KimiDetector,

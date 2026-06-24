@@ -151,6 +151,8 @@ async def build_prompt(request, tools) -> str:
     if request.chat_template_kwargs:
         kwargs.update(request.chat_template_kwargs)
 
+    if request.reasoning_effort is not None and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = request.reasoning_effort
     # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
     # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
     from .api_openai import _is_force_thinking_mode
