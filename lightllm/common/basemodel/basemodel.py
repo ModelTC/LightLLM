@@ -659,16 +659,19 @@ class TpPartBaseModel:
         dist_group_manager.clear_deepep_buffer()
         return model_output
 
+    def _token_forward_layers(self, input_embs: torch.Tensor, infer_state: InferStateInfo):
+        for i in range(self.layers_num):
+            layer = self.layers_infer[i]
+            input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
+        return input_embs
+
     @final
     def _token_forward(self, infer_state: InferStateInfo):
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
-
-        for i in range(self.layers_num):
-            layer = self.layers_infer[i]
-            input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
+        input_embs = self._token_forward_layers(input_embs, infer_state)
 
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(

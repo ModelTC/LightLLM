@@ -2,7 +2,7 @@ import torch
 from typing import Optional, Dict
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id, get_current_rank_in_dp, get_dp_world_size
-from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import add_rmsnorm_forward, rmsnorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_forward
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_fused_forward
 from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
@@ -70,6 +70,21 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         return self._forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
+    def add_rmsnorm(
+        self,
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        assert (
+            input.ndim in [2, 3] and residual.ndim in [2, 3] and self.weight.ndim == 1
+        ), f"input.ndim: {input.ndim}, residual.ndim: {residual.ndim}, weight.ndim: {self.weight.ndim}"
+        if out is None:
+            out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
+        return add_rmsnorm_forward(x=input, residual=residual, weight=self.weight, eps=eps, out=out)
 
 
 class GatedRMSNormWeight(RMSNormWeight):
