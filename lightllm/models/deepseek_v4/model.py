@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import json
 import os
 
 import torch
@@ -232,6 +233,20 @@ class DeepSeekV4Tokenizer:
             raise ValueError("Either 'conversation' or 'messages' must be provided")
 
         msgs = copy.deepcopy(msgs)
+
+        # The model's DSML encoder (encode_arguments_to_dsml in encoding_dsv4.py) expects
+        # function.arguments as a JSON string and parses it internally. Upstream,
+        # build_prompt._normalize_tool_call_arguments converts arguments from the OpenAI
+        # JSON string to a dict (needed by Qwen3.x-style Jinja templates). A dict hits the
+        # encoder's except-branch and gets wrapped under a single name="arguments" param,
+        # which the model then imitates and amplifies across turns until required fields go
+        # missing. Re-serialize dicts back to JSON strings so the encoder emits one
+        # <parameter> per real arg.
+        for msg in msgs:
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function")
+                if isinstance(fn, dict) and isinstance(fn.get("arguments"), dict):
+                    fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
 
         if tools:
             wrapped_tools = []
