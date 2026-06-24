@@ -38,7 +38,8 @@ class InferenceContext:
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
-    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
+    cpu_kv_cache_load_stream: torch.cuda.Stream = None  # 用于将 kv cache 从 cpu 加载到 gpu 的 stream
+    cpu_kv_cache_offload_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_linear_att_mixed_model: bool = False  # 标记模型是否是full att 混合 linear att 的混合模型。
 
     def register(
@@ -76,10 +77,15 @@ class InferenceContext:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
 
-    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
-        if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
-        return self.cpu_kv_cache_stream
+    def get_cpu_kv_cache_offload_stream(self) -> torch.cuda.Stream:
+        if self.cpu_kv_cache_offload_stream is None:
+            self.cpu_kv_cache_offload_stream = torch.cuda.Stream()
+        return self.cpu_kv_cache_offload_stream
+
+    def get_cpu_kv_cache_load_stream(self) -> torch.cuda.Stream:
+        if self.cpu_kv_cache_load_stream is None:
+            self.cpu_kv_cache_load_stream = torch.cuda.Stream()
+        return self.cpu_kv_cache_load_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []
@@ -549,7 +555,14 @@ class InferReq:
 
         # 在开启 enable_cpu_cache 的情况下，当请求结束后，会将请求的 kv cache
         # 卸载到 cpu cache 中，该标志变量用于标记请求的卸载任务的状态
-        self.cpu_cache_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+        if self.args.enable_cpu_cache:
+            self.cpu_cache_load_task_status: "InferReq._CpuCacheTaskStatus" = InferReq._CpuCacheTaskStatus.NOT_STARTED
+            self.cpu_cache_offload_task_status: "InferReq._CpuCacheTaskStatus" = (
+                InferReq._CpuCacheTaskStatus.NOT_STARTED
+            )
+        else:
+            self.cpu_cache_load_task_status = None
+            self.cpu_cache_offload_task_status = None
 
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
