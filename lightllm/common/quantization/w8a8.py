@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn.functional as F
 from typing import Optional, List, Union, Tuple
-from .quantize_method import QuantizationMethod
+from .quantize_method import QuantizationMethod, WeightPack
 from .registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
@@ -11,9 +11,16 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
+from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 
+# fp8 GEMM backend: LIGHTLLM_FP8_GEMM = auto | cutlass | sgl | triton (auto: cutlass > sgl > triton).
+_HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
+_FP8_GEMM_BACKEND = os.getenv("LIGHTLLM_FP8_GEMM", "auto").lower()
+if _FP8_GEMM_BACKEND in ("cutlass", "sgl", "triton"):
+    _FP8_BACKEND = _FP8_GEMM_BACKEND
+else:  # auto: Cutlass > sgl_kernel > triton, by availability
+    _FP8_BACKEND = "cutlass" if HAS_VLLM else ("sgl" if _HAS_SGL_FP8 else "triton")
 
-from .quantize_method import WeightPack
 
 if HAS_VLLM:
     scaled_fp8_quant = vllm_ops.scaled_fp8_quant
@@ -293,12 +300,25 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         x_q = alloc_func((m, k), dtype=torch.float8_e4m3fn, device=input_tensor.device)
         x_scale = alloc_func((m, 1), dtype=torch.float32, device=input_tensor.device)
         lightllm_per_token_group_quant_fp8(input_tensor, k, x_q, x_scale)
+        assert bias is None, "Bias addition is not supported in triton-fp8w8a8-pertensor for now"
+        if _FP8_BACKEND == "cutlass":
+            cu_out = vllm_ops.cutlass_scaled_mm(
+                x_q, qweight, x_scale, weight_scale.reshape(1, 1).to(torch.float32), input_tensor.dtype
+            )
+            return out.copy_(cu_out) if out is not None else cu_out
+        if _FP8_BACKEND == "sgl":
+            # sgl needs a per-channel weight scale [N]; expand the per-tensor scalar once, cache it.
+            b_scale = getattr(weight_pack, "_fp8_sgl_bscale", None)
+            if b_scale is None or b_scale.numel() != n:
+                b_scale = weight_scale.reshape(1).to(torch.float32).expand(n).contiguous()
+                weight_pack._fp8_sgl_bscale = b_scale
+            sgl_out = sgl_ops.fp8_scaled_mm(x_q, qweight, x_scale, b_scale, input_tensor.dtype)
+            return out.copy_(sgl_out) if out is not None else sgl_out
         if out is None:
             if use_custom_tensor_mananger:
                 out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        assert bias is None, "Bias addition is not supported in triton-fp8w8a8-pertensor for now"
         return fp8_scaled_mm_per_token(
             x_q,
             qweight,
