@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import torch
 import triton
 import triton.language as tl
@@ -26,6 +27,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
 from .moe_silu_and_mul import silu_and_mul_fwd
+from .moe_silu_and_mul_group_quant import silu_and_mul_group_quant_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
@@ -34,6 +36,11 @@ from lightllm.common.triton_utils.autotuner import autotune
 FFN_MOE_CHUNK_SIZE = 32 * 1024
 
 logger = init_logger(__name__)
+
+# Fuse the down-projection's per-token-group fp8 quant into the silu_and_mul that produces its
+# input (eliminates a separate per_token_group_quant launch per MoE layer). Numerically matches
+# the unfused path; gate exists for A/B and rollback.
+_ENABLE_FUSED_SILU_QUANT = os.environ.get("LIGHTLLM_FUSED_SILU_QUANT", "1") == "1"
 
 
 @triton.jit
@@ -860,8 +867,12 @@ def grouped_matmul(
         assert BLOCK_SIZE_K == triton.next_power_of_2(BLOCK_SIZE_K)
 
     if use_fp8_w8a8:
+        if token_inputs.dtype == expert_weights.dtype:
+            # token_inputs were already fp8-quantized by a fused producer (e.g. the fused
+            # silu+mul+group-quant on the down projection); token_input_scale is its scale.
+            assert token_input_scale is not None, "pre-quantized fp8 input requires its scale"
         # 当权重使用 block wise 量化时，激活也使用 per token， group size 量化
-        if block_size_k == 0:
+        elif block_size_k == 0:
             # input 使用 per token 量化
             token_inputs, token_input_scale = vllm_ops.scaled_fp8_quant(
                 token_inputs, token_input_scale, use_per_token_if_dynamic=True
@@ -1082,18 +1093,44 @@ def fused_experts_impl(
             bias=w1_bias,
         )
 
-        silu_and_mul_fwd(
-            intermediate_cache1.view(-1, N),
-            intermediate_cache2.view(-1, N // 2),
-            limit=limit,
-            alpha=alpha,
-            layout=layout,
-        )
+        # Fuse the down-projection's per-token-group fp8 quant into silu_and_mul when the down
+        # weight is block-wise fp8 quantized: the silu output is emitted directly as fp8 + scales,
+        # so grouped_matmul below skips its internal per_token_group_quant launch.
+        use_fused_silu_quant = _ENABLE_FUSED_SILU_QUANT and use_fp8_w8a8 and w2_scale is not None and w2_scale.ndim == 3
+        if use_fused_silu_quant:
+            down_token_num = curr_topk_ids.numel()
+            down_k = N // 2
+            down_group_size = down_k // w2_scale.shape[2]
+            down_inputs = alloc_tensor_func(
+                (down_token_num, down_k), device=hidden_states.device, dtype=torch.float8_e4m3fn
+            )
+            down_input_scale = alloc_tensor_func(
+                (down_token_num, down_k // down_group_size), device=hidden_states.device, dtype=torch.float32
+            )
+            silu_and_mul_group_quant_fwd(
+                intermediate_cache1.view(-1, N),
+                down_inputs,
+                down_input_scale,
+                down_group_size,
+                layout=layout,
+                limit=limit,
+                alpha=alpha,
+            )
+        else:
+            silu_and_mul_fwd(
+                intermediate_cache1.view(-1, N),
+                intermediate_cache2.view(-1, N // 2),
+                limit=limit,
+                alpha=alpha,
+                layout=layout,
+            )
+            down_inputs = intermediate_cache2.view(-1, N // 2)
+            down_input_scale = a2_scale
 
         grouped_matmul(
             curr_topk_ids.numel(),
-            intermediate_cache2.view(-1, N // 2),
-            a2_scale,
+            down_inputs,
+            down_input_scale,
             expert_to_token_num,
             expert_to_tokens,
             expert_to_weights=expert_to_weights,
