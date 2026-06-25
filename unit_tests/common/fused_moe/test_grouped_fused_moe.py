@@ -75,10 +75,7 @@ def test_moe_align1():
     assert torch.equal(experts_info, true_experts_info)
 
 
-def test_moe_align_fused():
-    expert_num = 5
-    topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda")
-    topk_weights = torch.tensor([[0.3, 0.7, 0.1], [0.2, 0.8, 0.4], [0.5, 0.6, 0.9]], dtype=torch.float32, device="cuda")
+def _check_moe_align_fused(topk_ids, topk_weights, expert_num, run_config=None, ordered=True):
     expert_to_token_index = torch.empty((expert_num, topk_ids.numel()), dtype=torch.int32, device="cuda")
     expert_to_weight = torch.empty((expert_num, topk_ids.numel()), dtype=torch.float32, device="cuda")
     expert_token_num = torch.empty((expert_num,), dtype=torch.int32, device="cuda")
@@ -89,22 +86,60 @@ def test_moe_align_fused():
         expert_token_num,
         topk_ids,
         topk_weights,
-        run_config={"BLOCK_SIZE": 1024, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1},
+        run_config=run_config,
     )
     torch.cuda.synchronize()
 
-    true_expert_token_num = torch.tensor([2, 3, 1, 2, 1], device="cuda", dtype=torch.int32)
-    assert torch.equal(expert_token_num, true_expert_token_num)
-
     flat_topk_ids = topk_ids.flatten()
     flat_topk_weights = topk_weights.flatten()
-    for expert_id in range(expert_num):
-        mask = flat_topk_ids == expert_id
-        true_index = torch.nonzero(mask, as_tuple=False).flatten().to(torch.int32)
-        true_weight = flat_topk_weights[mask]
-        token_num = true_expert_token_num[expert_id]
-        assert torch.equal(expert_to_token_index[expert_id, :token_num], true_index)
-        assert torch.allclose(expert_to_weight[expert_id, :token_num], true_weight)
+    expected_token_num = torch.bincount(flat_topk_ids, minlength=expert_num).to(torch.int32)
+    assert torch.equal(expert_token_num, expected_token_num)
+
+    for expert_id, token_num in enumerate(expected_token_num.tolist()):
+        expected_index = torch.nonzero(flat_topk_ids == expert_id, as_tuple=False).flatten()
+        expected_weight = flat_topk_weights[expected_index]
+        expected_index = expected_index.to(torch.int32)
+        token_index = expert_to_token_index[expert_id, :token_num]
+        token_weight = expert_to_weight[expert_id, :token_num]
+
+        if not ordered:
+            order = torch.argsort(token_index)
+            token_index = token_index[order]
+            token_weight = token_weight[order]
+
+        assert torch.equal(token_index, expected_index)
+        assert torch.allclose(token_weight, expected_weight)
+
+
+def test_moe_align_fused_small_token():
+    expert_num = 5
+    small_topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4]], dtype=torch.int32, device="cuda")
+    small_topk_weights = torch.tensor(
+        [[0.3, 0.7, 0.1], [0.2, 0.8, 0.4], [0.5, 0.6, 0.9]], dtype=torch.float32, device="cuda"
+    )
+    _check_moe_align_fused(small_topk_ids, small_topk_weights, expert_num)
+
+    small_many_topk_ids = torch.arange(128 * 17, dtype=torch.int32, device="cuda").reshape(128, 17) % expert_num
+    small_many_topk_weights = torch.arange(small_many_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(
+        128, 17
+    )
+    _check_moe_align_fused(small_many_topk_ids, small_many_topk_weights, expert_num)
+
+
+def test_moe_align_fused_large_token():
+    expert_num = 5
+
+    base_topk_ids = torch.tensor([[0, 1, 2], [0, 3, 1], [3, 1, 4], [2, 0, 4]], dtype=torch.int32, device="cuda")
+    large_topk_ids = base_topk_ids.repeat(33, 1)[:129].contiguous()
+    large_topk_weights = torch.arange(large_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(129, 3)
+    _check_moe_align_fused(large_topk_ids, large_topk_weights, expert_num, ordered=False)
+    _check_moe_align_fused(
+        large_topk_ids,
+        large_topk_weights,
+        expert_num,
+        run_config={"BLOCK_SIZE": 128, "num_warps": 4},
+        ordered=False,
+    )
 
 
 def test_moe_align2():
@@ -116,13 +151,14 @@ def test_moe_align2():
     experts_token_num[3] = 16
 
     mblocks_to_tuple_info = moe_align2(100, experts_token_num, block_m=16)
+    expected_expert_ids = torch.tensor([0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32)
+    valid_blocks = expected_expert_ids != -1
+
     assert mblocks_to_tuple_info.shape[0] == triton.cdiv(100 + 4 * (16 - 1), 16)
-    assert torch.allclose(
-        mblocks_to_tuple_info[:, 0],
-        torch.tensor([0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32),
-    )
-    assert torch.allclose(
-        mblocks_to_tuple_info[:, 1], torch.tensor([0, 0, 1, 2, 3, 0, 0, 0, 0, 0], device="cuda", dtype=torch.int32)
+    assert torch.equal(mblocks_to_tuple_info[:, 0], expected_expert_ids)
+    assert torch.equal(
+        mblocks_to_tuple_info[valid_blocks, 1],
+        torch.tensor([0, 0, 1, 2, 3, 0], device="cuda", dtype=torch.int32),
     )
 
 

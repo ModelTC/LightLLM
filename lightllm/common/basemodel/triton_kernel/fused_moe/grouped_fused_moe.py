@@ -214,22 +214,19 @@ def moe_align1(
 
 
 @triton.jit
-def moe_align_fused_deterministic_kernel(
+def moe_align_fused_small_token_kernel(
     topk_ids_ptr,  # [token_num, topk]
     topk_weights_ptr,  # [token_num, topk]
     expert_to_token_index_ptr,  # [expert_num, token_num * topk]
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
-    expert_num,
     token_num_mul_topk,
     BLOCK_SIZE: tl.constexpr,
-    EXPERT_BLOCK: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
-    expert_block_id = tl.program_id(0)
-    expert_offsets = (expert_block_id * EXPERT_BLOCK + tl.arange(0, EXPERT_BLOCK)) % expert_num
+    expert_id = tl.program_id(0)
     block_offs = tl.arange(0, BLOCK_SIZE)
-    token_count = tl.full((EXPERT_BLOCK,), 0, tl.int32)
+    token_count = tl.full((), 0, tl.int32)
 
     for start in tl.range(0, token_num_mul_topk, BLOCK_SIZE, num_stages=NUM_STAGE):
         raw_offs = start + block_offs
@@ -238,23 +235,22 @@ def moe_align_fused_deterministic_kernel(
         expert_ids = tl.load(topk_ids_ptr + load_offs, mask=valid, other=-1)
         weights = tl.load(topk_weights_ptr + load_offs, mask=valid, other=0.0)
 
-        expert_mask = (expert_ids[None, :] == expert_offsets[:, None]) & valid[None, :]
+        expert_mask = (expert_ids == expert_id) & valid
         expert_hits = tl.where(expert_mask, 1, 0)
-        local_pos = tl.cumsum(expert_hits, axis=1) - 1
-        write_pos = token_count[:, None] + local_pos
+        write_pos = token_count + tl.cumsum(expert_hits, axis=0) - 1
         tl.store(
-            expert_to_token_index_ptr + expert_offsets[:, None] * token_num_mul_topk + write_pos,
-            raw_offs[None, :],
+            expert_to_token_index_ptr + expert_id * token_num_mul_topk + write_pos,
+            raw_offs,
             mask=expert_mask,
         )
         tl.store(
-            expert_to_weight_ptr + expert_offsets[:, None] * token_num_mul_topk + write_pos,
-            weights[None, :],
+            expert_to_weight_ptr + expert_id * token_num_mul_topk + write_pos,
+            weights,
             mask=expert_mask,
         )
-        token_count += tl.sum(expert_hits, axis=1)
+        token_count += tl.sum(expert_hits, axis=0)
 
-    tl.store(expert_token_num_ptr + expert_offsets, token_count)
+    tl.store(expert_token_num_ptr + expert_id, token_count)
 
 
 def _get_moe_align_fused_static_key(
@@ -269,62 +265,149 @@ def _get_moe_align_fused_static_key(
     }
 
 
-def _get_moe_align_fused_configs():
-    return [
+@autotune(
+    kernel_name="moe_align_fused_small:v2",
+    configs_gen_func=lambda: [
         {
             "BLOCK_SIZE": bt,
-            "EXPERT_BLOCK": eb,
             "num_warps": nw,
             "NUM_STAGE": ns,
         }
         for ns in [1, 2, 4, 6]
         for nw in [1, 2, 4, 8]
-        for eb in [1, 4, 8, 16, 32]
-        for bt in [32, 64, 128, 256, 512, 1024, 2048]
-    ]
-
-
-@autotune(
-    kernel_name="moe_align_fused:v3",
-    configs_gen_func=_get_moe_align_fused_configs,
+        for bt in [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+    ],
     static_key_func=_get_moe_align_fused_static_key,
     run_key_func=lambda topk_ids: topk_ids.shape[0],
     mutates_args=["expert_to_token_index", "expert_to_weight", "expert_token_num"],
 )
-def moe_align_fused(
-    expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
+def _moe_align_fused_small_token(
+    expert_to_token_index,
+    expert_to_weight,
+    expert_token_num,
+    topk_ids,
+    topk_weights,
+    run_config: Optional[dict] = None,
 ):
-    token_num, topk_num = topk_ids.shape
-    expert_num = expert_token_num.shape[0]
-    token_num_mul_topk = token_num * topk_num
-
     if run_config is None:
-        if token_num_mul_topk <= 128:
-            run_config = {"BLOCK_SIZE": 128, "EXPERT_BLOCK": 8, "num_warps": 1, "NUM_STAGE": 1}
-        elif token_num_mul_topk <= 256:
-            run_config = {"BLOCK_SIZE": 128, "EXPERT_BLOCK": 8, "num_warps": 4, "NUM_STAGE": 4}
-        elif token_num_mul_topk <= 512:
-            run_config = {"BLOCK_SIZE": 256, "EXPERT_BLOCK": 4, "num_warps": 8, "NUM_STAGE": 1}
-        elif token_num_mul_topk <= 1536:
-            run_config = {"BLOCK_SIZE": 2048, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1}
-        elif token_num_mul_topk <= 3072:
-            run_config = {"BLOCK_SIZE": 1024, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1}
+        token_num = topk_ids.shape[0]
+        if token_num <= 2:
+            run_config = {"BLOCK_SIZE": 16, "num_warps": 1, "NUM_STAGE": 1}
+        elif token_num <= 8:
+            run_config = {"BLOCK_SIZE": 64, "num_warps": 1, "NUM_STAGE": 1}
+        elif token_num <= 16:
+            run_config = {"BLOCK_SIZE": 128, "num_warps": 1, "NUM_STAGE": 1}
+        elif token_num < 32:
+            run_config = {"BLOCK_SIZE": 256, "num_warps": 2, "NUM_STAGE": 1}
+        elif token_num <= 64:
+            run_config = {"BLOCK_SIZE": 512, "num_warps": 4, "NUM_STAGE": 1}
         else:
-            run_config = {"BLOCK_SIZE": 2048, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1}
+            run_config = {"BLOCK_SIZE": 1024, "num_warps": 8, "NUM_STAGE": 1}
+    token_num_mul_topk = topk_ids.numel()
+    expert_num = expert_token_num.shape[0]
+    block_size = run_config["BLOCK_SIZE"]
 
-    moe_align_fused_deterministic_kernel[(triton.cdiv(expert_num, run_config["EXPERT_BLOCK"]),)](
+    moe_align_fused_small_token_kernel[(expert_num,)](
         topk_ids,
         topk_weights,
         expert_to_token_index,
         expert_to_weight,
         expert_token_num,
-        expert_num,
         token_num_mul_topk,
-        BLOCK_SIZE=run_config["BLOCK_SIZE"],
-        EXPERT_BLOCK=run_config["EXPERT_BLOCK"],
+        BLOCK_SIZE=block_size,
         NUM_STAGE=run_config["NUM_STAGE"],
         num_warps=run_config["num_warps"],
     )
+    return expert_to_token_index, expert_to_weight, expert_token_num
+
+
+@triton.jit
+def moe_align_fused_large_atomic_kernel(
+    topk_ids_ptr,  # [token_num, topk]
+    topk_weights_ptr,  # [token_num, topk]
+    expert_to_token_index_ptr,  # [expert_num, token_num * topk]
+    expert_to_weight_ptr,  # [expert_num, token_num * topk]
+    expert_token_num_ptr,  # [expert_num]
+    token_num_mul_topk,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_id = tl.program_id(0)
+    offs = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = offs < token_num_mul_topk
+    expert_ids = tl.load(topk_ids_ptr + offs, mask=valid, other=-1)
+    weights = tl.load(topk_weights_ptr + offs, mask=valid, other=0.0)
+    write_pos = tl.atomic_add(expert_token_num_ptr + expert_ids, 1, mask=valid)
+    tl.store(
+        expert_to_token_index_ptr + expert_ids * token_num_mul_topk + write_pos,
+        offs,
+        mask=valid,
+    )
+    tl.store(
+        expert_to_weight_ptr + expert_ids * token_num_mul_topk + write_pos,
+        weights,
+        mask=valid,
+    )
+
+
+@autotune(
+    kernel_name="moe_align_fused_large:v1",
+    configs_gen_func=lambda: [
+        {
+            "BLOCK_SIZE": bt,
+            "num_warps": nw,
+        }
+        for nw in [1, 2, 4, 8]
+        for bt in [128, 256, 512, 1024, 2048]
+    ],
+    static_key_func=_get_moe_align_fused_static_key,
+    run_key_func=lambda topk_ids: topk_ids.shape[0],
+    mutates_args=["expert_to_token_index", "expert_to_weight", "expert_token_num"],
+)
+def _moe_align_fused_large_token(
+    expert_to_token_index,
+    expert_to_weight,
+    expert_token_num,
+    topk_ids,
+    topk_weights,
+    run_config: Optional[dict] = None,
+):
+    if run_config is None:
+        token_num = topk_ids.shape[0]
+        if token_num <= 128:
+            run_config = {"BLOCK_SIZE": 128, "num_warps": 4}
+        elif token_num <= 8192:
+            run_config = {"BLOCK_SIZE": 128, "num_warps": 8}
+        else:
+            run_config = {"BLOCK_SIZE": 128, "num_warps": 1}
+
+    token_num_mul_topk = topk_ids.numel()
+    block_size = run_config["BLOCK_SIZE"]
+    expert_token_num.zero_()
+    moe_align_fused_large_atomic_kernel[(triton.cdiv(token_num_mul_topk, block_size),)](
+        topk_ids,
+        topk_weights,
+        expert_to_token_index,
+        expert_to_weight,
+        expert_token_num,
+        token_num_mul_topk,
+        BLOCK_SIZE=block_size,
+        num_warps=run_config["num_warps"],
+    )
+    return expert_to_token_index, expert_to_weight, expert_token_num
+
+
+def moe_align_fused(
+    expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config: Optional[dict] = None
+):
+    token_num = topk_ids.shape[0]
+    if token_num <= 128:
+        _moe_align_fused_small_token(
+            expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config
+        )
+    else:
+        _moe_align_fused_large_token(
+            expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights, run_config
+        )
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 
