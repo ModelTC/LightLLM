@@ -205,7 +205,14 @@ class DeepSeekV4Tokenizer:
         if self._encoding_module is not None:
             return self._encoding_module
 
+        # Prefer the encoder shipped inside the model dir (respects any model-specific
+        # customization); fall back to the copy vendored in this repo, because some
+        # DeepSeek-V4 releases (e.g. the FP8 weights) do NOT ship an encoding/ dir.
+        # vLLM/sglang likewise vendor this encoder in-tree instead of depending on the
+        # model directory.
         encoding_path = os.path.join(self.model_dir, "encoding", "encoding_dsv4.py")
+        if not os.path.exists(encoding_path):
+            encoding_path = os.path.join(os.path.dirname(__file__), "encoding", "encoding_dsv4.py")
         if not os.path.exists(encoding_path):
             raise FileNotFoundError(f"DeepSeek-V4 encoding file not found: {encoding_path}")
 
