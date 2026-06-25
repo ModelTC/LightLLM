@@ -7,6 +7,33 @@ from typing import Tuple
 from .env_utils import set_flashinfer_envs
 
 
+def _fast_plan_mla_decode(
+    decode_wrapper,
+    qo_indptr_cpu,
+    kv_indptr_cpu,
+    kv_len_arr_cpu,
+    num_heads,
+    head_dim_ckv,
+    page_size,
+    causal,
+    sm_scale,
+):
+    decode_wrapper._causal = causal
+    decode_wrapper._page_size = page_size
+    decode_wrapper._sm_scale = sm_scale
+    decode_wrapper._plan_info = decode_wrapper._cached_module.plan(
+        decode_wrapper._float_workspace_buffer,
+        decode_wrapper._int_workspace_buffer,
+        decode_wrapper._pin_memory_int_workspace_buffer,
+        qo_indptr_cpu,
+        kv_indptr_cpu,
+        kv_len_arr_cpu,
+        num_heads,
+        head_dim_ckv,
+        causal,
+    )
+
+
 class MlaFlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
@@ -29,6 +56,10 @@ class MlaFlashInferAttBackend(BaseAttBackend):
             torch.empty(
                 model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
             ),
+        ]
+        self.kv_starts_host_buffer = [
+            torch.empty((model.graph_max_batch_size + 1,), dtype=torch.int32, device="cpu"),
+            torch.empty((model.graph_max_batch_size + 1,), dtype=torch.int32, device="cpu"),
         ]
 
         from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
@@ -113,6 +144,8 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
 class MlaFlashInferDecodeAttState(BaseDecodeAttState):
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
+    q_indptr_host: torch.Tensor = None
+    kv_starts_host: torch.Tensor = None
     decode_wrapper: object = None
 
     def init_state(self):
@@ -124,6 +157,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len
 
         self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
+        self.q_indptr_host = torch.arange(batch_size + 1, dtype=torch.int32, device="cpu")
         if batch_size <= model.graph_max_batch_size and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch:
             self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
                 : batch_size * self.backend.max_seq_length
@@ -143,6 +177,12 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )
+        if self.infer_state.b_seq_len_cpu is not None:
+            self.kv_starts_host = self.backend.kv_starts_host_buffer[self.infer_state.microbatch_index][
+                : batch_size + 1
+            ]
+            self.kv_starts_host[0] = 0
+            torch.cumsum(self.infer_state.b_seq_len_cpu, dim=0, out=self.kv_starts_host[1:])
         if self.infer_state.skip_decode_att_wrapper_init:
             return
 
@@ -175,20 +215,18 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
-        self.decode_wrapper.plan(
-            new_state.q_indptr,
-            new_state.kv_starts,
-            new_state.kv_indices,
-            new_state.infer_state.b_seq_len,
+        assert new_state.kv_starts_host is not None
+        assert new_state.infer_state.b_seq_len_cpu is not None
+        _fast_plan_mla_decode(
+            self.decode_wrapper,
+            new_state.q_indptr_host,
+            new_state.kv_starts_host,
+            new_state.infer_state.b_seq_len_cpu,
             new_state.backend.tp_q_head_num,
             new_state.backend.kv_lora_rank,
-            new_state.backend.qk_rope_head_dim,
             1,
             False,  # causal
             new_state.backend.softmax_scale,
-            new_state.backend.q_data_type,
-            new_state.backend.kv_data_type,
         )
 
     def decode_att(

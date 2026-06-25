@@ -211,7 +211,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             non_blocking=True,
             global_override_indptr_cpu=new_state.kv_starts_host,
         )
-        self.decode_wrapper._max_kv_len = new_state.infer_state.max_kv_seq_len
 
     def decode_att(
         self,
