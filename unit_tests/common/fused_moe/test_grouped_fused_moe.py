@@ -89,7 +89,7 @@ def test_moe_align_fused():
         expert_token_num,
         topk_ids,
         topk_weights,
-        run_config={"BLOCK_SIZE": 1024, "num_warps": 8, "NUM_STAGE": 1},
+        run_config={"BLOCK_SIZE": 1024, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1},
     )
     torch.cuda.synchronize()
 

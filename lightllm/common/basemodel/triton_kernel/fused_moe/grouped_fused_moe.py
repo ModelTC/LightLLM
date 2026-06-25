@@ -220,45 +220,52 @@ def moe_align_fused_deterministic_kernel(
     expert_to_token_index_ptr,  # [expert_num, token_num * topk]
     expert_to_weight_ptr,  # [expert_num, token_num * topk]
     expert_token_num_ptr,  # [expert_num]
+    expert_num,
     token_num_mul_topk,
     BLOCK_SIZE: tl.constexpr,
+    EXPERT_BLOCK: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
-    expert_id = tl.program_id(0)
+    expert_block_id = tl.program_id(0)
+    expert_offsets = (expert_block_id * EXPERT_BLOCK + tl.arange(0, EXPERT_BLOCK)) % expert_num
     block_offs = tl.arange(0, BLOCK_SIZE)
-    token_count = tl.full((), 0, tl.int32)
+    token_count = tl.full((EXPERT_BLOCK,), 0, tl.int32)
 
     for start in tl.range(0, token_num_mul_topk, BLOCK_SIZE, num_stages=NUM_STAGE):
         raw_offs = start + block_offs
         valid = raw_offs < token_num_mul_topk
         load_offs = tl.where(valid, raw_offs, 0)
-        expert_ids = tl.load(topk_ids_ptr + load_offs)
-        weights = tl.load(topk_weights_ptr + load_offs)
+        expert_ids = tl.load(topk_ids_ptr + load_offs, mask=valid, other=-1)
+        weights = tl.load(topk_weights_ptr + load_offs, mask=valid, other=0.0)
 
-        expert_mask = (expert_ids == expert_id) & valid
-        local_pos = tl.cumsum(tl.where(expert_mask, 1, 0)) - 1
-        write_pos = token_count + local_pos
+        expert_mask = (expert_ids[None, :] == expert_offsets[:, None]) & valid[None, :]
+        expert_hits = tl.where(expert_mask, 1, 0)
+        local_pos = tl.cumsum(expert_hits, axis=1) - 1
+        write_pos = token_count[:, None] + local_pos
         tl.store(
-            expert_to_token_index_ptr + expert_id * token_num_mul_topk + write_pos,
-            raw_offs,
+            expert_to_token_index_ptr + expert_offsets[:, None] * token_num_mul_topk + write_pos,
+            raw_offs[None, :],
             mask=expert_mask,
         )
         tl.store(
-            expert_to_weight_ptr + expert_id * token_num_mul_topk + write_pos,
-            weights,
+            expert_to_weight_ptr + expert_offsets[:, None] * token_num_mul_topk + write_pos,
+            weights[None, :],
             mask=expert_mask,
         )
-        token_count += tl.sum(tl.where(expert_mask, 1, 0), axis=0)
+        token_count += tl.sum(expert_hits, axis=1)
 
-    tl.store(expert_token_num_ptr + expert_id, token_count)
+    tl.store(expert_token_num_ptr + expert_offsets, token_count)
 
 
 def _get_moe_align_fused_static_key(
+    expert_token_num: torch.Tensor,
     topk_weights: torch.Tensor,
 ) -> dict:
     topk_num = topk_weights.shape[1]
+    expert_num = expert_token_num.shape[0]
     return {
         "topk_num": topk_num,
+        "expert_num": expert_num,
     }
 
 
@@ -266,17 +273,19 @@ def _get_moe_align_fused_configs():
     return [
         {
             "BLOCK_SIZE": bt,
+            "EXPERT_BLOCK": eb,
             "num_warps": nw,
             "NUM_STAGE": ns,
         }
         for ns in [1, 2, 4, 6]
         for nw in [1, 2, 4, 8]
+        for eb in [1, 4, 8, 16, 32]
         for bt in [32, 64, 128, 256, 512, 1024, 2048]
     ]
 
 
 @autotune(
-    kernel_name="moe_align_fused:v2",
+    kernel_name="moe_align_fused:v3",
     configs_gen_func=_get_moe_align_fused_configs,
     static_key_func=_get_moe_align_fused_static_key,
     run_key_func=lambda topk_ids: topk_ids.shape[0],
@@ -290,21 +299,29 @@ def moe_align_fused(
     token_num_mul_topk = token_num * topk_num
 
     if run_config is None:
-        if token_num_mul_topk <= 256:
-            run_config = {"BLOCK_SIZE": 256, "num_warps": 4, "NUM_STAGE": 4}
-        elif token_num_mul_topk <= 4096:
-            run_config = {"BLOCK_SIZE": 512, "num_warps": 8, "NUM_STAGE": 1}
+        if token_num_mul_topk <= 128:
+            run_config = {"BLOCK_SIZE": 128, "EXPERT_BLOCK": 8, "num_warps": 1, "NUM_STAGE": 1}
+        elif token_num_mul_topk <= 256:
+            run_config = {"BLOCK_SIZE": 128, "EXPERT_BLOCK": 8, "num_warps": 4, "NUM_STAGE": 4}
+        elif token_num_mul_topk <= 512:
+            run_config = {"BLOCK_SIZE": 256, "EXPERT_BLOCK": 4, "num_warps": 8, "NUM_STAGE": 1}
+        elif token_num_mul_topk <= 1536:
+            run_config = {"BLOCK_SIZE": 2048, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1}
+        elif token_num_mul_topk <= 3072:
+            run_config = {"BLOCK_SIZE": 1024, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1}
         else:
-            run_config = {"BLOCK_SIZE": 1024, "num_warps": 8, "NUM_STAGE": 1}
+            run_config = {"BLOCK_SIZE": 2048, "EXPERT_BLOCK": 1, "num_warps": 8, "NUM_STAGE": 1}
 
-    moe_align_fused_deterministic_kernel[(expert_num,)](
+    moe_align_fused_deterministic_kernel[(triton.cdiv(expert_num, run_config["EXPERT_BLOCK"]),)](
         topk_ids,
         topk_weights,
         expert_to_token_index,
         expert_to_weight,
         expert_token_num,
+        expert_num,
         token_num_mul_topk,
         BLOCK_SIZE=run_config["BLOCK_SIZE"],
+        EXPERT_BLOCK=run_config["EXPERT_BLOCK"],
         NUM_STAGE=run_config["NUM_STAGE"],
         num_warps=run_config["num_warps"],
     )
