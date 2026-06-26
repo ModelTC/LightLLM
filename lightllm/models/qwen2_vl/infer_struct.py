@@ -19,6 +19,10 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         InferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
             self.position_ids = self.get_mrope_position(self.multimodal_params)
+        elif self.multimodal_params is None or not any(
+            p.get("images") or p.get("audios") for p in self.multimodal_params
+        ):
+            self.position_ids = self.position_ids.unsqueeze(0).expand(3, -1)
         else:
             b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
             for batch_idx, p in enumerate(self.multimodal_params):
