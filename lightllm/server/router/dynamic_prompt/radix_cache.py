@@ -5,6 +5,9 @@ import collections
 from typing import Any, Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class UniqueTimeIdGenerator:
@@ -701,6 +704,44 @@ class RadixCache:
             self.evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
             self.mem_manager.free(mem_index)
+        return
+
+    def _free_radix_full_nodes_until(self, allocator, need: int) -> None:
+        """DeepSeek-V4 压缩池(c4/c128)兑现: 沿 LRU 序逐个驱逐 ref_count==0 的整个 full radix 节点,
+        经 mem_manager.free() 级联回收其 c4 页 / c128 槽(evict_c4/evict_c128),每驱逐一个就复查
+        *真实* allocator(不靠计数,稳),直到够或已无可驱逐的无引用节点。后者(空闲+可回收仍不足)
+        由上游 base_backend admission 的 wait_pause 兜底,allocator 的 assert 是最后防线。"""
+        if self.mem_manager is None or allocator is None:
+            return
+        while allocator.can_use_mem_size < need:
+            # 无可驱逐的无引用 token => 停(admission 应已 wait_pause)
+            if self.tree_total_tokens_num.arr[0] <= self.refed_tokens_num.arr[0]:
+                # 兜底没兜住:admission/realize 估算漂移了。打日志便于定位(否则只会撞下游隐晦的
+                # allocator "error alloc state" assert)。
+                logger.warning(
+                    f"dsv4 compress-pool realize could not free enough: need={need} "
+                    f"free={allocator.can_use_mem_size} tree_total={self.tree_total_tokens_num.arr[0]} "
+                    f"refed={self.refed_tokens_num.arr[0]} (admission should have paused this req)"
+                )
+                return
+            release_mems = []
+            # 复用已测的 evict():弹一个 LRU、ref==0 的叶子(>=1 token),其 full 槽经 free 级联回收压缩槽
+            self.evict(1, lambda mem_index: release_mems.append(mem_index))
+            self.mem_manager.free(torch.concat(release_mems))
+        return
+
+    def free_radix_cache_to_get_enough_c4_pages(self, need_pages: int) -> None:
+        allocator = getattr(self.mem_manager, "c4_page_allocator", None) if self.mem_manager is not None else None
+        if allocator is None or need_pages <= 0:
+            return
+        self._free_radix_full_nodes_until(allocator, need_pages)
+        return
+
+    def free_radix_cache_to_get_enough_c128_slots(self, need_slots: int) -> None:
+        allocator = getattr(self.mem_manager, "c128_allocator", None) if self.mem_manager is not None else None
+        if allocator is None or need_slots <= 0:
+            return
+        self._free_radix_full_nodes_until(allocator, need_slots)
         return
 
 

@@ -675,6 +675,7 @@ class DeepseekV4ReqManager(ReqManager):
         # host plan (cheap int arithmetic, no GPU). dup req in one call would break vectorized
         # continuation ordering -> fall back to the safe per-req path.
         plan, seen, duplicate_req = [], set(), False
+        c4_page_need = 0
         for req_idx, ready_len, seq_len in zip(req_list, ready_list, seq_list):
             req_idx = int(req_idx)
             if req_idx == self.HOLD_REQUEST_ID:
@@ -682,11 +683,14 @@ class DeepseekV4ReqManager(ReqManager):
             first, last = int(ready_len) // 4, int(seq_len) // 4
             if last <= first:
                 continue
+            c4_page_need += (last - 1) // page - first // page + 1  # 上界=区间触及页数, 复用本循环
             duplicate_req |= req_idx in seen
             seen.add(req_idx)
             plan.append((req_idx, first, last))
         if not plan:
             return
+        # 兑现: 在所有分支(dup/fresh/batched)的 alloc_c4_pages 之前统一腾页
+        self._realize_c4_pages(c4_page_need)
         if duplicate_req:
             for req_idx, first, last in plan:
                 self._scatter_c4_prefill_slots(req_idx, first, last)
@@ -779,6 +783,7 @@ class DeepseekV4ReqManager(ReqManager):
             self._register_c4_slots(mem_indexes[cont_rows], (prev_slots + 1).to(torch.int32))
 
         if new_rows:
+            self._realize_c4_pages(len(new_rows))  # 兑现: 精确需求, 复用已算的 new_rows
             pages = self.mem_manager.alloc_c4_pages(len(new_rows)).cuda(non_blocking=True).long()
             self._register_c4_slots(mem_indexes[new_rows], (pages * page).to(torch.int32))
         return
@@ -793,8 +798,33 @@ class DeepseekV4ReqManager(ReqManager):
         need = torch.unique(full_slots[mapping[full_slots] < 0])
         if need.numel() == 0:
             return
+        if ratio == 128:  # _scatter_compress_slots 仅用于 c128; 兑现其槽(复用已算的 need.numel())
+            self._realize_c128_slots(int(need.numel()))
         new_slots = alloc(need.numel()).cuda(non_blocking=True).to(torch.int32)
         mapping[need] = new_slots
+        return
+
+    def _realize_c4_pages(self, need_pages: int) -> None:
+        """压缩池兑现 —— 和主池在 prep 里调 free_radix_cache_to_get_enough_token 同一套路:
+        base_backend admission 已按"空闲+可回收"放行本步请求,这里在真分配前(scatter 已算好 need)
+        把可回收的无引用 radix 节点驱逐出来腾出 c4 页,避免 alloc_c4_pages 触底 assert。
+        可回收仍不足时由 admission 的 wait_pause 兜底。"""
+        if self.n_c4 == 0 or need_pages <= 0:
+            return
+        # 延迟 import: infer_batch 在模块顶 import 了 req_manager,顶层 import 会循环引用
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_c4_pages(need_pages)
+        return
+
+    def _realize_c128_slots(self, need_slots: int) -> None:
+        if self.n_c128 == 0 or need_slots <= 0:
+            return
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_c128_slots(need_slots)
         return
 
     def prepare_prefill_compress_slots(

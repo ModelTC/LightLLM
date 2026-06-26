@@ -598,6 +598,8 @@ class ModeBackend:
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
         can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
+        can_alloc_dsv4_c4_page_num = g_infer_context.get_can_alloc_dsv4_c4_page_num()
+        can_alloc_dsv4_c128_slot_num = g_infer_context.get_can_alloc_dsv4_c128_slot_num()
 
         for req_obj in ready_reqs:
 
@@ -632,13 +634,22 @@ class ModeBackend:
             if is_decode:
                 token_num = req_obj.decode_need_token_num()
                 swa_page_num = g_infer_context.get_dsv4_swa_decode_need_page_num(req_obj)
-                if token_num <= can_alloc_token_num and (
-                    can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num
+                c4_page_num = g_infer_context.get_dsv4_c4_decode_need_page_num(req_obj)
+                c128_slot_num = g_infer_context.get_dsv4_c128_decode_need_slot_num(req_obj)
+                if (
+                    token_num <= can_alloc_token_num
+                    and (can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num)
+                    and (can_alloc_dsv4_c4_page_num is None or c4_page_num <= can_alloc_dsv4_c4_page_num)
+                    and (can_alloc_dsv4_c128_slot_num is None or c128_slot_num <= can_alloc_dsv4_c128_slot_num)
                 ):
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                     if can_alloc_dsv4_swa_page_num is not None:
                         can_alloc_dsv4_swa_page_num -= swa_page_num
+                    if can_alloc_dsv4_c4_page_num is not None:
+                        can_alloc_dsv4_c4_page_num -= c4_page_num
+                    if can_alloc_dsv4_c128_slot_num is not None:
+                        can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
@@ -656,14 +667,27 @@ class ModeBackend:
                 swa_page_num = g_infer_context.get_dsv4_swa_prefill_need_page_num(
                     req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
                 )
-                if token_num <= can_alloc_token_num and (
-                    can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num
+                c4_page_num = g_infer_context.get_dsv4_c4_prefill_need_page_num(
+                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
+                )
+                c128_slot_num = g_infer_context.get_dsv4_c128_prefill_need_slot_num(
+                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
+                )
+                if (
+                    token_num <= can_alloc_token_num
+                    and (can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num)
+                    and (can_alloc_dsv4_c4_page_num is None or c4_page_num <= can_alloc_dsv4_c4_page_num)
+                    and (can_alloc_dsv4_c128_slot_num is None or c128_slot_num <= can_alloc_dsv4_c128_slot_num)
                 ):
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                     if can_alloc_dsv4_swa_page_num is not None:
                         can_alloc_dsv4_swa_page_num -= swa_page_num
+                    if can_alloc_dsv4_c4_page_num is not None:
+                        can_alloc_dsv4_c4_page_num -= c4_page_num
+                    if can_alloc_dsv4_c128_slot_num is not None:
+                        can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True

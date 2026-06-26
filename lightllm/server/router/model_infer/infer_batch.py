@@ -481,6 +481,66 @@ class InferenceContext:
             return None
         return mem_manager.swa_pool.page_size
 
+    # ---- DeepSeek-V4 compressed-pool (c4/c128) admission, mirror of the swa helpers above ----
+    # c4 is paged for fp8_paged_mqa_logits: 64 c4-slots/page == 256 full tokens. The prompt-cache
+    # radix is 256-aligned (DSV4_PROMPT_CACHE_PAGE_SIZE) and c4 is NOT windowed, so reclaimable c4
+    # pages derive exactly from the unref token count (`// 256`) — no separate counter needed
+    # (unlike swa, which is windowed). c128 is slot-based: 1 slot per 128 full tokens (`// 128`).
+    def get_can_alloc_dsv4_c4_page_num(self):
+        allocator = getattr(self.req_manager.mem_manager, "c4_page_allocator", None)
+        if allocator is None:
+            return None
+        radix_unref_page_num = 0
+        if self.radix_cache is not None:
+            radix_unref_page_num = (
+                self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
+            ) // 256
+        return int(allocator.can_use_mem_size) + int(radix_unref_page_num)
+
+    def get_can_alloc_dsv4_c128_slot_num(self):
+        allocator = getattr(self.req_manager.mem_manager, "c128_allocator", None)
+        if allocator is None:
+            return None
+        radix_unref_slot_num = 0
+        if self.radix_cache is not None:
+            radix_unref_slot_num = (
+                self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
+            ) // 128
+        return int(allocator.can_use_mem_size) + int(radix_unref_slot_num)
+
+    def get_dsv4_c4_decode_need_page_num(self, req: "InferReq"):
+        if getattr(self.req_manager.mem_manager, "c4_page_allocator", None) is None:
+            return 0
+        seq_len = int(req.get_cur_total_len())
+        # 与 _scatter_c4_decode_slots 一致: 关组(seq%4==0)且组末 c4-entry 落页首(entry%64==0) -> 开新页
+        if seq_len > 0 and seq_len % 4 == 0 and (seq_len // 4 - 1) % 64 == 0:
+            return 1
+        return 0
+
+    def get_dsv4_c128_decode_need_slot_num(self, req: "InferReq"):
+        if getattr(self.req_manager.mem_manager, "c128_allocator", None) is None:
+            return 0
+        seq_len = int(req.get_cur_total_len())
+        return 1 if (seq_len > 0 and seq_len % 128 == 0) else 0
+
+    def get_dsv4_c4_prefill_need_page_num(self, req: "InferReq", is_chuncked_prefill: bool):
+        if getattr(self.req_manager.mem_manager, "c4_page_allocator", None) is None:
+            return 0
+        start = int(req.cur_kv_len)
+        end = int(req.get_chuncked_input_token_len()) if is_chuncked_prefill else int(req.get_cur_total_len())
+        first, last = start // 4, end // 4
+        if last <= first:
+            return 0
+        # 安全上界: 覆盖 c4-entry 区间 [first,last) 触及的全部 64-页(忽略已分配的延续页 -> 偏多, 安全)
+        return (last - 1) // 64 - first // 64 + 1
+
+    def get_dsv4_c128_prefill_need_slot_num(self, req: "InferReq", is_chuncked_prefill: bool):
+        if getattr(self.req_manager.mem_manager, "c128_allocator", None) is None:
+            return 0
+        start = int(req.cur_kv_len)
+        end = int(req.get_chuncked_input_token_len()) if is_chuncked_prefill else int(req.get_cur_total_len())
+        return max(0, end // 128 - start // 128)
+
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """
         该函数用于在线性混合模型prefill后,如果存在大页匹配的情况下，将线性层状态复制到
