@@ -471,12 +471,56 @@ def _moe_align_fused_sorted_token(
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 
+@triton.jit
+def moe_align_fused_atomic_kernel(
+    topk_ids_ptr,  # [token_num, topk]
+    topk_weights_ptr,  # [token_num, topk]
+    expert_to_token_index_ptr,  # [expert_num, token_num * topk]
+    expert_to_weight_ptr,  # [expert_num, token_num * topk]
+    expert_token_num_ptr,  # [expert_num]
+    token_num_mul_topk,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_id = tl.program_id(0)
+    offs = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = offs < token_num_mul_topk
+    expert_id = tl.load(topk_ids_ptr + offs, mask=valid, other=0)
+    weight = tl.load(topk_weights_ptr + offs, mask=valid, other=0.0)
+    write_pos = tl.atomic_add(expert_token_num_ptr + expert_id, 1, mask=valid)
+    tl.store(expert_to_token_index_ptr + expert_id * token_num_mul_topk + write_pos, offs, mask=valid)
+    tl.store(expert_to_weight_ptr + expert_id * token_num_mul_topk + write_pos, weight, mask=valid)
+
+
+def _moe_align_fused_atomic_token(
+    expert_to_token_index,
+    expert_to_weight,
+    expert_token_num,
+    topk_ids,
+    topk_weights,
+):
+    token_num_mul_topk = topk_ids.numel()
+    expert_token_num.zero_()
+    moe_align_fused_atomic_kernel[(triton.cdiv(token_num_mul_topk, 128),)](
+        topk_ids,
+        topk_weights,
+        expert_to_token_index,
+        expert_to_weight,
+        expert_token_num,
+        token_num_mul_topk,
+        BLOCK_SIZE=128,
+        num_warps=4,
+    )
+    return expert_to_token_index, expert_to_weight, expert_token_num
+
+
 def moe_align_fused(expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights):
     token_num = topk_ids.shape[0]
-    if token_num <= 5120:
+    if token_num <= 128:
         _moe_align_fused_small_token(expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights)
     else:
-        _moe_align_fused_sorted_token(expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights)
+        # Expert rows may be unordered, but grouped matmul reuses this same
+        # mapping for up/down projections and writes back to original topk slots.
+        _moe_align_fused_atomic_token(expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights)
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 
