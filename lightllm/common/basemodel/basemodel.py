@@ -126,6 +126,7 @@ class TpPartBaseModel:
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
         self._autotune_warmup()
+        self._extra_autotune()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
@@ -285,6 +286,21 @@ class TpPartBaseModel:
                 self.prefill_graph.warmup_overlap(self)
             else:
                 self.prefill_graph.warmup(self)
+
+    @final
+    @torch.no_grad()
+    @post_empty_cache
+    def _extra_autotune(self):
+        if self.disable_cudagraph:
+            return
+        from lightllm.common.basemodel.cuda_graph import gen_cuda_graph_batch_sizes
+        from lightllm.utils.sgl_utils import fa3_decode_autotune
+
+        cuda_graph_batch_sizes = gen_cuda_graph_batch_sizes(
+            max_batch_size=self.graph_max_batch_size,
+            tp_world_size=self.tp_world_size_,
+        )
+        fa3_decode_autotune(self, cuda_graph_batch_sizes)
 
     def _init_custom(self):
         pass
@@ -1050,7 +1066,7 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup()
         torch.distributed.barrier()
 
-        warmup_lengths = [1, 8, 16, 32, 64, 100, 128, 256, 1024, 2048, 4096]
+        warmup_lengths = [1, 4, 8, 16, 32, 64, 100, 128, 256, 1024, 2048, 4096]
 
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)

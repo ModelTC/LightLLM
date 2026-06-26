@@ -2,6 +2,7 @@ import triton
 import orjson
 import os
 import inspect
+import gc
 import torch
 import torch.distributed as dist
 import random
@@ -275,6 +276,7 @@ class Autotuner:
             return float("inf")
 
     def _autotune(self, args, kwargs, static_key, run_key, rank_id, world_size):
+
         is_key_all_same = True
         if world_size > 1:
             all_keys = [None for _ in range(world_size)]
