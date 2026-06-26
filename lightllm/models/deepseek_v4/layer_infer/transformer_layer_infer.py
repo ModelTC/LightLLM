@@ -150,7 +150,10 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
 
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         T = input.shape[0]
-        qa = layer_weight.q_norm_(layer_weight.wq_a_.mm(input), eps=self.eps_)
+        # wq_a and wkv share `input` -> one fused fp8 GEMM, split [q_lora_rank | head_dim]. qa is a
+        # row-strided view (rmsnorm honors stride(0)); kv feeds a sglang jit kernel -> contiguous.
+        qkv = layer_weight.wq_a_wkv_.mm(input)
+        qa = layer_weight.q_norm_(qkv[:, : -self.head_dim_], eps=self.eps_)
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
         # per-(token, head) weightless self-RMSNorm + interleaved rope on the last rope_dim dims,
         # fused in one sglang dsv4 jit kernel (fp32 norm/rotation, bf16 in between -- same as eager).
@@ -162,7 +165,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
             mem_index=infer_state.mem_index,
-            kv=layer_weight.wkv_.mm(input),
+            kv=qkv[:, -self.head_dim_ :].contiguous(),
             kv_weight=layer_weight.kv_norm_.weight,
             eps=self.eps_,
             freqs_cis=self.freqs_cis,
@@ -175,8 +178,12 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         position_cos, position_sin = self._select_rope(infer_state)
         rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, position_cos, position_sin, inverse=True)
         T = o.shape[0]
-        o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
-        o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
+        if layer_weight.o_proj_fp8:
+            # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)
+            o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
+        else:
+            o = o.reshape(T, self.tp_groups, -1).transpose(0, 1).contiguous()  # [groups, T, per_group_in]
+            o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
         o = layer_weight.wo_b_.mm(o)
         return self._tpsp_reduce(input=o, infer_state=infer_state)
 
@@ -429,11 +436,11 @@ class CompressorInfer:
         )
         if self._metadata is not None:
             if self.is_in_indexer:
-                # indexer wkv/wgate are two separate replicated weights; cat -> [T, 2*coff*idx_hd]
-                # (same [kv | score] layout the fused compressor_wkv_gate_ produces for attention).
-                kv = layer_weight.idx_cmp_wkv_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager)
-                gate = layer_weight.idx_cmp_wgate_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager)
-                self._metadata.kv_score = torch.cat([kv, gate], dim=-1).float()
+                # fused wkv/wgate GEMM -> [T, 2*coff*idx_hd] in the [kv | score] layout directly
+                # (same as the attention compressor_wkv_gate_).
+                self._metadata.kv_score = layer_weight.idx_cmp_wkv_gate_.mm(
+                    x, use_custom_tensor_mananger=use_custom_tensor_manager
+                ).float()
                 ape = layer_weight.idx_cmp_ape_.weight
             else:
                 self._metadata.kv_score = layer_weight.compressor_wkv_gate_.mm(x).float()

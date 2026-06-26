@@ -62,11 +62,13 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     # ------------------------------------------------------------------ attention
     def _init_qkvo(self):
         p = f"{self.prefix}.attn"
-        # q low-rank (a replicated, b column-parallel over heads), kv single head (replicated)
-        self.wq_a_ = ROWMMWeight(
+        # q low-rank A and kv (single replicated head) both consume the same attention input ->
+        # fuse into one fp8 GEMM; _get_qkv splits the [q_lora_rank | head_dim] output. (q_b is
+        # column-parallel over heads.)
+        self.wq_a_wkv_ = ROWMMWeight(
             in_dim=self.hidden,
-            out_dims=[self.q_lora_rank],
-            weight_names=f"{p}.wq_a.weight",
+            out_dims=[self.q_lora_rank, self.head_dim],
+            weight_names=[f"{p}.wq_a.weight", f"{p}.wkv.weight"],
             data_type=self.data_type_,
             quant_method=self.get_quant_method("wq_a"),
             tp_rank=0,
@@ -79,31 +81,37 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             data_type=self.data_type_,
             quant_method=self.get_quant_method("wq_b"),
         )
-        self.wkv_ = ROWMMWeight(
-            in_dim=self.hidden,
-            out_dims=[self.head_dim],
-            weight_names=f"{p}.wkv.weight",
-            data_type=self.data_type_,
-            quant_method=self.get_quant_method("wkv"),
-            tp_rank=0,
-            tp_world_size=1,
-        )
         self.q_norm_ = RMSNormWeight(dim=self.q_lora_rank, weight_name=f"{p}.q_norm.weight", data_type=self.data_type_)
         self.kv_norm_ = RMSNormWeight(dim=self.head_dim, weight_name=f"{p}.kv_norm.weight", data_type=self.data_type_)
         self.attn_sink_ = TpAttSinkWeight(
             all_q_head_num=self.n_heads, weight_name=f"{p}.attn_sink", data_type=torch.float32
         )
-        # grouped low-rank output projection: wo_a is a per-group batched matmul [groups, in, o_lora],
-        # wo_b is row-parallel [groups*o_lora -> hidden]. wo_a is reshaped in load_hf_weights.
+        # grouped low-rank output projection (wo_a per-group [in, o_lora], wo_b row-parallel
+        # [groups*o_lora -> hidden]).
         per_group_in = self.n_heads * self.head_dim // self.o_groups
-        self.wo_a_ = ROWBMMWeight(
-            dim0=self.o_groups,
-            dim1=per_group_in,
-            dim2=self.o_lora_rank,
-            weight_names=f"{p}.wo_a.weight",
-            data_type=self.data_type_,
-            quant_method=None,
-        )
+        # When o_groups == tp_world_size (e.g. the daily tp8 config) each rank owns exactly ONE
+        # group, so the grouped O-proj collapses to a single GEMM -> run it in fp8 (deepgemm)
+        # instead of dequantizing wo_a to bf16. sglang does the same (fp8 wo_a is default-on there).
+        # For >1 group per rank (tp < o_groups) the per-group inputs differ (block-diagonal), so
+        # keep the bf16 grouped bmm.
+        self.o_proj_fp8 = (self.o_groups // self.tp_world_size_) == 1
+        if self.o_proj_fp8:
+            self.wo_a_ = ROWMMWeight(
+                in_dim=per_group_in,
+                out_dims=[self.o_groups * self.o_lora_rank],
+                weight_names=f"{p}.wo_a.weight",
+                data_type=self.data_type_,
+                quant_method=self.get_quant_method("wo_a"),
+            )
+        else:
+            self.wo_a_ = ROWBMMWeight(
+                dim0=self.o_groups,
+                dim1=per_group_in,
+                dim2=self.o_lora_rank,
+                weight_names=f"{p}.wo_a.weight",
+                data_type=self.data_type_,
+                quant_method=None,
+            )
         self.wo_b_ = COLMMWeight(
             in_dim=self.o_groups * self.o_lora_rank,
             out_dims=[self.hidden],
@@ -161,19 +169,12 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             tp_world_size=1,
         )
         coff = 2  # indexer compressor always uses ratio 4 (overlap)
-        self.idx_cmp_wkv_ = ROWMMWeight(
+        # wkv/wgate share the same input -> one fused bf16 GEMM producing the [kv | gate] layout
+        # directly (same as the attention compressor_wkv_gate_).
+        self.idx_cmp_wkv_gate_ = ROWMMWeight(
             in_dim=self.hidden,
-            out_dims=[coff * self.index_head_dim],
-            weight_names=f"{p}.compressor.wkv.weight",
-            data_type=self.data_type_,
-            quant_method=None,
-            tp_rank=0,
-            tp_world_size=1,
-        )
-        self.idx_cmp_wgate_ = ROWMMWeight(
-            in_dim=self.hidden,
-            out_dims=[coff * self.index_head_dim],
-            weight_names=f"{p}.compressor.wgate.weight",
+            out_dims=[coff * self.index_head_dim, coff * self.index_head_dim],
+            weight_names=[f"{p}.compressor.wkv.weight", f"{p}.compressor.wgate.weight"],
             data_type=self.data_type_,
             quant_method=None,
             tp_rank=0,
@@ -321,10 +322,13 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             else:
                 weights[k] = dequant_fp8_block_to_bf16(weights[k], weights[scale_k]).to(self.data_type_)
                 del weights[scale_k]
-        # grouped-O: reshape [groups*o_lora, in] -> [groups, in, o_lora] for the batched matmul
-        woa = f"{self.prefix}.attn.wo_a.weight"
-        if woa in weights and weights[woa].dim() == 2:
-            w = weights[woa]
-            per_group_in = self.n_heads * self.head_dim // self.o_groups
-            weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2).contiguous()
+        # grouped-O (bf16 path only): reshape [groups*o_lora, in] -> [groups, in, o_lora] for the
+        # batched matmul. The fp8 path keeps wo_a as a plain [groups*o_lora, in] fp8 GEMM weight
+        # (its `.scale` is renamed to `.weight_scale_inv` by the loop above, not dequantized).
+        if not self.o_proj_fp8:
+            woa = f"{self.prefix}.attn.wo_a.weight"
+            if woa in weights and weights[woa].dim() == 2:
+                w = weights[woa]
+                per_group_in = self.n_heads * self.head_dim // self.o_groups
+                weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2).contiguous()
         return
