@@ -16,7 +16,10 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
+from lightllm.common.linear_att_cache_manager.config_objs import (
+    LinearAttCacheConfig,
+    get_mtp_draft_full_att_layer_num,
+)
 
 logger = init_logger(__name__)
 
@@ -59,6 +62,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         start_args: StartArgs = get_env_start_args()
         ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+        draft_full_att_layers = get_mtp_draft_full_att_layer_num(start_args)
         self.linear_config = LinearAttCacheConfig(
             tp_world_size=self.tp_world_size_,
             full_att_all_num_kv_heads=self.config["num_key_value_heads"],
@@ -78,17 +82,24 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             ssm_state_dtype=ssm_dtype_dict[start_args.linear_att_ssm_data_type],
             full_attention_interval=self.config["full_attention_interval"],
             all_layer_num=self.config["n_layer"],
+            draft_full_att_layer_num=draft_full_att_layers,
         )
+
+        main_full_att = self.linear_config.get_main_full_att_layer_num()
+        persisted_full_att = self.linear_config.get_persisted_full_att_layer_num()
 
         self.mem_manager = Qwen3NextMemManager(
             size=self.max_total_token_num,
             dtype=self.data_type,
             num_kv_heads=self.num_kv_heads,
             head_dim=self.config["head_dim"],
-            full_att_layer_num=self.linear_config.all_layer_num - self.linear_config.linear_layer_num,
+            full_att_layer_num=persisted_full_att,
             linear_config=self.linear_config,
             mem_fraction=self.mem_fraction,
         )
+        self.mem_manager.main_full_att_layer_num = main_full_att
+        self.mem_manager.draft_full_att_layers = draft_full_att_layers
+        self.mem_manager.persisted_full_att_layer_num = persisted_full_att
 
     def _init_req_manager(self):
         create_max_seq_len = 0

@@ -1,8 +1,4 @@
-import torch
-from typing import List
-
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Qwen35InferStateInfo(Qwen2VLInferStateInfo):
@@ -12,8 +8,7 @@ class Qwen35InferStateInfo(Qwen2VLInferStateInfo):
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
-        self.b_att_seq_len = self.b_seq_len
-        mtp_step = get_env_start_args().mtp_step
+        from lightllm.common.basemodel.mtp_verify_extra_state import init_mtp_verify_extra_state
 
-        self.b_buffer_idx = self.b_req_idx * (mtp_step + 1) + self.b_mtp_index
+        init_mtp_verify_extra_state(self, model)
         return

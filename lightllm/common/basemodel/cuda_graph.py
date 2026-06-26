@@ -2,6 +2,7 @@ import os
 import torch
 import copy
 import bisect
+import math
 import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
@@ -32,32 +33,42 @@ class CudaGraph:
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
 
-        # gen cuda graph batch_sizes
-        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
-        # and [graph_split_batch_size + graph_grow_step_size,
-        # if the mtp_step is not 0, then the batch_sizes will be multiply of (mtp_step + 1)
+        # With MTP enabled, both the main-model verify forward and the draft (MTP) forward run over
+        # the (mtp_step+1)-expanded decode layout, so every decode batch size is a multiple of
+        # (mtp_step+1) and there is a single decode layout — the graph is keyed by batch size alone.
+        batch_size_multiple = self.mtp_step + 1 if self.mtp_step > 0 else 1
+        self.cuda_graph_batch_sizes = self._build_cuda_graph_batch_sizes(batch_size_multiple=batch_size_multiple)
+        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
-        graph_split_batch_size = self.args.graph_split_batch_size * (self.mtp_step + 1)
-        graph_grow_step_size = self.args.graph_grow_step_size * (self.mtp_step + 1)
+    def _build_cuda_graph_batch_sizes(self, batch_size_multiple: int):
+        graph_split_batch_size = self.args.graph_split_batch_size * batch_size_multiple
+        graph_grow_step_size = self.args.graph_grow_step_size * batch_size_multiple
 
-        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, self.args.graph_split_batch_size + 1)]
-        for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
+        batch_sizes = [i * batch_size_multiple for i in range(1, self.args.graph_split_batch_size + 1)]
+        for _batch_size in range(
+            graph_split_batch_size + graph_grow_step_size,
+            self.max_batch_size,
+            graph_grow_step_size,
+        ):
             batch_sizes.append(_batch_size)
 
-        batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
-        batch_sizes.append(max_batch_size)
+        batch_sizes = list(set([e for e in batch_sizes if e < self.max_batch_size]))
+        batch_sizes.append(self.max_batch_size)
         batch_sizes.sort()
         if self.args.enable_tpsp_mix_mode:
-            batch_sizes = [triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in batch_sizes]
+            padding_unit = math.lcm(self.tp_world_size, batch_size_multiple)
+            batch_sizes = [triton.cdiv(e, padding_unit) * padding_unit for e in batch_sizes]
             batch_sizes = list(set(batch_sizes))
             batch_sizes.sort()
 
-        self.cuda_graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
-        logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
+        return batch_sizes
 
     def can_run(self, batch_size, max_len_in_batch):
         return batch_size <= self.max_batch_size and max_len_in_batch <= self.graph_max_len_in_batch
+
+    def _decode_graph_key(self, infer_state: InferStateInfo):
+        return infer_state.input_ids.shape[0]
 
     def need_capture(self, batch_size):
         find_batch_size = self.find_closest_graph_batch_size(batch_size)
@@ -73,6 +84,54 @@ class CudaGraph:
             return find_batch_size
         else:
             return None
+
+    def _build_warmup_decode_model_input(
+        self,
+        model,
+        batch_size: int,
+        device: str = "cuda",
+    ) -> ModelInput:
+        mtp_size = self.mtp_step + 1
+        input_ids = torch.ones(batch_size, dtype=torch.int32, device=device)
+        mem_indexes = model.mem_manager.alloc(batch_size).to(device)
+        b_req_idx = torch.full(
+            (batch_size,),
+            fill_value=model.req_manager.HOLD_REQUEST_ID,
+            dtype=torch.int32,
+            device=device,
+        )
+
+        b_num_accepted_tokens = None
+        if self.mtp_step > 0:
+            assert batch_size % mtp_size == 0, "MTP decode CUDA graph batch size must be a multiple of mtp_step + 1"
+            real_batch_size = batch_size // mtp_size
+            b_mtp_index = torch.arange(mtp_size, dtype=torch.int32, device=device).repeat(real_batch_size)
+            b_seq_len = torch.arange(2, mtp_size + 2, dtype=torch.int32, device=device).repeat(real_batch_size)
+            # b_num_accepted_tokens 不再随 model_input 传入：GDN 的 init_mtp_verify_extra_state 会按
+            # req_first(全 HOLD，槽恒为 1) gather，warmup/capture 自然得到全 1，等价旧的 torch.ones。
+            total_token_num = real_batch_size * (mtp_size * (mtp_size + 3) // 2)
+        else:
+            seq_len = 2
+            total_token_num = batch_size * seq_len
+            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device=device)
+            b_seq_len = torch.empty(batch_size, dtype=torch.int32, device=device)
+            b_seq_len.fill_(seq_len)
+
+        return ModelInput(
+            batch_size=batch_size,
+            total_token_num=total_token_num,
+            max_q_seq_len=1,
+            max_kv_seq_len=self.graph_max_len_in_batch,
+            input_ids=input_ids,
+            mem_indexes=mem_indexes,
+            b_req_idx=b_req_idx,
+            b_seq_len=b_seq_len,
+            b_mtp_index=b_mtp_index,
+            b_num_accepted_tokens=b_num_accepted_tokens,
+            is_prefill=False,
+            multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+            **model._gen_special_model_input(batch_size),
+        )
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
         graph_obj = torch.cuda.CUDAGraph()
@@ -101,7 +160,11 @@ class CudaGraph:
 
         with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
-        self.graph[batch_size] = (graph_obj, infer_state, model_output)
+        self.graph[self._decode_graph_key(infer_state)] = (
+            graph_obj,
+            infer_state,
+            model_output,
+        )
         graph_obj.replay()
         return model_output
 
@@ -135,7 +198,7 @@ class CudaGraph:
 
         with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output, model_output1 = decode_func(infer_state, infer_state1)
-        self.graph[batch_size] = (
+        self.graph[self._decode_graph_key(infer_state)] = (
             graph_obj,
             infer_state,
             infer_state1,
@@ -162,8 +225,7 @@ class CudaGraph:
             return self._capture_decode(decode_func, infer_state)
 
     def _replay(self, infer_state: InferStateInfo):
-        batch_size = infer_state.input_ids.shape[0]
-        graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
+        graph_obj, graph_infer_state, graph_output = self.graph[self._decode_graph_key(infer_state)]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_obj.replay()
         return graph_output
@@ -173,14 +235,13 @@ class CudaGraph:
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
     ):
-        batch_size = infer_state.input_ids.shape[0]
         (
             graph_obj,
             graph_infer_state,
             graph_infer_state1,
             graph_model_output,
             graph_model_output1,
-        ) = self.graph[batch_size]
+        ) = self.graph[self._decode_graph_key(infer_state)]
         graph_infer_state.copy_for_cuda_graph(infer_state)
         graph_infer_state1.copy_for_cuda_graph(infer_state1)
         graph_obj.replay()
@@ -203,38 +264,9 @@ class CudaGraph:
 
         # decode cuda graph init
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
-            seq_len = 2
-            total_token_num = batch_size * seq_len
-            max_len_in_batch = self.graph_max_len_in_batch
-            input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-            b_req_idx = torch.tensor(
-                [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-            )
-            b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
-            b_seq_len.fill_(seq_len)
-            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-
-            model_input = ModelInput(
-                batch_size=batch_size,
-                total_token_num=total_token_num,
-                max_q_seq_len=1,
-                max_kv_seq_len=max_len_in_batch,
-                input_ids=input_ids,
-                mem_indexes=mem_indexes,
-                b_req_idx=b_req_idx,
-                b_seq_len=b_seq_len,
-                b_mtp_index=b_mtp_index,
-                is_prefill=False,
-                multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-                **model._gen_special_model_input(batch_size),
-            )
+            model_input = self._build_warmup_decode_model_input(model, batch_size)
             model_output: ModelOutput = model.forward(model_input)
             del model_output
-            del input_ids
-            del mem_indexes
-            del b_req_idx
-            del b_seq_len
 
             model.mem_manager.free_all()
             model.req_manager.free_all()
@@ -261,32 +293,7 @@ class CudaGraph:
             decode_batches = []
             for micro_batch_index in [0, 1]:
                 # dummy decoding, capture the cudagraph
-                seq_len = 2
-                total_token_num = batch_size * seq_len
-                max_len_in_batch = self.graph_max_len_in_batch
-                input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
-                b_req_idx = torch.tensor(
-                    [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-                )
-                b_seq_len = torch.empty(batch_size, dtype=torch.int32, device="cuda")
-                b_seq_len.fill_(seq_len)
-                b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-
-                micro_batch = ModelInput(
-                    is_prefill=False,
-                    batch_size=batch_size,
-                    total_token_num=total_token_num,
-                    max_q_seq_len=1,
-                    max_kv_seq_len=max_len_in_batch,
-                    input_ids=input_ids,
-                    b_mtp_index=b_mtp_index,
-                    mem_indexes=mem_indexes,
-                    b_req_idx=b_req_idx,
-                    b_seq_len=b_seq_len,
-                    multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-                    **model._gen_special_model_input(batch_size),
-                )
+                micro_batch = self._build_warmup_decode_model_input(model, batch_size)
                 decode_batches.append(micro_batch)
                 del micro_batch
 

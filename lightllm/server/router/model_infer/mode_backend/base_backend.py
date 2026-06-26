@@ -16,7 +16,7 @@ from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
+from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -41,10 +41,6 @@ from lightllm.distributed.communication_op import (
 )
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager, OverlapEventPack
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
-from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
-from lightllm.models.mistral_mtp.model import MistralMTPModel
-from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
@@ -328,22 +324,11 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # Select MTP model class based on model type
+            # Select MTP model class based on model type (single source of truth: #10).
+            from lightllm.server.router.model_infer.mode_backend.mtp_model_factory import create_mtp_draft_model
+
             model_type = mtp_model_cfg.get("model_type", "")
-            if model_type == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
-            elif model_type == "qwen3_moe":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
-            elif model_type == "mistral":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-                self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
-                self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-            else:
-                raise ValueError(f"Unsupported MTP model type: {model_type}")
+            self.draft_models.append(create_mtp_draft_model(model_type, self.args.mtp_mode, mtp_model_kvargs))
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
@@ -773,8 +758,7 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
         return draft_next_token_ids_gpu
 
     def _sample_and_scatter_token(

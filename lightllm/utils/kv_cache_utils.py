@@ -120,8 +120,8 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
-        assert is_linear_att_mixed_model(args.model_dir) is False, "linear att mixed model does not support mtp mode"
-        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
+        if not is_linear_att_mixed_model(args.model_dir):
+            cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
         (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())

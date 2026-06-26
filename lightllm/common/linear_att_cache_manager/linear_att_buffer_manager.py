@@ -24,7 +24,7 @@ class LinearAttCacheManager:
         self.conv_state_cache = LayerCache(
             size=self.size,
             dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_conv_state_shape(),
+            shape=self.linear_config.get_persisted_conv_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
             device="cpu",
             size_first=True,

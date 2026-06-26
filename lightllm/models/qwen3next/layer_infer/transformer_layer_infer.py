@@ -256,6 +256,18 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
+        elif getattr(infer_state, "is_mtp_verify", False):
+            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+            core_attn_out = self._gdn_verify_kernel(
+                mixed_qkv,
+                conv_states,
+                ssm_states,
+                a,
+                b,
+                infer_state,
+                layer_weight,
+            )
         else:
             mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
             conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
@@ -376,7 +388,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             query_start_loc=infer_state.b1_cu_q_seq_len,
-            cache_indices=infer_state.b_buffer_idx,
+            cache_indices=infer_state.b_conv_buffer_idx,
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=self.activation,
@@ -421,7 +433,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             activation=self.activation,
-            conv_state_indices=infer_state.b_buffer_idx,
+            conv_state_indices=infer_state.b_conv_buffer_idx,
         )
 
         # Recurrent processing with fused gating; the kernel reads the
@@ -434,6 +446,54 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             initial_state=ssm_states,
             inplace_final_state=True,
             ssm_state_indices=infer_state.b_buffer_idx,
+            use_qk_l2norm_in_kernel=True,
+            A_log=layer_weight.linear_A_log.weight,
+            dt_bias=layer_weight.linear_dt_bias.weight,
+            a_raw=a,
+            b_raw=b,
+        )
+        return core_attn_out
+
+    def _gdn_verify_kernel(
+        self,
+        mixed_qkv: torch.Tensor,
+        conv_states: torch.Tensor,
+        ssm_states: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ):
+        from lightllm.models.qwen3next.triton_kernel.causal_conv1d_spec import (
+            causal_conv1d_update as causal_conv1d_update_spec,
+        )
+
+        mixed_qkv = causal_conv1d_update_spec(
+            mixed_qkv,
+            conv_states,
+            layer_weight.linear_conv1d.mm_param.weight,
+            bias=layer_weight.linear_conv1d.bias,
+            activation=self.activation,
+            conv_state_indices=infer_state.b_conv_buffer_idx,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
+            query_start_loc=infer_state.b_gdn_verify_cu_seqlens,
+        )
+
+        query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
+        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream (init sets accept_len=1; the
+        # offload/snapshot guards bound it to [1, mtp_step+1]). The old per-layer per-step .all()
+        # D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
+        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            initial_state=ssm_states,
+            inplace_final_state=True,
+            cu_seqlens=infer_state.b_gdn_verify_cu_seqlens.to(torch.long),
+            ssm_state_indices=infer_state.b_ssm_index_rows,
+            ssm_state_write_indices=infer_state.b_ssm_index_rows,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
             use_qk_l2norm_in_kernel=True,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,
