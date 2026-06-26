@@ -87,11 +87,9 @@ class ReqManager:
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 
-        self.req_to_accept_len = (
-            torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
-            if get_env_start_args().mtp_step > 0
-            else None
-        )
+        # Always allocated (init 1 = no draft tokens accepted), so the linear-att cache-copy
+        # paths can index it unconditionally even when MTP is disabled (mtp_step == 0).
+        self.req_to_accept_len = torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda")
 
     def alloc(self):
         return self.req_list.alloc()
@@ -280,8 +278,7 @@ class ReqManagerForMamba(ReqManager):
         # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
         # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
         self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
-        if self.req_to_accept_len is not None:
-            self.req_to_accept_len[req.req_idx] = 1
+        self.req_to_accept_len[req.req_idx] = 1
         return
 
     def get_mamba_cache(self, layer_idx_in_all: int):
@@ -305,8 +302,7 @@ class ReqManagerForMamba(ReqManager):
         narrow_w = conv_state.shape[-1]  # persisted (narrow) width
         self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_accept_len is not None:
-            self.req_to_accept_len[req.req_idx] = 1
+        self.req_to_accept_len[req.req_idx] = 1
         return
 
     def copy_small_page_buffer_to_linear_att_state(
@@ -322,6 +318,5 @@ class ReqManagerForMamba(ReqManager):
         # 同时，非连续对象的拷贝，可能存在效率问题。
         self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_accept_len is not None:
-            self.req_to_accept_len[req.req_idx] = 1
+        self.req_to_accept_len[req.req_idx] = 1
         return
