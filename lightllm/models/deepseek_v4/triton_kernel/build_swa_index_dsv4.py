@@ -11,6 +11,7 @@ def _build_swa_index_kernel(
     req_to_token_stride0,
     full_to_swa_ptr,
     swa_index_ptr,
+    swa_index_stride0,
     swa_length_ptr,
     WINDOW: tl.constexpr,
     BLOCK_W: tl.constexpr,
@@ -28,7 +29,7 @@ def _build_swa_index_kernel(
     full_slot = tl.load(req_to_token_ptr + req * req_to_token_stride0 + safe_offset, mask=valid, other=0).to(tl.int64)
     swa_slot = tl.load(full_to_swa_ptr + full_slot, mask=valid, other=-1)
     out = tl.where(valid, swa_slot, -1).to(tl.int32)
-    tl.store(swa_index_ptr + token_idx * WINDOW + w, out, mask=w_mask)
+    tl.store(swa_index_ptr + token_idx * swa_index_stride0 + w, out, mask=w_mask)
 
     length = tl.minimum(tl.maximum(pos + 1, 1), WINDOW).to(tl.int32)
     tl.store(swa_length_ptr + token_idx, length)
@@ -39,7 +40,8 @@ def build_swa_index(
     positions: torch.Tensor,
     req_to_token_indexs: torch.Tensor,
     full_to_swa_indexs: torch.Tensor,
-    window: int,
+    swa_index: torch.Tensor,
+    swa_length: torch.Tensor,
 ):
     """Per-token sliding-window FlashMLA index table, built ONCE per forward (layer-independent:
     full_to_swa is a single global map and the window is a model constant, so every layer's swa
@@ -47,17 +49,11 @@ def build_swa_index(
     (req_idx, position) gather the last `window` tokens' full slots via req_to_token, then map
     full -> swa; out-of-range positions store -1.
 
-    Returns (swa_index [T, window] int32, swa_length [T] int32). `window` is 128 (a multiple of the
-    FlashMLA 64 alignment) so no extra pad is needed; the reader adds the s_q axis via unsqueeze(1).
-    Const output shape (no max_kv_seq_len dependence) makes this cuda-graph-safe to stage from
-    init_some_extra_state via copy_for_cuda_graph.
+    Writes (swa_index [T, window] int32, swa_length [T] int32). The caller owns the output storage;
+    the reader adds the s_q axis via unsqueeze(1).
     """
-    # window must stay 64-aligned: the output is the FlashMLA `indices` tensor directly (no separate
-    # _pad_last_dim), and the extra-cache fork requires the topk dim to be a multiple of 64.
-    assert window % 64 == 0, f"DeepSeek-V4 sliding_window must be a multiple of 64 for FlashMLA, got {window}"
     T = positions.shape[0]
-    swa_index = torch.empty((T, window), dtype=torch.int32, device=positions.device)
-    swa_length = torch.empty((T,), dtype=torch.int32, device=positions.device)
+    window = swa_index.shape[1]
     if T == 0:
         return swa_index, swa_length
     _build_swa_index_kernel[(T,)](
@@ -67,6 +63,7 @@ def build_swa_index(
         req_to_token_indexs.stride(0),
         full_to_swa_indexs,
         swa_index,
+        swa_index.stride(0),
         swa_length,
         WINDOW=window,
         BLOCK_W=triton.next_power_of_2(window),

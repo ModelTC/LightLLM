@@ -123,7 +123,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x = self.context_attention_forward(x, infer_state, layer_weight)
         x, residual, post_mix, res_mix = self._hc_ffn_in(x, residual, post_mix, res_mix, layer_weight)
         x = self._ffn(x, infer_state, layer_weight)
-        return self._hc_ffn_out(x, residual, post_mix, res_mix)
+        out = self._hc_ffn_out(x, residual, post_mix, res_mix)
+        return out
 
     def token_forward(
         self, input_embdings, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
@@ -220,9 +221,10 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             _o = tensor_to_no_ref_tensor(o)
 
             def att_func(new_infer_state: DeepseekV4InferStateInfo):
-                tmp_o = self._context_attention_kernel(_q, _q_lora, _x, new_infer_state, layer_weight)
+                tmp_o = self._context_attention_kernel(_q, _q_lora, _x, new_infer_state, layer_weight, out=_o)
                 assert tmp_o.shape == _o.shape
-                _o.copy_(tmp_o)
+                if tmp_o.data_ptr() != _o.data_ptr():
+                    _o.copy_(tmp_o)
                 return
 
             infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
@@ -265,7 +267,13 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         return self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
 
     def _context_attention_kernel(
-        self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
+        self,
+        q,
+        q_lora,
+        x,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        out=None,
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
         att_control = AttControl(
@@ -285,6 +293,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
             v=None,
             att_control=att_control,
+            out=out,
         )
         pad_q_len = getattr(infer_state, "_dsv4_prefill_pad_q_len", 0)
         if pad_q_len:
@@ -495,7 +504,7 @@ class DeepseekV4IndexInfer:
     ragged gather of the compressed c4 keys, deep_gemm.fp8_mqa_logits, then topk -- adapted for the
     replicated indexer (no gather-q/all_reduce), the c4-compressed entry space, and topk-512 (no
     inheritance only because of those data-shape differences). swa metadata is precomputed in
-    init_some_extra_state; this class owns the c4/c128 entry gather (build_compress_index) AND the c4
+    init_some_extra_state; this class owns the c4 entry gather (build_compress_index) AND the c4
     Lightning-Indexer scoring (gather + deep_gemm.fp8_mqa_logits + topk). Holds only static per-layer
     config; all per-request data flows in via args. Invoke from _context/_token_attention_kernel
     (after compressor.fused_compress, before *_att) so the c4 scorer/topk keep the same cuda-graph
@@ -558,11 +567,10 @@ class DeepseekV4IndexInfer:
     ):
         """Return the final flash_mla index tensors for this layer's compress variant. swa indices and
         the per-token req_idx are layer-independent and precomputed once in init_some_extra_state
-        (read here); only the c4 scorer / c128 gather is per-layer. The backend pairs these with the
+        (read here); only the c4 scorer is per-layer. The backend pairs these with the
         (data-independent, layer-keyed) fp8 cache-byte views it owns."""
         swa_indices = infer_state.dsv4_swa_indices.unsqueeze(1)
         swa_lengths = infer_state.dsv4_swa_lengths
-        req_idx = infer_state.dsv4_sparse_req_idx
         positions = infer_state.position_ids
         extra_indices = extra_lengths = None
         if self.compress_ratio == 4:
@@ -571,27 +579,14 @@ class DeepseekV4IndexInfer:
             )
             extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights, positions)
         elif self.compress_ratio == 128:
-            extra_indices, extra_lengths = self._c128_indices(infer_state, req_idx, positions)
+            extra_indices = infer_state.dsv4_c128_indices.unsqueeze(1)
+            extra_lengths = infer_state.dsv4_c128_lengths
         return {
             "swa_indices": swa_indices,
             "swa_lengths": swa_lengths,
             "extra_indices": extra_indices,
             "extra_lengths": extra_lengths,
         }
-
-    def _c128_indices(self, infer_state: DeepseekV4InferStateInfo, req_idx, positions):
-        from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
-
-        cap = ((max(1, int(infer_state.max_kv_seq_len) // 128) + 63) // 64) * 64
-        indices, lengths = build_compress_index(
-            req_idx,
-            positions,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.mem_manager.full_to_c128_indexs,
-            ratio=128,
-            cap=cap,
-        )
-        return indices.unsqueeze(1), lengths
 
     def _indexer_q_weight(
         self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
@@ -627,6 +622,7 @@ class DeepseekV4IndexInfer:
         then masked topk-512 -> c4 slots. Fixed shapes (c4_cap pinned per graph bucket) keep the decode
         cuda graph capturable."""
         mem_manager = infer_state.mem_manager
+        workspace = infer_state.dsv4_workspace
         index_topk = self.index_topk
         max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
         c4_cap = ((max_entries + 63) // 64) * 64
@@ -637,13 +633,15 @@ class DeepseekV4IndexInfer:
         if max_entries <= index_topk:
             from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
 
+            slots, lengths = workspace.c4(infer_state.microbatch_index, positions.shape[0], c4_cap)
             slots, lengths = build_compress_index(
                 infer_state.dsv4_sparse_req_idx,
                 positions,
                 infer_state.req_manager.req_to_token_indexs,
                 mem_manager.full_to_c4_indexs,
-                ratio=4,
-                cap=c4_cap,
+                4,
+                slots,
+                lengths,
             )
             return slots.unsqueeze(1), lengths
 
@@ -713,7 +711,7 @@ class DeepseekV4IndexInfer:
             c4_cap,
             False,
         )
-        top_slots = torch.empty((idx_q_fp8.shape[0], index_topk), dtype=torch.int32, device=device)
+        top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
         topk_transform_512(
             logits,
             valid_len,

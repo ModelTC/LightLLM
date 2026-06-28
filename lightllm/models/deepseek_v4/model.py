@@ -25,6 +25,7 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
@@ -113,6 +114,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
+        self.dsv4_workspace = DeepseekV4Workspace(self)
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1":
             prefill_aux_stream = torch.cuda.Stream()
             for layer in self.layers_infer:
