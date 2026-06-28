@@ -18,6 +18,9 @@ import deep_gemm
 from lightllm.third_party.sglang_jit.dsv4 import topk_transform_512
 
 
+_C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
+
+
 class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         TransformerLayerInferTpl.__init__(self, layer_num, network_config)
@@ -701,6 +704,58 @@ class DeepseekV4IndexInfer:
             1,
             self.index_head_dim + 4,
         )
+        top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
+        if infer_state.is_prefill:
+            rows_per_chunk = max(1, _C4_PREFILL_LOGITS_BUDGET_BYTES // (c4_cap * 4))
+            if idx_q_fp8.shape[0] > rows_per_chunk:
+                for start in range(0, idx_q_fp8.shape[0], rows_per_chunk):
+                    end = min(start + rows_per_chunk, idx_q_fp8.shape[0])
+                    chunk_ctx_lens = ctx_lens[start:end]
+                    self._c4_score_topk(
+                        idx_q_fp8[start:end],
+                        kv_cache,
+                        weights[start:end],
+                        chunk_ctx_lens,
+                        row_page_table[start:end],
+                        deep_gemm.get_paged_mqa_logits_metadata(
+                            chunk_ctx_lens,
+                            page_size,
+                            deep_gemm.get_num_sms(),
+                        ),
+                        c4_cap,
+                        valid_len[start:end],
+                        top_slots[start:end],
+                        page_size,
+                    )
+                return top_slots.unsqueeze(1), topk_lengths
+
+        self._c4_score_topk(
+            idx_q_fp8,
+            kv_cache,
+            weights,
+            ctx_lens,
+            row_page_table,
+            metadata,
+            c4_cap,
+            valid_len,
+            top_slots,
+            page_size,
+        )
+        return top_slots.unsqueeze(1), topk_lengths
+
+    @staticmethod
+    def _c4_score_topk(
+        idx_q_fp8,
+        kv_cache,
+        weights,
+        ctx_lens,
+        row_page_table,
+        metadata,
+        c4_cap,
+        valid_len,
+        top_slots,
+        page_size,
+    ):
         logits = deep_gemm.fp8_paged_mqa_logits(
             idx_q_fp8.unsqueeze(1),
             kv_cache,
@@ -711,7 +766,6 @@ class DeepseekV4IndexInfer:
             c4_cap,
             False,
         )
-        top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
         topk_transform_512(
             logits,
             valid_len,
@@ -719,4 +773,3 @@ class DeepseekV4IndexInfer:
             top_slots,
             page_size,
         )
-        return top_slots.unsqueeze(1), topk_lengths
