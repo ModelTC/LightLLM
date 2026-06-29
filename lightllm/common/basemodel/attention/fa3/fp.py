@@ -235,7 +235,6 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             causal=True,
             window_size=window_size,
             softcap=0.0,
-            num_splits=32,
             k_descale=k_descale,
             v_descale=v_descale,
             return_softmax_lse=False,
