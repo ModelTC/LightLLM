@@ -135,11 +135,22 @@ def test_moe_align_fused_large_token():
     large_topk_weights = torch.arange(large_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(129, 3)
     _check_moe_align_fused(large_topk_ids, large_topk_weights, expert_num, ordered=False)
 
-    sorted_path_topk_ids = base_topk_ids.repeat(1281, 1)[:5121].contiguous()
-    sorted_path_topk_weights = torch.arange(sorted_path_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(
+    medium_topk_ids = base_topk_ids.repeat(1024, 1).contiguous()
+    medium_topk_weights = torch.arange(medium_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(4096, 3)
+    _check_moe_align_fused(medium_topk_ids, medium_topk_weights, expert_num, ordered=False)
+
+    shared_expert_num = 257
+    shared_routing = torch.arange(512 * 7, dtype=torch.int32, device="cuda").reshape(512, 7) % 256
+    shared_last = torch.full((512, 1), 256, dtype=torch.int32, device="cuda")
+    shared_topk_ids = torch.cat([shared_routing, shared_last], dim=1).contiguous()
+    shared_topk_weights = torch.arange(shared_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(512, 8)
+    _check_moe_align_fused(shared_topk_ids, shared_topk_weights, shared_expert_num, ordered=False)
+
+    large_atomic_topk_ids = base_topk_ids.repeat(1281, 1)[:5121].contiguous()
+    large_atomic_topk_weights = torch.arange(large_atomic_topk_ids.numel(), dtype=torch.float32, device="cuda").reshape(
         5121, 3
     )
-    _check_moe_align_fused(sorted_path_topk_ids, sorted_path_topk_weights, expert_num, ordered=False)
+    _check_moe_align_fused(large_atomic_topk_ids, large_atomic_topk_weights, expert_num, ordered=False)
 
     sparse_expert_num = 257
     sparse_topk_ids = base_topk_ids.repeat(1281, 1)[:5121].contiguous()
