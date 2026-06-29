@@ -133,13 +133,18 @@ Prompt Cache 测试
 静态推理性能测试 (Static Inference Benchmark)
 ----------------------------------------------
 
-静态推理测试用于评估模型在固定输入条件下的推理性能, 主要评估算子的优劣
-模型推理测试 (model_infer.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+静态推理测试用于评估模型在固定输入条件下的推理性能, 主要评估算子的优劣。
+统一入口为 ``test/benchmark/static_inference/test_model.py``，核心实现集中在
+``test/benchmark/static_inference/static_benchmark.py``。
+
+模型推理测试
+~~~~~~~~~~~~
 
 **主要特性：**
 
 - 支持 prefill 和 decode 阶段性能测试
+- 支持 prefill 静态 TPS 的多输入长度、多 batch size 和 chunked prefill
+- 支持 decode 静态 TPS 的多 batch size、多上下文长度和多输出长度
 - 支持 microbatch overlap 优化
 - 支持多 GPU 并行推理
 - 提供详细的吞吐量统计
@@ -150,23 +155,28 @@ Prompt Cache 测试
 
     python test/benchmark/static_inference/test_model.py \
         --model_dir /path/to/model \
-        --batch_size 32 \
-        --input_len 1024 \
-        --output_len 128 \
+        --benchmark all \
+        --batch_sizes 8,16,32 \
+        --input_lens 1024,2048 \
+        --context_lens 1024,4096 \
+        --output_lens 128 \
+        --chunked_prefill_sizes 512 \
         --tp 2 \
         --data_type bf16
 
 **主要参数：**
 
 - ``--model_dir``: 模型路径
-- ``--batch_size``: 批次大小
-- ``--input_len``: 输入序列长度
-- ``--output_len``: 输出序列长度
+- ``--benchmark``: 测试阶段，可选 ``all``、``prefill``、``decode``
+- ``--batch_size`` / ``--batch_sizes``: 单个或多个批次大小
+- ``--input_len`` / ``--input_lens``: prefill 输入序列长度
+- ``--context_lens``: decode 阶段上下文长度
+- ``--output_len`` / ``--output_lens``: decode 输出长度
+- ``--chunked_prefill_sizes``: prefill chunk 大小，默认 ``4096``；使用 ``full``、``none`` 或 ``0`` 表示不分块
 - ``--tp``: Tensor Parallel 并行度
 - ``--data_type``: 数据类型 (bf16/fp16/fp32)
-- ``--enable_prefill_microbatch_overlap``: 启用 prefill microbatch overlap，仅适用于DeepSeek模型的EP模式
-- ``--enable_decode_microbatch_overlap``: 启用 decode microbatch overlap，仅适用于DeepSeek模型的EP模式
-- ``--torch_profile``: 启用 torch profiler 进行性能分析
+- ``--enable_prefill_microbatch_overlap``: 启用 prefill microbatch overlap，仅适用于 DeepSeek 模型的 EP 模式
+- ``--enable_decode_microbatch_overlap``: 启用 decode microbatch overlap，仅适用于 DeepSeek 模型的 EP 模式
 
 .. note::
     这里没有列举完整的启动参数，静态测试脚本也共享lightllm的启动参数，更多启动配置可以参考 :ref:`tutorial/api_server_args_zh` 。
@@ -177,10 +187,13 @@ Prompt Cache 测试
 - Decode 阶段吞吐量 (tokens/s)
 - 各阶段延迟统计
 
-多结果预测性能测试 (model_infer_mtp.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+多结果预测性能测试
+~~~~~~~~~~~~~~~~~~
 
-多结果预测静态性能测试，默认百分百接受率，用来评估多结果预测的极限性能。目前只支持DeepSeek 系列模型
+多结果预测静态性能测试默认 ``--mtp_accept_rate 1.0``，即接受全部 draft token；
+可调低该值模拟更低接受率下的 MTP decode 吞吐。
+DeepSeek R1 可以使用 ``/mtc/models/DeepSeek-R1`` 和 ``/mtc/models/DeepSeek-R1-NextN`` 这类
+主模型/草稿模型结构。
 
 **使用方法：**
 
@@ -188,19 +201,22 @@ Prompt Cache 测试
 
     python test/benchmark/static_inference/test_model.py \
         --model_dir /path/to/main_model \
-        --mtp_mode deepseekv3 \
-        --mtp_step 1 \
+        --benchmark decode \
+        --mtp_mode eagle_with_att \
+        --mtp_step 2 \
         --mtp_draft_model_dir /path/to/draft_model \
-        --batch_size 32 \
-        --input_len 1024 \
-        --output_len 128
+        --mtp_accept_rate 0.8 \
+        --batch_sizes 8,16 \
+        --context_lens 1024,4096 \
+        --output_lens 128
 
 参数说明：
 
 - ``--model_dir``: 主模型路径
-- ``--mtp_mode``: 指定多结果预测的模型，目前只支持deepseekv2/v3/r1
-- ``--mtp_step``: 每次forward step产生的token 数量，默认为1
+- ``--mtp_mode``: MTP 模式，如 ``eagle_with_att``、``vanilla_with_att``、``eagle_no_att``、``vanilla_no_att``
+- ``--mtp_step``: 每次 decode 额外预测的 draft token 数量
 - ``--mtp_draft_model_dir``: 草稿模型路径
+- ``--mtp_accept_rate``: 每个 draft token 的模拟接受概率，采样过程不计入 decode 耗时
 
 Vision Transformer 测试 (test_vit.py)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
