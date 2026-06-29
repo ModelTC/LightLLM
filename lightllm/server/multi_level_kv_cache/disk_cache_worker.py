@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_disk_cache_index_prefix, get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from .cpu_cache_client import CpuKvCacheClient
 
@@ -36,6 +36,8 @@ class DiskCacheWorker:
         disk_cache_storage_size: float,
         cpu_cache_client: CpuKvCacheClient,
         disk_cache_dir: Optional[str] = None,
+        redis_endpoint: str = "",
+        num_node_in_disk_cache: int = 1,
     ):
         self.cpu_cache_client = cpu_cache_client
         self._pages_all_idle = False
@@ -43,8 +45,9 @@ class DiskCacheWorker:
         assert disk_cache_storage_size > 0
         storage_size = int(disk_cache_storage_size * (1024 ** 3))
         # num_shard与KVCACHE_MAX_BLOCK_SIZE相关，KVCACHE_MAX_BLOCK_SIZE默认64MB前提下，
-        # num_shard设置32, 能使disk cache的容量利用率达到90%，继续增大num_shard会导致容量利用率下降
-        num_shard = 32
+        if num_node_in_disk_cache <= 0:
+            raise ValueError(f"num_node_in_disk_cache must be >= 1, got {num_node_in_disk_cache}")
+        num_shard = 64 * num_node_in_disk_cache if redis_endpoint else 64
         num_worker = 48
         # 读写同时进行时，分配16线程用来写，32线程用来读
         max_concurrent_write_tasks = 16
@@ -64,6 +67,9 @@ class DiskCacheWorker:
             storage_size=storage_size,
             num_shard=num_shard,
             num_worker=num_worker,
+            index_endpoint=redis_endpoint,
+            index_prefix=get_disk_cache_index_prefix(),
+            bandwidth_log=True,
         )
 
         logger.info(

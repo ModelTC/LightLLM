@@ -215,6 +215,11 @@ def get_disk_cache_prompt_limit_length():
 
 
 @lru_cache(maxsize=None)
+def get_disk_cache_index_prefix() -> str:
+    return os.getenv("LIGHTLLM_DISK_CACHE_INDEX_PREFIX", "lightmem")
+
+
+@lru_cache(maxsize=None)
 def enable_huge_page():
     """
     大页模式：启动后可大幅缩短cpu kv cache加载时间

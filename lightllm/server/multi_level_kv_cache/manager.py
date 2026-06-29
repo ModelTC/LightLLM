@@ -55,6 +55,8 @@ class MultiLevelKVCacheManager:
                 disk_cache_storage_size=self.args.disk_cache_storage_size,
                 cpu_cache_client=self.cpu_cache_client,
                 disk_cache_dir=self.args.disk_cache_dir,
+                redis_endpoint=self.args.redis_endpoint,
+                num_node_in_disk_cache=self.args.num_node_in_disk_cache,
             )
             self.disk_cache_thread = threading.Thread(target=self.disk_cache_worker.run, daemon=True)
             self.disk_cache_thread.start()
