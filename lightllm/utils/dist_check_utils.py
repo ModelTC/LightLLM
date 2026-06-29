@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _CUSTOM_ALLREDUCE_WORLD_SIZES = (2, 4, 6, 8)
-_TWO_GPU_CHECK_TIMEOUT_SECONDS = 600.0
+_TWO_GPU_CHECK_TIMEOUT_SECONDS = 60.0
 
 
 def _start_two_gpu_check_timeout_watchdog(backend_name: str) -> threading.Event:
