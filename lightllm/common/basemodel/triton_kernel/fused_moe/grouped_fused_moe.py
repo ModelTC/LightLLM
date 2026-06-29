@@ -345,24 +345,42 @@ def moe_align_fused_atomic_kernel(
     tl.store(expert_to_weight_ptr + expert_id * token_num_mul_topk + write_pos, weight, mask=valid)
 
 
+@autotune(
+    kernel_name="moe_align_fused_atomic:v1",
+    configs_gen_func=lambda: [
+        {
+            "BLOCK_SIZE": block_size,
+            "num_warps": num_warps,
+        }
+        for num_warps in [1, 2, 4, 8]
+        for block_size in [128, 256, 512, 1024, 2048]
+    ],
+    static_key_func=_get_moe_align_fused_static_key,
+    run_key_func=lambda topk_ids: topk_ids.shape[0],
+    mutates_args=["expert_to_token_index", "expert_to_weight", "expert_token_num"],
+)
 def _moe_align_fused_atomic_token(
     expert_to_token_index,
     expert_to_weight,
     expert_token_num,
     topk_ids,
     topk_weights,
+    run_config: Optional[dict] = None,
 ):
+    if run_config is None:
+        run_config = {"BLOCK_SIZE": 128, "num_warps": 4}
+
     token_num_mul_topk = topk_ids.numel()
     expert_token_num.zero_()
-    moe_align_fused_atomic_kernel[(triton.cdiv(token_num_mul_topk, 128),)](
+    moe_align_fused_atomic_kernel[(triton.cdiv(token_num_mul_topk, run_config["BLOCK_SIZE"]),)](
         topk_ids,
         topk_weights,
         expert_to_token_index,
         expert_to_weight,
         expert_token_num,
         token_num_mul_topk,
-        BLOCK_SIZE=128,
-        num_warps=4,
+        BLOCK_SIZE=run_config["BLOCK_SIZE"],
+        num_warps=run_config["num_warps"],
     )
     return expert_to_token_index, expert_to_weight, expert_token_num
 
