@@ -152,7 +152,7 @@ def copy_kv_buffer_to_cpu_cache(
     grid_num: int = 12,
 ):
     assert len(page_indexes) == len(page_readies) == len(big_page_buffer_ids)
-    assert len(mem_indexes) % len(page_indexes) == 0
+    assert len(mem_indexes) == len(page_indexes) * big_page_token_num
 
     BLOCK = 4096
     if linear_config.full_att_all_num_kv_heads % tp_world_size == 0:
@@ -389,7 +389,7 @@ def copy_cpu_cache_to_kv_buffer(
     grid_num: int = 12,
 ):
 
-    assert len(mem_indexes) % len(page_indexes) == 0
+    assert len(mem_indexes) == len(page_indexes) * big_page_token_num
 
     BLOCK = 4096
     if linear_config.full_att_all_num_kv_heads % tp_world_size == 0:

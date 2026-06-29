@@ -109,9 +109,6 @@ class LinearAttMemOperator(BaseMemManagerOperator):
     ):
         if not hasattr(self, "big_page_ids_buffer_store"):
             self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device="cuda")
-            self.mem_indexes_buffer = torch.empty(
-                (get_env_start_args().max_req_total_len + 1024,), dtype=torch.int32, device="cuda"
-            )
 
         assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
         args = get_env_start_args()
@@ -134,6 +131,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         if len(mem_indexes) % args.cpu_cache_token_page_size != 0:
             # 存在不满大页的碎页的页面存在需要复制的情况
             dst_len = triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
+            if not hasattr(self, "mem_indexes_buffer") or self.mem_indexes_buffer.shape[0] < dst_len:
+                self.mem_indexes_buffer = torch.empty((dst_len,), dtype=torch.int32, device="cuda")
             dst_mem_indexes = self.mem_indexes_buffer[0:dst_len].fill_(-1)
             dst_mem_indexes[0 : len(mem_indexes)].copy_(mem_indexes, non_blocking=True)
             mem_indexes = dst_mem_indexes
