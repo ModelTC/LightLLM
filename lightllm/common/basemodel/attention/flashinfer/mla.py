@@ -8,33 +8,6 @@ from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
 
 
-def _fast_plan_mla_decode(
-    decode_wrapper,
-    qo_indptr_cpu,
-    kv_indptr_cpu,
-    kv_len_arr_cpu,
-    num_heads,
-    head_dim_ckv,
-    page_size,
-    causal,
-    sm_scale,
-):
-    decode_wrapper._causal = causal
-    decode_wrapper._page_size = page_size
-    decode_wrapper._sm_scale = sm_scale
-    decode_wrapper._plan_info = decode_wrapper._cached_module.plan(
-        decode_wrapper._float_workspace_buffer,
-        decode_wrapper._int_workspace_buffer,
-        decode_wrapper._pin_memory_int_workspace_buffer,
-        qo_indptr_cpu,
-        kv_indptr_cpu,
-        kv_len_arr_cpu,
-        num_heads,
-        head_dim_ckv,
-        causal,
-    )
-
-
 class MlaFlashInferAttBackend(BaseAttBackend):
     def __init__(self, model):
         set_flashinfer_envs()
@@ -147,7 +120,30 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
     def _should_init_decode_wrapper(self) -> bool:
         return should_init_decode_wrapper(self.backend.model, self.infer_state)
 
+    def _fast_plan_decode(
+        self,
+        qo_indptr_cpu,
+        kv_indptr_cpu,
+        kv_len_arr_cpu,
+    ):
+        self.decode_wrapper._causal = False
+        self.decode_wrapper._page_size = 1
+        self.decode_wrapper._sm_scale = self.backend.softmax_scale
+        self.decode_wrapper._plan_info = self.decode_wrapper._cached_module.plan(
+            self.decode_wrapper._float_workspace_buffer,
+            self.decode_wrapper._int_workspace_buffer,
+            self.decode_wrapper._pin_memory_int_workspace_buffer,
+            qo_indptr_cpu,
+            kv_indptr_cpu,
+            kv_len_arr_cpu,
+            self.backend.tp_q_head_num,
+            self.backend.kv_lora_rank,
+            False,  # causal
+        )
+
     def init_state(self):
+        import flashinfer
+
         self.backend: MlaFlashInferAttBackend = self.backend
         model = self.backend.model
         device = self.infer_state.input_ids.device
@@ -176,10 +172,9 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )
+
         if not self._should_init_decode_wrapper():
             return
-
-        import flashinfer
 
         assert self.decode_wrapper is None
 
@@ -208,18 +203,20 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
-        kv_starts_host = new_state.kv_starts.cpu()
-        kv_len_arr_host = new_state.infer_state.b_seq_len.cpu()
-        _fast_plan_mla_decode(
-            self.decode_wrapper,
+        # 计算 cumsum_kv_len 的 cpu 版本, 这个地方每个flashinfer版本都需要check一下，防止算子不支持这种用途。
+        plan_kv_len_arr_cpu = torch.full(
+            (new_state.infer_state.batch_size,),
+            new_state.infer_state.max_kv_seq_len,
+            dtype=torch.int32,
+            device="cpu",
+        )
+        plan_kv_indptr_cpu = torch.empty((new_state.infer_state.batch_size + 1,), dtype=torch.int32, device="cpu")
+        plan_kv_indptr_cpu[0] = 0
+        torch.cumsum(plan_kv_len_arr_cpu, dim=0, out=plan_kv_indptr_cpu[1:])
+        self._fast_plan_decode(
             new_state.q_indptr_host,
-            kv_starts_host,
-            kv_len_arr_host,
-            new_state.backend.tp_q_head_num,
-            new_state.backend.kv_lora_rank,
-            1,
-            False,  # causal
-            new_state.backend.softmax_scale,
+            plan_kv_indptr_cpu,
+            plan_kv_len_arr_cpu,
         )
 
     def decode_att(

@@ -192,6 +192,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         from flashinfer.decode import fast_decode_plan
 
         # 计算 cumsum_kv_len 的 cpu 版本, 这个地方每个flashinfer版本都需要check一下，防止算子不支持这种用途。
+        # 这个地方将所有请求的kv_len都变相的设置为最长来看待的，这样可以绕开需要精确cu kv seq len 的问题，
         cpu_cumsum_kv_len = torch.tensor(
             [0] + [new_state.infer_state.max_kv_seq_len for _ in range(new_state.infer_state.batch_size)],
             dtype=torch.int32,
