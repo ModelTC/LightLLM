@@ -12,7 +12,7 @@ import uuid
 from lightllm.server.reasoning_parser import ReasoningParser
 
 from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser, ToolCallItem
-from .build_prompt import build_prompt, init_tokenizer
+from .build_prompt import build_prompt, get_effective_chat_template_kwargs, init_tokenizer
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
@@ -163,13 +163,14 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
+    chat_template_kwargs = get_effective_chat_template_kwargs(request)
     if reasoning_parser in ["qwen3-thinking", "gpt-oss", "minimax"]:
         return True
     if reasoning_parser in ["deepseek-v3"]:
-        return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
+        return chat_template_kwargs.get("thinking") is True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
         # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
-        return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
+        return chat_template_kwargs.get("enable_thinking", True) is True
     return True  # default
 
 

@@ -1,4 +1,15 @@
 import argparse
+import json
+
+
+def _json_dict(value: str) -> dict:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(f"invalid JSON object: {e}") from e
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("value must be a JSON object")
+    return parsed
 
 
 def make_argument_parser() -> argparse.ArgumentParser:
@@ -200,6 +211,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "- /test/chat_template/tool_chat_template_deepseekv32.jinja\n"
             "- /test/chat_template/tool_chat_template_qwen.jinja\n"
             "- /test/chat_template/tool_chat_template_deepseekr1.jinja"
+        ),
+    )
+    parser.add_argument(
+        "--default_chat_template_kwargs",
+        "--default-chat-template-kwargs",
+        type=_json_dict,
+        default=None,
+        help=(
+            "Default JSON kwargs passed to tokenizer.apply_chat_template for every chat request. "
+            'For example: \'{"preserve_thinking": true}\'. Request chat_template_kwargs override these values.'
         ),
     )
 
