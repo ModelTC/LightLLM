@@ -482,6 +482,10 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     if model_type is None:
         return None
 
+    # GLM-5 / GLM-5.2 DSA models use the GLM-4.7 tool-call format.
+    if model_type == "glm_moe_dsa":
+        return "glm47"
+
     # Qwen3.5 series
     if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
         return "qwen3_coder"
@@ -510,6 +514,10 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     model_type = get_model_type(model_path)
     if model_type is None:
         return None
+
+    # GLM-5 / GLM-5.2 DSA models share the GLM-4.5-style thinking tags.
+    if model_type == "glm_moe_dsa":
+        return "glm45"
 
     # Qwen3.5 and Qwen3 series
     if model_type in [

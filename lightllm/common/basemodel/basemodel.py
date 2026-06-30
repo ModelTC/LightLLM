@@ -1171,12 +1171,7 @@ class TpPartBaseModel:
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        is_mtp_draft_model = (
-            "Deepseek3MTPModel" in str(self.__class__)
-            or "Qwen3MOEMTPModel" in str(self.__class__)
-            or "MistralMTPModel" in str(self.__class__)
-            or "Glm4MoeLiteMTPModel" in str(self.__class__)
-        )
+        is_mtp_draft_model = getattr(self, "is_mtp_draft_model", False)
         if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
                 token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"

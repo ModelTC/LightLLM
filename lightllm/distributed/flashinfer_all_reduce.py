@@ -133,3 +133,26 @@ class FlashInferAllReduce:
             workspace=self._workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
         )
+
+    def allreduce_residual_rmsnorm(self, inp, residual, rms_weight, eps, alloc_func):
+        """Fused all-reduce + residual-add + RMSNorm (flashinfer kARResidualRMSNorm).
+
+        Computes ``residual_out = residual + allreduce(inp)`` and
+        ``norm_out = rmsnorm(residual_out) * rms_weight`` in one kernel — the SGLang
+        #22390 fusion. Returns ``(norm_out, residual_out)``; both are freshly allocated
+        (the kernel is out-of-place). ``inp`` must already satisfy ``should_use``.
+        """
+        norm_out = alloc_func(inp.shape, dtype=inp.dtype, device=inp.device)
+        residual_out = alloc_func(residual.shape, dtype=residual.dtype, device=residual.device)
+        flashinfer_comm.allreduce_fusion(
+            input=inp,
+            workspace=self._workspace,
+            pattern=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+            residual_in=residual,
+            residual_out=residual_out,
+            norm_out=norm_out,
+            rms_gamma=rms_weight,
+            rms_eps=eps,
+            fp32_acc=True,
+        )
+        return norm_out, residual_out
