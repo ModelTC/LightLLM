@@ -5,6 +5,7 @@ from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from typing import Tuple
 from .env_utils import set_flashinfer_envs
+from .utils import should_init_decode_wrapper
 
 
 def _fast_plan_mla_decode(
@@ -143,6 +144,9 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
     q_indptr_host: torch.Tensor = None
     decode_wrapper: object = None
 
+    def _should_init_decode_wrapper(self) -> bool:
+        return should_init_decode_wrapper(self.backend.model, self.infer_state)
+
     def init_state(self):
         self.backend: MlaFlashInferAttBackend = self.backend
         model = self.backend.model
@@ -172,7 +176,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )
-        if self.infer_state.skip_decode_att_wrapper_init:
+        if not self._should_init_decode_wrapper():
             return
 
         import flashinfer

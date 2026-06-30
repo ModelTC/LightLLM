@@ -56,7 +56,6 @@ class InferStateInfo:
         self.return_all_prompt_logics: bool = False
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
-        self.skip_decode_att_wrapper_init: bool = False
         self.dist_group: CustomProcessGroup = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号

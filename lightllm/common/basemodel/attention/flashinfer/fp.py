@@ -4,6 +4,7 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
+from .utils import should_init_decode_wrapper
 
 
 class FlashInferAttBackend(BaseAttBackend):
@@ -126,7 +127,12 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     kv_starts: torch.Tensor = None
     decode_wrapper: object = None
 
+    def _should_init_decode_wrapper(self) -> bool:
+        return should_init_decode_wrapper(self.backend.model, self.infer_state)
+
     def init_state(self):
+        import flashinfer
+
         self.backend: FlashInferAttBackend = self.backend
         device = self.infer_state.input_ids.device
         model = self.backend.model
@@ -154,10 +160,9 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             self.kv_indices,
         )
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
-        if self.infer_state.skip_decode_att_wrapper_init:
+        if not self._should_init_decode_wrapper():
+            # 处于 graph replay 回放阶段，不需要特殊初始化 decode wrapper。
             return
-
-        import flashinfer
 
         assert self.decode_wrapper is None
         self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
