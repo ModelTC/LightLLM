@@ -189,31 +189,37 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
+        super().copy_for_decode_cuda_graph(new_state)
+        self._refresh_cuda_graph_decode_plan(new_state.infer_state.max_kv_seq_len)
+        return
+
+    def _refresh_cuda_graph_decode_plan(self, max_kv_len: int):
         from flashinfer.decode import fast_decode_plan
 
-        # 计算 cumsum_kv_len 的 cpu 版本, 这个地方每个flashinfer版本都需要check一下，防止算子不支持这种用途。
-        # 这个地方将所有请求的kv_len都变相的设置为最长来看待的，这样可以绕开需要精确cu kv seq len 的问题，
-        cpu_cumsum_kv_len = torch.tensor(
-            [0] + [new_state.infer_state.max_kv_seq_len for _ in range(new_state.infer_state.batch_size)],
-            dtype=torch.int32,
-            device="cpu",
+        uniform_kv_indptr_cpu = (
+            torch.arange(
+                self.infer_state.batch_size + 1,
+                dtype=torch.int32,
+                device="cpu",
+            )
+            * max_kv_len
         )
-        cpu_cumsum_kv_len = torch.cumsum(cpu_cumsum_kv_len, dim=0)
 
         fast_decode_plan(
             self.decode_wrapper,
-            indptr=new_state.kv_starts,
-            indices=new_state.kv_indices,
-            last_page_len=new_state.kv_last_page_len_buffer,
-            num_qo_heads=new_state.backend.tp_q_head_num,
-            num_kv_heads=new_state.backend.tp_kv_head_num,
-            head_dim=new_state.backend.head_dim,
+            indptr=self.kv_starts,
+            indices=self.kv_indices,
+            last_page_len=self.kv_last_page_len_buffer,
+            num_qo_heads=self.backend.tp_q_head_num,
+            num_kv_heads=self.backend.tp_kv_head_num,
+            head_dim=self.backend.head_dim,
             page_size=1,
-            q_data_type=new_state.backend.q_data_type,
-            kv_data_type=new_state.backend.kv_data_type,
+            q_data_type=self.backend.q_data_type,
+            kv_data_type=self.backend.kv_data_type,
             non_blocking=True,
-            global_override_indptr_cpu=cpu_cumsum_kv_len,
+            global_override_indptr_cpu=uniform_kv_indptr_cpu,
         )
+        return
 
     def decode_att(
         self,

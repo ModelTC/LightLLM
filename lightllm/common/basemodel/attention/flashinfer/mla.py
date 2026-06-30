@@ -120,27 +120,6 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
     def _should_init_decode_wrapper(self) -> bool:
         return should_init_decode_wrapper(self.backend.model, self.infer_state)
 
-    def _fast_plan_decode(
-        self,
-        qo_indptr_cpu,
-        kv_indptr_cpu,
-        kv_len_arr_cpu,
-    ):
-        self.decode_wrapper._causal = False
-        self.decode_wrapper._page_size = 1
-        self.decode_wrapper._sm_scale = self.backend.softmax_scale
-        self.decode_wrapper._plan_info = self.decode_wrapper._cached_module.plan(
-            self.decode_wrapper._float_workspace_buffer,
-            self.decode_wrapper._int_workspace_buffer,
-            self.decode_wrapper._pin_memory_int_workspace_buffer,
-            qo_indptr_cpu,
-            kv_indptr_cpu,
-            kv_len_arr_cpu,
-            self.backend.tp_q_head_num,
-            self.backend.kv_lora_rank,
-            False,  # causal
-        )
-
     def init_state(self):
         import flashinfer
 
@@ -203,18 +182,48 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
-        # 计算 cumsum_kv_len 的 cpu 版本, 这个地方每个flashinfer版本都需要check一下，防止算子不支持这种用途。
+        super().copy_for_decode_cuda_graph(new_state)
+        self._refresh_cuda_graph_decode_plan(new_state.infer_state.max_kv_seq_len)
+        return
+
+    def _fast_plan_decode(
+        self,
+        qo_indptr_cpu,
+        kv_indptr_cpu,
+        kv_len_arr_cpu,
+    ):
+        self.decode_wrapper._causal = False
+        self.decode_wrapper._page_size = 1
+        self.decode_wrapper._sm_scale = self.backend.softmax_scale
+        self.decode_wrapper._plan_info = self.decode_wrapper._cached_module.plan(
+            self.decode_wrapper._float_workspace_buffer,
+            self.decode_wrapper._int_workspace_buffer,
+            self.decode_wrapper._pin_memory_int_workspace_buffer,
+            qo_indptr_cpu,
+            kv_indptr_cpu,
+            kv_len_arr_cpu,
+            self.backend.tp_q_head_num,
+            self.backend.kv_lora_rank,
+            False,  # causal
+        )
+
+    def _refresh_cuda_graph_decode_plan(self, max_kv_len: int):
         plan_kv_len_arr_cpu = torch.full(
-            (new_state.infer_state.batch_size,),
-            new_state.infer_state.max_kv_seq_len,
+            (self.infer_state.batch_size,),
+            max_kv_len,
             dtype=torch.int32,
             device="cpu",
         )
-        plan_kv_indptr_cpu = torch.empty((new_state.infer_state.batch_size + 1,), dtype=torch.int32, device="cpu")
-        plan_kv_indptr_cpu[0] = 0
-        torch.cumsum(plan_kv_len_arr_cpu, dim=0, out=plan_kv_indptr_cpu[1:])
+        plan_kv_indptr_cpu = (
+            torch.arange(
+                self.infer_state.batch_size + 1,
+                dtype=torch.int32,
+                device="cpu",
+            )
+            * max_kv_len
+        )
         self._fast_plan_decode(
-            new_state.q_indptr_host,
+            self.q_indptr_host,
             plan_kv_indptr_cpu,
             plan_kv_len_arr_cpu,
         )
