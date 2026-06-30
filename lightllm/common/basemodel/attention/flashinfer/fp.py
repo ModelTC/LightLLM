@@ -186,6 +186,14 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
         from flashinfer.decode import fast_decode_plan
 
+        # 计算 cumsum_kv_len 的 cpu 版本, 这个地方每个flashinfer版本都需要check一下，防止算子不支持这种用途。
+        cpu_cumsum_kv_len = torch.tensor(
+            [0] + [new_state.infer_state.max_kv_seq_len for _ in range(new_state.infer_state.batch_size)],
+            dtype=torch.int32,
+            device="cpu",
+        )
+        cpu_cumsum_kv_len = torch.cumsum(cpu_cumsum_kv_len, dim=0)
+
         fast_decode_plan(
             self.decode_wrapper,
             indptr=new_state.kv_starts,
@@ -198,6 +206,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             q_data_type=new_state.backend.q_data_type,
             kv_data_type=new_state.backend.kv_data_type,
             non_blocking=True,
+            global_override_indptr_cpu=cpu_cumsum_kv_len,
         )
 
     def decode_att(
