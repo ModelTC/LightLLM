@@ -65,6 +65,12 @@ class PD_Client_Obj:
     def to_llm_url(self):
         return f"http://{self.client_ip_port}/pd_generate_stream"
 
+    def load(self):
+        return self.run_status.total_token_usage_rate
+
+    def url(self):
+        return self.client_ip_port
+
 
 @dataclass
 class PD_Master_Obj:
