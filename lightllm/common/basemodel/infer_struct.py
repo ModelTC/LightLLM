@@ -40,7 +40,6 @@ class InferStateInfo:
         self.b_mtp_index: torch.Tensor = None
 
         self.b_seq_len: torch.Tensor = None
-        self.b_seq_len_cpu: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         # prefix_total_token_num 用于 prefill 阶段标识当前请求中所有已经ready的kv的长度

@@ -25,10 +25,6 @@ class FlashInferAttBackend(BaseAttBackend):
                 model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
             ),
         ]
-        self.kv_starts_host_buffer = [
-            torch.empty((model.graph_max_batch_size + 1,), dtype=torch.int32, device="cpu"),
-            torch.empty((model.graph_max_batch_size + 1,), dtype=torch.int32, device="cpu"),
-        ]
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
 
@@ -128,7 +124,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     kv_last_page_len_buffer: torch.Tensor = None
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
-    kv_starts_host: torch.Tensor = None
     decode_wrapper: object = None
 
     def init_state(self):
@@ -159,12 +154,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             self.kv_indices,
         )
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
-        if self.infer_state.b_seq_len_cpu is not None:
-            self.kv_starts_host = self.backend.kv_starts_host_buffer[self.infer_state.microbatch_index][
-                : self.infer_state.batch_size + 1
-            ]
-            self.kv_starts_host[0] = 0
-            torch.cumsum(self.infer_state.b_seq_len_cpu, dim=0, out=self.kv_starts_host[1:])
         if self.infer_state.skip_decode_att_wrapper_init:
             return
 
@@ -209,7 +198,6 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             q_data_type=new_state.backend.q_data_type,
             kv_data_type=new_state.backend.kv_data_type,
             non_blocking=True,
-            global_override_indptr_cpu=new_state.kv_starts_host,
         )
 
     def decode_att(

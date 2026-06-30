@@ -57,10 +57,6 @@ class MlaFlashInferAttBackend(BaseAttBackend):
                 model.graph_max_batch_size * self.max_seq_length, dtype=torch.int32, device=get_current_device_id()
             ),
         ]
-        self.kv_starts_host_buffer = [
-            torch.empty((model.graph_max_batch_size + 1,), dtype=torch.int32, device="cpu"),
-            torch.empty((model.graph_max_batch_size + 1,), dtype=torch.int32, device="cpu"),
-        ]
 
         from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 
@@ -145,7 +141,6 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
     q_indptr_host: torch.Tensor = None
-    kv_starts_host: torch.Tensor = None
     decode_wrapper: object = None
 
     def init_state(self):
@@ -177,12 +172,6 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.infer_state.max_kv_seq_len,
             self.kv_indices,
         )
-        if self.infer_state.b_seq_len_cpu is not None:
-            self.kv_starts_host = self.backend.kv_starts_host_buffer[self.infer_state.microbatch_index][
-                : batch_size + 1
-            ]
-            self.kv_starts_host[0] = 0
-            torch.cumsum(self.infer_state.b_seq_len_cpu, dim=0, out=self.kv_starts_host[1:])
         if self.infer_state.skip_decode_att_wrapper_init:
             return
 
@@ -215,13 +204,13 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         return
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaFlashInferDecodeAttState"):
-        assert new_state.kv_starts_host is not None
-        assert new_state.infer_state.b_seq_len_cpu is not None
+        kv_starts_host = new_state.kv_starts.cpu()
+        kv_len_arr_host = new_state.infer_state.b_seq_len.cpu()
         _fast_plan_mla_decode(
             self.decode_wrapper,
             new_state.q_indptr_host,
-            new_state.kv_starts_host,
-            new_state.infer_state.b_seq_len_cpu,
+            kv_starts_host,
+            kv_len_arr_host,
             new_state.backend.tp_q_head_num,
             new_state.backend.kv_lora_rank,
             1,

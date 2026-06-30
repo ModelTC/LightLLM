@@ -314,7 +314,6 @@ class TpPartBaseModel:
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
-        infer_state.b_seq_len_cpu = model_input.b_seq_len_cpu
         infer_state.b_mtp_index = model_input.b_mtp_index
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
@@ -372,10 +371,6 @@ class TpPartBaseModel:
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
-        if new_model_input.b_seq_len_cpu is not None:
-            new_model_input.b_seq_len_cpu = F.pad(
-                new_model_input.b_seq_len_cpu, (0, padded_batch_size), mode="constant", value=2
-            )
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_batch_size),
