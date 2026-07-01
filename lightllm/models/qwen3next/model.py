@@ -102,3 +102,19 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
         return
+
+    def _token_forward_layers(self, input_embs: torch.Tensor, infer_state: Qwen3NextInferStateInfo):
+        next_att_normed = None
+        for i in range(self.layers_num):
+            layer: Qwen3NextTransformerLayerInfer = self.layers_infer[i]
+            layer_weight: Qwen3NextTransformerLayerWeight = self.trans_layers_weight[i]
+            has_next_layer = i + 1 < self.layers_num
+            input_embs, next_att_normed = layer.token_forward_with_next_att_norm(
+                input_embs,
+                infer_state,
+                layer_weight,
+                att_normed_input=next_att_normed,
+                next_layer=self.layers_infer[i + 1] if has_next_layer else None,
+                next_layer_weight=self.trans_layers_weight[i + 1] if has_next_layer else None,
+            )
+        return input_embs
