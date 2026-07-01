@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
@@ -47,7 +48,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.sin_compress_table = None
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.routed_scaling_factor = network_config["routed_scaling_factor"]
-        self.swiglu_limit = network_config["swiglu_limit"]
+        self.swiglu_limit = float(network_config["swiglu_limit"])
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.tp_q_head_num_ = self.num_heads // self.tp_world_size_
         self.tp_groups = self.o_groups // self.tp_world_size_
@@ -347,17 +348,28 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             clamp_limit=float(self.swiglu_limit),
         )
 
+    def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+        input = input.view(-1, self.embed_dim_)
+        gate_up = layer_weight.gate_up_proj.mm(input)
+        shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
+        silu_and_mul_fwd(gate_up, shared, limit=self.swiglu_limit)
+        input = None
+        gate_up = None
+        out = layer_weight.down_proj.mm(shared)
+        shared = None
+        return out
+
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
         if not self.enable_ep_moe:
             x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
-        logits = layer_weight.gate_weight_.mm(x).float().contiguous()
+        logits = layer_weight.gate_weight_.mm(x, out_dtype=torch.float32)
         weights, indices = self._select_experts(logits, infer_state, layer_weight)
         # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
         # 是 inplace 的，_routed_experts 返回后 x 已被覆盖为 routed 输出。
-        # 复用 Llama 的 _ffn_tp: fused gate_up matmul + silu_and_mul triton kernel，无 swiglu clamp，
-        # 对齐参考 DeepseekV4MLP(=LlamaMLP)。swiglu_limit clamp 只属于 routed 专家 (见 _routed_experts)。
+        # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
+        # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = self._routed_experts(x, weights, indices, layer_weight)
         if self.enable_ep_moe:
@@ -451,11 +463,13 @@ class CompressorInfer:
                 # fused wkv/wgate GEMM -> [T, 2*coff*idx_hd] in the [kv | score] layout directly
                 # (same as the attention compressor_wkv_gate_).
                 self._metadata.kv_score = layer_weight.idx_cmp_wkv_gate_.mm(
-                    x, use_custom_tensor_mananger=use_custom_tensor_manager
-                ).float()
+                    x, use_custom_tensor_mananger=use_custom_tensor_manager, out_dtype=torch.float32
+                )
                 ape = layer_weight.idx_cmp_ape_.weight
             else:
-                self._metadata.kv_score = layer_weight.compressor_wkv_gate_.mm(x).float()
+                self._metadata.kv_score = layer_weight.compressor_wkv_gate_.mm(
+                    x, use_custom_tensor_mananger=use_custom_tensor_manager, out_dtype=torch.float32
+                )
                 ape = layer_weight.compressor_ape_.weight
             prepare_partial_states(
                 kv_score=self._metadata.kv_score,

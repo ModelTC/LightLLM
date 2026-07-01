@@ -132,8 +132,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # gemma4 two-variant convention; the fused sglang q kernel consumes them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the kv rope,
         # inverse rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
-        # Sliding-window layers use base rope_theta (no YaRN);
-        # compressed (CSA/HCA) layers use compress_rope_theta with configured rope_scaling.
+        # Sliding-window and compressed layers both use DeepSeek YaRN correction; only the
+        # RoPE base differs (rope_theta vs compress_rope_theta), matching SGLang/vLLM.
         # Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
@@ -146,22 +146,27 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
         positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
 
-        sliding_freqs = 1.0 / (cfg["rope_theta"] ** freq_exponents)
+        rope_type = rs.get("rope_type", rs.get("type", "default"))
+        orig_max = rs.get("original_max_position_embeddings", 0)
+
+        def build_inv_freq(base):
+            freqs = 1.0 / (base ** freq_exponents)
+            if rope_type == "yarn" and orig_max > 0:
+                beta_fast = rs.get("beta_fast", 32)
+                beta_slow = rs.get("beta_slow", 1)
+                factor = rs.get("factor", 1)
+                if factor is None:
+                    factor = cfg.get("max_position_embeddings", max_seq) / orig_max
+                low, high = find_correction_range(beta_fast, beta_slow, dim, base, orig_max)
+                smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
+                freqs = freqs / factor * (1 - smooth) + freqs * smooth
+            return freqs
+
+        sliding_freqs = build_inv_freq(cfg["rope_theta"])
         f = torch.outer(positions, sliding_freqs)  # [max_seq, dim//2]
         self._freqs_cis_sliding = torch.complex(f.cos(), f.sin())
 
-        compress_freqs = 1.0 / (cfg["compress_rope_theta"] ** freq_exponents)
-        rope_type = rs.get("rope_type", rs.get("type", "default"))
-        orig_max = rs.get("original_max_position_embeddings", 0)
-        if rope_type == "yarn" and orig_max > 0:
-            beta_fast = rs.get("beta_fast", 32)
-            beta_slow = rs.get("beta_slow", 1)
-            factor = rs.get("factor", 1)
-            if factor is None:
-                factor = cfg.get("max_position_embeddings", max_seq) / orig_max
-            low, high = find_correction_range(beta_fast, beta_slow, dim, cfg["compress_rope_theta"], orig_max)
-            smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
-            compress_freqs = compress_freqs / factor * (1 - smooth) + compress_freqs * smooth
+        compress_freqs = build_inv_freq(cfg["compress_rope_theta"])
         f = torch.outer(positions, compress_freqs)  # [max_seq, dim//2]
         self._freqs_cis_compress = torch.complex(f.cos(), f.sin())
         self._cos_cached_sliding = self._freqs_cis_sliding.real

@@ -89,12 +89,13 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # grouped low-rank output projection (wo_a per-group [in, o_lora], wo_b row-parallel
         # [groups*o_lora -> hidden]).
         per_group_in = self.n_heads * self.head_dim // self.o_groups
-        # When o_groups == tp_world_size (e.g. the daily tp8 config) each rank owns exactly ONE
-        # group, so the grouped O-proj collapses to a single GEMM -> run it in fp8 (deepgemm)
-        # instead of dequantizing wo_a to bf16. sglang does the same (fp8 wo_a is default-on there).
+        # When o_groups == tp_world_size (e.g. tp8) each rank owns exactly one group, so the
+        # grouped O-proj can collapse to a single GEMM. SGLang only enables the fp8 wo_a GEMM
+        # on Blackwell; on Hopper it keeps BF16, and this checkpoint stores wo_a as BF16.
         # For >1 group per rank (tp < o_groups) the per-group inputs differ (block-diagonal), so
-        # keep the bf16 grouped bmm.
-        self.o_proj_fp8 = (self.o_groups // self.tp_world_size_) == 1
+        # keep the BF16 grouped bmm.
+        major, _ = torch.cuda.get_device_capability()
+        self.o_proj_fp8 = (self.o_groups // self.tp_world_size_) == 1 and major >= 10
         if self.o_proj_fp8:
             self.wo_a_ = ROWMMWeight(
                 in_dim=per_group_in,
@@ -190,8 +191,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     # ------------------------------------------------------------------ moe
     def _init_moe(self):
         p = f"{self.prefix}.ffn"
-        # Router gate in bf16 (matches the sglang/vLLM DeepSeek references, which run the gate GEMM in
-        # the model dtype); the bf16 GEMM output is cast back to fp32 in _ffn for topk_hash_softplus_sqrt.
+        # Router gate weights stay bf16, but DS4 routing consumes fp32 GEMM output
+        # (SGLang linear_bf16_fp32 / vLLM router_logits_dtype=torch.float32).
         self.gate_weight_ = ROWMMWeight(
             in_dim=self.hidden,
             out_dims=[self.n_routed_experts],
@@ -331,4 +332,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
                 w = weights[woa]
                 per_group_in = self.n_heads * self.head_dim // self.o_groups
                 weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2).contiguous()
+        # Keep c4 overlap APE in checkpoint layout [4, 2*head_dim]. SGLang reorders it
+        # because its compressor consumes ape.view(8, head_dim) by window offset. LightLLM
+        # adds APE into each token's two score halves before compression using position % 4,
+        # so the raw checkpoint layout is the equivalent representation here.
         return

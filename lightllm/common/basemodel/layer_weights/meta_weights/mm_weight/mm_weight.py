@@ -54,8 +54,23 @@ class MMWeightTpl(BaseWeightTpl):
         self.gen_weight_quant_param_names()
 
     def mm(
-        self, input_tensor: torch.Tensor, out: Optional[torch.Tensor] = None, use_custom_tensor_mananger: bool = True
+        self,
+        input_tensor: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        out_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        if out_dtype is not None and not isinstance(self.quant_method, NoQuantization):
+            raise NotImplementedError(f"out_dtype is not supported for quant method {self.quant_method.method_name}")
+        if out_dtype is not None:
+            return self.quant_method.apply(
+                input_tensor,
+                self.mm_param,
+                out,
+                use_custom_tensor_mananger=use_custom_tensor_mananger,
+                bias=self.bias,
+                out_dtype=out_dtype,
+            )
         return self.quant_method.apply(
             input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
         )
