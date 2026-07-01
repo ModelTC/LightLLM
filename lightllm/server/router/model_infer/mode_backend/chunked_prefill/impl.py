@@ -39,12 +39,23 @@ class ChunkedPrefillBackend(ModeBackend):
         if get_env_start_args().mtp_mode:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att"]
+            mtp_mode = get_env_start_args().mtp_mode
+            # frozen-KV (Gemma-4 assistant): eagle-style recurrence (1 draft module,
+            # run mtp_step times) but the draft writes no KV of its own - it reads
+            # the target model's committed KV cache.
+            self.is_mtp_frozen_kv = mtp_mode == "eagle_frozen_kv"
+            self.is_mtp_eagle = mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle_frozen_kv"]
             self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
-            self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
+            if self.is_mtp_frozen_kv:
+                self._draft_decode_func = self._draft_decode_frozen_kv
+            elif self.is_mtp_eagle:
+                self._draft_decode_func = self._draft_decode_eagle
+            else:
+                self._draft_decode_func = self._draft_decode_vanilla
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
+            self.is_mtp_frozen_kv = False
 
         self.classed_req_strict_prefill = False
         return
@@ -323,6 +334,10 @@ class ChunkedPrefillBackend(ModeBackend):
 
     def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
         # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
+        # frozen-KV draft 没有自己的 kv 需要填充，它读取 target 模型已提交的 kv cache；
+        # 第一个 decode step 的 draft 输入来自该 step 的 target forward，无需 prefill 阶段准备。
+        if self.is_mtp_frozen_kv:
+            return
         draft_model_input = model_input
         draft_model_output = model_output
         draft_next_token_ids_gpu = next_token_ids
@@ -420,3 +435,40 @@ class ChunkedPrefillBackend(ModeBackend):
             mtp_accept_len=mtp_accept_len,
         )
         return eagle_mem_indexes_cpu
+
+    def _draft_decode_frozen_kv(
+        self,
+        main_model_input: ModelInput,
+        main_model_output: ModelOutput,
+        next_token_ids: torch.Tensor,
+        mtp_accept_len: torch.Tensor,
+        b_req_mtp_start_loc: torch.Tensor,
+    ):
+        # frozen-KV draft (Gemma-4 assistant): like _draft_decode_eagle but the
+        # draft has no KV cache of its own - it reads the target model's committed
+        # KV. So there is no mem_manager.alloc, no b_seq_len / max_kv_seq_len
+        # advance, and no mem_indexes roll: every draft step queries at the same
+        # (target-committed) position, and the recurrent hidden state carries the
+        # progression. Nothing extra to free, so returns None.
+        draft_model_input = main_model_input
+        draft_model_output = main_model_output
+        draft_next_token_ids = next_token_ids
+        all_next_token_ids = []
+        all_next_token_ids.append(next_token_ids)
+        for _step in range(self.mtp_step):
+            draft_model_input.input_ids = draft_next_token_ids
+            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
+            draft_model_output: ModelOutput = self.draft_models[0].forward(draft_model_input)
+            draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
+            all_next_token_ids.append(draft_next_token_ids)
+
+        all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
+
+        mtp_scatter_next_token_ids(
+            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            b_req_mtp_start_loc=b_req_mtp_start_loc,
+            all_next_token_ids=all_next_token_ids,
+            b_req_idx=main_model_input.b_req_idx,
+            mtp_accept_len=mtp_accept_len,
+        )
+        return None
