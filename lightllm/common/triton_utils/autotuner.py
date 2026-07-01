@@ -2,7 +2,6 @@ import triton
 import orjson
 import os
 import inspect
-import gc
 import torch
 import torch.distributed as dist
 import random
@@ -275,20 +274,7 @@ class Autotuner:
         except (OutOfResources, PTXASError, CompileTimeAssertionFailure, RuntimeError, Exception):
             return float("inf")
 
-    def _autotune_boundary_sync(self, world_size):
-        # Clear autotune boundary state so adjacent kernel tuning runs interfere less.
-        torch.cuda.synchronize()
-        if world_size > 1:
-            dist.barrier(group=self._get_autotune_group())
-        gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        if world_size > 1:
-            dist.barrier(group=self._get_autotune_group())
-
     def _autotune(self, args, kwargs, static_key, run_key, rank_id, world_size):
-        self._autotune_boundary_sync(world_size)
-
         is_key_all_same = True
         if world_size > 1:
             all_keys = [None for _ in range(world_size)]
@@ -369,7 +355,6 @@ class Autotuner:
                     )
                 logger.info(f"Saved configs for {self.kernel_name} - {_static_key}")
 
-        self._autotune_boundary_sync(world_size)
         logger.info(f"rank {rank_id} tuning {self.kernel_name} _static_key {static_key} finished")
 
     def _mutate_args_clone(self, args, kwargs):
