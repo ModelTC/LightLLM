@@ -19,10 +19,6 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         InferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
             self.position_ids = self.get_mrope_position(self.multimodal_params)
-        elif self.multimodal_params is None or not any(
-            p.get("images") or p.get("audios") for p in self.multimodal_params
-        ):
-            self.position_ids = self.position_ids.unsqueeze(0).expand(3, -1)
         else:
             b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
             for batch_idx, p in enumerate(self.multimodal_params):
@@ -30,7 +26,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
                 for image in p["images"]:
                     position_delta += image["grid_thwd"][3]
                 b_position_delta[batch_idx] = position_delta
-            position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
+                b_position_delta = torch.tensor(b_position_delta, dtype=self.position_ids.dtype, device="cpu", pin_memory=True).cuda(non_blocking=True)
+            position_ids = self.position_ids + position_delta
             self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
 
         self.position_ids = self.position_ids.contiguous()
