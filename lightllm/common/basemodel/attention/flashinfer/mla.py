@@ -3,6 +3,7 @@ import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.repack_kv_index import repack_kv_index
+from ...triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
 from typing import Tuple
 from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
@@ -186,46 +187,15 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         self._refresh_cuda_graph_decode_plan(new_state.infer_state.max_kv_seq_len)
         return
 
-    def _fast_plan_decode(
-        self,
-        qo_indptr_cpu,
-        kv_indptr_cpu,
-        kv_len_arr_cpu,
-    ):
-        self.decode_wrapper._causal = False
-        self.decode_wrapper._page_size = 1
-        self.decode_wrapper._sm_scale = self.backend.softmax_scale
-        self.decode_wrapper._plan_info = self.decode_wrapper._cached_module.plan(
-            self.decode_wrapper._float_workspace_buffer,
-            self.decode_wrapper._int_workspace_buffer,
-            self.decode_wrapper._pin_memory_int_workspace_buffer,
-            qo_indptr_cpu,
-            kv_indptr_cpu,
-            kv_len_arr_cpu,
-            self.backend.tp_q_head_num,
-            self.backend.kv_lora_rank,
-            False,  # causal
-        )
-
     def _refresh_cuda_graph_decode_plan(self, max_kv_len: int):
-        plan_kv_len_arr_cpu = torch.full(
-            (self.infer_state.batch_size,),
+        # Prefer the GPU-generated split plan for long decode; use exact non-split for
+        # short or unsupported graph shapes.
+        fill_mla_decode_plan_for_cuda_graph(
+            self.decode_wrapper,
+            self.kv_starts,
+            self.infer_state.batch_size,
+            self.backend.tp_q_head_num,
             max_kv_len,
-            dtype=torch.int32,
-            device="cpu",
-        )
-        plan_kv_indptr_cpu = (
-            torch.arange(
-                self.infer_state.batch_size + 1,
-                dtype=torch.int32,
-                device="cpu",
-            )
-            * max_kv_len
-        )
-        self._fast_plan_decode(
-            self.q_indptr_host,
-            plan_kv_indptr_cpu,
-            plan_kv_len_arr_cpu,
         )
 
     def decode_att(
