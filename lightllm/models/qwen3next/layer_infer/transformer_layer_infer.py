@@ -47,7 +47,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         return
 
     def _init_linear_layer_metadata(self, layer_num, network_config):
-
         # Linear attention specific dimensions
         self.num_v_heads = network_config["linear_num_value_heads"]
         self.num_k_heads = network_config["linear_num_key_heads"]
@@ -260,6 +259,18 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
+        elif getattr(infer_state, "is_decode_with_mtp", False):
+            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+            core_attn_out = self._gdn_mtp_kernel(
+                mixed_qkv,
+                conv_states,
+                ssm_states,
+                a,
+                b,
+                infer_state,
+                layer_weight,
+            )
         else:
             mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
             conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
@@ -381,7 +392,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             query_start_loc=infer_state.b1_cu_q_seq_len,
-            cache_indices=infer_state.b_buffer_idx,
+            cache_indices=infer_state.b_conv_buffer_idx,
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=self.activation,
@@ -432,7 +443,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
             layer_weight.linear_conv1d.bias,
-            infer_state.b_buffer_idx,
+            infer_state.b_conv_buffer_idx,
             self.activation,
             self.conv_kernel_dim,
             self.tp_num_k_heads,
@@ -454,3 +465,52 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             b_raw=b,
         )
         return core_attn_out, z
+
+    def _gdn_mtp_kernel(
+        self,
+        mixed_qkv: torch.Tensor,
+        conv_states: torch.Tensor,
+        ssm_states: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ):
+        from lightllm.models.qwen3next.triton_kernel.causal_conv1d_spec import (
+            causal_conv1d_update as causal_conv1d_update_spec,
+        )
+
+        cu_seqlens_q = infer_state.b1_mtp_cu_q_seq_len
+        mixed_qkv = causal_conv1d_update_spec(
+            mixed_qkv,
+            conv_states,
+            layer_weight.linear_conv1d.mm_param.weight,
+            bias=layer_weight.linear_conv1d.bias,
+            activation=self.activation,
+            conv_state_indices=infer_state.b_conv_buffer_idx,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
+            query_start_loc=cu_seqlens_q,
+        )
+
+        query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
+        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
+        # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
+        # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
+        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            initial_state=ssm_states,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens_q.to(torch.long),
+            ssm_state_indices=infer_state.b_ssm_index_rows,
+            ssm_state_write_indices=infer_state.b_ssm_index_rows,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+            A_log=layer_weight.linear_A_log.weight,
+            dt_bias=layer_weight.linear_dt_bias.weight,
+            a_raw=a,
+            b_raw=b,
+        )
+        return core_attn_out

@@ -1,7 +1,7 @@
 import torch
 import dataclasses
 import triton
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
@@ -30,6 +30,7 @@ class LinearAttCacheConfig:
     ssm_state_dtype: torch.dtype
     full_attention_interval: int
     all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
+    draft_full_att_kv_layer_num: int = 0
 
     def get_conv_dim(self):
         # 第一项对应q的参数，第二项对应k的参数，第三项对应v的参数
@@ -41,8 +42,21 @@ class LinearAttCacheConfig:
             + self.head_linear_v_dim * self.num_linear_v_heads
         )
 
+    def get_model_full_att_layer_num(self):
+        full_att_layer_num = self.all_layer_num - self.linear_layer_num
+        assert full_att_layer_num == self.all_layer_num // self.full_attention_interval
+        return full_att_layer_num
+
+    def get_full_att_kv_layer_num(self):
+        return self.get_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
+
     def get_conv_state_shape(self):
+        # Base committed sliding-window state, without speculative MTP tail.
         return (self.get_conv_dim(), self.conv_kernel_size - 1)
+
+    def get_mtp_conv_state_shape(self, mtp_step: int):
+        # Working state with room for S speculative tokens before acceptance.
+        return (self.get_conv_dim(), (self.conv_kernel_size - 1) + mtp_step)
 
     def get_ssm_state_shape(self):
         return (self.num_linear_v_heads, self.head_linear_k_dim, self.head_linear_v_dim)
@@ -66,7 +80,7 @@ class LinearAttCacheConfig:
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
         full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
-        a = full_att_bytes * (self.all_layer_num - self.linear_layer_num) * big_page_token_num
+        a = full_att_bytes * self.get_full_att_kv_layer_num() * big_page_token_num
         return a
 
     def get_cpu_cache_conv_bytes(self):
@@ -113,4 +127,5 @@ class LinearAttCacheConfig:
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=llm_config["full_attention_interval"],
             all_layer_num=n_layer,
+            draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num(),
         )

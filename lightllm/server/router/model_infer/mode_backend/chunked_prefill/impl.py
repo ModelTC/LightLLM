@@ -19,6 +19,7 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
+    scatter_mtp_accept_len,
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
@@ -257,6 +258,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
+            if self.is_linear_att_mixed_model:
+                scatter_mtp_accept_len(
+                    self.model.req_manager.req_to_accept_len, b_req_mtp_start_loc, model_input.b_req_idx, mtp_accept_len
+                )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,
@@ -352,7 +357,6 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
-
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP
@@ -394,7 +398,6 @@ class ChunkedPrefillBackend(ModeBackend):
         all_next_token_ids.append(next_token_ids)
         # process the draft model output
         for _step in range(self.mtp_step):
-
             draft_model_input.input_ids = draft_next_token_ids
             draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
             # spec decode: MTP

@@ -145,7 +145,7 @@ class RouterManager:
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": self.args.running_max_req_size + 8,
+            "max_req_num": self.args.running_max_req_size,
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
             "nccl_host": self.args.nccl_host,
             "nccl_port": self.args.nccl_port,
