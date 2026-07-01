@@ -1,14 +1,10 @@
 import torch
-import numpy as np
-from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
-from lightllm.distributed.communication_op import all_gather
+from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerInfer
 
 
-class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
+class Gemma4MTPPostLayerInfer(Gemma4PostLayerInfer):
     def __init__(self, network_config):
         super().__init__(network_config)
-        cap = network_config.get("final_logit_softcapping")
-        self.final_logit_softcapping = float(cap) if cap else None
 
         self.use_ordered_embeddings_ = bool(network_config.get("use_ordered_embeddings"))
         self._post_projection_weight_ = None
@@ -23,27 +19,6 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
             # token -> centroid mapping is derived lazily from the loaded
             # token_ordering buffer (weights are not loaded yet at __init__).
             self._centroid_of_token_ = None
-
-    def _dense_logits(self, last_hidden, token_num, input_embdings_dtype, infer_state, layer_weight):
-        lm_input = last_hidden.permute(1, 0).view(-1, token_num)
-        logic_batch = layer_weight.lm_head_weight_(input=lm_input, alloc_func=self.alloc_tensor)
-        vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if self.tp_world_size_ == 1:
-            gather_data = logic_batch
-        else:
-            gather_data = self.alloc_tensor((vocab_size, token_num), dtype=input_embdings_dtype)
-            split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
-            all_gather(
-                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
-                logic_batch,
-                group=infer_state.dist_group,
-                async_op=False,
-            )
-        logic_batch = None
-        ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
-        ans_logics[:, :] = gather_data.permute(1, 0)
-        gather_data = None
-        return ans_logics
 
     def _centroid_logits(self, last_hidden, token_num, layer_weight):
         """Gather lm_head rows for the per-token top-K centroid blocks,
@@ -76,15 +51,11 @@ class Gemma4MTPPostLayerInfer(LlamaPostLayerInfer):
         output.scatter_(-1, selected_vocab, selected_logits)
         return output
 
-    def token_forward(self, input_embdings, infer_state, layer_weight):
-        last_hidden, token_num = self._slice_get_last_input(input_embdings, infer_state)
-        last_hidden = self._norm(last_hidden, infer_state, layer_weight)
+    def _logits_from_normed(self, normed, token_num, infer_state, layer_weight):
         if self.use_ordered_embeddings_:
-            logits = self._centroid_logits(last_hidden, token_num, layer_weight)
-        else:
-            logits = self._dense_logits(last_hidden, token_num, input_embdings.dtype, infer_state, layer_weight)
-        if self.final_logit_softcapping is not None and self.final_logit_softcapping > 0:
-            cap = self.final_logit_softcapping
-            logits = torch.tanh(logits / cap) * cap
+            return self._centroid_logits(normed, token_num, layer_weight)
+        return super()._logits_from_normed(normed, token_num, infer_state, layer_weight)
+
+    def _mtp_hiddens_from_normed(self, normed):
         assert self._post_projection_weight_ is not None, "post_projection weight is not initialized"
-        return logits, self._post_projection_weight_.mm(last_hidden)
+        return self._post_projection_weight_.mm(normed)
