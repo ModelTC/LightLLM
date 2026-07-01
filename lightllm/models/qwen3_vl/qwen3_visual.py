@@ -316,6 +316,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 idx_list[i].extend(indices[i].tolist())
                 weight_list[i].extend(weights[i].tolist())
 
+        # TODO: Avoid constructing CUDA tensors directly from Python list data.
         idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=self.pos_embed.weight.device)
         weight_tensor = torch.tensor(
             weight_list, dtype=self.pos_embed.weight.dtype, device=self.pos_embed.weight.device

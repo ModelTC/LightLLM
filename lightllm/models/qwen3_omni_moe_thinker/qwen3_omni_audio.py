@@ -274,6 +274,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         aftercnn_lens = _get_feat_extract_output_lengths(feature_lens)
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
+        # TODO: Avoid constructing CUDA tensors directly from Python list data.
         chunk_lengths = torch.tensor(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
@@ -317,6 +318,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             remainder = cnn_len % window_aftercnn
             if remainder != 0:
                 cu_chunk_lens += [remainder]
+        # TODO: Avoid constructing CUDA tensors directly from Python list data.
         cu_seqlens = torch.tensor(cu_chunk_lens, device=aftercnn_lens.device).cumsum(-1, dtype=torch.int32)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         for encoder_layer in self.layers:
