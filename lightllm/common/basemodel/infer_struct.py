@@ -38,6 +38,8 @@ class InferStateInfo:
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_mtp_index: torch.Tensor = None
+        # only for mrope model in decode phase used.
+        self.b_position_delta: torch.Tensor = None
 
         self.b_seq_len: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度

@@ -20,14 +20,8 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         if self.is_prefill:
             self.position_ids = self.get_mrope_position(self.multimodal_params)
         else:
-            b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
-            for batch_idx, p in enumerate(self.multimodal_params):
-                position_delta = 0
-                for image in p["images"]:
-                    position_delta += image["grid_thwd"][3]
-                b_position_delta[batch_idx] = position_delta
-                b_position_delta = torch.tensor(b_position_delta, dtype=self.position_ids.dtype, device="cpu", pin_memory=True).cuda(non_blocking=True)
-            position_ids = self.position_ids + position_delta
+            b_position_delta = self.b_position_delta.to(dtype=self.position_ids.dtype)
+            position_ids = self.position_ids + b_position_delta
             self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
 
         self.position_ids = self.position_ids.contiguous()

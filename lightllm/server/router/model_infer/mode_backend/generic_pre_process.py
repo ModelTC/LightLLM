@@ -130,6 +130,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_position_delta = build_b_position_delta(multimodal_params)
 
     if enable_diverse_mode_gqa_decode_fast_kernel():
         b_shared_seq_len, b_mark_shared_group = build_diverse_shared_group_infos(run_reqs=run_reqs)
@@ -152,12 +153,25 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
         multimodal_params=multimodal_params,
     )
     return model_input, run_reqs
+
+
+def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
+    b_position_delta = []
+    for params in multimodal_params:
+        position_delta = 0
+        for image in params.get("images", []):
+            grid_thwd = image.get("grid_thwd")
+            if grid_thwd is not None:
+                position_delta += grid_thwd[3]
+        b_position_delta.append(position_delta)
+    return torch.tensor(b_position_delta, dtype=torch.int32, device="cpu")
 
 
 def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Tensor, torch.Tensor]:

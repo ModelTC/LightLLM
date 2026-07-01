@@ -8,6 +8,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context, Infe
 from lightllm.utils.infer_utils import calculate_time
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from .generic_pre_process import build_b_position_delta
 
 
 def padded_prepare_prefill_inputs(
@@ -196,6 +197,7 @@ def padded_prepare_decode_inputs(
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_position_delta = build_b_position_delta(batch_multimodal_params)
 
     # dynamic prompt cache 准备 token
     padded_mem_indexes_num = padded_req_num * (args_mtp_step + 1)
@@ -221,6 +223,7 @@ def padded_prepare_decode_inputs(
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_position_delta=b_position_delta,
         is_prefill=False,
         multimodal_params=batch_multimodal_params,
     )
