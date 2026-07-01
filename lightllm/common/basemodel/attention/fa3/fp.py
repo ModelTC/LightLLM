@@ -222,7 +222,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache_autotune(
+        o = flash_attn_with_kvcache(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
             v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
