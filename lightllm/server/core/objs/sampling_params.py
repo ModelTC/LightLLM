@@ -1,7 +1,7 @@
 import os
 import ctypes
 from typing import Optional, List, Tuple, Union
-from transformers import GenerationConfig
+from lightllm.utils.config_utils import get_generation_config_diff_dict
 from lightllm.server.req_id_generator import MAX_BEST_OF
 from .pd_kv_trans_params import PDKVTransParamObj
 
@@ -395,7 +395,7 @@ class SamplingParams(ctypes.Structure):
     @classmethod
     def load_generation_cfg(cls, weight_dir):
         try:
-            generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
+            generation_cfg = get_generation_config_diff_dict(weight_dir)
             cls._do_sample = generation_cfg.get("do_sample", False)
             cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
             cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)

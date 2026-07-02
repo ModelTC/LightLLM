@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from functools import lru_cache
 from .envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -12,6 +12,13 @@ def get_config_json(model_path: str):
     with open(os.path.join(model_path, "config.json"), "r") as file:
         json_obj = json.load(file)
     return json_obj
+
+
+def get_generation_config_diff_dict(model_path: str) -> Dict[str, Any]:
+    from transformers import GenerationConfig
+
+    generation_cfg = GenerationConfig.from_pretrained(model_path, trust_remote_code=True).to_diff_dict()
+    return {key: value for key, value in generation_cfg.items() if value is not None}
 
 
 def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
