@@ -8,15 +8,18 @@ import torch
 import os
 import sys
 
-os.environ['PYTHONPATH'] = '/data/nvme0/chenjunyi/project/lightllm'
-sys.path.insert(0, '/data/nvme0/chenjunyi/project/lightllm')
+os.environ["PYTHONPATH"] = "/data/nvme0/chenjunyi/project/lightllm"
+sys.path.insert(0, "/data/nvme0/chenjunyi/project/lightllm")
 
 import json
-os.environ['LIGHTLLM_START_ARGS'] = json.dumps({
-    'mtp_step': 1,
-    'model_dir': '/tmp/test_model',
-    'max_total_token_num': 10000,
-})
+
+os.environ["LIGHTLLM_START_ARGS"] = json.dumps(
+    {
+        "mtp_step": 1,
+        "model_dir": "/tmp/test_model",
+        "max_total_token_num": 10000,
+    }
+)
 
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
     mtp_diverse_stage1_single_token,
@@ -144,14 +147,11 @@ def test_mtp_diverse_correctness():
     print(f"req_to_tokens:\n{req_to_tokens}")
 
     batch_size = q.shape[0]
-    num_heads = q.shape[1]
-    head_dim = q.shape[2]
-    max_kv_len = b_seq_len.max().item()
     block_seq = 256
 
     # Run MTP diverse attention
     from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse.mtp_diverse_attn import (
-        token_decode_attention_mtp_diverse_single_token
+        token_decode_attention_mtp_diverse_single_token,
     )
 
     mtp_output = token_decode_attention_mtp_diverse_single_token(

@@ -4,17 +4,18 @@ from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import RMS
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
 """
-midlayer.hidden_norm.weight	[2048]	
-midlayer.input_layernorm.weight	[2048]	
-midlayer.mlp.down_proj.weight	[2048, 6144]	
-midlayer.mlp.gate_proj.weight	[6144, 2048]	
-midlayer.mlp.up_proj.weight	[6144, 2048]	
-midlayer.post_attention_layernorm.weight	[2048]	
-midlayer.self_attn.k_proj.weight	[512, 4096]	
-midlayer.self_attn.o_proj.weight	[2048, 4096]	
-midlayer.self_attn.q_proj.weight	[4096, 4096]	
-midlayer.self_attn.v_proj.weight	[512, 4096]	
+midlayer.hidden_norm.weight	[2048]
+midlayer.input_layernorm.weight	[2048]
+midlayer.mlp.down_proj.weight	[2048, 6144]
+midlayer.mlp.gate_proj.weight	[6144, 2048]
+midlayer.mlp.up_proj.weight	[6144, 2048]
+midlayer.post_attention_layernorm.weight	[2048]
+midlayer.self_attn.k_proj.weight	[512, 4096]
+midlayer.self_attn.o_proj.weight	[2048, 4096]
+midlayer.self_attn.q_proj.weight	[4096, 4096]
+midlayer.self_attn.v_proj.weight	[512, 4096]
 """
+
 
 class Qwen3EagleTransformerLayerWeight(LlamaTransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
@@ -51,7 +52,7 @@ class Qwen3EagleTransformerLayerWeight(LlamaTransformerLayerWeight):
         self._att_norm_weight_name = f"{weight_prefix}.input_layernorm.weight"
         self._ffn_norm_weight_name = f"{weight_prefix}.post_attention_layernorm.weight"
         self._hidden_norm_weight_name = f"{weight_prefix}.hidden_norm.weight"
-    
+
     def _init_qkv(self):
         in_dim = self.n_embed * 2
         q_out_dim = self.q_head_num_ * self.head_dim

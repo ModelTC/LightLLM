@@ -135,10 +135,8 @@ def sample_requests(
             rendered_text = "\n".join(parts)
         rendered_prompts.append(rendered_text)
 
-    # Tokenize the prompts and completions.
+    # Tokenize the prompts.
     prompt_token_ids = tokenizer(rendered_prompts).input_ids if rendered_prompts else []
-    completion_texts = [completion for _, completion in built_examples]
-    completion_token_ids = tokenizer(completion_texts).input_ids if completion_texts else []
 
     tokenized_dataset: List[Tuple[List[dict], str, int, int]] = []
     for i in range(len(built_examples)):

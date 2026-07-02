@@ -178,7 +178,9 @@ def benchmark_mtp_diverse(data, block_seq=256, num_warmup=10, num_iters=100):
 
     for _ in range(num_warmup):
         _ = token_decode_attention_mtp_diverse_single_token(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             Req_to_tokens=req_to_tokens,
             B_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -190,7 +192,9 @@ def benchmark_mtp_diverse(data, block_seq=256, num_warmup=10, num_iters=100):
 
     for _ in range(num_iters):
         _ = token_decode_attention_mtp_diverse_single_token(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             Req_to_tokens=req_to_tokens,
             B_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -232,8 +236,7 @@ def benchmark_fa3_decode(data, num_warmup=10, num_iters=100):
     k_cache = k.view(k.shape[0], 1, kv_head_num, head_dim).contiguous()
     v_cache = v.view(v.shape[0], 1, kv_head_num, head_dim).contiguous()
 
-    # page_table: [num_groups, max_kv_len]
-    max_kv_len = base_len + group_size
+    # page_table: [num_groups, base_len + group_size]
     page_table = req_to_tokens.contiguous()
 
     # cache_seqlens: [num_groups] 每个请求的最大 KV 长度
@@ -249,10 +252,7 @@ def benchmark_fa3_decode(data, num_warmup=10, num_iters=100):
         for _ in range(num_groups):
             kv_lens.append(base_len + i)
     kv_lens = torch.tensor(kv_lens, dtype=torch.int32, device=q.device)
-    cu_seqlens_k_new = torch.cat([
-        torch.tensor([0], dtype=torch.int32, device=q.device),
-        kv_lens.cumsum(dim=0)
-    ])
+    cu_seqlens_k_new = torch.cat([torch.tensor([0], dtype=torch.int32, device=q.device), kv_lens.cumsum(dim=0)])
 
     Lq = head_dim
     sm_scale = 1.0 / (Lq ** 0.5)
@@ -301,7 +301,10 @@ def main():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     config = setup_qwen3_8b_config()
-    print(f"模型：Qwen3-8B (num_heads={config['num_heads']}, kv_head_num={config['kv_head_num']}, head_dim={config['head_dim']})")
+    print(
+        "模型：Qwen3-8B "
+        f"(num_heads={config['num_heads']}, kv_head_num={config['kv_head_num']}, head_dim={config['head_dim']})"
+    )
 
     base_len = 1024
     static_gs_list = [1, 2, 3, 4]

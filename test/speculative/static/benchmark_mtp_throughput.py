@@ -45,6 +45,7 @@ logger = init_logger(__name__)
 @dataclass
 class BenchmarkResult:
     """存储单次benchmark结果"""
+
     batch_size: int
     input_len: int
     output_len: int
@@ -60,11 +61,11 @@ class BenchmarkResult:
 
 def load_dataset_samples(dataset_path: str, num_samples: int, tokenizer) -> List[List[int]]:
     """从数据集加载样本，返回 input_ids 列表"""
-    with open(dataset_path, 'r', encoding='utf-8') as f:
+    with open(dataset_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
 
     samples = []
-    for i, data in enumerate(dataset[:num_samples * 2]):
+    for i, data in enumerate(dataset[: num_samples * 2]):
         if len(samples) >= num_samples:
             break
 
@@ -102,6 +103,7 @@ def compute_dynamic_mtp_size(
     与服务端 compute_dynamic_mtp_size 保持一致
     """
     import random
+
     batch_size = main_probs.shape[0]
     dynamic_mtp_sizes = []
 
@@ -153,6 +155,7 @@ def prepare_mtp_prefill_inputs_for_benchmark(
     模拟服务端的 prepare_mtp_prefill_inputs 函数
     """
     import copy
+
     new_model_input = copy.copy(model_input)
     new_input_ids = gen_mtp_new_input_ids(
         input_ids=model_input.input_ids,
@@ -167,23 +170,27 @@ def prepare_mtp_prefill_inputs_for_benchmark(
 
 def init_mtp_model(args, kvargs, main_model):
     """初始化 MTP draft model（Eagle模式只有一个draft model）"""
-    args.mtp_draft_model_dir = args.mtp_draft_model_dir[0] if isinstance(args.mtp_draft_model_dir, list) else args.mtp_draft_model_dir
+    args.mtp_draft_model_dir = (
+        args.mtp_draft_model_dir[0] if isinstance(args.mtp_draft_model_dir, list) else args.mtp_draft_model_dir
+    )
 
     os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
     mtp_model_cfg, _ = PretrainedConfig.get_config_dict(args.mtp_draft_model_dir)
 
     mtp_model_kvargs = kvargs.copy()
-    mtp_model_kvargs.update({
-        "weight_dir": args.mtp_draft_model_dir,
-        "max_total_token_num": main_model.mem_manager.size,
-        "disable_chunked_prefill": True,
-        "mtp_mode": args.mtp_mode,
-        "main_model": main_model,
-        "mtp_previous_draft_models": [],
-        "is_mtp_draft_model": True,
-        "run_mode": "normal",
-    })
+    mtp_model_kvargs.update(
+        {
+            "weight_dir": args.mtp_draft_model_dir,
+            "max_total_token_num": main_model.mem_manager.size,
+            "disable_chunked_prefill": True,
+            "mtp_mode": args.mtp_mode,
+            "main_model": main_model,
+            "mtp_previous_draft_models": [],
+            "is_mtp_draft_model": True,
+            "run_mode": "normal",
+        }
+    )
 
     model_type = mtp_model_cfg.get("model_type", "")
 
@@ -196,18 +203,12 @@ def init_mtp_model(args, kvargs, main_model):
 
 
 def run_benchmark_no_mtp(
-    args,
-    input_ids_list: List[List[int]],
-    output_len: int,
-    batch_size: int,
-    main_model,
-    warmup: bool = False
+    args, input_ids_list: List[List[int]], output_len: int, batch_size: int, main_model, warmup: bool = False
 ) -> BenchmarkResult:
     """无 MTP 模式的 benchmark"""
     rank_id = get_current_rank_in_dp()
     actual_batch_size = min(batch_size, len(input_ids_list))
     input_lens = [len(input_ids_list[i]) for i in range(actual_batch_size)]
-    max_input_len = max(input_lens)
 
     # Padding - 与prepare_prefill_inputs一致
     input_ids = []
@@ -222,8 +223,7 @@ def run_benchmark_no_mtp(
     prefill_start = time.time()
 
     b_req_idx = torch.tensor(
-        [main_model.req_manager.alloc() for _ in range(actual_batch_size)],
-        dtype=torch.int32, device="cpu"
+        [main_model.req_manager.alloc() for _ in range(actual_batch_size)], dtype=torch.int32, device="cpu"
     )
     b_seq_len = torch.tensor(input_lens, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.zeros(actual_batch_size, dtype=torch.int32, device="cpu")
@@ -352,7 +352,7 @@ def run_benchmark_eagle_mtp(
     main_model,
     draft_model,
     enable_dynamic_mtp: bool = False,
-    warmup: bool = False
+    warmup: bool = False,
 ) -> BenchmarkResult:
     """
     Eagle MTP 模式的 benchmark
@@ -362,7 +362,6 @@ def run_benchmark_eagle_mtp(
     rank_id = get_current_rank_in_dp()
     actual_batch_size = min(batch_size, len(input_ids_list))
     input_lens = [len(input_ids_list[i]) for i in range(actual_batch_size)]
-    max_input_len = max(input_lens)
     mtp_step = args.mtp_step
 
     mode_str = "dynamic_mtp" if enable_dynamic_mtp else "static_mtp"
@@ -381,8 +380,7 @@ def run_benchmark_eagle_mtp(
 
     # 分配请求索引
     b_req_idx = torch.tensor(
-        [main_model.req_manager.alloc() for _ in range(actual_batch_size)],
-        dtype=torch.int32, device="cpu"
+        [main_model.req_manager.alloc() for _ in range(actual_batch_size)], dtype=torch.int32, device="cpu"
     )
     b_seq_len = torch.tensor(input_lens, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.zeros(actual_batch_size, dtype=torch.int32, device="cpu")
@@ -594,14 +592,14 @@ def run_benchmark_eagle_mtp(
             draft_model_input_cpu.max_kv_seq_len += 1
 
             # 更新 mem_indexes（Eagle模式）
-            eagle_mem_indexes_i = eagle_mem_indexes_gpu[_step * num_reqs:(_step + 1) * num_reqs]
+            eagle_mem_indexes_i = eagle_mem_indexes_gpu[_step * num_reqs : (_step + 1) * num_reqs]
 
             if enable_dynamic_mtp:
                 # 动态模式：根据 group_sizes 拆分和重新组合
                 chunks = torch.split(draft_model_input_cpu.mem_indexes.cuda(), mtp_group_sizes)
                 new_chunks = []
                 for i, chunk in enumerate(chunks):
-                    updated_chunk = torch.cat([chunk[1:], eagle_mem_indexes_i[i:i+1]], dim=0)
+                    updated_chunk = torch.cat([chunk[1:], eagle_mem_indexes_i[i : i + 1]], dim=0)
                     new_chunks.append(updated_chunk)
                 draft_model_input_cpu.mem_indexes = torch.cat(new_chunks, dim=0).cpu()
                 draft_model_input_cpu.mem_indexes_cpu = draft_model_input_cpu.mem_indexes
@@ -711,7 +709,7 @@ def worker_process(args, model_kvargs, input_ids_list, output_len, batch_size, a
     from lightllm.distributed import dist_group_manager
 
     # 设置模式
-    args.mtp_dynamic_verify = (mode == "dynamic_mtp")
+    args.mtp_dynamic_verify = mode == "dynamic_mtp"
     set_env_start_args(args)
 
     init_distributed_env(model_kvargs)
@@ -742,16 +740,32 @@ def worker_process(args, model_kvargs, input_ids_list, output_len, batch_size, a
         # MTP 模式需要初始化 draft model
         draft_model = init_mtp_model(args, model_kvargs, main_model)
 
-        enable_dynamic = (mode == "dynamic_mtp")
+        enable_dynamic = mode == "dynamic_mtp"
 
         # Warmup
-        run_benchmark_eagle_mtp(args, input_ids_list, output_len, batch_size, main_model, draft_model,
-                                 enable_dynamic_mtp=enable_dynamic, warmup=True)
+        run_benchmark_eagle_mtp(
+            args,
+            input_ids_list,
+            output_len,
+            batch_size,
+            main_model,
+            draft_model,
+            enable_dynamic_mtp=enable_dynamic,
+            warmup=True,
+        )
         dist.barrier()
 
         # Actual benchmark
-        result = run_benchmark_eagle_mtp(args, input_ids_list, output_len, batch_size, main_model, draft_model,
-                                          enable_dynamic_mtp=enable_dynamic, warmup=False)
+        result = run_benchmark_eagle_mtp(
+            args,
+            input_ids_list,
+            output_len,
+            batch_size,
+            main_model,
+            draft_model,
+            enable_dynamic_mtp=enable_dynamic,
+            warmup=False,
+        )
 
     dist.barrier()
     ans_queue.put(result if rank_id == 0 else None)
@@ -759,11 +773,7 @@ def worker_process(args, model_kvargs, input_ids_list, output_len, batch_size, a
 
 
 def run_single_config(
-    args,
-    input_ids_list: List[List[int]],
-    output_len: int,
-    batch_size: int,
-    mode: str
+    args, input_ids_list: List[List[int]], output_len: int, batch_size: int, mode: str
 ) -> BenchmarkResult:
     """运行单种配置的 benchmark"""
     from easydict import EasyDict
@@ -786,27 +796,26 @@ def run_single_config(
             "world_size": args.tp,
             "dp_size": dp_size,
             "weight_dir": args.model_dir,
-            "quant_type": getattr(args, 'quant_type', None),
+            "quant_type": getattr(args, "quant_type", None),
             "load_way": "HF",
             "max_total_token_num": args.max_total_token_num,
             "graph_max_len_in_batch": args.max_req_total_len,
-            "graph_max_batch_size": getattr(args, 'graph_max_batch_size', 16),
-            "mem_faction": getattr(args, 'mem_fraction', 0.9),
+            "graph_max_batch_size": getattr(args, "graph_max_batch_size", 16),
+            "mem_faction": getattr(args, "mem_fraction", 0.9),
             "max_req_num": 2000,
             "batch_max_tokens": 2048,
             "run_mode": "normal",
             "max_seq_length": args.max_req_total_len,
-            "spec_algo": getattr(args, 'spec_algo', None),
-            "disable_cudagraph": getattr(args, 'disable_cudagraph', True),
-            "mtp_mode": getattr(args, 'mtp_mode', None),
-            "mtp_draft_model_dir": getattr(args, 'mtp_draft_model_dir', None),
-            "llm_decode_att_backend": getattr(args, 'llm_decode_att_backend', 'triton'),
-            "llm_prefill_att_backend": getattr(args, 'llm_prefill_att_backend', ['fa3']),
+            "spec_algo": getattr(args, "spec_algo", None),
+            "disable_cudagraph": getattr(args, "disable_cudagraph", True),
+            "mtp_mode": getattr(args, "mtp_mode", None),
+            "mtp_draft_model_dir": getattr(args, "mtp_draft_model_dir", None),
+            "llm_decode_att_backend": getattr(args, "llm_decode_att_backend", "triton"),
+            "llm_prefill_att_backend": getattr(args, "llm_prefill_att_backend", ["fa3"]),
         }
 
         proc = multiprocessing.Process(
-            target=worker_process,
-            args=(args, model_kvargs, input_ids_list, output_len, batch_size, ans_queue, mode)
+            target=worker_process, args=(args, model_kvargs, input_ids_list, output_len, batch_size, ans_queue, mode)
         )
         proc.start()
         workers.append(proc)
@@ -830,9 +839,9 @@ def print_comparison_report(results: List[BenchmarkResult], output_file: str = N
         print(msg)
         report_lines.append(msg)
 
-    log("\n" + "="*100)
+    log("\n" + "=" * 100)
     log("MTP Throughput Benchmark Report")
-    log("="*100)
+    log("=" * 100)
 
     # Group by batch size
     by_config = {}
@@ -842,35 +851,52 @@ def print_comparison_report(results: List[BenchmarkResult], output_file: str = N
             by_config[key] = {}
         by_config[key][r.mode] = r
 
-    log(f"\n{'Batch':>8} {'Input':>8} {'Output':>8} {'Mode':>18} {'Prefill(t/s)':>14} {'Decode(t/s)':>14} {'Overall(t/s)':>14} {'Avg Steps':>12}")
+    log(
+        f"\n{'Batch':>8} {'Input':>8} {'Output':>8} {'Mode':>18} "
+        f"{'Prefill(t/s)':>14} {'Decode(t/s)':>14} {'Overall(t/s)':>14} {'Avg Steps':>12}"
+    )
     log("-" * 110)
 
     for (bs, in_len, out_len), modes in sorted(by_config.items()):
         for mode in ["no_mtp", "static_mtp", "dynamic_mtp"]:
             if mode in modes:
                 r = modes[mode]
-                log(f"{bs:>8} {in_len:>8} {out_len:>8} {mode:>18} {r.prefill_throughput:>14.2f} {r.decode_throughput:>14.2f} {r.overall_throughput:>14.2f} {r.avg_accepted_steps:>12.2f}")
+                log(
+                    f"{bs:>8} {in_len:>8} {out_len:>8} {mode:>18} "
+                    f"{r.prefill_throughput:>14.2f} {r.decode_throughput:>14.2f} "
+                    f"{r.overall_throughput:>14.2f} {r.avg_accepted_steps:>12.2f}"
+                )
 
         # Calculate improvement
         if "no_mtp" in modes and "static_mtp" in modes:
             r_no = modes["no_mtp"]
             r_static = modes["static_mtp"]
-            static_improvement = ((r_static.overall_throughput - r_no.overall_throughput) / r_no.overall_throughput) * 100
-            log(f"{'':>8} {'':>8} {'':>8} {'Static vs No MTP':>18} {'':>14} {'':>14} {static_improvement:>13.2f}% {'':>12}")
+            static_improvement = (
+                (r_static.overall_throughput - r_no.overall_throughput) / r_no.overall_throughput
+            ) * 100
+            log(
+                f"{'':>8} {'':>8} {'':>8} {'Static vs No MTP':>18} {'':>14} {'':>14} "
+                f"{static_improvement:>13.2f}% {'':>12}"
+            )
 
         if "static_mtp" in modes and "dynamic_mtp" in modes:
             r_static = modes["static_mtp"]
             r_dynamic = modes["dynamic_mtp"]
-            dynamic_improvement = ((r_dynamic.overall_throughput - r_static.overall_throughput) / r_static.overall_throughput) * 100
-            log(f"{'':>8} {'':>8} {'':>8} {'Dynamic vs Static':>18} {'':>14} {'':>14} {dynamic_improvement:>13.2f}% {'':>12}")
+            dynamic_improvement = (
+                (r_dynamic.overall_throughput - r_static.overall_throughput) / r_static.overall_throughput
+            ) * 100
+            log(
+                f"{'':>8} {'':>8} {'':>8} {'Dynamic vs Static':>18} {'':>14} {'':>14} "
+                f"{dynamic_improvement:>13.2f}% {'':>12}"
+            )
 
         log("")
 
-    log("="*100)
+    log("=" * 100)
 
     if output_file:
-        with open(output_file, 'w') as f:
-            f.write('\n'.join(report_lines))
+        with open(output_file, "w") as f:
+            f.write("\n".join(report_lines))
         print(f"\nReport saved to {output_file}")
 
 
@@ -878,22 +904,28 @@ def main():
     parser = make_argument_parser()
 
     # Benchmark specific arguments
-    parser.add_argument("--batch_sizes", type=int, nargs="+", default=[1, 4, 8, 16],
-                        help="List of batch sizes to test")
-    parser.add_argument("--output_lens", type=int, nargs="+", default=[128, 512],
-                        help="List of output lengths to test")
-    parser.add_argument("--dataset", type=str, default=None,
-                        help="Path to dataset JSON file")
-    parser.add_argument("--num_samples", type=int, default=100,
-                        help="Number of samples to load from dataset")
-    parser.add_argument("--report_file", type=str, default="mtp_benchmark_report.txt",
-                        help="Output file for benchmark report")
-    parser.add_argument("--skip_no_mtp", action="store_true",
-                        help="Skip no MTP benchmark")
-    parser.add_argument("--skip_static_mtp", action="store_true",
-                        help="Skip static MTP benchmark")
-    parser.add_argument("--skip_dynamic_mtp", action="store_true",
-                        help="Skip dynamic MTP benchmark")
+    parser.add_argument(
+        "--batch_sizes",
+        type=int,
+        nargs="+",
+        default=[1, 4, 8, 16],
+        help="List of batch sizes to test",
+    )
+    parser.add_argument(
+        "--output_lens",
+        type=int,
+        nargs="+",
+        default=[128, 512],
+        help="List of output lengths to test",
+    )
+    parser.add_argument("--dataset", type=str, default=None, help="Path to dataset JSON file")
+    parser.add_argument("--num_samples", type=int, default=100, help="Number of samples to load from dataset")
+    parser.add_argument(
+        "--report_file", type=str, default="mtp_benchmark_report.txt", help="Output file for benchmark report"
+    )
+    parser.add_argument("--skip_no_mtp", action="store_true", help="Skip no MTP benchmark")
+    parser.add_argument("--skip_static_mtp", action="store_true", help="Skip static MTP benchmark")
+    parser.add_argument("--skip_dynamic_mtp", action="store_true", help="Skip dynamic MTP benchmark")
 
     args = parser.parse_args()
     set_env_start_args(args)

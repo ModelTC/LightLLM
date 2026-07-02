@@ -31,7 +31,7 @@ from collections import defaultdict
 import numpy as np
 
 # 添加项目路径
-sys.path.insert(0, '/data/nvme0/chenjunyi/project/lightllm')
+sys.path.insert(0, "/data/nvme0/chenjunyi/project/lightllm")
 
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
     token_decode_attention_mtp_diverse_single_token,
@@ -50,6 +50,7 @@ from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding.g
 @dataclass
 class TestConfig:
     """测试配置"""
+
     name: str
     batch_size: int
     avg_seq_len: int
@@ -69,6 +70,7 @@ class TestConfig:
 @dataclass
 class BenchmarkResult:
     """benchmark 结果"""
+
     config_name: str
     kernel_name: str
     batch_size: int
@@ -84,6 +86,7 @@ class BenchmarkResult:
 
 class SimpleInferState:
     """简单的 InferState 用于 Flash Decoding 测试"""
+
     def __init__(self, b_seq_len, req_to_tokens, b_req_idx, max_kv_seq_len=None):
         self.b_seq_len = b_seq_len
         self.total_token_num = b_seq_len.sum().item()
@@ -105,7 +108,7 @@ def warmup_gpu(device="cuda", num_warmup=20):
     for _ in range(num_warmup):
         a = torch.randn(1000, 1000, device=device)
         b = torch.randn(1000, 1000, device=device)
-        c = torch.matmul(a, b)
+        _ = torch.matmul(a, b)
     torch.cuda.synchronize(device)
     torch.cuda.empty_cache()
 
@@ -243,7 +246,9 @@ def setup_decode_data(config: TestConfig, device="cuda", seed=42):
     # 设置连续的 KV 索引
     kv_offset = 0
     for i in range(batch_size):
-        req_to_tokens[i, :seq_lens[i]] = torch.arange(kv_offset, kv_offset + seq_lens[i], dtype=torch.int32, device=device)
+        req_to_tokens[i, : seq_lens[i]] = torch.arange(
+            kv_offset, kv_offset + seq_lens[i], dtype=torch.int32, device=device
+        )
         kv_offset += seq_lens[i]
 
     return q, k, v, req_to_tokens, b_req_idx, b_seq_len
@@ -289,7 +294,8 @@ def benchmark_kernel_cuda_graph(func, graph_size=100, device="cuda") -> Tuple[fl
     # Capture graph
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        out = func()
+        graph_out = func()
+    del graph_out
 
     # Benchmark graph replay
     torch.cuda.synchronize()
@@ -312,10 +318,13 @@ def benchmark_kernel_cuda_graph(func, graph_size=100, device="cuda") -> Tuple[fl
 # Kernel 测试函数
 # ============================================================================
 
+
 def test_mtp_diverse_original(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group, block_seq=256):
     """MTP Diverse Original"""
     return token_decode_attention_mtp_diverse_single_token(
-        q=q, k=k, v=v,
+        q=q,
+        k=k,
+        v=v,
         Req_to_tokens=req_to_tokens,
         B_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
@@ -327,7 +336,9 @@ def test_mtp_diverse_original(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_ma
 def test_mtp_diverse_vsm(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group):
     """MTP Diverse VSM"""
     return token_decode_attention_mtp_diverse_vsm_single_token(
-        q=q, k=k, v=v,
+        q=q,
+        k=k,
+        v=v,
         Req_to_tokens=req_to_tokens,
         B_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
@@ -353,6 +364,7 @@ def test_flash_decoding_vsm(q, k, v, infer_state):
 # Benchmark 函数
 # ============================================================================
 
+
 def benchmark_mtp_kernels(config: TestConfig, device="cuda", use_cuda_graph=False) -> List[BenchmarkResult]:
     """
     测试 MTP kernels 性能
@@ -366,12 +378,16 @@ def benchmark_mtp_kernels(config: TestConfig, device="cuda", use_cuda_graph=Fals
 
     # 定义 kernels
     kernels = [
-        ("MTP_Diverse_Original", lambda: test_mtp_diverse_original(
-            q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group, block_seq
-        )),
-        ("MTP_Diverse_VSM", lambda: test_mtp_diverse_vsm(
-            q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group
-        )),
+        (
+            "MTP_Diverse_Original",
+            lambda: test_mtp_diverse_original(
+                q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group, block_seq
+            ),
+        ),
+        (
+            "MTP_Diverse_VSM",
+            lambda: test_mtp_diverse_vsm(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group),
+        ),
     ]
 
     for kernel_name, kernel_func in kernels:
@@ -385,32 +401,36 @@ def benchmark_mtp_kernels(config: TestConfig, device="cuda", use_cuda_graph=Fals
             actual_tokens = config.num_groups
             tokens_per_sec = actual_tokens / (avg_ms / 1000)
 
-            results.append(BenchmarkResult(
-                config_name=config.name,
-                kernel_name=kernel_name,
-                batch_size=config.batch_size,
-                avg_seq_len=b_seq_len.float().mean().item(),
-                group_size=config.group_size,
-                avg_time_ms=avg_ms,
-                std_time_ms=std_ms,
-                tokens_per_sec=tokens_per_sec,
-                status="SUCCESS",
-                cuda_graph_enabled=use_cuda_graph,
-            ))
+            results.append(
+                BenchmarkResult(
+                    config_name=config.name,
+                    kernel_name=kernel_name,
+                    batch_size=config.batch_size,
+                    avg_seq_len=b_seq_len.float().mean().item(),
+                    group_size=config.group_size,
+                    avg_time_ms=avg_ms,
+                    std_time_ms=std_ms,
+                    tokens_per_sec=tokens_per_sec,
+                    status="SUCCESS",
+                    cuda_graph_enabled=use_cuda_graph,
+                )
+            )
         except Exception as e:
-            results.append(BenchmarkResult(
-                config_name=config.name,
-                kernel_name=kernel_name,
-                batch_size=config.batch_size,
-                avg_seq_len=config.avg_seq_len,
-                group_size=config.group_size,
-                avg_time_ms=0,
-                std_time_ms=0,
-                tokens_per_sec=0,
-                status="FAILED",
-                error_msg=str(e),
-                cuda_graph_enabled=use_cuda_graph,
-            ))
+            results.append(
+                BenchmarkResult(
+                    config_name=config.name,
+                    kernel_name=kernel_name,
+                    batch_size=config.batch_size,
+                    avg_seq_len=config.avg_seq_len,
+                    group_size=config.group_size,
+                    avg_time_ms=0,
+                    std_time_ms=0,
+                    tokens_per_sec=0,
+                    status="FAILED",
+                    error_msg=str(e),
+                    cuda_graph_enabled=use_cuda_graph,
+                )
+            )
 
     return results
 
@@ -445,32 +465,36 @@ def benchmark_decode_kernels(config: TestConfig, device="cuda", use_cuda_graph=F
             # 计算吞吐量
             tokens_per_sec = config.batch_size / (avg_ms / 1000)
 
-            results.append(BenchmarkResult(
-                config_name=config.name,
-                kernel_name=kernel_name,
-                batch_size=config.batch_size,
-                avg_seq_len=b_seq_len.float().mean().item(),
-                group_size=1,
-                avg_time_ms=avg_ms,
-                std_time_ms=std_ms,
-                tokens_per_sec=tokens_per_sec,
-                status="SUCCESS",
-                cuda_graph_enabled=use_cuda_graph,
-            ))
+            results.append(
+                BenchmarkResult(
+                    config_name=config.name,
+                    kernel_name=kernel_name,
+                    batch_size=config.batch_size,
+                    avg_seq_len=b_seq_len.float().mean().item(),
+                    group_size=1,
+                    avg_time_ms=avg_ms,
+                    std_time_ms=std_ms,
+                    tokens_per_sec=tokens_per_sec,
+                    status="SUCCESS",
+                    cuda_graph_enabled=use_cuda_graph,
+                )
+            )
         except Exception as e:
-            results.append(BenchmarkResult(
-                config_name=config.name,
-                kernel_name=kernel_name,
-                batch_size=config.batch_size,
-                avg_seq_len=config.avg_seq_len,
-                group_size=1,
-                avg_time_ms=0,
-                std_time_ms=0,
-                tokens_per_sec=0,
-                status="FAILED",
-                error_msg=str(e),
-                cuda_graph_enabled=use_cuda_graph,
-            ))
+            results.append(
+                BenchmarkResult(
+                    config_name=config.name,
+                    kernel_name=kernel_name,
+                    batch_size=config.batch_size,
+                    avg_seq_len=config.avg_seq_len,
+                    group_size=1,
+                    avg_time_ms=0,
+                    std_time_ms=0,
+                    tokens_per_sec=0,
+                    status="FAILED",
+                    error_msg=str(e),
+                    cuda_graph_enabled=use_cuda_graph,
+                )
+            )
 
     return results
 
@@ -478,6 +502,7 @@ def benchmark_decode_kernels(config: TestConfig, device="cuda", use_cuda_graph=F
 # ============================================================================
 # 配置生成函数
 # ============================================================================
+
 
 def generate_llama3_configs() -> List[TestConfig]:
     """
@@ -489,13 +514,15 @@ def generate_llama3_configs() -> List[TestConfig]:
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
 
     for bs in batch_sizes:
-        configs.append(TestConfig(
-            name=f"Llama3_bs{bs}",
-            batch_size=bs,
-            avg_seq_len=1024,
-            seq_len_variance=256,
-            max_seq_len=2048,
-        ))
+        configs.append(
+            TestConfig(
+                name=f"Llama3_bs{bs}",
+                batch_size=bs,
+                avg_seq_len=1024,
+                seq_len_variance=256,
+                max_seq_len=2048,
+            )
+        )
 
     return configs
 
@@ -510,13 +537,15 @@ def generate_deepseek_v2_configs() -> List[TestConfig]:
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
 
     for bs in batch_sizes:
-        configs.append(TestConfig(
-            name=f"DeepSeekV2_bs{bs}",
-            batch_size=bs,
-            avg_seq_len=10240,
-            seq_len_variance=2560,
-            max_seq_len=128000,
-        ))
+        configs.append(
+            TestConfig(
+                name=f"DeepSeekV2_bs{bs}",
+                batch_size=bs,
+                avg_seq_len=10240,
+                seq_len_variance=2560,
+                max_seq_len=128000,
+            )
+        )
 
     return configs
 
@@ -546,14 +575,16 @@ def generate_load_distribution_configs(model_type: str = "llama3") -> List[TestC
 
     for bs in batch_sizes:
         for dist in distributions:
-            configs.append(TestConfig(
-                name=f"{model_type}_bs{bs}_{dist}",
-                batch_size=bs,
-                avg_seq_len=avg_seq_len,
-                seq_len_variance=seq_len_variance,
-                max_seq_len=max_seq_len,
-                load_distribution=dist,
-            ))
+            configs.append(
+                TestConfig(
+                    name=f"{model_type}_bs{bs}_{dist}",
+                    batch_size=bs,
+                    avg_seq_len=avg_seq_len,
+                    seq_len_variance=seq_len_variance,
+                    max_seq_len=max_seq_len,
+                    load_distribution=dist,
+                )
+            )
 
     return configs
 
@@ -572,15 +603,17 @@ def generate_mtp_configs() -> List[TestConfig]:
         for bs in batch_sizes:
             if bs % gs == 0:
                 num_groups = bs // gs
-                configs.append(TestConfig(
-                    name=f"MTP_gs{gs}_bs{bs}",
-                    batch_size=bs,
-                    avg_seq_len=gs // 2 + 1,
-                    seq_len_variance=0,
-                    max_seq_len=gs,
-                    group_size=gs,
-                    num_groups=num_groups,
-                ))
+                configs.append(
+                    TestConfig(
+                        name=f"MTP_gs{gs}_bs{bs}",
+                        batch_size=bs,
+                        avg_seq_len=gs // 2 + 1,
+                        seq_len_variance=0,
+                        max_seq_len=gs,
+                        group_size=gs,
+                        num_groups=num_groups,
+                    )
+                )
 
     return configs
 
@@ -589,22 +622,30 @@ def generate_mtp_configs() -> List[TestConfig]:
 # 结果输出函数
 # ============================================================================
 
+
 def print_results_table(results: List[BenchmarkResult]):
     """打印结果表格"""
     print("\n" + "=" * 150)
     print("MTP Kernel Performance Comparison Results")
     print("=" * 150)
-    print(f"{'Config':<28} {'Kernel':<25} {'Batch':<8} {'Avg_Seq':<10} {'Time(ms)':<12} {'Std(ms)':<10} {'Tokens/s':<12} {'Status':<10}")
+    print(
+        f"{'Config':<28} {'Kernel':<25} {'Batch':<8} {'Avg_Seq':<10} "
+        f"{'Time(ms)':<12} {'Std(ms)':<10} {'Tokens/s':<12} {'Status':<10}"
+    )
     print("-" * 150)
 
     for r in results:
         status_str = r.status[:10] if len(r.status) > 10 else r.status
         if r.status == "SUCCESS":
-            print(f"{r.config_name:<28} {r.kernel_name:<25} {r.batch_size:<8} {r.avg_seq_len:<10.1f} "
-                  f"{r.avg_time_ms:<12.3f} {r.std_time_ms:<10.3f} {r.tokens_per_sec:<12.2f} {status_str:<10}")
+            print(
+                f"{r.config_name:<28} {r.kernel_name:<25} {r.batch_size:<8} {r.avg_seq_len:<10.1f} "
+                f"{r.avg_time_ms:<12.3f} {r.std_time_ms:<10.3f} {r.tokens_per_sec:<12.2f} {status_str:<10}"
+            )
         else:
-            print(f"{r.config_name:<28} {r.kernel_name:<25} {r.batch_size:<8} {r.avg_seq_len:<10} "
-                  f"{'N/A':<12} {'N/A':<10} {'N/A':<12} {status_str:<10}")
+            print(
+                f"{r.config_name:<28} {r.kernel_name:<25} {r.batch_size:<8} {r.avg_seq_len:<10} "
+                f"{'N/A':<12} {'N/A':<10} {'N/A':<12} {status_str:<10}"
+            )
 
     print("=" * 150)
 
@@ -630,7 +671,7 @@ def analyze_results(results: List[BenchmarkResult]) -> Dict:
         analysis[config_name] = {
             "fastest_kernel": fastest.kernel_name,
             "fastest_time": fastest.avg_time_ms,
-            "speedups": {r.kernel_name: fastest.avg_time_ms / r.avg_time_ms for r in kernel_results}
+            "speedups": {r.kernel_name: fastest.avg_time_ms / r.avg_time_ms for r in kernel_results},
         }
 
     # 分析 CUDA Graph 的影响
@@ -664,7 +705,7 @@ def export_results(results: List[BenchmarkResult], analysis: Dict, filename: str
         "results": [asdict(r) for r in results],
         "analysis": analysis,
     }
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         json.dump(export_data, f, indent=2)
     print(f"\nResults exported to {filename}")
 
@@ -682,7 +723,7 @@ def print_analysis_summary(analysis: Dict):
             continue
         print(f"\n{config_name}:")
         print(f"  Fastest: {info['fastest_kernel']} ({info['fastest_time']:.3f} ms)")
-        for kernel, speedup in sorted(info['speedups'].items(), key=lambda x: -x[1]):
+        for kernel, speedup in sorted(info["speedups"].items(), key=lambda x: -x[1]):
             print(f"  {kernel}: {speedup:.2f}x")
 
     # CUDA Graph 影响
@@ -700,12 +741,15 @@ def print_analysis_summary(analysis: Dict):
 
 def main():
     parser = argparse.ArgumentParser(description="MTP Kernel Performance Benchmark")
-    parser.add_argument("--model", type=str, default="all",
-                        choices=["llama3", "deepseek_v2", "load_dist", "mtp", "all"],
-                        help="Model type to benchmark")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="all",
+        choices=["llama3", "deepseek_v2", "load_dist", "mtp", "all"],
+        help="Model type to benchmark",
+    )
     parser.add_argument("--cuda-graph", action="store_true", help="Enable CUDA Graph")
-    parser.add_argument("--output", type=str, default="mtp_kernel_benchmark_results.json",
-                        help="Output JSON file")
+    parser.add_argument("--output", type=str, default="mtp_kernel_benchmark_results.json", help="Output JSON file")
     parser.add_argument("--device", type=str, default="cuda", help="CUDA device")
     parser.add_argument("--skip-decode", action="store_true", help="Skip decode kernel benchmarks")
     parser.add_argument("--skip-mtp", action="store_true", help="Skip MTP kernel benchmarks")
@@ -759,9 +803,11 @@ def main():
     print("=" * 80)
 
     for i, config in enumerate(all_configs):
-        print(f"\n[{i+1}/{len(all_configs)}] {config.name}: bs={config.batch_size}, "
-              f"avg_seq={config.avg_seq_len}, max_seq={config.max_seq_len}, "
-              f"distribution={config.load_distribution}, group_size={config.group_size}")
+        print(
+            f"\n[{i+1}/{len(all_configs)}] {config.name}: bs={config.batch_size}, "
+            f"avg_seq={config.avg_seq_len}, max_seq={config.max_seq_len}, "
+            f"distribution={config.load_distribution}, group_size={config.group_size}"
+        )
 
         if config.group_size > 1 and not args.skip_mtp:
             # MTP 模式

@@ -16,7 +16,7 @@ from typing import List, Tuple, Dict
 import torch.cuda.profiler as profiler
 
 # 添加项目路径
-sys.path.insert(0, '/data/nvme0/chenjunyi/project/lightllm')
+sys.path.insert(0, "/data/nvme0/chenjunyi/project/lightllm")
 
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
     token_decode_attention_mtp_diverse_single_token,
@@ -29,13 +29,21 @@ def warmup_gpu(device="cuda"):
     for _ in range(10):
         a = torch.randn(1000, 1000, device=device)
         b = torch.randn(1000, 1000, device=device)
-        c = torch.matmul(a, b)
+        _ = torch.matmul(a, b)
     torch.cuda.synchronize(device)
 
 
-def setup_mtp_test_data(kv_len: int, group_size: int, batch_groups: int,
-                        num_heads: int = 32, kv_head_num: int = 4, head_dim: int = 128,
-                        test_dtype=torch.bfloat16, device="cuda", seed=42):
+def setup_mtp_test_data(
+    kv_len: int,
+    group_size: int,
+    batch_groups: int,
+    num_heads: int = 32,
+    kv_head_num: int = 4,
+    head_dim: int = 128,
+    test_dtype=torch.bfloat16,
+    device="cuda",
+    seed=42,
+):
     """
     设置 MTP 测试数据
 
@@ -50,7 +58,6 @@ def setup_mtp_test_data(kv_len: int, group_size: int, batch_groups: int,
     torch.manual_seed(seed)
 
     batch_size = batch_groups * group_size
-    gqa_group_size = num_heads // kv_head_num
 
     # KV池：[batch_groups * kv_len, kv_head_num, head_dim]
     kv_pool_size = batch_groups * kv_len
@@ -90,9 +97,19 @@ def setup_mtp_test_data(kv_len: int, group_size: int, batch_groups: int,
     return q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group
 
 
-def benchmark_mtp_diverse(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_shared_group,
-                          block_seq: int = 256, warmup_iters: int = 10, test_iters: int = 100,
-                          device="cuda"):
+def benchmark_mtp_diverse(
+    q,
+    k,
+    v,
+    req_to_tokens,
+    b_req_idx,
+    b_seq_len,
+    b_mark_shared_group,
+    block_seq: int = 256,
+    warmup_iters: int = 10,
+    test_iters: int = 100,
+    device="cuda",
+):
     """
     基准测试MTP diverse算子
 
@@ -104,7 +121,9 @@ def benchmark_mtp_diverse(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_s
     # Warmup
     for _ in range(warmup_iters):
         _ = token_decode_attention_mtp_diverse_single_token(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             Req_to_tokens=req_to_tokens,
             B_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -120,7 +139,9 @@ def benchmark_mtp_diverse(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_s
     start_event.record()
     for _ in range(test_iters):
         _ = token_decode_attention_mtp_diverse_single_token(
-            q=q, k=k, v=v,
+            q=q,
+            k=k,
+            v=v,
             Req_to_tokens=req_to_tokens,
             B_req_idx=b_req_idx,
             b_seq_len=b_seq_len,
@@ -136,8 +157,9 @@ def benchmark_mtp_diverse(q, k, v, req_to_tokens, b_req_idx, b_seq_len, b_mark_s
     return avg_time_ms
 
 
-def run_benchmark_suite(configs: List[Dict], num_heads: int = 32, kv_head_num: int = 4,
-                        head_dim: int = 128, device="cuda") -> List[Dict]:
+def run_benchmark_suite(
+    configs: List[Dict], num_heads: int = 32, kv_head_num: int = 4, head_dim: int = 128, device="cuda"
+) -> List[Dict]:
     """
     运行一系列基准测试
 
@@ -156,8 +178,10 @@ def run_benchmark_suite(configs: List[Dict], num_heads: int = 32, kv_head_num: i
         batch_groups = cfg["batch_groups"]
         batch_size = group_size * batch_groups
 
-        print(f"\n[{i+1}/{len(configs)}] Testing: kv_len={kv_len}, group_size={group_size}, "
-              f"batch_groups={batch_groups}, total_batch={batch_size}")
+        print(
+            f"\n[{i+1}/{len(configs)}] Testing: kv_len={kv_len}, group_size={group_size}, "
+            f"batch_groups={batch_groups}, total_batch={batch_size}"
+        )
 
         try:
             # 准备数据
@@ -173,7 +197,9 @@ def run_benchmark_suite(configs: List[Dict], num_heads: int = 32, kv_head_num: i
 
             # 运行测试
             avg_time_ms = benchmark_mtp_diverse(
-                q=q, k=k, v=v,
+                q=q,
+                k=k,
+                v=v,
                 req_to_tokens=req_to_tokens,
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
@@ -239,11 +265,13 @@ def generate_test_configs(fixed_kv_len: int = 1000) -> List[Dict]:
 
     for group_size in group_sizes:
         for batch_groups in batch_groups_list:
-            configs.append({
-                "kv_len": fixed_kv_len,
-                "group_size": group_size,
-                "batch_groups": batch_groups,
-            })
+            configs.append(
+                {
+                    "kv_len": fixed_kv_len,
+                    "group_size": group_size,
+                    "batch_groups": batch_groups,
+                }
+            )
 
     return configs
 
@@ -253,18 +281,24 @@ def print_results_table(results: List[Dict]):
     print("\n" + "=" * 120)
     print("MTP Diverse Attention Performance Benchmark Results")
     print("=" * 120)
-    print(f"{'kv_len':<10} {'group_size':<12} {'batch_groups':<14} {'total_batch':<12} "
-          f"{'avg_time(ms)':<14} {'tokens/sec':<14} {'status':<10}")
+    print(
+        f"{'kv_len':<10} {'group_size':<12} {'batch_groups':<14} {'total_batch':<12} "
+        f"{'avg_time(ms)':<14} {'tokens/sec':<14} {'status':<10}"
+    )
     print("-" * 120)
 
     for r in results:
         if r["status"] == "SUCCESS":
-            print(f"{r['kv_len']:<10} {r['group_size']:<12} {r['batch_groups']:<14} "
-                  f"{r['total_batch_size']:<12} {r['avg_time_ms']:<14.3f} "
-                  f"{r['tokens_per_sec']:<14.2f} {r['status']:<10}")
+            print(
+                f"{r['kv_len']:<10} {r['group_size']:<12} {r['batch_groups']:<14} "
+                f"{r['total_batch_size']:<12} {r['avg_time_ms']:<14.3f} "
+                f"{r['tokens_per_sec']:<14.2f} {r['status']:<10}"
+            )
         else:
-            print(f"{r['kv_len']:<10} {r['group_size']:<12} {r['batch_groups']:<14} "
-                  f"{r['total_batch_size']:<12} {'N/A':<14} {'N/A':<14} {r['status']:<10}")
+            print(
+                f"{r['kv_len']:<10} {r['group_size']:<12} {r['batch_groups']:<14} "
+                f"{r['total_batch_size']:<12} {'N/A':<14} {'N/A':<14} {r['status']:<10}"
+            )
 
     print("=" * 120)
 
@@ -277,6 +311,7 @@ def analyze_group_size_impact(results: List[Dict]):
 
     # 按batch_groups分组，比较group_size=6和group_size=12的性能
     from collections import defaultdict
+
     grouped = defaultdict(lambda: {})
 
     for r in results:
@@ -299,7 +334,7 @@ def analyze_group_size_impact(results: List[Dict]):
 
 def export_results(results: List[Dict], filename: str = "mtp_diverse_benchmark_results.json"):
     """导出结果到JSON文件"""
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults exported to {filename}")
 
@@ -333,8 +368,10 @@ def main():
     print("\nTest configurations:")
     for cfg in configs:
         batch_size = cfg["group_size"] * cfg["batch_groups"]
-        print(f"  kv_len={cfg['kv_len']}, group_size={cfg['group_size']}, "
-              f"batch_groups={cfg['batch_groups']}, total_batch={batch_size}")
+        print(
+            f"  kv_len={cfg['kv_len']}, group_size={cfg['group_size']}, "
+            f"batch_groups={cfg['batch_groups']}, total_batch={batch_size}"
+        )
 
     # 运行测试
     print("\n" + "=" * 80)
