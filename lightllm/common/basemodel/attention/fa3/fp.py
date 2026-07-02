@@ -3,7 +3,7 @@ import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
@@ -222,7 +222,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache(
+        o = flash_attn_with_kvcache_autotune(
             q=q,
             k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
             v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
