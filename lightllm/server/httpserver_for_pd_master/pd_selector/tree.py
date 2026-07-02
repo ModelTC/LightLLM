@@ -6,6 +6,13 @@ from itertools import count
 from threading import RLock
 from typing import Dict, List, Optional, Tuple
 
+try:
+    from ._pd_tree_rust import PrefixMatchResult as RustPrefixMatchResult
+    from ._pd_tree_rust import Tree as RustTree
+except Exception:
+    RustPrefixMatchResult = None
+    RustTree = None
+
 
 _EPOCH_COUNTER = count()
 
@@ -28,6 +35,9 @@ class PrefixMatchResult:
     tenant: str
     matched_char_count: int
     input_char_count: int
+
+
+PythonPrefixMatchResult = PrefixMatchResult
 
 
 @dataclass(slots=True)
@@ -156,7 +166,7 @@ class Tree:
             if tenant != "empty":
                 curr.tenant_last_access_time[tenant] = _get_epoch()
 
-            return PrefixMatchResult(
+            return PythonPrefixMatchResult(
                 tenant=tenant,
                 matched_char_count=matched_chars,
                 input_char_count=len(text),
@@ -314,3 +324,10 @@ class Tree:
                     )
                 stack.extend(curr.children.values())
             return used_size_per_tenant
+
+
+PythonTree = Tree
+
+if RustTree is not None and RustPrefixMatchResult is not None:
+    PrefixMatchResult = RustPrefixMatchResult
+    Tree = RustTree

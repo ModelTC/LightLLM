@@ -1,6 +1,21 @@
 from setuptools import setup, find_packages
 
+try:
+    from setuptools_rust import Binding, RustExtension
+except ImportError:
+    Binding = None
+    RustExtension = None
+
 package_data = {"lightllm": ["common/all_kernel_configs/*/*.json", "common/triton_utils/*/*/*/*/*.json"]}
+rust_extensions = []
+if RustExtension is not None and Binding is not None:
+    rust_extensions = [
+        RustExtension(
+            "lightllm.server.httpserver_for_pd_master.pd_selector._pd_tree_rust",
+            path="rust/pd_tree/Cargo.toml",
+            binding=Binding.PyO3,
+        )
+    ]
 setup(
     name="lightllm",
     version="1.1.0",
@@ -29,4 +44,6 @@ setup(
         "orjson",
     ],
     package_data=package_data,
+    rust_extensions=rust_extensions,
+    zip_safe=False,
 )

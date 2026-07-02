@@ -94,8 +94,10 @@ class UpStatusManager:
                                 logger.info(f"up kv status: {upkv_status}")
                             else:
                                 await asyncio.sleep(3)
+
                         except BaseException as e:
                             logger.error(str(e))
+                            await task_queue.put(upkv_status)
                             raise e
             except asyncio.CancelledError:
                 logger.info(f"up_kv_status_task {pd_master_obj} cancelled")

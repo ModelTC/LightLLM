@@ -16,9 +16,9 @@ logger = init_logger(__name__)
 @dataclass(slots=True)
 class CacheAwareConfig:
     cache_threshold: float = 0.5
-    balance_rel_threshold: float = 1.1
+    balance_rel_threshold: float = 1.2
     eviction_interval_secs: int = 30
-    max_tree_size: int = 100000
+    max_tree_size: int = 1000000
 
 
 class CacheAwarePolicy:
@@ -82,8 +82,6 @@ class CacheAwarePolicy:
         min_load = min(loads) if loads else 0
         max_load = max(loads) if loads else 0
 
-
-
         is_imbalanced = max_load > (min_load * self.config.balance_rel_threshold)
 
         logger.info(
@@ -109,7 +107,7 @@ class CacheAwarePolicy:
         )
 
         logger.info(
-            f"CacheAwarePolicy: request_text='{text}', matched_char_count={result.matched_char_count}, "
+            f"CacheAwarePolicy: matched_char_count={result.matched_char_count}, "
             f"input_char_count={result.input_char_count}, match_rate={match_rate:.4f}, "
             f"cache_threshold={self.config.cache_threshold:.4f}"
         )
