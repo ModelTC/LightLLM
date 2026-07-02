@@ -1,3 +1,4 @@
+// modified from https://github.com/sgl-project/sglang/blob/main/sgl-model-gateway/src/policies/tree.rs
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, VecDeque},
@@ -329,11 +330,40 @@ fn intern_tenant(tenant: &str) -> TenantId {
 
 impl Default for Tree {
     fn default() -> Self {
-        Self::py_new()
+        Self::new()
     }
 }
 
 impl Tree {
+    /*
+    Thread-safe multi tenant radix tree
+
+    1. Storing data for multiple tenants (the overlap of multiple radix tree)
+    2. Node-level lock to enable concurrent access on nodes
+    3. Leaf LRU eviction based on tenant access time
+
+    Optimizations:
+    - Cached character counts in NodeText to avoid O(n) chars().count() calls
+    - Interned tenant IDs (Arc<str>) for cheap cloning and comparison
+    - Batched timestamp updates to reduce syscalls
+    - Custom hasher for char keys in children DashMap
+    */
+    pub fn new() -> Self {
+        Tree {
+            // Root uses higher shard count since ALL requests pass through it
+            root: Arc::new(Node {
+                children: DashMap::with_hasher_and_shard_amount(
+                    CharHasherBuilder::default(),
+                    ROOT_SHARD_COUNT,
+                ),
+                text: RwLock::new(NodeText::empty()),
+                tenant_last_access_time: DashMap::with_shard_amount(ROOT_SHARD_COUNT),
+                parent: RwLock::new(None),
+                last_tenant: parking_lot::RwLock::new(None),
+            }),
+            tenant_char_count: DashMap::with_shard_amount(ROOT_SHARD_COUNT),
+        }
+    }
     /// Return the list of tenants for which this node is a leaf.
     /// A tenant is a leaf at this node if no children have that tenant.
     fn leaf_of(node: &NodeRef) -> Vec<TenantId> {
@@ -402,35 +432,10 @@ impl Tree {
 
 #[pymethods]
 impl Tree {
-    /*
-    Thread-safe multi tenant radix tree
-
-    1. Storing data for multiple tenants (the overlap of multiple radix tree)
-    2. Node-level lock to enable concurrent access on nodes
-    3. Leaf LRU eviction based on tenant access time
-
-    Optimizations:
-    - Cached character counts in NodeText to avoid O(n) chars().count() calls
-    - Interned tenant IDs (Arc<str>) for cheap cloning and comparison
-    - Batched timestamp updates to reduce syscalls
-    - Custom hasher for char keys in children DashMap
-    */
+   
     #[new]
     pub fn py_new() -> Self {
-        Tree {
-            // Root uses higher shard count since ALL requests pass through it
-            root: Arc::new(Node {
-                children: DashMap::with_hasher_and_shard_amount(
-                    CharHasherBuilder::default(),
-                    ROOT_SHARD_COUNT,
-                ),
-                text: RwLock::new(NodeText::empty()),
-                tenant_last_access_time: DashMap::with_shard_amount(ROOT_SHARD_COUNT),
-                parent: RwLock::new(None),
-                last_tenant: parking_lot::RwLock::new(None),
-            }),
-            tenant_char_count: DashMap::with_shard_amount(ROOT_SHARD_COUNT),
-        }
+        Self::new()
     }
 
     pub fn insert(&self, text: &str, tenant: &str) {
