@@ -32,12 +32,9 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _get_qkv(self, input, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
         raise Exception("need to impl")
 
-    def _tpsp_get_qkv(self, input, infer_state: InferStateInfo, layer_weight) -> Tuple[torch.Tensor, torch.Tensor]:
-        raise Exception("need to impl")
-
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
         mem_manager = infer_state.mem_manager
-        mem_manager.copy_kv_to_mem_manager(
+        mem_manager.operator.copy_kv_to_mem_manager(
             layer_index=self.layer_num_,
             mem_index=infer_state.mem_index,
             kv=cache_kv,
@@ -53,13 +50,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def _tpsp_get_o(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
-        raise Exception("need to impl")
-
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
-        raise Exception("need to impl")
-
-    def _tpsp_ffn(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
     def context_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
@@ -70,8 +61,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         )
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+
         return o
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
@@ -83,8 +73,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
-        if self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
@@ -94,8 +83,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
         o = self._get_o(o, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(o, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
+
         return o
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
@@ -106,50 +94,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
         input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
-        if self.tp_world_size_ > 1:
-            all_reduce(ffn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-        return input_embdings
 
-    def tpsp_context_attention_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
-        q, cache_kv = self._tpsp_get_qkv(input_embdings, infer_state, layer_weight)
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._context_attention_wrapper_run(
-            q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
-        )
-        q = None
-        o = self._tpsp_get_o(o, infer_state, layer_weight)
-        return o
-
-    def tpsp_context_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        o = self.tpsp_context_attention_forward(input1, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
-
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._tpsp_ffn(input1, infer_state, layer_weight)
-        input1 = None
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-        return input_embdings
-
-    def tpsp_token_attention_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
-        q, cache_kv = self._tpsp_get_qkv(input_embdings, infer_state, layer_weight)
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        o = self._token_attention_kernel(q, infer_state, layer_weight)
-        q = None
-        o = self._tpsp_get_o(o, infer_state, layer_weight)
-        return o
-
-    def tpsp_token_forward(self, input_embdings: torch.Tensor, infer_state: InferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        o = self.tpsp_token_attention_forward(input1, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
-        o = None
-
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._tpsp_ffn(input1, infer_state, layer_weight)
-        input1 = None
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
@@ -158,11 +103,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     ) -> torch.Tensor:
         if torch.cuda.is_current_stream_capturing():
             q = q.contiguous()
-            cache_kv = cache_kv.contiguous()
-            _q, _cache_kv = (
-                tensor_to_no_ref_tensor(q),
-                tensor_to_no_ref_tensor(cache_kv),
-            )
+            # cache_kv is None for layers that own no K/V slot (e.g. gemma4
+            # KV-shared layers, which read K/V from a prior layer's cache and
+            # ignore this arg in _context_attention_kernel). Skip the
+            # graph-input plumbing for it instead of crashing on None.
+            cache_kv = cache_kv.contiguous() if cache_kv is not None else None
+            _q = tensor_to_no_ref_tensor(q)
+            _cache_kv = tensor_to_no_ref_tensor(cache_kv) if cache_kv is not None else None
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
             pre_capture_graph.__exit__(None, None, None)
 

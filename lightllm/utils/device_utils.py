@@ -41,6 +41,11 @@ def get_device_sm_count():
 
 
 @lru_cache(maxsize=None)
+def is_sm100_gpu():
+    return torch.cuda.get_device_capability()[0] == 10
+
+
+@lru_cache(maxsize=None)
 def get_device_sm_regs_num():
     import triton
     from triton.runtime import driver

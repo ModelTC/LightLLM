@@ -79,17 +79,17 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
         nsa_dict = att_control.nsa_prefill_dict
-        topk_indices = nsa_dict["topk_indices"]
+        topk_mem_indices = nsa_dict["topk_mem_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
 
-        if topk_indices.ndim == 2:
-            topk_indices = topk_indices.unsqueeze(1)
+        if topk_mem_indices.ndim == 2:
+            topk_mem_indices = topk_mem_indices.unsqueeze(1)
 
         mla_out, _, _ = flash_mla_sparse_fwd(
             q=q,
             kv=kv,
-            indices=topk_indices,
+            indices=topk_mem_indices,
             sm_scale=softmax_scale,
             d_v=kv_lora_rank,
         )

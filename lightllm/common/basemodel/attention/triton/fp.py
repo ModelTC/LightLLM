@@ -27,12 +27,12 @@ class TritonPrefillAttState(BasePrefillAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        assert att_control.use_sliding_window is False and att_control.use_att_sink is False
         if att_control.use_alibi:
+            assert att_control.use_sliding_window is False, "alibi + sliding_window not supported"
             assert att_control.tp_alibi is not None
             return self._alibi_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
-            return self._nomarl_prefill_att(q=q, k=k, v=v, alloc_func=alloc_func)
+            return self._nomarl_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
 
     def _alibi_prefill_att(
         self,
@@ -61,8 +61,20 @@ class TritonPrefillAttState(BasePrefillAttState):
         )
         return out
 
-    def _nomarl_prefill_att(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty):
+    def _nomarl_prefill_att(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        att_control: AttControl = AttControl(),
+        alloc_func=torch.empty,
+    ):
         from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd
+
+        if att_control.use_sliding_window:
+            sliding_window = att_control.sliding_window
+        else:
+            sliding_window = (-1, -1)
 
         out = alloc_func(q.shape, q.dtype)
         context_attention_fwd(
@@ -76,6 +88,7 @@ class TritonPrefillAttState(BasePrefillAttState):
             self.infer_state.b_ready_cache_len,
             self.infer_state.max_q_seq_len,
             self.infer_state.req_manager.req_to_token_indexs,
+            sliding_window=sliding_window,
         )
         return out
 
@@ -105,8 +118,8 @@ class TritonDecodeAttState(BaseDecodeAttState):
         att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
-        assert att_control.use_sliding_window is False and att_control.use_att_sink is False
         if att_control.use_alibi:
+            assert att_control.use_sliding_window is False, "alibi + sliding_window not supported"
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
@@ -123,7 +136,9 @@ class TritonDecodeAttState(BaseDecodeAttState):
             elif q_head_num == k_head_num:
                 return self._normal_decode_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
             elif q_head_num > k_head_num:
-                return self._normal_decode_gqa_flash_decoding_att(q=q, k=k, v=v, alloc_func=alloc_func)
+                return self._normal_decode_gqa_flash_decoding_att(
+                    q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func
+                )
             else:
                 raise NotImplementedError("error")
 
@@ -182,11 +197,17 @@ class TritonDecodeAttState(BaseDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        att_control: AttControl = AttControl(),
         alloc_func=torch.empty,
     ):
         from ...triton_kernel.att.decode_att.gqa.flash_decoding.gqa_flash_decoding import (
             gqa_token_decode_attention_flash_decoding,
         )
+
+        if att_control.use_sliding_window:
+            sliding_window = att_control.sliding_window
+        else:
+            sliding_window = (-1, -1)
 
         out = alloc_func(q.shape, q.dtype)
 
@@ -197,6 +218,7 @@ class TritonDecodeAttState(BaseDecodeAttState):
             cache_v=v,
             out=out,
             alloc_tensor_func=alloc_func,
+            sliding_window=sliding_window,
         )
 
         return out

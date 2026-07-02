@@ -622,20 +622,38 @@ class BaseReasoningFormatDetector:
 
         return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text)
 
+    def flush(self) -> StreamingParseResult:
+        """
+        Flush any remaining buffered content when generation ends prematurely
+        (e.g., max_completion_tokens reached before </think> is seen).
+        Returns buffered content as reasoning_text (if still in reasoning block)
+        or normal_text (if in normal content block).
+        """
+        if not self._buffer:
+            return StreamingParseResult()
+        remaining = self._buffer
+        self._buffer = ""
+        if self._in_reasoning:
+            return StreamingParseResult(reasoning_text=remaining)
+        else:
+            return StreamingParseResult(normal_text=remaining)
+
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
         """
         Streaming incremental parsing for reasoning content.
         Handles partial reasoning tags and content.
 
-        If stream_reasoning is False:
-            Accumulates reasoning content until the end tag is found
-        If stream_reasoning is True:
-            Streams reasoning content as it arrives
+        Reasoning tokens are always streamed immediately as they arrive,
+        regardless of stream_reasoning setting (aligns with vLLM behavior).
+        The only exception is when the buffer holds a partial tag prefix
+        (e.g. "</" while waiting to confirm "</think>"), in which case we
+        keep buffering until the tag is confirmed or refuted.
         """
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
+        # until we can confirm or refute the tag.
         if any(
             token.startswith(current_text) and token != current_text
             for token in [self.think_start_token, self.think_end_token]
@@ -660,14 +678,11 @@ class BaseReasoningFormatDetector:
 
             return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text.rstrip())
 
-        # Continue with reasoning content
+        # Always stream reasoning content immediately.
+        # stream_reasoning flag is ignored for streaming responses.
         if self._in_reasoning:
-            if self.stream_reasoning:
-                # Stream the content immediately
-                self._buffer = ""
-                return StreamingParseResult(reasoning_text=current_text)
-            else:
-                return StreamingParseResult()
+            self._buffer = ""
+            return StreamingParseResult(reasoning_text=current_text)
 
         # If we're not in a reasoning block return as normal text
         if not self._in_reasoning:
@@ -847,6 +862,33 @@ class NanoV3Detector(BaseReasoningFormatDetector):
         )
 
 
+class Gemma4Detector(BaseReasoningFormatDetector):
+    """
+    Detector for Google Gemma-4 thinking models.
+
+    Format: ``<|channel>thought\\n...reasoning...\\n<channel|>answer``.
+    Role label ``thought\\n`` is baked into the start token (cf.
+    GptOssDetector) so the base class strips it for free.
+
+    Note: ``<|channel>`` and ``<channel|>`` are special tokens (ids 100/101).
+    The API layer forces ``skip_special_tokens=False`` when this parser is
+    active so the delimiters survive decoding (see ``api_openai.py``).
+    """
+
+    THINK_START_TOKEN = "<|channel>thought\n"
+    THINK_END_TOKEN = "<channel|>"
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+        # force_reasoning ignored: Gemma-4's template never starts generation
+        # inside an open channel (ReasoningParser pins it to False too).
+        super().__init__(
+            self.THINK_START_TOKEN,
+            self.THINK_END_TOKEN,
+            force_reasoning=False,
+            stream_reasoning=stream_reasoning,
+        )
+
+
 class ReasoningParser:
     """
     Parser that handles both streaming and non-streaming scenarios for extracting
@@ -872,6 +914,7 @@ class ReasoningParser:
         "step3": DeepSeekR1Detector,
         "nano_v3": NanoV3Detector,
         "interns1": Qwen3Detector,
+        "gemma4": Gemma4Detector,
     }
 
     def __init__(
@@ -887,9 +930,12 @@ class ReasoningParser:
         if not detector_class:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        # Special cases where we override force_reasoning
-        if model_type.lower() in {"qwen3-thinking", "gpt-oss", "minimax"}:
-            force_reasoning = True
+        elif model_type.lower() == "gemma4":
+            # Gemma-4's chat template never positions generation inside an open
+            # channel — see Gemma4Detector docstring. Pin to False so a
+            # request_enable_reasoning=True from the caller can't accidentally
+            # mark the parser as already inside reasoning.
+            force_reasoning = False
 
         # Only pass force_reasoning if explicitly set, let detectors use their defaults
         kwargs = {"stream_reasoning": stream_reasoning}
@@ -906,4 +952,9 @@ class ReasoningParser:
     def parse_stream_chunk(self, chunk_text: str) -> Tuple[Optional[str], Optional[str]]:
         """Streaming call: incremental parsing"""
         ret = self.detector.parse_streaming_increment(chunk_text)
+        return ret.reasoning_text, ret.normal_text
+
+    def flush(self) -> Tuple[Optional[str], Optional[str]]:
+        """Flush remaining buffered content when generation ends prematurely."""
+        ret = self.detector.flush()
         return ret.reasoning_text, ret.normal_text

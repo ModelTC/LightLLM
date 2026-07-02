@@ -33,12 +33,16 @@ class FusedMoeWeight(BaseWeightTpl):
         num_fused_shared_experts: int = 0,
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
+        per_expert_scale_name: str = "",
     ) -> None:
         super().__init__(data_type=data_type)
         self.w1_weight_name = gate_proj_name
         self.w2_weight_name = down_proj_name
         self.w3_weight_name = up_proj_name
         self.e_score_correction_bias_name = e_score_correction_bias_name
+        # gemma4 的专家计算出的值都需要一个 scale 值，每个专家有自己独立的scale参数
+        # per_expert_scale_name 是专家的scale参数权重的名称， 为 "" 表示没有专家独立的scale参数
+        self.per_expert_scale_name = per_expert_scale_name
         self.weight_prefix = weight_prefix
         self.layer_num_ = layer_num
         self.global_rank_ = get_global_rank()
@@ -130,6 +134,7 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Backward compatible method that routes to platform-specific implementation."""
         return self.fuse_moe_impl(
@@ -145,6 +150,8 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
+            per_expert_scale=self.per_expert_scale,
+            shared_expert_gate=shared_expert_gate,
         )
 
     def low_latency_dispatch(
@@ -261,18 +268,26 @@ class FusedMoeWeight(BaseWeightTpl):
 
     def load_hf_weights(self, weights):
         # Load bias
-        if self.e_score_correction_bias_name in weights:
-            self.e_score_correction_bias.copy_(weights[self.e_score_correction_bias_name])
+        self._load_e_score_correction_bias(weights)
+        self._load_per_expert_scale(weights)
         self._load_weight(self.expert_idx_to_local_idx, weights)
         if self.redundancy_expert_num > 0:
             self._load_weight(self.redundancy_expert_idx_to_local_idx, weights)
 
     def verify_load(self):
-        return all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
+        weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
+        per_expert_scale_load_ok = (
+            True if self.per_expert_scale is None else getattr(self.per_expert_scale, "load_ok", False)
+        )
+        e_score_correction_bias_load_ok = (
+            True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
+        )
+        return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size
         self.e_score_correction_bias = None
+        self.per_expert_scale = None
         # Create e_score_correction_bias
         if self.e_score_correction_bias_name:
             self.e_score_correction_bias = torch.empty(
@@ -280,6 +295,15 @@ class FusedMoeWeight(BaseWeightTpl):
                 dtype=self.data_type_,
                 device=f"cuda:{self.device_id_}",
             )
+            self.e_score_correction_bias.load_ok = False
+
+        if self.per_expert_scale_name:
+            self.per_expert_scale = torch.empty(
+                (self.n_routed_experts,),
+                dtype=torch.float32,
+                device=f"cuda:{self.device_id_}",
+            )
+            self.per_expert_scale.load_ok = False
 
         self.w13, w13_param_list = self.quant_method.create_moe_weight(
             out_dims=[intermediate_size, intermediate_size],
@@ -299,6 +323,16 @@ class FusedMoeWeight(BaseWeightTpl):
         self.w3_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[1])
         self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2)
 
+    def _load_e_score_correction_bias(self, weights: Dict[str, torch.Tensor]):
+        if self.e_score_correction_bias_name and self.e_score_correction_bias_name in weights:
+            self.e_score_correction_bias.copy_(weights[self.e_score_correction_bias_name])
+            self.e_score_correction_bias.load_ok = True
+
+    def _load_per_expert_scale(self, weights: Dict[str, torch.Tensor]):
+        if self.per_expert_scale_name and self.per_expert_scale_name in weights:
+            self.per_expert_scale.copy_(weights[self.per_expert_scale_name].to(self.per_expert_scale.dtype))
+            self.per_expert_scale.load_ok = True
+
     def _get_expert_weight_list(self, weight_pack: WeightPack):
         weight_list = []
         for idx in range(self.local_n_routed_experts):
@@ -307,7 +341,6 @@ class FusedMoeWeight(BaseWeightTpl):
         return weight_list
 
     def _load_weight(self, expert_idx_to_local_idx: Dict[int, int], weights: Dict[str, torch.Tensor]):
-
         # Load each expert with TP slicing
         for expert_idx, local_expert_idx in expert_idx_to_local_idx.items():
             with self.lock:

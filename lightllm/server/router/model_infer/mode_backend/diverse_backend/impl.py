@@ -14,7 +14,6 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from ..chunked_prefill.impl import ChunkedPrefillBackend
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -140,7 +139,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                     pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
                     update_func_objs.append(pack)
                     pre_master_req_pack = pack
-                    # TODO 如果 diverse mode 需要支持 nixl pd 分离，则应该每个分块prefill后都进行相关的复制，
+                    # TODO 如果 diverse mode 需要支持 pd 分离，则应该每个分块prefill后都进行相关的复制，
                     # 暂时不支持 diverse mode 和 pd 模式的混合
                     continue
 
@@ -167,7 +166,6 @@ class DiversehBackend(ChunkedPrefillBackend):
         return update_func_objs
 
     def _master_req_to_radix_cache(self, master_req: InferReq):
-        g_infer_state_lock.acquire()
         key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
         key = torch.tensor(key, dtype=torch.int64, device="cpu")
         value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
@@ -189,11 +187,9 @@ class DiversehBackend(ChunkedPrefillBackend):
         share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
         assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
         self.model.req_manager.req_to_token_indexs[master_req.req_idx][0 : master_req.cur_kv_len] = value
-        g_infer_state_lock.release()
         return
 
     def _copy_master_req_to_slave_req(self, slave_req: InferReq):
-        g_infer_state_lock.acquire()
         master_req = slave_req.related_master_req
         assert master_req is not None
 
@@ -213,6 +209,4 @@ class DiversehBackend(ChunkedPrefillBackend):
             slave_req.shm_req.shm_cur_kv_len = slave_req.cur_kv_len
 
         assert kv_len <= slave_req.shm_req.input_len
-
-        g_infer_state_lock.release()
         return

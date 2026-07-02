@@ -18,12 +18,11 @@ class DPKVSharedMoudle:
     _KV_LEN_INDEX = 0
     _REQ_IDX_INDEX = 1
 
-    def __init__(self, max_req_num: int, max_req_seq_len: int, dp_size_in_node: int, backend):
+    def __init__(self, max_req_num: int, dp_size_in_node: int, backend):
         from .impl import DPChunkedPrefillBackend
 
         self.backend: DPChunkedPrefillBackend = backend
         self.max_req_num = max_req_num
-        self.max_req_seq_len = max_req_seq_len
 
         # 0 代表 kv_len, 1 代表 radix_cache_len
         self.shared_req_infos = ShmArray(
@@ -111,7 +110,7 @@ class DPKVSharedMoudle:
             max_kv_len_mem_indexes_tensor = torch.cat(max_kv_len_mem_indexes).to(dtype=torch.int64, device="cuda")
             max_kv_len_dp_ranks_tensor = torch.tensor(max_kv_len_dp_ranks, dtype=torch.int32, device="cuda")
             mem_indexes_tensor = torch.cat(mem_indexes).to(dtype=torch.int64, device="cuda")
-            self.backend.model.mem_manager.copy_kv_from_other_dp_ranks(
+            self.backend.model.mem_manager.operator.copy_kv_from_other_dp_ranks(
                 mem_managers=self.backend.mem_managers,
                 move_token_indexes=max_kv_len_mem_indexes_tensor,
                 token_dp_indexes=max_kv_len_dp_ranks_tensor,

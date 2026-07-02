@@ -4,7 +4,7 @@ import dataclasses
 import os
 import xxhash
 import threading
-import time
+import concurrent.futures
 import numpy as np
 import triton
 from functools import lru_cache
@@ -15,19 +15,21 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num
+from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_att_mixed_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
+    Qwen3NextMemManager,
 )
 
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.auto_shm_cleanup import register_sysv_shm_for_cleanup
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 logger = init_logger(__name__)
 
@@ -61,8 +63,25 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    mem_manager_class = select_mem_manager_class()
-    if mem_manager_class is Deepseek2MemoryManager:
+    if is_linear_att_mixed_model(args.model_dir):
+        # 对于 qwen3.5 等 linear att 混合模型的特殊处理。
+        mem_manager_class = Qwen3NextMemManager
+    else:
+        mem_manager_class = select_mem_manager_class()
+
+    if mem_manager_class is Qwen3NextMemManager:
+        linear_config = LinearAttCacheConfig.load_from_args()
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=1,
+            layer_num=1,
+            num_heads=1,
+            head_dim=linear_config.get_cpu_cache_big_page_bytes(),
+            data_type=torch.uint8,
+            scale_head_dim=0,
+            scale_data_type=get_llm_data_type(),
+        )
+    elif mem_manager_class is Deepseek2MemoryManager:
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,
@@ -101,6 +120,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if args.mtp_mode is not None:
         # TODO 可能会存在不同mtp模式的精度问题
+        assert is_linear_att_mixed_model(args.model_dir) is False, "linear att mixed model does not support mtp mode"
         cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
@@ -215,7 +235,16 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     def _pre_warm_memory():
         page_size = _get_default_hugepage_size() if use_hugetlb else 4096
         arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
-        volatile_sum = int(arr[::page_size].sum())
+        worker_num = 8
+        chunk_size = triton.cdiv(size_to_alloc, worker_num * page_size) * page_size
+
+        def _warm_range(worker_id: int):
+            start = worker_id * chunk_size
+            end = min(size_to_alloc, start + chunk_size)
+            return int(arr[start:end:page_size].sum())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
+            volatile_sum = sum(executor.map(_warm_range, range(worker_num)))
         logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
 
     th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
@@ -225,8 +254,8 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
 
 @lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle":
-    """Start async cudaHostRegister on the given [shm_ptr, shm_ptr+size) and return a handle."""
+def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
+    """Synchronously cudaHostRegister the given [shm_ptr, shm_ptr+size)."""
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     tasks: list[tuple[int, int]] = []
     offset = 0
@@ -235,73 +264,42 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> "AsyncRegistrationHandle
         tasks.append((offset, seg_len))
         offset += seg_len
 
-    handle = AsyncRegistrationHandle(total_tasks=len(tasks))
+    cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
+    cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+    cuda.cudaHostRegister.restype = ctypes.c_int
+    cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
+    cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
 
-    def _worker():
-        cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
-        cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
-        cuda.cudaHostRegister.restype = ctypes.c_int
-        cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
-        cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
+    cudaHostRegisterFlag = 3
 
-        cudaHostRegisterFlag = 3
+    device_id = get_current_device_id()
+    torch.cuda.set_device(device_id)
+    desc = f"pid {os.getpid()} Registering pinned host memory"
 
-        torch.cuda.set_device(get_current_device_id())
-        # TODO 这个地方的分块注册是否具备合法性和合理性。
-        for offset, seg_len in tasks:
-            ptr = ctypes.c_void_p(shm_ptr + offset)
-            r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
-            if r != 0:
-                raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
-            handle.task_count += 1
-
-        device_ptr = ctypes.c_void_p()
-        host_ptr = ctypes.c_void_p(shm_ptr)
-        res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
-        if res != 0:
-            raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-        assert host_ptr.value == device_ptr.value
-        handle.tasks_finished.set()
-
-    th = threading.Thread(target=_worker, name=f"cpu_cache_register_{shm_ptr}", daemon=True)
-    handle.thread = th
-    th.start()
-    return handle
-
-
-class AsyncRegistrationHandle:
-    """A handle for async host memory registration.
-
-    - wait(): blocks until registration finishes, prints tqdm progress, and returns device pointer (int).
-    """
-
-    def __init__(self, total_tasks: int):
-        self.total_tasks = total_tasks
-        self.task_count = 0
-        self.thread: Optional[threading.Thread] = None
-        self.tasks_finished = threading.Event()
-
-    def wait(self):
-        """Block until the async registration completes. Only here we print tqdm progress."""
-        last_count = 0
-        desc = f"pid {os.getpid()} Registering pinned host memory (async)"
-        with tqdm(total=self.total_tasks, desc=desc) as pbar:
-            while not self.tasks_finished.is_set():
-                cur = self.task_count
-                if cur > last_count:
-                    pbar.update(cur - last_count)
-                    last_count = cur
-                time.sleep(0.01)
-            # final update
-            cur = self.task_count
-            if cur > last_count:
-                pbar.update(cur - last_count)
-                last_count = cur
-
-        if self.thread is not None and self.thread.is_alive():
-            self.thread.join()
-
+    def _register_one_segment(task: Tuple[int, int]):
+        offset, seg_len = task
+        torch.cuda.set_device(device_id)
+        ptr = ctypes.c_void_p(shm_ptr + offset)
+        r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
+        if r != 0:
+            raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
         return
+
+    # worker_num的数值需要与_pre_warm_memory一致，不然会丢失warmup的效果
+    if tasks:
+        worker_num = min(8, len(tasks))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
+            futures = [executor.submit(_register_one_segment, task) for task in tasks]
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=desc):
+                future.result()
+
+    device_ptr = ctypes.c_void_p()
+    host_ptr = ctypes.c_void_p(shm_ptr)
+    res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
+    if res != 0:
+        raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
+    logger.info(f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
+    return device_ptr.value
 
 
 @lru_cache(maxsize=None)

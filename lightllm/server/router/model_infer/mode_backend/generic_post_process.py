@@ -2,8 +2,9 @@ import torch
 import triton
 import triton.language as tl
 from typing import List, Tuple, Optional
-from lightllm.common.basemodel.triton_kernel.apply_penalty import apply_penalty
-from lightllm.common.basemodel.triton_kernel.apply_penalty_gpu_cache import apply_penalty_gpu_cache
+from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
+from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
+from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
@@ -23,12 +24,16 @@ def sample(
         b_top_ks,
         b_length_penalty_param,
         b_mask_eos_reqs,
+        invalid_token_ids,
+        cu_invalid_token_num,
         is_all_greedy,
+        has_invalid_token_ids,
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
     ) = _get_post_sample_tensors(reqs)
 
+    sample_reqs = reqs
     if selected_run_reqs is not None:
         assert dynamic_batch_size is not None
         (
@@ -48,6 +53,14 @@ def sample(
             b_length_penalty_param=b_length_penalty_param,
             b_mask_eos_reqs=b_mask_eos_reqs,
         )
+        if has_invalid_token_ids or exist_req_use_random_seed:
+            sample_reqs = _get_selected_reqs(reqs=reqs, selected_run_reqs=selected_run_reqs)
+        if has_invalid_token_ids:
+            invalid_token_ids, cu_invalid_token_num, has_invalid_token_ids = _get_invalid_token_tensors(
+                reqs=sample_reqs
+            )
+        if exist_req_use_random_seed:
+            exist_req_use_random_seed = any(req.generator is not None for req in sample_reqs)
 
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
@@ -92,6 +105,14 @@ def sample(
             eos_ids=eos_ids,
             sampling_params_manager=sampling_params_manager,
         )
+
+    if has_invalid_token_ids:
+        apply_invalid_token_ids(
+            Logits=logits,
+            invalid_token_ids=invalid_token_ids,
+            cu_invalid_token_num=cu_invalid_token_num,
+        )
+
     logits.div_(b_temperatures.view((-1, 1)))
     probs = torch.softmax(logits, dim=-1)
 
@@ -102,13 +123,13 @@ def sample(
 
     elif skip_top_k and skip_top_p:
         # topk 等于整个词表，topp 等于1.0，等价于不进行topk topp过滤，直接进行随机采样，可以提升采样速度
-        batch_next_token_ids = _random_sample(probs, reqs, exist_req_use_random_seed)
+        batch_next_token_ids = _random_sample(probs, sample_reqs, exist_req_use_random_seed)
         batch_next_token_probs = torch.gather(probs, dim=1, index=batch_next_token_ids.view(-1, 1))
         return batch_next_token_ids.view(-1), torch.log(batch_next_token_probs).view(-1)
 
     else:
         batch_next_token_ids, batch_next_token_logprobs = _top_p_top_k_sample(
-            reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
+            sample_reqs, probs, b_top_ps, b_top_ks, exist_req_use_random_seed
         )
         return batch_next_token_ids.view(-1), batch_next_token_logprobs.view(-1)
 
@@ -131,7 +152,9 @@ def _top_p_top_k_sample(
     b_top_ks: torch.Tensor,
     exist_req_use_random_seed: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if get_env_start_args().sampling_backend == "triton":
+    sampling_backend = get_env_start_args().sampling_backend
+
+    if sampling_backend == "triton":
         probs_sort, probs_idx = _top_p_top_k(probs, b_top_ps, b_top_ks)
         if not exist_req_use_random_seed:
             sampled_index = torch.multinomial(probs_sort, num_samples=1, replacement=True)
@@ -141,8 +164,8 @@ def _top_p_top_k_sample(
         next_token_logprobs = torch.log(torch.gather(probs_sort, dim=1, index=sampled_index))
         return next_token_ids.view(-1), next_token_logprobs.view(-1)
 
-    elif get_env_start_args().sampling_backend == "sglang_kernel":
-        from sgl_kernel import top_k_top_p_sampling_from_probs
+    elif sampling_backend == "flashinfer":
+        from flashinfer.sampling import top_k_top_p_sampling_from_probs
 
         batch_next_token_ids = top_k_top_p_sampling_from_probs(
             probs,
@@ -181,6 +204,12 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     skip_top_p = True
     exist_req_use_random_seed = False
 
+    # invalid token ids
+    invalid_token_ids: List[int] = []
+    has_invalid_token_ids = False
+    cu_invalid_token_num = [0]
+    invalid_token_num_start = 0
+
     for i, req_obj in enumerate(reqs):
         sample_param = req_obj.sampling_param
         shm_param = sample_param.shm_param
@@ -202,6 +231,11 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         if req_obj.generator is not None:
             exist_req_use_random_seed = True
         req_idxes.append(req_obj.req_idx)
+        invalid_token_num_start += len(req_obj.sampling_param.invalid_token_ids)
+        cu_invalid_token_num.append(invalid_token_num_start)
+        if len(req_obj.sampling_param.invalid_token_ids) > 0:
+            has_invalid_token_ids = True
+            invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
 
     req_idxes_cpu = g_pin_mem_manager.gen_from_list(key="req_idxes", data=req_idxes, dtype=torch.int32)
     temperatures_cpu = g_pin_mem_manager.gen_from_list(key="temperatures", data=temperatures, dtype=torch.float32)
@@ -212,6 +246,14 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
     )
     mask_eos_reqs_cpu = g_pin_mem_manager.gen_from_list(key="mask_eos_reqs", data=mask_eos_reqs, dtype=torch.bool)
 
+    if has_invalid_token_ids:
+        invalid_token_ids_cpu = g_pin_mem_manager.gen_from_list(
+            key="invalid_token_ids", data=invalid_token_ids, dtype=torch.int32
+        )
+        cu_invalid_token_num_cpu = g_pin_mem_manager.gen_from_list(
+            key="cu_invalid_token_num", data=cu_invalid_token_num, dtype=torch.int32
+        )
+
     return (
         req_idxes_cpu.cuda(non_blocking=True),
         temperatures_cpu.cuda(non_blocking=True),
@@ -219,10 +261,47 @@ def _get_post_sample_tensors(reqs: List[InferReq]):
         top_ks_cpu.cuda(non_blocking=True),
         length_penalty_param_cpu.cuda(non_blocking=True),
         mask_eos_reqs_cpu.cuda(non_blocking=True),
+        invalid_token_ids_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
+        cu_invalid_token_num_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
         is_all_greedy,
+        has_invalid_token_ids,
         skip_top_k,
         skip_top_p,
         exist_req_use_random_seed,
+    )
+
+
+def _get_selected_reqs(reqs: List[InferReq], selected_run_reqs: torch.Tensor):
+    selected_run_reqs_cpu = selected_run_reqs.detach().cpu().tolist()
+    return [req_obj for req_obj, selected in zip(reqs, selected_run_reqs_cpu) if int(selected) != 0]
+
+
+def _get_invalid_token_tensors(reqs: List[InferReq]):
+    invalid_token_ids: List[int] = []
+    has_invalid_token_ids = False
+    cu_invalid_token_num = [0]
+    invalid_token_num_start = 0
+
+    for req_obj in reqs:
+        invalid_token_num_start += len(req_obj.sampling_param.invalid_token_ids)
+        cu_invalid_token_num.append(invalid_token_num_start)
+        if len(req_obj.sampling_param.invalid_token_ids) > 0:
+            has_invalid_token_ids = True
+            invalid_token_ids.extend(req_obj.sampling_param.invalid_token_ids)
+
+    if not has_invalid_token_ids:
+        return None, None, False
+
+    invalid_token_ids_cpu = g_pin_mem_manager.gen_from_list(
+        key="invalid_token_ids", data=invalid_token_ids, dtype=torch.int32
+    )
+    cu_invalid_token_num_cpu = g_pin_mem_manager.gen_from_list(
+        key="cu_invalid_token_num", data=cu_invalid_token_num, dtype=torch.int32
+    )
+    return (
+        invalid_token_ids_cpu.cuda(non_blocking=True),
+        cu_invalid_token_num_cpu.cuda(non_blocking=True),
+        True,
     )
 
 

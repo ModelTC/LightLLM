@@ -30,6 +30,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
+        if infer_state.need_dp_prefill_balance:
+            input = infer_state._all_to_all_unbalance_get(data=input)
 
         q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
@@ -224,7 +227,15 @@ class NsaInfer:
 
         import deep_gemm
 
-        logits = deep_gemm.fp8_mqa_logits(q_fp8, (k_fp8_, k_scale_), weights.squeeze(-1), ks, ke)
+        logits = deep_gemm.fp8_mqa_logits(
+            q_fp8,
+            (k_fp8_, k_scale_),
+            weights.squeeze(-1),
+            ks,
+            ke,
+            clean_logits=False,
+            max_seqlen_k=infer_state.max_kv_seq_len,
+        )
 
         from sgl_kernel import fast_topk_v2
 
@@ -232,7 +243,6 @@ class NsaInfer:
             score=logits,
             lengths=lengths,
             topk=self.index_topk,
-            row_starts=ks,
         )
         b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
         # 将 topk index 转化为 mem index
@@ -248,7 +258,7 @@ class NsaInfer:
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         assert x.dtype == torch.bfloat16
-        from sgl_kernel import hadamard_transform
+        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."

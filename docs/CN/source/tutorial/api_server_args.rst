@@ -18,6 +18,16 @@ APIServer 参数详解
     * ``pd_master``: pd 主节点模式（用于 pd 分离运行模式）
     * ``config_server``: 配置服务器模式（用于 pd 分离模式，用于注册 pd_master 节点并获取 pd_master 节点列表）,专门为大规模、高并发场景设计，当 `pd_master` 遇到显著的 CPU 瓶颈时使用。
 
+.. option:: --performance_mode, --p_mode
+
+    不同场景的性能模式，可选值：
+    
+    * ``None``: 不应用性能模式（默认）
+    * ``personal``: 私有化个人运行模式，自动设置：
+        - ``running_max_req_size`` 为 3
+        - ``batch_max_tokens`` 为 2048 (2k)
+        - ``chunked_prefill_size`` 为 1024 (1k)
+
 .. option:: --host
 
     服务器监听地址，默认为 ``127.0.0.1``
@@ -122,7 +132,10 @@ PD 分离模式参数
 
 .. option:: --max_req_total_len
 
-    请求输入长度 + 请求输出长度的最大值，默认为 ``16384``
+    请求输入长度 + 请求输出长度的最大值。若未显式设置，将从模型配置自动推导，
+    若推导失败则回退到 ``16384``。
+    对于部分 RoPE 类型（如 ``yarn/dynamic/su/llama3``），推导不会直接用 ``rope_scaling.factor``
+    去乘以 ``max_position_embeddings``，以避免过度估算最大长度。
 
 .. option:: --eos_id
 
@@ -201,6 +214,16 @@ PD 分离模式参数
     
     激进调度可能导致解码期间频繁的预填充中断。禁用它可以让 router_max_wait_tokens 参数更有效地工作。
 
+.. option:: --enable_prefill_decode_mixed
+
+    在同一次推理调度步骤中混合执行 prefill 与 decode。
+
+    仅支持 ``--run_mode`` 为 ``normal`` 时开启。当同时存在 prefill 与 decode 请求时，调度器会在同一步内
+    先执行 prefill、再执行 decode，而不是在激进调度下只执行 prefill、阻塞 decode，从而在有新 prefill
+    请求时也能推进 decode，提升整体吞吐。
+
+    不能与 ``--enable_prefill_microbatch_overlap`` 或 ``--enable_decode_microbatch_overlap`` 同时使用。
+
 .. option:: --disable_dynamic_prompt_cache
 
     禁用kv cache 缓存
@@ -259,6 +282,18 @@ PD 分离模式参数
 
     多模态资源的缓存服务器容量，默认为 ``200``
 
+.. option:: --max_image_token_count
+
+    单张图片在转换为 token 后允许的最大 token 数量，默认为 ``6128``
+
+    当任意图片超过该阈值时，请求会被拒绝。
+
+.. option:: --max_image_pixels
+
+    单张图片在预处理缩放前允许的最大像素数量，默认为 ``8294400``（约等于 4K 图片像素总量）。
+
+    当输入图片超过该阈值时，LightLLM 会先自动将其缩放到该像素预算内，再继续后续流程。
+
 .. option:: --visual_infer_batch_size
 
     每次推理批次中处理的图像数量，默认为 ``1``
@@ -293,13 +328,13 @@ PD 分离模式参数
 性能优化参数
 ------------
 
-.. option:: --disable_custom_allreduce
+.. option:: --disable_symm_mem_allreduce
 
-    是否禁用自定义 allreduce
+    禁用默认开启的 SymmMem all-reduce 快路径，并回退到 NCCL
 
-.. option:: --enable_custom_allgather
+.. option:: --disable_flashinfer_allreduce
 
-    是否启用自定义 allgather
+    禁用默认开启的 FlashInfer all-reduce 快路径，并回退到 SymmMem / NCCL
 
 .. option:: --enable_tpsp_mix_mode
 
@@ -341,6 +376,41 @@ PD 分离模式参数
 
     - ``fp8kv_sph``: FP8 静态按 head 量化，对应 fa3 后端
     - ``fp8kv_spt``: FP8 静态按 tensor 量化，对应 flashinfer 后端
+
+.. option:: --linear_att_hash_page_size
+
+    线性注意力的哈希页大小，默认为 ``512``。
+
+    该参数控制每个哈希桶中的 token 数量，会影响 radix cache 的复用效果。
+
+.. option:: --linear_att_page_block_num
+
+    线性注意力状态存储使用的块数量，默认为 ``10000000``。
+
+    该参数控制用于保存注意力状态的可用页数，会影响内存占用和多轮对话性能。
+    在当前实现中，可将块大小近似理解为
+    ``linear_att_page_block_num * linear_att_hash_page_size``。
+    当 ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len`` 时，
+    radix cache 的块级匹配能力会近似被关闭，此时更依赖请求级别的小块匹配（小块大小为 ``linear_att_hash_page_size``）。
+    如果负载较高，小块数量不足叠加内部 LRU 淘汰机制，可能导致 cache 命中率下降。
+
+    当开启 ``--enable_cpu_cache`` 时，cpu cache 的 page 大小会被强制设置为
+    ``linear_att_page_block_num * linear_att_hash_page_size``，以满足内部复用约束。
+
+.. option:: --linear_att_cache_size
+
+    线性注意力缓存大小。
+
+    不指定时会根据缓存相关配置自动计算。
+    当高负载下出现小块缓存命中不足（例如受小块数量和 LRU 淘汰影响）时，
+    可以调大该参数以提升命中率，但会增加内存占用。
+
+.. option:: --linear_att_ssm_data_type
+
+    线性注意力 SSM 状态的数据类型，可选值：
+
+    * ``bfloat16``
+    * ``float32``（默认）
 
 .. option:: --disable_cudagraph
 
@@ -394,6 +464,14 @@ PD 分离模式参数
     
     示例可以在 test/advanced_config/mixed_quantization/llamacls-mix-down.yaml 中找到。
 
+.. option:: --expert_dtype
+
+    EP MoE 专家量化类型，可选值：
+
+    * ``fp8``
+    * ``fp4``，仅支持 SM100 GPU
+    * ``None`` (默认)
+
 .. option:: --vit_quant_type
 
     ViT 量化方法，可选值：
@@ -425,14 +503,6 @@ PD 分离模式参数
 .. option:: --use_reward_model
 
     使用奖励模型
-
-.. option:: --long_truncation_mode
-
-    当 input_token_len + max_new_tokens > max_req_total_len 时的处理方式，可选值：
-    
-    * ``None``: 抛出异常（默认）
-    * ``head``: 移除一些头部 token 使 input_token_len + max_new_tokens <= max_req_total_len
-    * ``center``: 移除中心位置的一些 token 使 input_token_len + max_new_tokens <= max_req_total_len
 
 .. option:: --use_tgi_api
 

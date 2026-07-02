@@ -9,7 +9,7 @@ import pickle
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.core.objs import FinishStatus
-from ..pd_io_struct import PD_Client_Obj, UpKVStatus, NixlUpKVStatus, ObjType, NodeRole, NIXLDecodeNodeInfo
+from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInfo
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
@@ -19,7 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
 from .pd_selector import create_selector
 
@@ -48,6 +48,11 @@ class HttpServerManagerForPDMaster:
         self.per_token_costs = MovingAverage()
         return
 
+    def get_real_supported_max_req_total_len(self):
+        # HttpServerManager.generate 会借用 _check_and_repair_length(self, ...)，其中会调用本方法。
+        # PD master 无本地 token 池 shm 计数；上限与启动参数及子节点对齐的 max_req_total_len 一致。
+        return self.max_req_total_len
+
     async def register_pd(self, pd_info_json, websocket):
         self.pd_manager.register_pd(pd_info_json, websocket)
         return
@@ -56,7 +61,7 @@ class HttpServerManagerForPDMaster:
         self.pd_manager.remove_pd(pd_info_json)
         return
 
-    async def update_req_status(self, upkv_status: Union[UpKVStatus, NixlUpKVStatus]):
+    async def update_req_status(self, upkv_status: PDUpKVStatus):
         try:
             group_request_id = convert_sub_id_to_group_id(upkv_status.group_request_id)
             up_status_event = self.req_id_to_out_inf[group_request_id].up_status_event
@@ -76,7 +81,16 @@ class HttpServerManagerForPDMaster:
         for img in multimodal_params.images:
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
-            image_tokens += self.tokenizer.get_image_token_length(img)
+            token_num = self.tokenizer.get_image_token_length(img)
+            if token_num > self.args.max_image_token_count:
+                err_msg = (
+                    f"the image token count {token_num} > max_image_token_count {self.args.max_image_token_count}. "
+                    f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
+                    f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
+                )
+                logger.warning(err_msg)
+                raise ValueError(err_msg)
+            image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
             self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
@@ -163,8 +177,12 @@ class HttpServerManagerForPDMaster:
 
                 await self.remove_req(group_request_id=block_group_request_id)
 
-        except BaseException as e:
+        except (ClientDisconnected, BaseException) as e:
             logger.error(f"has exception {str(e)}")
+
+            if isinstance(e, ClientDisconnected):
+                logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
+
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
             except:
@@ -186,7 +204,7 @@ class HttpServerManagerForPDMaster:
         )
         return
 
-    async def fetch_stream(
+    async def fetch_pd_stream(
         self,
         p_node: PD_Client_Obj,
         d_node: PD_Client_Obj,
@@ -202,104 +220,25 @@ class HttpServerManagerForPDMaster:
         self.req_id_to_out_inf[group_request_id] = req_status
 
         up_status_event = req_status.up_status_event
-
-        d_start_args = d_node.start_args
-        decode_node_dict = {
-            "node_id": d_start_args["pd_node_id"],
-            "ip": d_start_args["host"],
-            "rpyc_port": d_start_args["pd_decode_rpyc_port"],
-            "max_new_tokens": sampling_params.max_new_tokens - 1,
-        }
-
-        old_max_new_tokens = sampling_params.max_new_tokens
-        sampling_params.max_new_tokens = 1
-        sampling_params.move_kv_to_decode_node.initialize(decode_node_dict if old_max_new_tokens != 1 else None)
-        sampling_params.suggested_dp_index = -1
-
-        await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
-
-        while True:
-            await req_status.wait_to_ready()
-            if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
-
-            if await req_status.can_read(self.req_id_to_out_inf):
-                token_list = await req_status.pop_all_tokens()
-                for sub_req_id, request_output, metadata, finish_status in token_list:
-                    if old_max_new_tokens != 1:
-                        finish_status = FinishStatus(FinishStatus.NO_FINISH)
-                    else:
-                        finish_status = FinishStatus(FinishStatus.FINISHED_LENGTH)
-                    # 得到 p 节点返回的 prompt_ids 信息
-                    if metadata.get("prompt_ids", None) is not None:
-                        prompt_ids = metadata.get("prompt_ids")
-                        prompt_ids.append(metadata.get("id"))
-                    yield sub_req_id, request_output, metadata, finish_status
-                break
-
-        # 如果只需要一个输出 token，prefill 完就直接结束掉吧
-        if old_max_new_tokens == 1:
-            return
-
-        try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
-        except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
-            raise ServerBusyError()
-
-        sampling_params.move_kv_to_decode_node.initialize(None)
-        sampling_params.max_new_tokens = old_max_new_tokens - 1
-        upkv_status: UpKVStatus = up_status_event.upkv_status
-        sampling_params.suggested_dp_index = upkv_status.dp_index
-
-        await d_node.websocket.send_bytes(
-            pickle.dumps((ObjType.REQ, (prompt_ids, sampling_params, MultimodalParams())))
-        )
-
-        while True:
-            await req_status.wait_to_ready()
-            if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
-            if await req_status.can_read(self.req_id_to_out_inf):
-                token_list = await req_status.pop_all_tokens()
-                for sub_req_id, request_output, metadata, finish_status in token_list:
-                    yield sub_req_id, request_output, metadata, finish_status
-
-        return
-
-    async def fetch_nixl_stream(
-        self,
-        p_node: PD_Client_Obj,
-        d_node: PD_Client_Obj,
-        prompt: Union[str, List[int]],
-        sampling_params: SamplingParams,
-        multimodal_params: MultimodalParams,
-        request: Request,
-    ):
-        group_request_id = sampling_params.group_request_id
-        sampling_params.pd_master_node_id.initialize(self.args.pd_node_id)
-
-        req_status = ReqStatus(group_request_id, p_node, d_node)
-        self.req_id_to_out_inf[group_request_id] = req_status
-
-        up_status_event = req_status.up_status_event
-        nixl_np_up_prompt_ids_event = req_status.nixl_np_up_prompt_ids_event
+        prefill_prompt_ids_event = req_status.prefill_prompt_ids_event
 
         old_max_new_tokens = sampling_params.max_new_tokens
         sampling_params.max_new_tokens = 1
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
-            await asyncio.wait_for(nixl_np_up_prompt_ids_event.wait(), timeout=60)
+            await asyncio.wait_for(prefill_prompt_ids_event.wait(), timeout=60)
         except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} wait np up prompt ids time out")
+            logger.warning(f"group_request_id: {group_request_id} wait prefill prompt ids time out")
             raise ServerBusyError()
 
         if await request.is_disconnected():
-            raise Exception(f"req_id {group_request_id} disconnected")
+            raise ClientDisconnected(
+                group_request_id=group_request_id, reason="fetch_pd_stream prefill period check network disconnected"
+            )
 
-        prompt_ids = nixl_np_up_prompt_ids_event.prompt_ids
-        logger.info(f"group_request_id: {group_request_id} get np up prompt ids len {len(prompt_ids)}")
+        prompt_ids = prefill_prompt_ids_event.prompt_ids
+        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
@@ -307,34 +246,37 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=60)
+            await asyncio.wait_for(up_status_event.wait(), timeout=180)
         except asyncio.TimeoutError:
             logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
             raise ServerBusyError()
 
         # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
-        upkv_status: NixlUpKVStatus = up_status_event.upkv_status
-        nixl_params: bytes = upkv_status.nixl_params
-        decode_node_info: NIXLDecodeNodeInfo = pickle.loads(nixl_params)
+        upkv_status: PDUpKVStatus = up_status_event.upkv_status
+        pd_kv_trans_params: bytes = upkv_status.pd_kv_trans_params
+        decode_node_info: PDDecodeNodeInfo = pickle.loads(pd_kv_trans_params)
         await p_node.websocket.send_bytes(
-            pickle.dumps((ObjType.NIXL_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
+            pickle.dumps((ObjType.PD_REQ_DECODE_NODE_INFO, group_request_id, decode_node_info))
         )
 
         first_token_gen = False
         while True:
             await req_status.wait_to_ready()
             if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(
+                    group_request_id=group_request_id,
+                    reason="fetch_pd_stream decode period check network disconnected",
+                )
             if await req_status.can_read(self.req_id_to_out_inf):
                 token_list = await req_status.pop_all_tokens()
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
-                    # 因为 nixl 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
+                    # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
                     if output_index == 1:
                         if first_token_gen is False:
                             first_token_gen = True
                             node_run_mode = metadata.pop("node_mode", None)
-                            if node_run_mode == "nixl_prefill":
+                            if node_run_mode == "prefill":
                                 if old_max_new_tokens != 1 and finish_status.is_finished_length():
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                             yield sub_req_id, request_output, metadata, finish_status
@@ -365,15 +307,13 @@ class HttpServerManagerForPDMaster:
         is_first_token = True
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
 
-        client_mode: NodeRole = NodeRole(d_node.mode)
-
-        fetch_stream = self.fetch_nixl_stream if client_mode.is_NP_or_ND() else self.fetch_stream
-
-        async for sub_req_id, out_str, metadata, finish_status in fetch_stream(
+        async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
             p_node, d_node, prompt, sampling_params, multimodal_params, request
         ):
             if await request.is_disconnected():
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                )
 
             prompt_tokens = metadata["prompt_tokens"]
             out_token_counter += 1
@@ -490,16 +430,16 @@ class HttpServerManagerForPDMaster:
                                     req_status.event.set()
                             except:
                                 pass
-                    elif obj[0] == ObjType.NIXL_UPLOAD_NP_PROMPT_IDS:
+                    elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
                             req_status: ReqStatus = self.req_id_to_out_inf[group_req_id]
                             async with req_status.lock:
-                                req_status.nixl_np_up_prompt_ids_event.prompt_ids = prompt_ids
-                                req_status.nixl_np_up_prompt_ids_event.set()
+                                req_status.prefill_prompt_ids_event.prompt_ids = prompt_ids
+                                req_status.prefill_prompt_ids_event.set()
                         except:
                             logger.error(
-                                f"NIXL_UPLOAD_NP_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
+                                f"PD_UPLOAD_PREFILL_PROMPT_IDS fail find req status for group_req_id: {group_req_id}"
                             )
                     else:
                         logger.error(f"recevie error obj {obj}")
@@ -522,7 +462,7 @@ class ReqStatus:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.up_status_event = asyncio.Event()
-        self.nixl_np_up_prompt_ids_event = asyncio.Event()
+        self.prefill_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
@@ -572,10 +512,10 @@ class PDManager:
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client
 
-        if pd_client.mode in ["prefill", "nixl_prefill"]:
+        if pd_client.mode == "prefill":
             self.prefill_nodes = [e for e in self.prefill_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.prefill_nodes.append(pd_client)
-        elif pd_client.mode in ["decode", "nixl_decode"]:
+        elif pd_client.mode == "decode":
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)
         else:

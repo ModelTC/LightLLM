@@ -18,7 +18,6 @@ from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
@@ -133,6 +132,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 mask_func=self.prefill_mask_func,
             )
+            g_infer_context.copy_linear_att_state_to_cache_buffer(
+                b_req_idx=model_input.b_req_idx,
+                reqs=run_reqs,
+            )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -149,7 +152,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
-            nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
+            pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
         )
         # 第四阶段
         event_pack.notify_pre_post_handle()
@@ -214,6 +217,10 @@ class ChunkedPrefillBackend(ModeBackend):
             self._draft_prefill_forward(
                 model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
             )
+            g_infer_context.copy_linear_att_state_to_cache_buffer(
+                b_req_idx=model_input.b_req_idx,
+                reqs=run_reqs,
+            )
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -231,7 +238,7 @@ class ChunkedPrefillBackend(ModeBackend):
             next_token_logprobs=next_token_logprobs_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
-            nixl_prefill_chuncked_handle_func=self.nixl_prefill_chuncked_handle_func,
+            pd_prefill_chunked_handle_func=self.pd_prefill_chunked_handle_func,
         )
 
         # 第四阶段
@@ -439,9 +446,7 @@ class ChunkedPrefillBackend(ModeBackend):
         )
 
         if len(need_free_mem_indexes) > 0:
-            g_infer_state_lock.acquire()
             g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
-            g_infer_state_lock.release()
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
@@ -583,11 +588,9 @@ class ChunkedPrefillBackend(ModeBackend):
             eagle_mem_indexes_cpu = None
             eagle_mem_indexes = None
         else:
-            g_infer_state_lock.acquire()
             if g_infer_context.radix_cache is not None:
                 g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * draft_step)
             eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * draft_step)
-            g_infer_state_lock.release()
             eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
         # share some inference info with the main model

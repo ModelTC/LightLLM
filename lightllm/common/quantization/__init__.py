@@ -7,17 +7,35 @@ from .deepgemm import *
 from .awq import *
 from .no_quant import *
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 
+EXPERT_DTYPE_TO_QUANT_TYPE = {
+    "fp8": "deepgemm-fp8w8a8-b128",
+    "fp4": "deepgemm-fp4fp8-b32",
+}
+SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
+
 
 class Quantcfg:
-    def __init__(self, network_config, quant_type="none", custom_cfg_path=None):
+    def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
+        self.expert_dtype = expert_dtype
         self.network_config_ = network_config
         self._parse_custom_cfg(custom_cfg_path)
         self._parse_network_config(network_config)
+
+    def _get_expert_quant_type(self, expert_dtype):
+        quant_type = EXPERT_DTYPE_TO_QUANT_TYPE.get(expert_dtype)
+        if quant_type is None:
+            raise ValueError(
+                f"unsupported expert_dtype `{expert_dtype}`; expected one of {list(SUPPORTED_EXPERT_DTYPES)}"
+            )
+        if expert_dtype == "fp4" and not is_sm100_gpu():
+            raise RuntimeError("expert_dtype `fp4` requires an SM100 GPU; please use `fp8` on non-SM100 GPUs.")
+        return quant_type
 
     def _parse_network_config(self, network_config):
         hf_quantization_config = network_config.get("quantization_config", None)
@@ -44,6 +62,19 @@ class Quantcfg:
                 else:
                     self.quant_type = "vllm-fp8w8a8-b128"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+
+            # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
+            # 按其值给 fused_moe 选用对应的 deepgemm 量化方法。
+            expert_dtype = self.expert_dtype or self.network_config_.get("expert_dtype", None)
+            if expert_dtype is None:
+                return
+            target = self._get_expert_quant_type(expert_dtype)
+            for layer_num in range(self.layer_num):
+                if self.expert_dtype is not None:
+                    self.quant_cfg[layer_num]["fused_moe"] = target
+                else:
+                    self.quant_cfg[layer_num].setdefault("fused_moe", target)
+            logger.info(f"select fused_moe quant way from expert_dtype=`{expert_dtype}`: {target}")
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):

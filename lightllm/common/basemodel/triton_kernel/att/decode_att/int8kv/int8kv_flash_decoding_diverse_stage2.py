@@ -250,7 +250,10 @@ def flash_decode_stage2(
     # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
     assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
+    if Lk == 256:
+        BLOCK_N = min(BLOCK_N, 16)
+    assert BLOCK_SEQ % BLOCK_N == 0
     sm_scale = 1.0 / (Lk ** 0.5)
     batch, kv_head_num = B_req_idx.shape[0], k.shape[1]
     grid = (batch, kv_head_num, triton.cdiv(max_len_in_batch, BLOCK_SEQ))

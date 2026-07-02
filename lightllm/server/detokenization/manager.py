@@ -39,7 +39,7 @@ class DeTokenizationManager:
         self.req_id_to_out: Dict[int, DecodeReq] = {}
         self.eos_id = args.eos_id
         self._init_get_token_id_to_token_str()
-        self.is_pd_decode_mode = self.args.run_mode == "decode"
+        self.is_pd_decode_mode = False
         self.shm_req_manager = ShmReqManager()
 
     def _init_get_token_id_to_token_str(self):

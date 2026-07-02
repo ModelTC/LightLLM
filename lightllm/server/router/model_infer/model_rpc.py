@@ -22,14 +22,10 @@ from lightllm.server.router.model_infer.mode_backend import (
     XgrammarBackend,
     DPChunkedPrefillBackend,
     DiversehBackend,
-    DecodeNode,
-    DPForDecodeNode,
-    ChunckedPrefillForPrefillNode,
-    DPChunkedForPrefillNode,
-    NIXLChunckedPrefillForPrefillNode,
-    NIXLDPChunkedForPrefillNode,
-    NIXLDecodeNode,
-    NIXLDPForDecodeNode,
+    PDChunkedPrefillForPrefillNode,
+    PDDPChunkedForPrefillNode,
+    PDDecodeNode,
+    PDDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -69,31 +65,18 @@ class ModelRpcServer(rpyc.Service):
         assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
-        is_nixl_prefill_node = self.args.run_mode == "nixl_prefill"
-        is_nixl_decode_node = self.args.run_mode == "nixl_decode"
 
         if is_prefill_node:
             if self.args.dp > 1:
-                self.backend = DPChunkedForPrefillNode(self.info_queue)
+                self.backend = PDDPChunkedForPrefillNode(self.info_queue)
             else:
-                self.backend = ChunckedPrefillForPrefillNode(self.info_queue)
-        elif is_nixl_prefill_node:
-            if self.args.dp > 1:
-                self.backend = NIXLDPChunkedForPrefillNode(self.info_queue)
-            else:
-                self.backend = NIXLChunckedPrefillForPrefillNode(self.info_queue)
+                self.backend = PDChunkedPrefillForPrefillNode(self.info_queue)
 
         elif is_decode_node:
             if self.args.dp > 1:
-                self.backend = DPForDecodeNode(self.info_queue)
+                self.backend = PDDPForDecodeNode(self.info_queue)
             else:
-                self.backend = DecodeNode(self.info_queue)
-
-        elif is_nixl_decode_node:
-            if self.args.dp > 1:
-                self.backend = NIXLDPForDecodeNode(self.info_queue)
-            else:
-                self.backend = NIXLDecodeNode(self.info_queue)
+                self.backend = PDDecodeNode(self.info_queue)
 
         elif self.args.dp > 1:
             self.backend = DPChunkedPrefillBackend()
@@ -169,7 +152,6 @@ def _init_env(
     rank_in_node,
     node_world_size,
     info_queue,
-    router_lock,
     socket_path,
     success_event,
 ):
@@ -179,11 +161,6 @@ def _init_env(
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
     start_parent_check_thread()
-
-    # 将调度锁注册到全局的共享变量中
-    from lightllm.common.basemodel.infer_lock import g_router_lock
-
-    g_router_lock.obj = router_lock
 
     model_rpc_server = ModelRpcServer(args, rank, rank_in_node, node_world_size, info_queue)
     # Start rpyc server with Unix socket
@@ -200,7 +177,6 @@ async def start_model_process(
     rank_in_node,
     node_world_size,
     info_queue: mp.Queue,
-    router_lock,
 ):
     import lightllm.utils.rpyc_fix_utils as _
 
@@ -217,7 +193,6 @@ async def start_model_process(
             rank_in_node,
             node_world_size,
             info_queue,
-            router_lock,
             socket_path,
             success_event,
         ),

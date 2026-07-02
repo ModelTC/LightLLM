@@ -2,12 +2,13 @@ import os
 import torch
 import copy
 import bisect
+import triton
 from typing import List, Tuple
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
+from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
 from .cuda_graph import CudaGraph
@@ -18,9 +19,9 @@ logger = init_logger(__name__)
 class PrefillCudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, decode_cuda_graph: CudaGraph):
+    def __init__(self, decode_cuda_graph: CudaGraph, tp_world_size: int):
         self.graph = {}
-
+        self.tp_world_size = tp_world_size
         if decode_cuda_graph is not None:
             self.mempool = decode_cuda_graph.mempool  # prefill 和 decode 共享一个 mempool
         else:
@@ -28,14 +29,30 @@ class PrefillCudaGraph:
 
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
-        self.max_handle_token_num = self.args.prefll_cudagraph_max_handle_token
+        self.max_handle_token_num = self.args.prefill_cudagraph_max_handle_token
+        if self.args.batch_max_tokens is not None:
+            self.max_handle_token_num = min(self.max_handle_token_num, self.args.batch_max_tokens)
 
-        graph_handle_token_nums = []
-        for i in range(2048):
-            token_num = int(2 ** (2 * i))
-            if 1 < token_num < self.max_handle_token_num:
-                graph_handle_token_nums.append(token_num)
+        graph_handle_token_nums = (
+            list(range(4, 33, 4))
+            + list(range(48, 257, 16))
+            + list(range(288, 513, 32))
+            + list(range(576, 1024 + 1, 64))
+            + list(range(1280, 4096 + 1, 256))
+            + list(range(4608, self.max_handle_token_num + 1, 512))
+        )
+        graph_handle_token_nums = [e for e in graph_handle_token_nums if e <= self.max_handle_token_num]
         graph_handle_token_nums.append(self.max_handle_token_num)
+
+        graph_handle_token_nums = list(set[int](graph_handle_token_nums))
+        graph_handle_token_nums.sort()
+        if self.args.enable_tpsp_mix_mode:
+            graph_handle_token_nums = [
+                triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in graph_handle_token_nums
+            ]
+            graph_handle_token_nums = list(set(graph_handle_token_nums))
+            graph_handle_token_nums.sort()
+
         self.graph_handle_token_nums = graph_handle_token_nums
         logger.info(f"prefill cuda graph graph_handle_token_nums: {self.graph_handle_token_nums}")
 
@@ -61,15 +78,13 @@ class PrefillCudaGraph:
         self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
         handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        dist_group: CustomProcessGroup = infer_state.dist_group
-        with lightllm_capture_graph(dist_group):
-            infer_state.mem_pool = self.mempool
-            infer_state.prefill_cuda_graph_create_graph_obj()
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
-            graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
-            graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        infer_state.mem_pool = self.mempool
+        infer_state.prefill_cuda_graph_create_graph_obj()
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+        graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
+        graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
+        graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
 
         graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
         graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]

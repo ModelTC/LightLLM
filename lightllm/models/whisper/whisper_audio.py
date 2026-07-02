@@ -135,6 +135,7 @@ class WhisperAudioModel:
     def forward(self, audio_values, audio_lens_after_cnn):
         audio_values = audio_values.to(self.data_type).to(device=self.device)
         audio_values = audio_values.squeeze(1)
+        # TODO: Avoid constructing CUDA tensors directly from Python or NumPy data.
         audio_lens_after_cnn = torch.tensor(audio_lens_after_cnn).cuda()
         max_len_in_batch = torch.max(audio_lens_after_cnn).item()
 
@@ -223,3 +224,6 @@ class WhisperAudioModel:
             ans_embeds.append(cur_embed)
 
         return ans_embeds, audio_items
+
+    def check_long_audio_infer(self):
+        pass

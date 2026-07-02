@@ -24,6 +24,12 @@ class ModelInput:
     b_req_idx: torch.Tensor = None
     b_mtp_index: torch.Tensor = None
     b_seq_len: torch.Tensor = None
+    # 在 prefill 阶段，用于在 enable_prefill_decode_mixed 开启下，
+    # 用于标识请求是否为 decode 请求混合在 prefill 请求中。
+    # 其对应的 input_ids 需要特殊处理, 从 req_to_next_token_ids 中获取。
+
+    b_is_decode_req: torch.Tensor = None
+
     # 只会在 diverse_mode 下的 decode 阶段真正被使用的参数, 用于记录共享的radix cache中的长度
     b_shared_seq_len: torch.Tensor = None
     # 只会在 diverse_mode 下的 decode 阶段真正被使用的参数, 用于记录请求间的共享关系。
@@ -36,6 +42,9 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
+    # 只会在继承 Qwen2VLInferStateInfo 的 MRoPE 模型 decode 阶段使用，如
+    # Qwen2/2.5-VL、Qwen3-VL/MOE/Omni、Qwen3.5；普通模型不会使用。
+    b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
     # cpu 变量
@@ -56,11 +65,22 @@ class ModelInput:
             self.input_ids = self.input_ids.cuda(non_blocking=True)
         if self.mem_indexes is None:
             self.mem_indexes = self.mem_indexes_cpu.cuda(non_blocking=True)
+
+        if self.b_is_decode_req is not None:
+            self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
+            assert self.is_prefill
+
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
         self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+        if self.b_position_delta is not None:
+            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
+            assert self.is_prefill is False, "b_position_delta should only be used in decode phase."
+        else:
+            assert self.is_prefill is True, "decode ModelInput should provide b_position_delta."
+
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
         if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():

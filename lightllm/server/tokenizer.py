@@ -31,7 +31,9 @@ from ..models.qwen2_vl.model import QWen2VLTokenizer
 from ..models.qwen3_vl.model import QWen3VLTokenizer
 from ..models.internvl.model import InternvlTokenizer
 from ..models.gemma3.model import Gemma3Tokenizer
+from ..models.gemma4.tokenizer import Gemma4Tokenizer
 from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
+from ..models import deepseek3_2  # noqa: F401  # registers the deepseek_v32 config with transformers
 
 # A fast LLaMA tokenizer with the pre-processed `tokenizer.json` file.
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
@@ -130,5 +132,13 @@ def get_tokenizer(
         tokenizer = InternvlTokenizer(tokenizer, model_cfg, weight_dir=tokenizer_name)
     elif model_type == "gemma3":
         tokenizer = Gemma3Tokenizer(tokenizer, model_cfg)
+    elif model_type == "gemma4":
+        image_processor = None
+        if "vision_config" in model_cfg and model_cfg["vision_config"] is not None:
+            from transformers import AutoProcessor
+
+            processor = AutoProcessor.from_pretrained(tokenizer_name)
+            image_processor = processor.image_processor
+        tokenizer = Gemma4Tokenizer(tokenizer, model_cfg, image_processor=image_processor)
 
     return tokenizer

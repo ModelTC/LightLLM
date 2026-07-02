@@ -114,6 +114,10 @@ class ShmReqManager:
     async def async_release_req_index(self, req_index_in_mem):
         return self.release_req_index(req_index_in_mem)
 
+    def is_idle(self) -> bool:
+        """True when no request slot is currently allocated in shared memory."""
+        return int(np.sum(self.alloc_state_shm.arr)) == 0
+
     # get_req_obj_by_index 和 put_back_req_obj 是 分配好后，进行对象获取和
     # 管理的接口，主要是要进行引用计数的管理。
     def get_req_obj_by_index(self, req_index_in_mem):

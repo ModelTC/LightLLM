@@ -116,7 +116,7 @@ class VisualOnlyManager(rpyc.Service):
                     "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
-                    "max_batch_size": min(self.infer_batch_size // self.vit_dp, 1),
+                    "max_batch_size": max(self.infer_batch_size // self.vit_dp, 1),
                     "vit_attn_backend": self.vit_attn_backend,
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
@@ -177,7 +177,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
+    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_only_server")
     start_parent_check_thread()
 
     try:

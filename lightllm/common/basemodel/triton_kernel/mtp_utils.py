@@ -4,7 +4,6 @@ import triton.language as tl
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.triton_kernel.mtp_utils1 import sample_dynamic_mtp_req_mask
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size, get_env_start_args
@@ -204,12 +203,18 @@ def _fwd_kernel_trim_dynamic_mtp_model_input(
     out_b_mtp_index,
     b_seq_len,
     out_b_seq_len,
+    b_position_delta,
+    out_b_position_delta,
+    mem_indexes,
+    out_mem_indexes,
     b_shared_seq_len,
     out_b_shared_seq_len,
     selected_mask,
     selected_dst_pos,
     batch_size,
     HAS_INPUT_IDS: tl.constexpr,
+    HAS_B_POSITION_DELTA: tl.constexpr,
+    HAS_MEM_INDEXES: tl.constexpr,
     HAS_B_SHARED_SEQ_LEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -232,6 +237,14 @@ def _fwd_kernel_trim_dynamic_mtp_model_input(
     if HAS_INPUT_IDS:
         input_id = tl.load(input_ids + offsets, mask=mask, other=0)
         tl.store(out_input_ids + dst_pos, input_id, mask=write_mask)
+
+    if HAS_B_POSITION_DELTA:
+        position_delta = tl.load(b_position_delta + offsets, mask=mask, other=0)
+        tl.store(out_b_position_delta + dst_pos, position_delta, mask=write_mask)
+
+    if HAS_MEM_INDEXES:
+        mem_index = tl.load(mem_indexes + offsets, mask=mask, other=0)
+        tl.store(out_mem_indexes + dst_pos, mem_index, mask=write_mask)
 
     if HAS_B_SHARED_SEQ_LEN:
         shared_seq_len = tl.load(b_shared_seq_len + offsets, mask=mask, other=0)
@@ -264,9 +277,7 @@ def _fwd_kernel_rebuild_trimmed_mtp_b_mark_shared_group(
     next_req_idx = tl.load(b_req_idx + next_offsets, mask=next_offsets < batch_size, other=-2)
     group_pos = prev_same_count % max_batch_shared_group_size
     is_group_end = mask & (
-        (next_offsets == batch_size)
-        | (next_req_idx != cur_req_idx)
-        | (group_pos == max_batch_shared_group_size - 1)
+        (next_offsets == batch_size) | (next_req_idx != cur_req_idx) | (group_pos == max_batch_shared_group_size - 1)
     )
     mark_value = tl.where(is_group_end, group_pos + 1, 0)
     tl.store(out_b_mark_shared_group + offsets, mark_value, mask=mask)
@@ -401,6 +412,24 @@ def _trim_decode_model_input_inplace(
     out_b_seq_len = torch.empty(
         (dynamic_batch_size,), dtype=model_input.b_seq_len.dtype, device=model_input.b_seq_len.device
     )
+    out_b_position_delta = None
+    if model_input.b_position_delta is not None:
+        assert model_input.b_position_delta.is_cuda
+        out_b_position_delta = torch.empty(
+            (dynamic_batch_size,),
+            dtype=model_input.b_position_delta.dtype,
+            device=model_input.b_position_delta.device,
+        )
+
+    out_mem_indexes = None
+    if model_input.mem_indexes is not None:
+        assert model_input.mem_indexes.is_cuda
+        out_mem_indexes = torch.empty(
+            (dynamic_batch_size,),
+            dtype=model_input.mem_indexes.dtype,
+            device=model_input.mem_indexes.device,
+        )
+
     dummy_1d = model_input.b_req_idx
     BLOCK_SIZE = triton.next_power_of_2(old_batch_size)
     grid = (1,)
@@ -413,12 +442,18 @@ def _trim_decode_model_input_inplace(
         out_b_mtp_index=out_b_mtp_index,
         b_seq_len=model_input.b_seq_len,
         out_b_seq_len=out_b_seq_len,
+        b_position_delta=model_input.b_position_delta if model_input.b_position_delta is not None else dummy_1d,
+        out_b_position_delta=out_b_position_delta if out_b_position_delta is not None else dummy_1d,
+        mem_indexes=model_input.mem_indexes if model_input.mem_indexes is not None else dummy_1d,
+        out_mem_indexes=out_mem_indexes if out_mem_indexes is not None else dummy_1d,
         b_shared_seq_len=model_input.b_shared_seq_len if model_input.b_shared_seq_len is not None else dummy_1d,
         out_b_shared_seq_len=out_b_shared_seq_len if out_b_shared_seq_len is not None else dummy_1d,
         selected_mask=selected_mask_gpu,
         selected_dst_pos=selected_dst_pos,
         batch_size=old_batch_size,
         HAS_INPUT_IDS=model_input.input_ids is not None,
+        HAS_B_POSITION_DELTA=model_input.b_position_delta is not None,
+        HAS_MEM_INDEXES=model_input.mem_indexes is not None,
         HAS_B_SHARED_SEQ_LEN=model_input.b_shared_seq_len is not None,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,
@@ -429,6 +464,8 @@ def _trim_decode_model_input_inplace(
     model_input.b_req_idx = out_b_req_idx
     model_input.b_mtp_index = out_b_mtp_index
     model_input.b_seq_len = out_b_seq_len
+    model_input.b_position_delta = out_b_position_delta
+    model_input.mem_indexes = out_mem_indexes
     model_input.b_shared_seq_len = out_b_shared_seq_len
     model_input.b_mark_shared_group = _rebuild_trimmed_mtp_b_mark_shared_group_from_b_req_idx(out_b_req_idx)
 
@@ -442,6 +479,10 @@ def _trim_decode_model_input_inplace(
             selected_dst_pos,
             dynamic_batch_size,
         )
+    if model_input.b_position_delta is not None:
+        assert model_input.b_position_delta.shape[0] == dynamic_batch_size
+    if model_input.mem_indexes is not None:
+        assert model_input.mem_indexes.shape[0] == dynamic_batch_size
     model_input.batch_size = dynamic_batch_size
 
     return model_input
@@ -466,21 +507,6 @@ def prepare_dynamic_mtp_model_input(
     mtp_step = int(get_env_start_args().mtp_step)
     assert model_input.batch_size == req_num * (mtp_step + 1)
 
-    if model_input.mem_indexes_cpu is not None and len(model_input.mem_indexes_cpu) > 0:
-        release_mem_indexes_cpu = model_input.mem_indexes_cpu[dynamic_batch_size:]
-        if len(release_mem_indexes_cpu) > 0:
-            g_infer_state_lock.acquire()
-            try:
-                g_infer_context.req_manager.mem_manager.free(release_mem_indexes_cpu)
-            finally:
-                g_infer_state_lock.release()
-        model_input.mem_indexes_cpu = model_input.mem_indexes_cpu[:dynamic_batch_size]
-    if model_input.mem_indexes is not None:
-        model_input.mem_indexes = model_input.mem_indexes[:dynamic_batch_size]
-
-    if model_input.multimodal_params is not None:
-        model_input.multimodal_params = model_input.multimodal_params[:dynamic_batch_size]
-
     # ! 在一个CUDA流上面的GPU操作会自动串行化，因此不需要额外同步
     # ! model_input必须在GPU上，才能高效进行trim操作
     model_input.to_cuda()
@@ -491,6 +517,20 @@ def prepare_dynamic_mtp_model_input(
         req_to_next_token_probs=req_to_next_token_probs,
         mtp_step=mtp_step,
     )
+
+    selected_mask_cpu = selected_mask_gpu.detach().cpu().to(dtype=torch.bool)
+    assert int(selected_mask_cpu.sum().item()) == dynamic_batch_size
+
+    if model_input.mem_indexes_cpu is not None and len(model_input.mem_indexes_cpu) > 0:
+        release_mem_indexes_cpu = model_input.mem_indexes_cpu[~selected_mask_cpu]
+        if len(release_mem_indexes_cpu) > 0:
+            g_infer_context.req_manager.mem_manager.free(release_mem_indexes_cpu)
+        model_input.mem_indexes_cpu = model_input.mem_indexes_cpu[selected_mask_cpu]
+
+    if model_input.multimodal_params is not None:
+        model_input.multimodal_params = [
+            params for params, selected in zip(model_input.multimodal_params, selected_mask_cpu.tolist()) if selected
+        ]
 
     model_input = _trim_decode_model_input_inplace(
         model_input=model_input,
@@ -625,6 +665,8 @@ def test_sample_dynamic_mtp_req_mask():
 
 def test_trim_dynamic_mtp_model_input():
     torch.manual_seed(1234)
+    origin_b_position_delta = torch.arange(12, dtype=torch.int32, device="cuda")
+    origin_mem_indexes = torch.arange(12, dtype=torch.int32, device="cuda")
 
     model_input = ModelInput(
         batch_size=12,
@@ -635,9 +677,10 @@ def test_trim_dynamic_mtp_model_input():
         b_req_idx=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32, device="cuda"),
         b_mtp_index=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.int32, device="cuda"),
         b_seq_len=torch.tensor([3, 4, 5, 6, 3, 4, 5, 6, 3, 4, 5, 6], dtype=torch.int32, device="cuda"),
+        b_position_delta=origin_b_position_delta,
         b_shared_seq_len=None,
         b_mark_shared_group=torch.tensor([0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 4], dtype=torch.int32, device="cuda"),
-        mem_indexes=torch.arange(12, dtype=torch.int32, device="cuda"),
+        mem_indexes=origin_mem_indexes,
         mem_indexes_cpu=torch.arange(12, dtype=torch.int32, device="cpu"),
         is_prefill=False,
         multimodal_params=[{"images": [], "audios": []} for _ in range(12)],
@@ -663,6 +706,9 @@ def test_trim_dynamic_mtp_model_input():
         selected_mask_gpu=selected_mask,
         dynamic_batch_size=8,
     )
+    selected_pos = torch.where(selected_mask == 1)[0]
+    assert torch.equal(model_input.b_position_delta, origin_b_position_delta[selected_pos])
+    assert torch.equal(model_input.mem_indexes, origin_mem_indexes[selected_pos])
 
     print("==== test_trim_dynamic_mtp_model_input ====")
     print("selected_mask:")
@@ -676,6 +722,8 @@ def test_trim_dynamic_mtp_model_input():
     print(model_input.b_mtp_index.cpu())
     print("b_seq_len:")
     print(model_input.b_seq_len.cpu())
+    print("b_position_delta:")
+    print(model_input.b_position_delta.cpu())
     print("b_mark_shared_group:")
     print(model_input.b_mark_shared_group.cpu())
     print("mem_indexes:")

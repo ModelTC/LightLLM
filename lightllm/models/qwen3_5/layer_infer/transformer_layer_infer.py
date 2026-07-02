@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 from typing import Tuple
 
 from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
@@ -10,9 +9,6 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
 )
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
@@ -30,15 +26,21 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
         layer_weight: Qwen35TransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         input = input.view(-1, self.embed_dim_)
+        input = self._tpsp_allgather(input=input, infer_state=infer_state)
 
-        qkv_out = layer_weight.qkv_proj.mm(input)
+        qkv_gate_out = layer_weight.qkvo_gate_proj.mm(input)
+        qkv_out, o_gate = qkv_gate_out.split(
+            [
+                self.tp_q_head_num_ * self.head_dim_ + (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_,
+                self.tp_q_head_num_ * self.head_dim_,
+            ],
+            dim=-1,
+        )
         q, cache_kv = qkv_out.split(
             [self.tp_q_head_num_ * self.head_dim_, (self.tp_k_head_num_ + self.tp_v_head_num_) * self.head_dim_], dim=-1
         )
-        o_gate = layer_weight._o_gate_proj.mm(input)
 
-        # In-place sigmoid for gate
-        infer_state.gate_value = o_gate.sigmoid_()
+        infer_state.gate_logics_value = o_gate
         layer_weight.qk_norm_weight_(
             q,
             cache_kv[:, : self.tp_k_head_num_ * self.head_dim_],
@@ -55,4 +57,7 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
             is_interleaved=True,  # Qwen3 uses interleaved mrope
             partial_rotary_factor=self.partial_rotary_factor,
         )
+        if infer_state.need_dp_prefill_balance:
+            q = infer_state._all_to_all_unbalance_get(data=q)
+            cache_kv = infer_state._all_to_all_unbalance_get(data=cache_kv)
         return q, cache_kv

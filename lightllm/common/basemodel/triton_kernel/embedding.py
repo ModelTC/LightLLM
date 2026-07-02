@@ -29,7 +29,7 @@ def embedding_kernel(
         n_ctx_mask = offs_seq < n_ctx
         token_ids = tl.load(input_ids + offs_seq, mask=n_ctx_mask, other=vob_end_id)
         id_mask = (token_ids >= vob_start_id) & (token_ids < vob_end_id)
-        token_ids = token_ids - vob_start_id
+        token_ids = (token_ids - vob_start_id).to(tl.int64)
         dim_mask = offs_d < hiden_size
         load_mask = id_mask[:, None] & dim_mask[None, :]
         store_mask = n_ctx_mask[:, None] & dim_mask[None, :]
@@ -130,4 +130,4 @@ if __name__ == "__main__":
                     t2 = 0
 
         MFLOPS = int(DIM * N_CTX * TEST_COUNT / t1 / 1000 / 1000)
-        print(f"TP={TP}, Diff={max_diff}, old_t:{t2:.5f}, new_t:{t1:.5f}, MFLOPS={MFLOPS}, SP={t2/t1:.5f}")
+        print(f"TP={TP}, Diff={max_diff}, old_t:{t2:.5f}, new_t:{t1:.5f}, MFLOPS={MFLOPS}, SP={t2 / t1:.5f}")

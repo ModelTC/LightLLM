@@ -27,26 +27,21 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
     get_env_start_args,
-    get_deepep_num_max_dispatch_tokens_per_rank,
+    get_deepep_num_max_dispatch_tokens_per_rank_prefill,
+    get_deepep_num_max_dispatch_tokens_per_rank_decode,
     get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
     get_dp_world_size,
-    get_global_rank,
-    get_current_rank_in_dp,
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
-from lightllm.utils.device_utils import get_device_sm_count
-from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
-from lightllm.utils.light_utils import HAS_LIGHTLLM_KERNEL
-from contextlib import nullcontext, contextmanager
+from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
+from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 logger = init_logger(__name__)
 
-from .custom_all_reduce import CustomAllreduce
-from .custom_all_gather import CustomAllgather
 
 try:
     import deep_ep
@@ -59,8 +54,8 @@ except:
 
 class CustomProcessGroup:
     def __init__(self):
-        self.custom_reduce = None
-        self.custom_gather = None
+        self.symm_mem_reduce = None
+        self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
         self.device_group = create_new_group_for_current_dp("nccl")
         if get_env_start_args().enable_dp_prefill_balance:
@@ -70,62 +65,64 @@ class CustomProcessGroup:
 
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
-    def init_custom_reduce(self) -> None:
-        if not HAS_SGL_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
-            return
-        args = get_env_start_args()
-        if args.disable_custom_allreduce:
-            return
-        cpu_group = create_new_group_for_current_dp("gloo")
-        self.custom_reduce = CustomAllreduce(cpu_group, torch.cuda.current_device())
-        logger.info("Enable Custom ALLReduce. You can disable it by settting --disable_custom_allreduce.")
+    def _support_custom_allreduce(self) -> bool:
+        return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
 
-    def init_custom_gather(self) -> None:
-        if not HAS_LIGHTLLM_KERNEL or not has_nvlink() or self.dp_world_size not in [2, 4, 6, 8]:
+    def init_symm_mem_reduce(self) -> None:
+        if not self._support_custom_allreduce():
             return
+        from .symm_mem_all_reduce import SymmMemAllreduce
 
-        args = get_env_start_args()
-        if not args.enable_custom_allgather:
+        data_type = get_torch_dtype(get_env_start_args().data_type)
+        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
+        if not symm.disabled:
+            self.symm_mem_reduce = symm
+            logger.info("Enable SymmMem ALLReduce.")
+
+    def init_flashinfer_reduce(self) -> None:
+        if not self._support_custom_allreduce():
             return
+        from .flashinfer_all_reduce import FlashInferAllReduce
 
-        cpu_group = create_new_group_for_current_dp("gloo")
-        self.custom_gather = CustomAllgather(cpu_group, torch.cuda.current_device())
-        logger.info("Enable Custom ALLGather.  You can disable it by settting --disable_custom_allgather")
+        fi_cpu_group = create_new_group_for_current_dp("gloo")
+        fi = FlashInferAllReduce(fi_cpu_group, torch.cuda.current_device())
+        if not fi.disabled:
+            self.flashinfer_reduce = fi
+            logger.info("Enable FlashInfer ALLReduce.")
 
     def all_reduce(self, input_: torch.Tensor) -> None:
-        if self.custom_reduce is not None and self.custom_reduce.should_custom_ar(input_):
-            input_.data = self.custom_reduce.custom_all_reduce(input_)
+        # Dispatch chain: FlashInfer -> SymmMem -> NCCL.
+        if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(input_):
+            input_.data = self.flashinfer_reduce.all_reduce(input_)
             return
-        else:
-            return dist.all_reduce(input_, group=self.device_group)
+        if self.symm_mem_reduce is not None and self.symm_mem_reduce.should_use(input_):
+            self.symm_mem_reduce.all_reduce(input_)
+            return
+        return dist.all_reduce(input_, group=self.device_group)
 
     def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
-        if self.custom_gather is not None and self.custom_gather.should_custom_ar(input_):
-            self.custom_gather.custom_all_gather(output_, input_)
-            return
-        else:
-            return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
-
-
-@contextmanager
-def lightllm_capture_graph(group: CustomProcessGroup = None):
-    with group.custom_reduce.capture() if group and group.custom_reduce else nullcontext():
-        with group.custom_gather.capture() if group and group.custom_gather else nullcontext():
-            yield
+        return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
 
 class DistributeGroupManager:
     def __init__(self):
         self.groups = []
+        self.ep_buffer = None
+        self.ep_low_latency_buffer = None
+        self.ep_mega_moe_buffer = None
+        self.ep_num_sms = None
 
     def __len__(self):
         return len(self.groups)
 
     def create_groups(self, group_size: int):
+        args = get_env_start_args()
         for i in range(group_size):
             group = CustomProcessGroup()
-            group.init_custom_gather()
-            group.init_custom_reduce()
+            if not args.disable_symm_mem_allreduce:
+                group.init_symm_mem_reduce()
+            if not args.disable_flashinfer_allreduce:
+                group.init_flashinfer_reduce()
             self.groups.append(group)
         return
 
@@ -135,52 +132,92 @@ class DistributeGroupManager:
     def get_group(self, group_index: int) -> CustomProcessGroup:
         return self.groups[group_index]
 
-    def new_deepep_group(self, n_routed_experts, hidden_size):
+    def new_deepep_group(
+        self,
+        n_routed_experts,
+        hidden_size,
+        num_experts_per_tok: int = 1,
+        moe_intermediate_size: Optional[int] = None,
+    ):
         enable_ep_moe = get_env_start_args().enable_ep_moe
-        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank()
+        prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
             self.ep_buffer = None
+            self.ep_low_latency_buffer = None
+            self.ep_mega_moe_buffer = None
+            self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
-        self._set_num_sms_for_deep_gemm()
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
-        low_latency_mode, num_rdma_bytes = True, 0
-        if low_latency_mode:
-            self.ll_num_tokens, self.ll_hidden = num_max_dispatch_tokens_per_rank, hidden_size
-            self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
-            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
-            )
-        self.ep_buffer = deep_ep.Buffer(
+        self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
+        self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
+        self.ll_hidden = hidden_size
+        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
+        self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
-            int(1e9),
-            num_rdma_bytes,
-            low_latency_mode=low_latency_mode,
-            num_qps_per_rank=(self.ll_num_experts // global_world_size if low_latency_mode else 1),
+            num_max_tokens_per_rank=self.ll_num_tokens,
+            hidden=self.ll_hidden,
+            num_topk=num_experts_per_tok,
+            use_fp8_dispatch=True,
+            allow_multiple_reduction=False,
         )
+        self.ep_mega_moe_buffer = None
+        self.ep_low_latency_buffer = None
+        if not is_sm100_gpu():
+            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+            )
+            self.ep_low_latency_buffer = deep_ep.Buffer(
+                deepep_group,
+                int(1e9),
+                num_rdma_bytes,
+                low_latency_mode=True,
+                num_qps_per_rank=(self.ll_num_experts // global_world_size),
+            )
+        else:
+            if moe_intermediate_size is None:
+                raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
 
-    def _set_num_sms_for_deep_gemm(self):
+            import deep_gemm
+
+            self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+                deepep_group,
+                self.ll_num_experts,
+                self.ll_num_tokens,
+                num_experts_per_tok,
+                self.ll_hidden,
+                moe_intermediate_size,
+            )
+        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+        self._set_num_sms_for_deep_gemm(theoretical_sms)
+
+    def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
         try:
             try:
                 from deep_gemm.jit_kernels.utils import set_num_sms
             except:
                 from deep_gemm import set_num_sms
 
-            deepep_sms = int(os.getenv("DEEPEP_SMS", deep_ep.Buffer.num_sms))
             device_sms = get_device_sm_count()
-            deep_ep.Buffer.set_num_sms(deepep_sms)
-            set_num_sms(device_sms - deepep_sms)
+            deepep_sms = max(0, min(deepep_sms, max(device_sms - 2, 0)))
+            self.ep_num_sms = deepep_sms
+            if self.ep_low_latency_buffer is not None:
+                deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
+            set_num_sms(max(device_sms - deepep_sms, 2))
         except BaseException as e:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
     def clear_deepep_buffer(self):
         """
-        prefill 之后需要clean 一下，ep buffer 才能正常执行 decode。
+        Prefill after using ElasticBuffer may leave the legacy low-latency buffer dirty for decode.
         """
-        if hasattr(self, "ep_buffer") and self.ep_buffer is not None:
-            self.ep_buffer.clean_low_latency_buffer(self.ll_num_tokens, self.ll_hidden, self.ll_num_experts)
+        if self.ep_low_latency_buffer is not None:
+            self.ep_low_latency_buffer.clean_low_latency_buffer(
+                self.ll_decode_num_tokens, self.ll_hidden, self.ll_num_experts
+            )
 
 
 def all_reduce(
@@ -192,9 +229,10 @@ def all_reduce(
     if _is_single_group(group=group):
         return
     if isinstance(group, CustomProcessGroup):
-        return group.all_reduce(input_)
-    else:
-        return dist.all_reduce(input_, op, group, async_op)
+        if op == ReduceOp.SUM:
+            return group.all_reduce(input_)
+        return dist.all_reduce(input_, op, group.device_group, async_op)
+    return dist.all_reduce(input_, op, group, async_op)
 
 
 def all_gather_into_tensor(

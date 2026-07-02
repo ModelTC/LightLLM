@@ -3,10 +3,10 @@ import torch
 import torch.distributed as dist
 import copy
 import bisect
+import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
-from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
 
@@ -17,8 +17,9 @@ logger = init_logger(__name__)
 class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, max_batch_size=8, max_len_in_batch=8192):
+    def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
         self.graph = {}
+        self.tp_world_size = tp_world_size
         self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
         self.args = get_env_start_args()
         self.mtp_step = self.args.mtp_step
@@ -42,6 +43,11 @@ class CudaGraph:
         batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
         batch_sizes.append(max_batch_size)
         batch_sizes.sort()
+        if self.args.enable_tpsp_mix_mode:
+            batch_sizes = [triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in batch_sizes]
+            batch_sizes = list(set(batch_sizes))
+            batch_sizes.sort()
+
         self.cuda_graph_batch_sizes = batch_sizes
         assert batch_sizes[-1] == self.max_batch_size
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
@@ -65,7 +71,6 @@ class CudaGraph:
             return None
 
     def _capture_decode(self, decode_func, infer_state: InferStateInfo):
-        dist_group: CustomProcessGroup = infer_state.dist_group
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
@@ -90,9 +95,8 @@ class CudaGraph:
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
-        with lightllm_capture_graph(dist_group):
-            with torch.cuda.graph(graph_obj, pool=self.mempool):
-                model_output = decode_func(infer_state)
+        with torch.cuda.graph(graph_obj, pool=self.mempool):
+            model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
         self._record_capture_replay_infer_cost_ms(graph_obj=graph_obj, batch_size=batch_size)
@@ -133,8 +137,6 @@ class CudaGraph:
         infer_state: InferStateInfo,
         infer_state1: InferStateInfo,
     ):
-        dist_group: CustomProcessGroup = infer_state.dist_group
-        dist_group1 = infer_state1.dist_group
         graph_obj = torch.cuda.CUDAGraph()
         input_ids = infer_state.input_ids
         batch_size = input_ids.shape[0]
@@ -157,10 +159,8 @@ class CudaGraph:
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
 
-        with lightllm_capture_graph(dist_group1):
-            with lightllm_capture_graph(dist_group):
-                with torch.cuda.graph(graph_obj, pool=self.mempool):
-                    model_output, model_output1 = decode_func(infer_state, infer_state1)
+        with torch.cuda.graph(graph_obj, pool=self.mempool):
+            model_output, model_output1 = decode_func(infer_state, infer_state1)
         self.graph[batch_size] = (
             graph_obj,
             infer_state,
@@ -253,6 +253,7 @@ class CudaGraph:
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
+                b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                 **model._gen_special_model_input(batch_size),
@@ -313,6 +314,7 @@ class CudaGraph:
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
+                    b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                     **model._gen_special_model_input(batch_size),
                 )

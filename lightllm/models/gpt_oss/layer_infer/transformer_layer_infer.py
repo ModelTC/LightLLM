@@ -41,6 +41,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _ffn(self, input, infer_state, layer_weight: GptOssTransformerLayerWeight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
+        hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
         num_tokens, hidden_dim = hidden_states.shape
         router_logits = layer_weight.moe_gate.mm(hidden_states)
         hidden_states = layer_weight.experts.experts(
@@ -52,7 +53,8 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
         )
-        return hidden_states.view(num_tokens, hidden_dim)
+        hidden_states = hidden_states.view(num_tokens, hidden_dim)
+        return self._tpsp_reduce(input=hidden_states, infer_state=infer_state)
 
     def _context_attention_kernel(
         self,
@@ -63,7 +65,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         out=None,
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
-            window_size = (self.sliding_window - 1, self.sliding_window - 1)
+            window_size = (self.sliding_window - 1, 0)
             use_sliding_window = True
         else:
             window_size = (-1, -1)
@@ -90,7 +92,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
         self, q: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: GptOssTransformerLayerWeight, out=None
     ):
         if self.network_config_["layer_types"][self.layer_num_] == "sliding_attention":
-            window_size = (self.sliding_window - 1, self.sliding_window - 1)
+            window_size = (self.sliding_window - 1, 0)
             use_sliding_window = True
         else:
             window_size = (-1, -1)

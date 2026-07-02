@@ -175,6 +175,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
 
     # PD prefill 模式 for DeepSeek-R1 (DP+EP) on H200
     # 使用方法: sh pd_prefill.sh <host> <pd_master_ip>
+    # 默认使用 NIXL 传输；如需使用 NCCL 数据面，可设置 LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl
     # nvidia-cuda-mps-control -d，运行MPS(可选, 有mps支持性能会好特别多，但是部分显卡和驱动环境开启mps会容易出现错误，建议升级驱动到较高版本，特别是H系列卡)
 
     export host=$1
@@ -201,6 +202,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
 
     # PD decode 模式 for DeepSeek-R1 (DP+EP) on H200
     # 使用方法: sh pd_decode.sh <host> <pd_master_ip>
+    # 默认使用 NIXL 传输；如需使用 NCCL 数据面，可设置 LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d

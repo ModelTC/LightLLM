@@ -62,5 +62,8 @@ class FuseMoeBaseImpl:
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        per_expert_scale: Optional[torch.Tensor] = None,
+        # Qwen3.5 uses this gate to control fused shared expert aggregation weights.
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pass

@@ -4,6 +4,7 @@ import time
 import uuid
 import subprocess
 import signal
+import math
 from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
@@ -17,7 +18,14 @@ from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.utils.config_utils import has_audio_module, has_vision_module
+from lightllm.utils.config_utils import (
+    has_audio_module,
+    has_vision_module,
+    is_linear_att_mixed_model,
+    auto_set_max_req_total_len,
+    auto_set_fused_shared_experts,
+)
+from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
 
@@ -68,6 +76,8 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
+    auto_set_max_req_total_len(args)
+    auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -75,7 +85,7 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
@@ -91,7 +101,7 @@ def normal_or_p_d_start(args):
             args.disable_audio = True
 
     # pd 分离模式下，不启动多模态的模块
-    if args.run_mode in ["decode", "nixl_decode"]:
+    if args.run_mode == "decode":
         args.disable_audio = True
         args.disable_vision = True
 
@@ -117,6 +127,19 @@ def normal_or_p_d_start(args):
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+
+    # performance_mode 参数处理
+    if args.performance_mode == "personal":
+        args.running_max_req_size = 6
+        args.batch_max_tokens = 2048
+        args.chunked_prefill_size = 1024
+        args.embed_cache_storage_size = 0.8
+        args.graph_max_batch_size = 6
+        logger.info(
+            f"performance_mode is personal, set running_max_req_size to 3,"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
+            f"graph_max_batch_size to 32"
+        )
 
     if not args.disable_shm_warning:
         check_recommended_shm_size(args)
@@ -165,8 +188,27 @@ def normal_or_p_d_start(args):
             args.kv_quant_calibration_config_path is not None
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
 
+    if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
+        args.enable_tpsp_mix_mode = True
+
+    if args.enable_prefill_decode_mixed:
+        assert args.run_mode == "normal", "--enable_prefill_decode_mixed only supports run_mode normal"
+
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    if args.enable_ep_moe:
+        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        for backend in args.llm_prefill_att_backend:
+            assert backend in allowed_ep_att_backends, (
+                "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
+                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+            )
+        for backend in args.llm_decode_att_backend:
+            assert backend in allowed_ep_att_backends, (
+                "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
+                f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
+            )
 
     # mtp params check
     if args.mtp_mode is not None:
@@ -249,6 +291,18 @@ def normal_or_p_d_start(args):
         ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
         f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
 
+    # linear att cache 参数自动设置
+    if args.linear_att_cache_size is None:
+        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
+        default_cache_size = args.running_max_req_size * 2
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
+        args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
+
+    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
         from lightllm.utils.petrel_helper import s3_model_prepare
@@ -261,6 +315,22 @@ def normal_or_p_d_start(args):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
+    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
+    if args.tool_call_parser is None:
+        from lightllm.utils.config_utils import get_tool_call_parser_for_model
+
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
+    if args.reasoning_parser is None:
+        from lightllm.utils.config_utils import get_reasoning_parser_for_model
+
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
 
@@ -270,8 +340,6 @@ def normal_or_p_d_start(args):
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
         already_uesd_ports.append(args.nccl_port)
-    if args.pd_decode_rpyc_port is not None:
-        already_uesd_ports.append(args.pd_decode_rpyc_port)
     if args.visual_nccl_ports is not None:
         already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
     if not args.disable_audio and args.audio_nccl_ports is not None:
@@ -291,6 +359,7 @@ def normal_or_p_d_start(args):
     (
         nccl_port,
         router_port,
+        router_profiler_port,
         detokenization_port,
         http_server_port,
         visual_port,
@@ -298,7 +367,6 @@ def normal_or_p_d_start(args):
         cache_port,
         metric_port,
         multi_level_kv_cache_port,
-        pd_decode_rpyc_port,
     ) = can_use_ports[0:10]
     can_use_ports = can_use_ports[10:]
 
@@ -317,9 +385,8 @@ def normal_or_p_d_start(args):
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
         args.nccl_port = nccl_port
-    if args.pd_decode_rpyc_port is None:
-        args.pd_decode_rpyc_port = pd_decode_rpyc_port
     args.router_port = router_port
+    args.router_profiler_port = router_profiler_port
     args.detokenization_port = detokenization_port
     args.http_server_port = http_server_port
     args.visual_port = visual_port
@@ -331,10 +398,6 @@ def normal_or_p_d_start(args):
     args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
-    # p 节点用来建立torch kv 传输分布组的可用端口范围
-    args.pd_p_allowed_port_min = 20000
-    args.pd_p_allowed_port_max = 30000
-
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
@@ -347,6 +410,8 @@ def normal_or_p_d_start(args):
             """dp <= 1 does not support dp_prompt_cache_fetch;
             overriding enable_dp_prompt_cache_fetch to False"""
         )
+
+    auto_configure_allreduce_flags_from_args(args)
 
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
@@ -462,6 +527,8 @@ def pd_master_start(args):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    auto_set_max_req_total_len(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.

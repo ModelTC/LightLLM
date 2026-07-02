@@ -2,7 +2,6 @@ import torch
 import numpy as np
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.utils.envs_utils import (
     enable_diverse_mode_gqa_decode_fast_kernel,
@@ -26,6 +25,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_ready_cache_len = []
     b_mtp_index = []
     b_prefill_has_output = []
+    b_is_decode_req = []
 
     for req in req_objs:
         run_reqs.append(req)
@@ -51,6 +51,11 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         prefix_total_token_num += req.cur_kv_len
         b_ready_cache_len.append(req.cur_kv_len)
         b_mtp_index.append(0)
+        if hasattr(req, "is_decode_req_mixed_in_prefill"):
+            b_is_decode_req.append(True)
+            del req.is_decode_req_mixed_in_prefill
+        else:
+            b_is_decode_req.append(False)
 
     max_kv_seq_len = max(b_seq_len)
     max_cache_len = max(b_ready_cache_len)
@@ -60,17 +65,16 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     input_ids = torch.tensor(input_ids, dtype=torch.int64, device="cpu")
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
+    b_is_decode_req = torch.tensor(b_is_decode_req, dtype=torch.bool, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
     b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
     # dynamic prompt cache 准备 token
-    g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(input_ids.shape[0])
-    g_infer_state_lock.release()
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
@@ -83,6 +87,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_is_decode_req=b_is_decode_req,
         b_ready_cache_len=b_ready_cache_len,
         b_prefill_start_loc=b_prefill_start_loc,
         is_prefill=True,
@@ -129,6 +134,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
+    b_position_delta = build_b_position_delta(multimodal_params)
 
     # diverse mode 和 dynamic MTP mode 使用不同的 shared group 构建逻辑
     if enable_diverse_mode_gqa_decode_fast_kernel():
@@ -142,11 +148,9 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_mark_shared_group = None
 
     # dynamic prompt cache 准备 token
-    g_infer_state_lock.acquire()
     if g_infer_context.radix_cache is not None:
         g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(b_seq_len.shape[0])
     mem_indexes = g_infer_context.req_manager.mem_manager.alloc(b_seq_len.shape[0])
-    g_infer_state_lock.release()
 
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
@@ -158,12 +162,25 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
         b_seq_len=b_seq_len,
+        b_position_delta=b_position_delta,
         b_shared_seq_len=b_shared_seq_len,
         b_mark_shared_group=b_mark_shared_group,
         is_prefill=False,
         multimodal_params=multimodal_params,
     )
     return model_input, run_reqs
+
+
+def build_b_position_delta(multimodal_params: List[dict]) -> torch.Tensor:
+    b_position_delta = []
+    for params in multimodal_params:
+        position_delta = 0
+        for image in params.get("images", []):
+            grid_thwd = image.get("grid_thwd")
+            if grid_thwd is not None:
+                position_delta += grid_thwd[3]
+        b_position_delta.append(position_delta)
+    return torch.tensor(b_position_delta, dtype=torch.int32, device="cpu")
 
 
 def build_diverse_shared_group_infos(run_reqs: List[InferReq]) -> Tuple[torch.Tensor, torch.Tensor]:

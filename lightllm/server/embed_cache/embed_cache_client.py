@@ -35,10 +35,9 @@ class CpuEmbedCacheClient(object):
             size_bytes=self.embed_cache_tensor_meta.calcu_size(),
         )
         cache_tensor_creator = CpuCacheCreator(tensor_spec=cache_tensor_spec)
-        self.cpu_embed_cache_tensor, _ = cache_tensor_creator.create_or_attach(
+        self.cpu_embed_cache_tensor = cache_tensor_creator.create_or_attach(
             init_shm_data=init_shm_data,
             pin=pin_shm,
-            pin_no_blocking=False,
         )
         return
 

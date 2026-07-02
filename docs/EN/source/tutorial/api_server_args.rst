@@ -18,6 +18,16 @@ Basic Configuration Parameters
     * ``pd_master``: pd master node mode (for pd disaggregation running mode)
     * ``config_server``: Configuration server mode (for pd disaggregation mode, used to register pd_master nodes and get pd_master node list), specifically designed for large-scale, high-concurrency scenarios, used when `pd_master` encounters significant CPU bottlenecks.
 
+.. option:: --performance_mode, --p_mode
+
+    Performance mode for different scenarios, optional values:
+    
+    * ``None``: No performance mode applied (default)
+    * ``personal``: Private personal running mode, automatically sets:
+        - ``running_max_req_size`` to 3
+        - ``batch_max_tokens`` to 2048 (2k)
+        - ``chunked_prefill_size`` to 1024 (1k)
+
 .. option:: --host
 
     Server listening address, default is ``127.0.0.1``
@@ -122,7 +132,10 @@ Memory and Batch Processing Parameters
 
 .. option:: --max_req_total_len
 
-    Maximum value of request input length + request output length, default is ``16384``
+    Maximum value of request input length + request output length. If not set, it will be
+    automatically derived from model config.json and fall back to ``16384`` if derivation fails.
+    For some RoPE types (like ``yarn/dynamic/su/llama3``), the derivation does not multiply
+    ``rope_scaling.factor`` by ``max_position_embeddings`` to avoid over-estimating the max length.
 
 .. option:: --eos_id
 
@@ -200,6 +213,17 @@ Scheduling Parameters
     
     Aggressive scheduling may cause frequent prefill interruptions during decoding. Disabling it can make the router_max_wait_tokens parameter work more effectively.
 
+.. option:: --enable_prefill_decode_mixed
+
+    Enable mixed prefill and decode scheduling in the same inference step.
+
+    Only supported when ``--run_mode`` is ``normal``. When both prefill and decode requests are pending,
+    the scheduler runs prefill first and then decode in one scheduling step, instead of running only
+    prefill under aggressive scheduling. This improves decode throughput when new prefill requests arrive.
+
+    Cannot be used together with ``--enable_prefill_microbatch_overlap`` or
+    ``--enable_decode_microbatch_overlap``.
+
 .. option:: --disable_dynamic_prompt_cache
 
     Disable kv cache caching
@@ -257,6 +281,18 @@ Multimodal Parameters
 
     Cache server capacity for multimodal resources, default is ``200``
 
+.. option:: --max_image_token_count
+
+    Maximum allowed token count for a single image after tokenization, default is ``6128``
+
+    Requests are rejected when any image exceeds this limit.
+
+.. option:: --max_image_pixels
+
+    Maximum allowed pixel count for a single image before preprocessing resize, default is ``8294400`` (about 4K image pixels).
+
+    If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
+
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``
@@ -291,13 +327,13 @@ Multimodal Parameters
 Performance Optimization Parameters
 -----------------------------------
 
-.. option:: --disable_custom_allreduce
+.. option:: --disable_symm_mem_allreduce
 
-    Whether to disable custom allreduce
+    Disable the default SymmMem all-reduce fast path and fall back to NCCL
 
-.. option:: --enable_custom_allgather
+.. option:: --disable_flashinfer_allreduce
 
-    Whether to enable custom allgather
+    Disable the default FlashInfer all-reduce fast path and fall back to SymmMem / NCCL
 
 .. option:: --enable_tpsp_mix_mode
 
@@ -342,6 +378,42 @@ Performance Optimization Parameters
     * ``int4kv``: INT4 KV quantization
     * ``fp8kv_sph``: FP8 static per-head quantization, uses fa3 backend
     * ``fp8kv_spt``: FP8 static per-tensor quantization, uses flashinfer backend
+
+.. option:: --linear_att_hash_page_size
+
+    Hash page size for linear attention, default is ``512``.
+
+    This controls the number of tokens per hash bucket, which can affect radix cache reuse.
+
+.. option:: --linear_att_page_block_num
+
+    Number of blocks used for linear-attention state storage, default is ``10000000``.
+
+    This controls the available pages for attention state data, which can affect memory usage and multi-turn chat performance.
+    In current behavior, block size can be approximated as
+    ``linear_att_page_block_num * linear_att_hash_page_size``.
+    When ``linear_att_page_block_num * linear_att_hash_page_size > max_req_total_len``,
+    block-level matching in radix cache is effectively disabled, and request-level small-page matching
+    (small page size is ``linear_att_hash_page_size``) becomes dominant.
+    Under high load, limited small-page capacity plus internal LRU eviction can reduce cache hit rate.
+
+    When ``--enable_cpu_cache`` is enabled, CPU cache page size is forced to
+    ``linear_att_page_block_num * linear_att_hash_page_size`` to satisfy internal reuse constraints.
+
+.. option:: --linear_att_cache_size
+
+    Size of linear-attention cache.
+
+    If not specified, it will be automatically derived from cache-related settings.
+    If small-page cache hits are poor under high load (for example, due to limited small-page count and LRU eviction),
+    increasing this value can improve cache hit rate, at the cost of more memory usage.
+
+.. option:: --linear_att_ssm_data_type
+
+    Data type of linear-attention SSM state, optional values:
+
+    * ``bfloat16``
+    * ``float32`` (default)
 
 .. option:: --disable_cudagraph
 
@@ -393,6 +465,14 @@ Quantization Parameters
     
     Examples can be found in test/advanced_config/mixed_quantization/llamacls-mix-down.yaml.
 
+.. option:: --expert_dtype
+
+    Expert quantization dtype for EP MoE, optional values:
+
+    * ``fp8``
+    * ``fp4``: SM100 GPUs only
+    * ``None`` (default)
+
 .. option:: --vit_quant_type
 
     ViT quantization method, optional values:
@@ -424,14 +504,6 @@ Sampling and Generation Parameters
 .. option:: --use_reward_model
 
     Use reward model
-
-.. option:: --long_truncation_mode
-
-    How to handle when input_token_len + max_new_tokens > max_req_total_len, optional values:
-    
-    * ``None``: Throw exception (default)
-    * ``head``: Remove some head tokens to make input_token_len + max_new_tokens <= max_req_total_len
-    * ``center``: Remove some tokens at the center position to make input_token_len + max_new_tokens <= max_req_total_len
 
 .. option:: --use_tgi_api
 

@@ -13,11 +13,11 @@ import pickle
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Union, List, Tuple, Dict, Optional, AsyncGenerator
+from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole, ObjType, NIXLDecodeNodeInfo
+from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
@@ -34,7 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.error_utils import NixlPrefillNodeStopGenToken
+from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -52,8 +52,9 @@ class HttpServerManager:
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
-        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 1)
+        self._shm_lock_pool = AtomicShmArrayLock(f"{get_unique_server_name()}_lightllm_resource_lock", 2)
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
+        self._run_reqs_count_lock = AsyncLock(self._shm_lock_pool.get_lock_context(1))
         self.node_rank = args.node_rank
         self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
@@ -111,17 +112,25 @@ class HttpServerManager:
         self.metric_client = MetricClient(args.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
-        assert self.pd_mode in [NodeRole.P, NodeRole.D, NodeRole.NORMAL, NodeRole.NP, NodeRole.ND]
+        assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
         # 有的模型的vocab size 读取tokenizer和config.json中不一致
         self.vocab_size = max(get_vocab_size(args.model_dir), self.tokenizer.vocab_size)
 
-        # The timemark of the latest inference(prefill/decode) which is used to check the health status of the system.
-        # If the timemark is not updated for a pre-set time, a prob request will be sent to the backend.
+        # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
+        self.run_reqs_count_mark.set_value(0)
+
+        # 用于记录真实的--max_total_token_num 参数，当这个参数在启动参数中没有设置的时候，其是在推理进程中被分析出来的，
+        # 这个时候如果 --max_req_total_len >  --max_total_token_num 时，如果httpserver放过一些非法的输入进入后续的模块可能
+        # 会触发整个系统崩溃，所以httpserver需要知道真实的 max_total_token_num的数据，用于提前拦截非法请求等参数。
+        # router 进程会在启动后向这个共享内存写入正确的max_total_token_num 参数，用于后续的请求控制。
+        self.shm_max_total_token_num = SharedInt(f"{get_unique_server_name()}_shm_max_total_token_num")
         return
 
     def _log_stage_timing(self, group_request_id: int, start_time: float, stage: str, **kwargs):
@@ -175,8 +184,19 @@ class HttpServerManager:
             self.cache_client.root.set_items_data(update_data_ids)
         return
 
+    def _assert_image_token_count(self, token_num: int):
+        if token_num > self.args.max_image_token_count:
+            err_msg = (
+                f"single image token count {token_num} exceeds max_image_token_count {self.args.max_image_token_count}."
+                f"You can increase this limit by setting --max_image_token_count to a larger value when starting "
+                f"LightLLM. Warning: increasing this limit raises runtime OOM risk."
+            )
+            logger.warning(err_msg)
+            raise ValueError(err_msg)
+        return
+
     async def _alloc_multimodal_resources(self, multimodal_params: MultimodalParams, sampling_params: SamplingParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        # 只有 prefill 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             items, md5sums, tokens_nums, datas = [], [], [], []
             for img in multimodal_params.images:
@@ -184,6 +204,7 @@ class HttpServerManager:
                 data = img.read()
                 # must after init_imageitem_extral_params
                 token_num = self.tokenizer.get_image_token_length(img)
+                self._assert_image_token_count(token_num)
                 md5sum = hashlib.md5(data).hexdigest() + "_" + str(hash(frozendict(img.extra_params)))
                 md5sums.append(md5sum)
                 img.md5 = md5sum
@@ -205,7 +226,7 @@ class HttpServerManager:
         return
 
     async def _release_multimodal_resources(self, multimodal_params: MultimodalParams):
-        # 只有 P 和 NORMAL 节点需要真的管理多模态资源
+        # 只有 prefill 和 NORMAL 节点需要真的管理多模态资源
         if self.pd_mode.is_P_or_NORMAL():
             if multimodal_params is not None:
                 ids_to_release = []
@@ -239,7 +260,9 @@ class HttpServerManager:
         for img in multimodal_params.images:
             img_count += 1
             self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
-            image_tokens += self.tokenizer.get_image_token_length(img)
+            token_num = self.tokenizer.get_image_token_length(img)
+            self._assert_image_token_count(token_num)
+            image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
             self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
@@ -263,12 +286,9 @@ class HttpServerManager:
             asyncio.create_task(generate_wrapper(results_generator))
         return
 
-    def alloc_req_id(self, sampling_params, is_health_req: bool = False):
+    def alloc_req_id(self, sampling_params):
         # 请求的 id 可以由外部传入，也可以由内部生成，但是由外部传入的时候，要自己保证全局唯一性
         # 否则会造成异常问题。目前限制 NORMAL 模式都使用内部id替换， P 和 D 模式按需设置
-        # health 请求 request_id 为负数，直接返回
-        if is_health_req:
-            return sampling_params.group_request_id
         if self.pd_mode.is_normal():
             if not self.is_multinode_tp:
                 group_request_id = self.id_gen.generate_id()
@@ -292,15 +312,15 @@ class HttpServerManager:
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
-        is_health_req: bool = False,
-        # 该参数只会在 nixl pd mode 中使用，用于上报一些信息给 pd_master
-        nixl_pd_upload_websocket: ClientConnection = None,
+        # 该参数只会在 pd mode 中使用，用于上报一些信息给 pd_master
+        pd_upload_websocket: ClientConnection = None,
         # 用于等待 pd_master 下发的交换信息
-        nixl_pd_event: asyncio.Event = None,
+        pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
-        group_request_id = self.alloc_req_id(sampling_params, is_health_req)
+        group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
         self._log_stage_timing(
@@ -310,6 +330,9 @@ class HttpServerManager:
             audio_count=audio_count,
             image_count=image_count,
         )
+
+        async with self._run_reqs_count_lock:
+            self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
             original_multimodal_params = None
@@ -335,40 +358,40 @@ class HttpServerManager:
             )
 
             prompt_tokens = len(prompt_ids)
-            # 监控
-            if group_request_id > 0:
-                self.metric_client.counter_inc("lightllm_request_count")
-                self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
-                self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
+            # 监控
+            self.metric_client.counter_inc("lightllm_request_count")
+            self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)
+            self.metric_client.histogram_observe("lightllm_request_max_new_tokens", sampling_params.max_new_tokens)
+
             self._log_stage_timing(
                 group_request_id,
                 start_time,
                 "check_and_repair_length_done",
             )
 
-            if nixl_pd_upload_websocket is not None and not is_health_req and self.pd_mode.is_NP():
-                # 在 nixl pd 模式下的 p 节点， 为了更好的兼容多模态的推理流程，np 节点需要先上报其 encode 好的 prompt ids 信息，然后
-                # 再等待 pd_master 传输下来的对应的进行 decode 节点的decode信息，然后再执行后续的流程
+            if pd_upload_websocket is not None and self.pd_mode.is_P():
+                # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
+                # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
                 logger.info(
-                    f"nixl prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
+                    f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
-                await nixl_pd_upload_websocket.send(
-                    pickle.dumps((ObjType.NIXL_UPLOAD_NP_PROMPT_IDS, group_request_id, prompt_ids))
+                await pd_upload_websocket.send(
+                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, prompt_ids))
                 )
                 try:
-                    await asyncio.wait_for(nixl_pd_event.wait(), timeout=80)
+                    await asyncio.wait_for(pd_event.wait(), timeout=180)
                 except asyncio.TimeoutError:
-                    logger.error(f"nixl np node wait nixl_pd_event 36s time out, group_req_id {group_request_id}")
-                    raise Exception(f"group_req_id {group_request_id} wait nixl_pd_event time out")
+                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
+                    raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
 
-                decode_node_info: NIXLDecodeNodeInfo = nixl_pd_event.decode_node_info
-                sampling_params.nixl_params.set(pickle.dumps(decode_node_info))
+                decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
+                sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
                 if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
                     # 如果 decode 节点的 ready_kv_len 和 prefill encode 的 len(prompt ids) -1 相等，说明不需要进行 prefill
-                    # 直接 raise NixlPrefillNodeStopGenToken
-                    raise NixlPrefillNodeStopGenToken(group_request_id=group_request_id)
+                    # 直接 raise PDPrefillNodeStopGenToken
+                    raise PDPrefillNodeStopGenToken(group_request_id=group_request_id)
 
             # 申请资源并存储
             alloced_req_indexes = []
@@ -444,8 +467,12 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except Exception as e:
-            logger.error(f"group_request_id: {group_request_id} has exception {str(e)}")
+        except (ClientDisconnected, Exception) as e:
+            logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
+
+            if isinstance(e, ClientDisconnected):
+                logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
@@ -454,6 +481,9 @@ class HttpServerManager:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
+        finally:
+            async with self._run_reqs_count_lock:
+                self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
@@ -487,6 +517,15 @@ class HttpServerManager:
         self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
     ):
         if isinstance(prompt, str):
+            # pre-verify prompt length
+            # The average character length per token is always less than 8
+            # TODO: automatically calculate the average character length per token
+            max_prompt_chars = self.max_req_total_len * 8
+            if len(prompt) > max_prompt_chars:
+                raise ValueError(
+                    f"prompt text length {len(prompt)} exceeds the character limit {max_prompt_chars}, "
+                    f"the request is rejected before tokenization."
+                )
             if self.enable_multimodal:
                 assert (
                     len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
@@ -494,15 +533,22 @@ class HttpServerManager:
                 if multimodal_params.audios:
                     assert not self.args.disable_audio, "audio multimodal not enabled"
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
-                prompt_ids = self.tokenizer.encode(
-                    prompt, multimodal_params, add_special_tokens=sampling_params.add_special_tokens
+                prompt_ids = await asyncio.to_thread(
+                    self.tokenizer.encode,
+                    prompt,
+                    multimodal_params,
+                    add_special_tokens=sampling_params.add_special_tokens,
                 )
             else:
-                prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=sampling_params.add_special_tokens)
+                prompt_ids = await asyncio.to_thread(
+                    self.tokenizer.encode,
+                    prompt,
+                    add_special_tokens=sampling_params.add_special_tokens,
+                )
 
             if self.args.detail_log:
                 logger.debug(
-                    f"req_id: {sampling_params.group_request_id} prompt: {prompt},\n"
+                    f"req_id: {sampling_params.group_request_id} prompt: {prompt}\n"
                     f"samplingparmas: {sampling_params.to_dict()}\n"
                     f"token_ids: {prompt_ids}"
                 )
@@ -521,37 +567,34 @@ class HttpServerManager:
             raise ValueError(f"prompt format error, get type{type(prompt)}")
         return
 
+    def get_real_supported_max_req_total_len(self):
+        # 得到系统真正能支持的最大长度，同时收到启动参数中模型支持长度的限制，也收到token容量的限制。
+        return min(self.shm_max_total_token_num.get_value() - 36, self.max_req_total_len)
+
     async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
         if not prompt_ids:
             raise ValueError("prompt_ids is empty")
         prompt_tokens = len(prompt_ids)
-        if prompt_tokens + sampling_params.max_new_tokens > self.max_req_total_len:
-            # use long_truncation_mode to truncate long input len req.
-            if self.args.long_truncation_mode is None:
-                # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
-                # 修改 max_new_tokens 的值，使其满足合法约束。
-                new_max_new_tokens = self.max_req_total_len - prompt_tokens
-                if new_max_new_tokens > 0:
-                    logger.debug(
-                        f"the input prompt token len {prompt_tokens} + max_new_tokens"
-                        f"{sampling_params.max_new_tokens} > {self.max_req_total_len},"
-                        f"so change max_new_tokens to {new_max_new_tokens}"
-                    )
-                    sampling_params.max_new_tokens = new_max_new_tokens
-                else:
-                    raise ValueError(
-                        f"the input prompt token len {prompt_tokens} + max_new_tokens \
-                            {sampling_params.max_new_tokens} > {self.max_req_total_len}"
-                    )
-            elif self.args.long_truncation_mode == "head":
-                prompt_ids = prompt_ids[-(self.max_req_total_len - sampling_params.max_new_tokens) :]
-            elif self.args.long_truncation_mode == "center":
-                req_input_len = self.max_req_total_len - sampling_params.max_new_tokens
-                prompt_ids = prompt_ids[0 : req_input_len // 2] + prompt_ids[-(req_input_len - req_input_len // 2) :]
-                prompt_tokens = len(prompt_ids)
-                assert prompt_tokens == req_input_len
+        # 这里 -36 是保留一些不可预知的边界余量，防止系统出错
+        real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
+
+        if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:
+
+            # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
+            # 修改 max_new_tokens 的值，使其满足合法约束。
+            new_max_new_tokens = real_supported_max_req_total_len - prompt_tokens
+            if new_max_new_tokens > 0:
+                logger.debug(
+                    f"the input prompt token len {prompt_tokens} + max_new_tokens"
+                    f"{sampling_params.max_new_tokens} > {real_supported_max_req_total_len},"
+                    f"so change max_new_tokens to {new_max_new_tokens}"
+                )
+                sampling_params.max_new_tokens = new_max_new_tokens
             else:
-                assert False, "error args"
+                raise ValueError(
+                    f"the input prompt token len {prompt_tokens} + max_new_tokens \
+                        {sampling_params.max_new_tokens} > {real_supported_max_req_total_len}"
+                )
 
         # last repaired
         req_total_len = len(prompt_ids) + sampling_params.max_new_tokens
@@ -648,7 +691,9 @@ class HttpServerManager:
 
             if not self.disable_abort and request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
-                raise Exception(f"req_id {group_request_id} disconnected")
+                raise ClientDisconnected(
+                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                )
 
             async with req_status.lock:
                 event.clear()
@@ -662,9 +707,10 @@ class HttpServerManager:
                     if self.pd_mode.is_P() and is_first_token:
                         metadata["prompt_ids"] = prompt_ids
 
-                    prompt_cache_len = metadata.pop("prompt_cache_len", 0)
+                    gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
                     cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
+                    metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
                     sub_req_id_to_mtp_verify_token_num[sub_req_id] = metadata.get("mtp_verify_token_num", 0)
 
@@ -689,9 +735,12 @@ class HttpServerManager:
                         self.per_token_costs.add(mean_per_token_cost_time_ms)
                         x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
                         x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        gpu_prompt_cache_ratio = gpu_prompt_cache_len / prompt_tokens
                         cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
                         disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
+                        prompt_cache_len = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                        generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
                         mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
                         mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
@@ -706,9 +755,9 @@ class HttpServerManager:
                             f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
                             f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
                             f"prompt_token_num:{prompt_tokens} "
-                            f"gpu cache hit: {prompt_cache_len > 0} "
-                            f"gpu_prompt_cache_len:{prompt_cache_len} "
-                            f"gpu_prompt_cache_ratio:{prompt_cache_ratio} "
+                            f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
+                            f"gpu_prompt_cache_len:{gpu_prompt_cache_len} "
+                            f"gpu_prompt_cache_ratio:{gpu_prompt_cache_ratio} "
                             f"cpu cache hit: {cpu_prompt_cache_len > 0} "
                             f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
                             f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
@@ -718,11 +767,13 @@ class HttpServerManager:
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                             f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )
-                        if group_request_id < 0:
-                            # health 探测请求，不记录日志和监控
-                            return
+
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
                         self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
+                        self.metric_client.counter_inc_by("lightllm_prompt_tokens_total", prompt_tokens)
+                        self.metric_client.counter_inc_by("lightllm_generation_tokens_total", out_token_counter)
+                        self.metric_client.gauge_set("lightllm_cache_hit_rate", prompt_cache_ratio)
+                        self.metric_client.gauge_set("lightllm_gen_throughput", generation_throughput)
                         self.metric_client.histogram_observe(
                             "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
                         )
@@ -753,6 +804,23 @@ class HttpServerManager:
             req.is_aborted = True
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
+
+    def _get_router_profiler_client(self):
+        router_profiler_client = getattr(self, "router_profiler_client", None)
+        if router_profiler_client is None or getattr(router_profiler_client, "closed", False):
+            from lightllm.utils.retry_utils import retry
+
+            self.router_profiler_client = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
+                "localhost",
+                self.args.router_profiler_port,
+                config={"allow_pickle": True},
+            )
+            self.router_profiler_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return self.router_profiler_client
+
+    async def profiler_cmd(self, cmd: Literal["start", "stop"]):
+        client = self._get_router_profiler_client()
+        client.root.profiler_cmd(cmd)
 
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
