@@ -133,8 +133,10 @@ def _fused_compress_norm_rope_insert_kernel(
     rms_eps,
     cos_table,
     cos_stride0,
+    cos_stride1,
     sin_table,
     sin_stride0,
+    sin_stride1,
     out_buffer,
     HEAD_DIM: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -250,8 +252,8 @@ def _fused_compress_norm_rope_insert_kernel(
     is_rope_pair = rope_pair_local >= 0
     cs_idx = tl.maximum(rope_pair_local, 0)
     compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cos_v = tl.load(cos_table + compressed_pos * cos_stride0 + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(sin_table + compressed_pos * sin_stride0 + cs_idx, mask=is_rope_pair, other=0.0)
+    cos_v = tl.load(cos_table + compressed_pos * cos_stride0 + cs_idx * cos_stride1, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(sin_table + compressed_pos * sin_stride0 + cs_idx * sin_stride1, mask=is_rope_pair, other=0.0)
     new_even = even * cos_v - odd * sin_v
     new_odd = odd * cos_v + even * sin_v
     rotated = tl.interleave(new_even, new_odd)
@@ -424,8 +426,10 @@ def fused_compress(
         eps,
         cos_table,
         cos_table.stride(0),
+        cos_table.stride(1),
         sin_table,
         sin_table.stride(0),
+        sin_table.stride(1),
         metadata.out_buffer,
         HEAD_DIM=head_dim,
         STATE_WIDTH=state_width,
