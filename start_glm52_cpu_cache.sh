@@ -29,7 +29,7 @@ case " $(hostname -I) " in
 esac
 
 echo "Launching ${CONTAINER_NAME}: model=${MODEL_DIR} on ${MACHINE} GPUs=${GPUS} port=${PORT} image=${IMAGE}"
-echo "CPU cache: ${CPU_CACHE_STORAGE_SIZE}GB, page=${CPU_CACHE_TOKEN_PAGE_SIZE}, kv=fp8kv_dsa"
+echo "CPU cache: ${CPU_CACHE_STORAGE_SIZE}GB, page=${CPU_CACHE_TOKEN_PAGE_SIZE}, kv=bf16"
 
 if [[ "${MACHINE}" == "${LOCAL_MACHINE}" ]]; then
   RUN=(bash -s)
@@ -74,7 +74,6 @@ docker run -d --init --name "${CONTAINER_NAME}" \
       --mem_fraction 0.85 \
       --max_req_total_len ${MAX_REQ_TOTAL_LEN} \
       --graph_max_batch_size 32 \
-      --llm_kv_type fp8kv_dsa \
       --enable_cpu_cache \
       --cpu_cache_storage_size ${CPU_CACHE_STORAGE_SIZE} \
       --cpu_cache_token_page_size ${CPU_CACHE_TOKEN_PAGE_SIZE} \

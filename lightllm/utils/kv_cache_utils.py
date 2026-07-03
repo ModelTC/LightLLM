@@ -23,7 +23,6 @@ from lightllm.common.kv_cache_mem_manager import (
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
     Deepseek3_2MemoryManager,
-    FP8PerTokenGroupQuantDeepseek3_2MemoryManager,
     Qwen3NextMemManager,
 )
 
@@ -104,20 +103,6 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             data_type=get_llm_data_type(),
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is FP8PerTokenGroupQuantDeepseek3_2MemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=1,
-            head_dim=(
-                FP8PerTokenGroupQuantDeepseek3_2MemoryManager.flashmla_bytes_per_token
-                + FP8PerTokenGroupQuantDeepseek3_2MemoryManager.indexer_bytes_per_token
-            ),
-            data_type=torch.uint8,
-            scale_head_dim=0,
-            scale_data_type=torch.uint8,
         )
     elif mem_manager_class is MemoryManager:
         cpu_cache_meta = CpuKVCacheMeta(
