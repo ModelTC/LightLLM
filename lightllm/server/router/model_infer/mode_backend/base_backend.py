@@ -6,14 +6,13 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.req_manager import ReqManagerForMamba
+from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
@@ -154,7 +153,8 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
-        if isinstance(self.model, DeepseekV4TpPartModel):
+        self.is_deepseek_v4 = isinstance(self.model.req_manager, DeepseekV4ReqManager)
+        if self.is_deepseek_v4:
             self.support_overlap = False
 
         if self.is_linear_att_mixed_model:
@@ -181,7 +181,7 @@ class ModeBackend:
             else:
                 radix_page_size = 1
                 radix_extra_value_ops = None
-                if isinstance(self.model, DeepseekV4TpPartModel):
+                if self.is_deepseek_v4:
                     radix_page_size = self.model.req_manager.get_prompt_cache_page_size()
                     radix_extra_value_ops = self.model.req_manager.get_prompt_cache_value_ops()
                 self.radix_cache = RadixCache(
@@ -192,7 +192,7 @@ class ModeBackend:
                     page_size=radix_page_size,
                     extra_value_ops=radix_extra_value_ops,
                 )
-                if isinstance(self.model, DeepseekV4TpPartModel):
+                if self.is_deepseek_v4:
                     self.model.mem_manager.register_swa_free_hook(self.radix_cache.free_unreferenced_swa_pages)
 
                 if not self.disable_chunked_prefill and radix_page_size > 1:
@@ -600,9 +600,13 @@ class ModeBackend:
         prefill_tokens = 0
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
-        can_alloc_dsv4_swa_page_num = g_infer_context.get_can_alloc_dsv4_swa_page_num()
-        can_alloc_dsv4_c4_page_num = g_infer_context.get_can_alloc_dsv4_c4_page_num()
-        can_alloc_dsv4_c128_slot_num = g_infer_context.get_can_alloc_dsv4_c128_slot_num()
+        is_deepseek_v4 = self.is_deepseek_v4
+        if is_deepseek_v4:
+            (
+                can_alloc_dsv4_swa_page_num,
+                can_alloc_dsv4_c4_page_num,
+                can_alloc_dsv4_c128_slot_num,
+            ) = g_infer_context.get_can_alloc_dsv4_page_and_slot_num()
 
         for req_obj in ready_reqs:
 
@@ -636,20 +640,20 @@ class ModeBackend:
 
             if is_decode:
                 token_num = req_obj.decode_need_token_num()
-                swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_decode_need_page_and_slot_num()
-                if (
-                    token_num <= can_alloc_token_num
-                    and (can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num)
-                    and (can_alloc_dsv4_c4_page_num is None or c4_page_num <= can_alloc_dsv4_c4_page_num)
-                    and (can_alloc_dsv4_c128_slot_num is None or c128_slot_num <= can_alloc_dsv4_c128_slot_num)
-                ):
+                can_run = token_num <= can_alloc_token_num
+                if can_run and is_deepseek_v4:
+                    swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_decode_need_page_and_slot_num()
+                    can_run = (
+                        swa_page_num <= can_alloc_dsv4_swa_page_num
+                        and c4_page_num <= can_alloc_dsv4_c4_page_num
+                        and c128_slot_num <= can_alloc_dsv4_c128_slot_num
+                    )
+                if can_run:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
-                    if can_alloc_dsv4_swa_page_num is not None:
+                    if is_deepseek_v4:
                         can_alloc_dsv4_swa_page_num -= swa_page_num
-                    if can_alloc_dsv4_c4_page_num is not None:
                         can_alloc_dsv4_c4_page_num -= c4_page_num
-                    if can_alloc_dsv4_c128_slot_num is not None:
                         can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:
@@ -666,23 +670,23 @@ class ModeBackend:
                 token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=is_chuncked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_prefill_need_page_and_slot_num(
-                    is_chuncked_prefill=is_chuncked_prefill
-                )
-                if (
-                    token_num <= can_alloc_token_num
-                    and (can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num)
-                    and (can_alloc_dsv4_c4_page_num is None or c4_page_num <= can_alloc_dsv4_c4_page_num)
-                    and (can_alloc_dsv4_c128_slot_num is None or c128_slot_num <= can_alloc_dsv4_c128_slot_num)
-                ):
+                can_run = token_num <= can_alloc_token_num
+                if can_run and is_deepseek_v4:
+                    swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_prefill_need_page_and_slot_num(
+                        is_chuncked_prefill=is_chuncked_prefill
+                    )
+                    can_run = (
+                        swa_page_num <= can_alloc_dsv4_swa_page_num
+                        and c4_page_num <= can_alloc_dsv4_c4_page_num
+                        and c128_slot_num <= can_alloc_dsv4_c128_slot_num
+                    )
+                if can_run:
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
-                    if can_alloc_dsv4_swa_page_num is not None:
+                    if is_deepseek_v4:
                         can_alloc_dsv4_swa_page_num -= swa_page_num
-                    if can_alloc_dsv4_c4_page_num is not None:
                         can_alloc_dsv4_c4_page_num -= c4_page_num
-                    if can_alloc_dsv4_c128_slot_num is not None:
                         can_alloc_dsv4_c128_slot_num -= c128_slot_num
                 else:
                     if wait_pause_count < pause_max_req_num:

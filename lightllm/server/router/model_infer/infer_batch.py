@@ -40,6 +40,7 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_linear_att_mixed_model: bool = False  # 标记模型是否是full att 混合 linear att 的混合模型。
+    is_deepseek_v4: bool = False
 
     def register(
         self,
@@ -66,6 +67,7 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_linear_att_mixed_model = isinstance(self.req_manager, ReqManagerForMamba)
+        self.is_deepseek_v4 = isinstance(self.req_manager, DeepseekV4ReqManager)
 
         return
 
@@ -124,17 +126,16 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
-        is_dsv4_req_manager = isinstance(self.req_manager, DeepseekV4ReqManager)
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
-            if is_dsv4_req_manager:
+            if self.is_deepseek_v4:
                 # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx,
                 # 必须在此复位出窗水位线 + 清 c128 在途状态(恢复命中走 extend,不会再有
                 # restore/zero 时机;c4 状态随 swa 页生灭,无需处理)。
                 self.req_manager.init_compress_state(req.req_idx)
         else:
             if not self.is_linear_att_mixed_model:
-                if is_dsv4_req_manager:
+                if self.is_deepseek_v4:
                     self._dsv4_full_att_free_req(free_token_index=free_token_index, req=req)
                 else:
                     self._full_att_free_req(free_token_index=free_token_index, req=req)
@@ -403,37 +404,28 @@ class InferenceContext:
             )
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
-    def get_can_alloc_dsv4_swa_page_num(self):
-        allocator = getattr(self.req_manager.mem_manager, "swa_page_allocator", None)
-        if allocator is None:
-            return None
-
+    def get_can_alloc_dsv4_page_and_slot_num(self):
+        self.req_manager: DeepseekV4ReqManager
+        mem_manager = self.req_manager.mem_manager
         radix_cache_unref_page_num = 0
+        radix_cache_unref_token_num = 0
         if self.radix_cache is not None:
             radix_cache_unref_page_num = self.radix_cache.get_unrefed_swa_pages_num()
-        return int(allocator.can_use_mem_size) + radix_cache_unref_page_num
-
-    def get_can_alloc_dsv4_c4_page_num(self):
-        allocator = getattr(self.req_manager.mem_manager, "c4_page_allocator", None)
-        if allocator is None:
-            return None
-        radix_unref_page_num = 0
-        if self.radix_cache is not None:
-            radix_unref_page_num = (
+            radix_cache_unref_token_num = (
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
-            ) // 256
-        return int(allocator.can_use_mem_size) + int(radix_unref_page_num)
+            )
+        swa_page_num = int(mem_manager.swa_page_allocator.can_use_mem_size) + radix_cache_unref_page_num
 
-    def get_can_alloc_dsv4_c128_slot_num(self):
-        allocator = getattr(self.req_manager.mem_manager, "c128_allocator", None)
-        if allocator is None:
-            return None
-        radix_unref_slot_num = 0
-        if self.radix_cache is not None:
-            radix_unref_slot_num = (
-                self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
-            ) // 128
-        return int(allocator.can_use_mem_size) + int(radix_unref_slot_num)
+        c4_page_num = 0
+        if mem_manager.c4_page_allocator is not None:
+            c4_page_num = int(mem_manager.c4_page_allocator.can_use_mem_size) + int(
+                radix_cache_unref_token_num // self.req_manager.get_prompt_cache_page_size()
+            )
+
+        c128_slot_num = 0
+        if mem_manager.c128_allocator is not None:
+            c128_slot_num = int(mem_manager.c128_allocator.can_use_mem_size) + int(radix_cache_unref_token_num // 128)
+        return swa_page_num, c4_page_num, c128_slot_num
 
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """
@@ -647,14 +639,13 @@ class InferReq:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att
             self.get_chuncked_input_token_ids = self.get_chuncked_input_token_ids_for_linear_att
 
-        mem_manager = g_infer_context.req_manager.mem_manager
-        self.dsv4_swa_page_size: Optional[int] = (
-            mem_manager.swa_pool.page_size if getattr(mem_manager, "swa_pool", None) is not None else None
-        )
-        self.dsv4_c4_page_size: Optional[int] = (
-            mem_manager.c4_pool.page_size if getattr(mem_manager, "c4_pool", None) is not None else None
-        )
-        self.dsv4_has_c128: bool = getattr(mem_manager, "c128_pool", None) is not None
+        if g_infer_context.is_deepseek_v4:
+            mem_manager = g_infer_context.req_manager.mem_manager
+            self.dsv4_swa_page_size: int = mem_manager.swa_pool.page_size
+            self.dsv4_c4_page_size: int = (
+                mem_manager.c4_pool.page_size if mem_manager.c4_page_allocator is not None else 0
+            )
+            self.dsv4_has_c128: bool = mem_manager.c128_allocator is not None
 
         self._init_all_state()
 
@@ -989,18 +980,15 @@ class InferReq:
         if end <= start:
             return 0, 0, 0
 
-        swa_page_num = 0
-        if self.dsv4_swa_page_size is not None:
-            first_new_page = (start + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
-            last_page = (end - 1) // self.dsv4_swa_page_size
-            swa_page_num = last_page - first_new_page + 1
+        first_new_page = (start + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
+        last_page = (end - 1) // self.dsv4_swa_page_size
+        swa_page_num = last_page - first_new_page + 1
 
         c4_page_num = 0
-        if self.dsv4_c4_page_size is not None:
-            first, last = start // 4, end // 4
-            if last > first:
-                # Safe upper bound: touched c4 pages, including a possible already-allocated continuation page.
-                c4_page_num = (last - 1) // self.dsv4_c4_page_size - first // self.dsv4_c4_page_size + 1
+        first, last = start // 4, end // 4
+        if last > first:
+            # Safe upper bound: touched c4 pages, including a possible already-allocated continuation page.
+            c4_page_num = (last - 1) // self.dsv4_c4_page_size - first // self.dsv4_c4_page_size + 1
 
         c128_slot_num = max(0, end // 128 - start // 128) if self.dsv4_has_c128 else 0
         return swa_page_num, c4_page_num, c128_slot_num
@@ -1010,9 +998,9 @@ class InferReq:
         if seq_len <= 0:
             return 0, 0, 0
 
-        swa_page_num = 1 if self.dsv4_swa_page_size is not None and (seq_len - 1) % self.dsv4_swa_page_size == 0 else 0
+        swa_page_num = 1 if (seq_len - 1) % self.dsv4_swa_page_size == 0 else 0
         c4_page_num = 0
-        if self.dsv4_c4_page_size is not None and seq_len % 4 == 0:
+        if seq_len % 4 == 0:
             entry = seq_len // 4 - 1
             c4_page_num = 1 if entry % self.dsv4_c4_page_size == 0 else 0
         c128_slot_num = 1 if self.dsv4_has_c128 and seq_len % 128 == 0 else 0
