@@ -56,8 +56,6 @@ def _causal_conv1d_update_kernel(
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    IS_SPEC_DECODING: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     USE_PAD_SLOT: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -85,40 +83,32 @@ def _causal_conv1d_update_kernel(
             # not processing as this is not the actual sequence
             return
 
-    if IS_VARLEN:
-        query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
-        query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
-        # revise state_len and seqlen
-        state_len = state_len - (seqlen - (query_end_index - query_start_index))
-        seqlen = query_end_index - query_start_index
-        x_offset = query_start_index * stride_x_token
-        o_offset = query_start_index * stride_o_token
-    else:
-        query_start_index = idx_seq * seqlen
-        query_end_index = query_start_index + seqlen
-        x_offset = idx_seq * stride_x_seq
-        o_offset = idx_seq * stride_o_seq
+    query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
+    query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
+    # revise state_len and seqlen
+    state_len = state_len - (seqlen - (query_end_index - query_start_index))
+    seqlen = query_end_index - query_start_index
+    x_offset = query_start_index * stride_x_token
+    o_offset = query_start_index * stride_o_token
+
 
     if query_start_index == query_end_index:
         return
 
-    if IS_SPEC_DECODING:
-        # The rolling of conv state:
-        #
-        # Before forward, the conv_state is:
-        # [history1, history2, ..., historyM].
-        #
-        # After forward, the conv_state becomes:
-        # [history2, ..., historyM, draft1, draft2, ..., draftN].
-        #
-        # After acceptance, it becomes:
-        #
-        # - accept 1 tokens: [history2, ..., historyM, draft1]
-        # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
-        # - and so on.
-        conv_state_token_offset = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
-    else:
-        conv_state_token_offset = 0
+    # The rolling of conv state:
+    #
+    # Before forward, the conv_state is:
+    # [history1, history2, ..., historyM].
+    #
+    # After forward, the conv_state becomes:
+    # [history2, ..., historyM, draft1, draft2, ..., draftN].
+    #
+    # After acceptance, it becomes:
+    #
+    # - accept 1 tokens: [history2, ..., historyM, draft1]
+    # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
+    # - and so on.
+    conv_state_token_offset = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
 
     # STEP 1: READ init_state data
     conv_states_base = (
@@ -328,6 +318,7 @@ def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
+    mtp_step: int,
     bias: Optional[torch.Tensor] = None,
     activation: Optional[str] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
@@ -370,47 +361,35 @@ def causal_conv1d_update(
 
     original_x_dtype = x.dtype
     x = x.to(conv_state.dtype)
-    unsqueeze = query_start_loc is None and x.dim() == 2
-    if unsqueeze:
-        # make it (batch, dim, seqlen) with seqlen == 1
-        x = x.unsqueeze(-1)
-    if query_start_loc is None:
-        batch, dim, seqlen = x.shape
-    else:
-        assert conv_state_indices is not None
-        batch = conv_state_indices.size(0)
-        dim = x.size(1)
-        # The MTP verify layout is uniform (mtp_step+1) tokens per request, so seqlen is
-        # structurally x.size(0) // batch. Compute it without a D2H sync on query_start_loc on
-        # BOTH the capture and eager paths (#8a) — the eager .item() ran once per GDN layer per
-        # decode step. .item() is also illegal during CUDA-graph capture.
-        assert x.size(0) % batch == 0, "varlen conv update expects a uniform per-request length"
-        seqlen = x.size(0) // batch
+    # x shape is (att_batch_size * (mtp_step + 1), dim)
+    assert conv_state_indices is not None
+    batch = conv_state_indices.size(0) # batch is att_batch_size
+    dim = x.size(1)
+    # The MTP verify layout is uniform (mtp_step+1) tokens per request, so seqlen is
+    # structurally x.size(0) // batch. Compute it without a D2H sync on query_start_loc on
+    # BOTH the capture and eager paths (#8a) — the eager .item() ran once per GDN layer per
+    # decode step. .item() is also illegal during CUDA-graph capture.
+    assert x.size(0) % batch == 0, "varlen conv update expects a uniform per-request length"
+    seqlen = x.size(0) // batch # 输入的每个请求的token数量
     _, width = weight.shape
     # conv_state: (num_slots, dim, state_len), where state_len >= width - 1
     num_cache_lines, _, state_len = conv_state.size()
+
+    assert state_len == width - 1 + mtp_step
 
     # adopt the strategy in vLLM that overwrites 'x' directly, rather than creating a new tensor 'o'
     out = x
     stride_w_dim, stride_w_width = weight.stride()
 
-    if query_start_loc is None:
-        # X (batch, dim, seqlen)
-        stride_x_seq, stride_x_dim, stride_x_token = x.stride()
-        stride_o_seq, stride_o_dim, stride_o_token = out.stride()
-    else:
-        # X (num_tokens, dim)
-        stride_x_token, stride_x_dim = x.stride()
-        stride_x_seq = 0
-        stride_o_token, stride_o_dim = out.stride()
-        stride_o_seq = 0
+    # X (num_tokens, dim)
+    stride_x_token, stride_x_dim = x.stride()
+    stride_x_seq = 0
+    stride_o_token, stride_o_dim = out.stride()
+    stride_o_seq = 0
 
     stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride()
-    stride_state_indices = conv_state_indices.stride(0) if conv_state_indices is not None else 0
-    if num_accepted_tokens is not None:
-        state_len = width - 1 + (seqlen - 1)  # effective state_len needed
-    else:
-        state_len = width - 1
+    stride_state_indices = conv_state_indices.stride(0)
+
     np2_statelen = triton.next_power_of_2(state_len)
 
     def grid(META):
@@ -454,12 +433,9 @@ def causal_conv1d_update(
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
-        IS_VARLEN=query_start_loc is not None,
-        IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
         USE_PAD_SLOT=pad_slot_id is not None,
         BLOCK_N=256,
     )
-    if unsqueeze:
-        out = out.squeeze(-1)
+
     return out.to(original_x_dtype)

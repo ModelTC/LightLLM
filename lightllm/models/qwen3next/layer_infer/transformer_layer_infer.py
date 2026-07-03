@@ -497,6 +497,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             mixed_qkv,
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
+            mtp_step=get_env_start_args().mtp_step,
             bias=layer_weight.linear_conv1d.bias,
             activation=self.activation,
             conv_state_indices=infer_state.b_conv_buffer_idx,
