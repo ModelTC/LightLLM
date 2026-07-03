@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -11,6 +12,8 @@ from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import 
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
+
+_ENABLE_PAGED_INDEXER_LOGITS = os.environ.get("LIGHTLLM_PAGED_INDEXER_LOGITS", "1") == "1"
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
@@ -216,28 +219,44 @@ class NsaInfer:
             mtp_step = 0
         else:
             mtp_step = get_env_start_args().mtp_step
-        # Use efficient Triton kernel to extract FP8 keys and scales from buffer
-        k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
-            b_seq_len=infer_state.b_seq_len,
-            b_req_idx=infer_state.b_req_idx,
-            req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-            out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
-            max_kv_seq_len=infer_state.max_kv_seq_len,
-            mtp_step=mtp_step,
-        )
 
-        import deep_gemm
+        if not infer_state.is_prefill and _ENABLE_PAGED_INDEXER_LOGITS:
+            # Decode: compute logits directly on the paged indexer-K pool through
+            # ragged_mem_index — skips materializing a dense [batch * max_kv_seq_len] K copy.
+            from ..triton_kernel.fp8_mqa_logits import fp8_paged_mqa_logits
 
-        logits = deep_gemm.fp8_mqa_logits(
-            q_fp8,
-            (k_fp8_, k_scale_),
-            weights.squeeze(-1),
-            ks,
-            ke,
-            clean_logits=False,
-            max_seqlen_k=infer_state.max_kv_seq_len,
-        )
+            logits = fp8_paged_mqa_logits(
+                q_fp8=q_fp8,
+                indexer_k_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+                weights=weights.squeeze(-1).float(),
+                ragged_mem_index=att_state.ragged_mem_index,
+                cu_seqlen_ks=ks,
+                cu_seqlen_ke=ke,
+                max_kv_seq_len=infer_state.max_kv_seq_len,
+            )
+        else:
+            # Use efficient Triton kernel to extract FP8 keys and scales from buffer
+            k_fp8_, k_scale_ = extract_indexer_ks(
+                I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+                b_seq_len=infer_state.b_seq_len,
+                b_req_idx=infer_state.b_req_idx,
+                req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
+                out_token_num=infer_state.b_seq_len.shape[0] * infer_state.max_kv_seq_len,
+                max_kv_seq_len=infer_state.max_kv_seq_len,
+                mtp_step=mtp_step,
+            )
+
+            import deep_gemm
+
+            logits = deep_gemm.fp8_mqa_logits(
+                q_fp8,
+                (k_fp8_, k_scale_),
+                weights.squeeze(-1),
+                ks,
+                ke,
+                clean_logits=False,
+                max_seqlen_k=infer_state.max_kv_seq_len,
+            )
 
         from sgl_kernel import fast_topk_v2
 
