@@ -260,31 +260,34 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
-        elif getattr(infer_state, "is_decode_with_mtp", False):
-            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
-            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-            core_attn_out = self._gdn_mtp_kernel(
-                mixed_qkv,
-                conv_states,
-                ssm_states,
-                a,
-                b,
-                infer_state,
-                layer_weight,
-            )
         else:
-            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
-            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-            core_attn_out, z = self._gdn_decode_kernel(
-                mixed_qkv,
-                z,
-                conv_states,
-                ssm_states,
-                a,
-                b,
-                infer_state,
-                layer_weight,
-            )
+            if get_env_start_args().mtp_step > 0:
+                # MTP 模式下，使用线性层 MTP 状态。
+                mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+                conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                core_attn_out = self._gdn_mtp_kernel(
+                    mixed_qkv,
+                    conv_states,
+                    ssm_states,
+                    a,
+                    b,
+                    infer_state,
+                    layer_weight,
+                )
+            else:
+                # 非 MTP 模式下，使用线性层 decode 状态。
+                mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+                conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                core_attn_out, z = self._gdn_decode_kernel(
+                    mixed_qkv,
+                    z,
+                    conv_states,
+                    ssm_states,
+                    a,
+                    b,
+                    infer_state,
+                    layer_weight,
+                )
 
         num_tokens = z.shape[0]
         core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
@@ -327,7 +330,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 conv_states, ssm_states = new_infer_state.req_manager.get_mamba_cache(self.layer_num_)
                 # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
                 # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
-                conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
+                if get_env_start_args().mtp_step > 0:
+                    conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
                 mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba)
                 _z.copy_(tmp_z)
                 tmp_o = self._gdn_prefill_kernel(
@@ -343,7 +347,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
-        conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
+        if get_env_start_args().mtp_step > 0:
+            conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
         return core_attn_out, z
