@@ -330,7 +330,6 @@ def causal_conv1d_update(
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     activation: Optional[str] = None,
-    cache_seqlens: Optional[torch.Tensor] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
     num_accepted_tokens: Optional[torch.Tensor] = None,
     query_start_loc: Optional[torch.Tensor] = None,
@@ -353,8 +352,6 @@ def causal_conv1d_update(
         weight: depthwise filter of shape ``(dim, width)``.
         bias: optional ``(dim,)`` bias.
         activation: ``None``, ``"silu"`` or ``"swish"``.
-        cache_seqlens: accepted for call-compatibility with the non-spec wrapper;
-            unused here.
         conv_state_indices: ``(batch,)`` int32 mapping each request to its conv_state
             slot. Required when ``query_start_loc`` is given.
         num_accepted_tokens: ``(batch,)`` int32. When not None the conv_state read
