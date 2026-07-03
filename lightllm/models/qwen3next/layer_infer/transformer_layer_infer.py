@@ -413,7 +413,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # Recurrent processing
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv)
-        initial_state = ssm_states[infer_state.b_buffer_idx]
+        initial_state = ssm_states[infer_state.b_ssm_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
         core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
             q=query,
@@ -428,9 +428,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_qk_l2norm_in_kernel=True,
         )
         if self.needs_ssm_dtype_conversion:
-            ssm_states[infer_state.b_buffer_idx] = last_recurrent_state.to(self.ssm_state_dtype, copy=False)
+            ssm_states[infer_state.b_ssm_buffer_idx] = last_recurrent_state.to(self.ssm_state_dtype, copy=False)
         else:
-            ssm_states[infer_state.b_buffer_idx] = last_recurrent_state
+            ssm_states[infer_state.b_ssm_buffer_idx] = last_recurrent_state
         return core_attn_out
 
     def _gdn_decode_kernel(
@@ -469,7 +469,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             v=value,
             initial_state=ssm_states,
             inplace_final_state=True,
-            ssm_state_indices=infer_state.b_buffer_idx,
+            ssm_state_indices=infer_state.b_ssm_buffer_idx,
             use_qk_l2norm_in_kernel=True,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,
