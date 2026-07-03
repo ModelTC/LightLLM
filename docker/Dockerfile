@@ -145,9 +145,9 @@ COPY . /lightllm
 ARG ENABLE_RUST=1
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN if [ "${ENABLE_RUST}" = "1" ]; then \
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
-      pip install --no-cache-dir --upgrade pip setuptools-rust wheel && \
-      cd /lightllm && python setup.py build_ext --inplace; \
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y && \
+      pip install --no-cache-dir --upgrade pip setuptools-rust wheel; \
     fi
 
-RUN pip install -e /lightllm --no-cache-dir --no-build-isolation
+RUN pip install -v -e /lightllm --no-cache-dir --no-build-isolation
+

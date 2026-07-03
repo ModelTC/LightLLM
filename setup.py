@@ -14,6 +14,7 @@ if RustExtension is not None and Binding is not None:
             "lightllm.server.httpserver_for_pd_master.pd_selector._pd_tree_rust",
             path="rust/pd_tree/Cargo.toml",
             binding=Binding.PyO3,
+            debug=False,
         )
     ]
 setup(
