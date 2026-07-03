@@ -124,7 +124,7 @@ class InferenceContext:
         return req_objs
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
-        is_dsv4_req_manager = hasattr(self.req_manager, "build_prompt_cache_payload")
+        is_dsv4_req_manager = isinstance(self.req_manager, DeepseekV4ReqManager)
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
             if is_dsv4_req_manager:
@@ -145,11 +145,6 @@ class InferenceContext:
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
-    def _append_free_token_index(self, free_token_index: List, tensor: torch.Tensor):
-        if tensor.numel() > 0:
-            free_token_index.append(tensor)
-        return
-
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
         input_token_ids = req.get_input_token_ids()
         key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
@@ -166,59 +161,30 @@ class InferenceContext:
         return
 
     def _dsv4_full_att_free_req(self, free_token_index: List, req: "InferReq"):
-        if req.cur_kv_len == 0:
-            free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0:0])
-            return
-
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         inserted_len = old_prefix_len
         duplicate_prefix_len = old_prefix_len
 
-        # 载荷只剩按页 bitmap(compressor 状态随 swa 页生灭/边界自然归零,不进载荷),
-        # 任意 128 对齐前缀皆可插入——含生成段(floor(cur_kv_len) 边界,回收保留尾页保证其驻留)。
         cache_len = self.radix_cache.align_len(req.cur_kv_len)
         self.req_manager: DeepseekV4ReqManager
         if cache_len > old_prefix_len:
-            payload = self.req_manager.build_prompt_cache_payload(req.req_idx, cache_len)
+            payload = self.req_manager.build_prompt_cache_payload(cache_len)
             value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
-            # 按页有效性 bitmap 用插入时刻的映射写定(此后只会被阀清 0,不会复活)。水位线
-            # 纯 CPU 推导,避免 router 关键路径上的 GPU gather 同步(每插入一次要等全部在途
-            # decode kernel)。插入门: 截掉结尾的 invalid 页 —— 它们生来不可命中,还会永久
-            # 挡住后续更长前缀复用同一段 token(全量重插会因前缀已存在而保留旧 bitmap)。
-            page_size = self.req_manager.get_prompt_cache_page_size()
-            bitmap = self.req_manager.swa_page_valid_from_watermark(req.req_idx, cache_len)
-            n_pages = int(bitmap.numel())
-            while n_pages > 0 and not bool(bitmap[n_pages - 1]):
-                n_pages -= 1
-            gated_len = n_pages * page_size
-            if gated_len < cache_len:
-                logger.info(
-                    f"DeepSeek-V4 prompt cache insert gate: trailing swa pages already evicted, "
-                    f"shrink insert {cache_len} -> {gated_len}"
-                )
-                cache_len = gated_len
-                payload.cache_len = cache_len
-            payload.swa_page_valid = bitmap[:n_pages].clone()
 
-            if cache_len > old_prefix_len:
-                input_token_ids = req.get_input_token_ids()
-                key = torch.tensor(input_token_ids[0:cache_len], dtype=torch.int64, device="cpu")
-                duplicate_prefix_len, cache_node = self.radix_cache.insert(key, value[:cache_len], extra_value=payload)
-                inserted_len = 0 if cache_node is None else cache_node.node_prefix_total_len
-                if inserted_len != cache_len:
-                    inserted_len = old_prefix_len
-                    duplicate_prefix_len = old_prefix_len
+            payload.swa_page_valid = self.req_manager.swa_page_valid_from_watermark(req.req_idx, cache_len)
+
+            key = torch.tensor(req.get_input_token_ids()[0:cache_len], dtype=torch.int64, device="cpu")
+            duplicate_prefix_len, _ = self.radix_cache.insert(key, value[:cache_len], extra_value=payload)
+            inserted_len = cache_len
 
         dense_row = self.req_manager.req_to_token_indexs[req.req_idx]
-        self._append_free_token_index(free_token_index, dense_row[old_prefix_len:duplicate_prefix_len])
-        self._append_free_token_index(free_token_index, dense_row[inserted_len : req.cur_kv_len])
+        if duplicate_prefix_len > old_prefix_len:
+            free_token_index.append(dense_row[old_prefix_len:duplicate_prefix_len])
+        if req.cur_kv_len > inserted_len:
+            free_token_index.append(dense_row[inserted_len : req.cur_kv_len])
         if len(free_token_index) == 0:
             free_token_index.append(dense_row[0:0])
-        # 释放的 full 槽经 mem_manager.free 级联回收 swa/c4/c128(映射键控,无需收集槽位)。
 
-        # pause 路径不会走 req_manager.free/init: 复位出窗水位线(残留水位线会破坏下一次
-        # prefill 的共享前缀保护)并清 c128 在途状态(恢复命中走 extend 续算,若残留暂停前的
-        # 半窗聚合会算错;c128 状态在 128 对齐命中边界本应为零)。
         self.req_manager.init_compress_state(req.req_idx)
 
         if req.shared_kv_node is not None:
@@ -438,8 +404,7 @@ class InferenceContext:
         return self.req_manager.mem_manager.allocator.can_use_mem_size + radix_cache_unref_token_num
 
     def get_can_alloc_dsv4_swa_page_num(self):
-        mem_manager = self.req_manager.mem_manager
-        allocator = getattr(mem_manager, "swa_page_allocator", None)
+        allocator = getattr(self.req_manager.mem_manager, "swa_page_allocator", None)
         if allocator is None:
             return None
 
@@ -448,44 +413,6 @@ class InferenceContext:
             radix_cache_unref_page_num = self.radix_cache.get_unrefed_swa_pages_num()
         return int(allocator.can_use_mem_size) + radix_cache_unref_page_num
 
-    def get_dsv4_swa_prefill_need_page_num(self, req: "InferReq", is_chuncked_prefill: bool):
-        page_size = self._get_dsv4_swa_page_size()
-        if page_size is None:
-            return 0
-
-        start = int(req.cur_kv_len)
-        if is_chuncked_prefill:
-            end = int(req.get_chuncked_input_token_len())
-        else:
-            end = int(req.get_cur_total_len())
-        if end <= start:
-            return 0
-        first_new_page = (start + page_size - 1) // page_size
-        last_page = (end - 1) // page_size
-        return last_page - first_new_page + 1
-
-    def get_dsv4_swa_decode_need_page_num(self, req: "InferReq"):
-        page_size = self._get_dsv4_swa_page_size()
-        if page_size is None:
-            return 0
-
-        seq_len = int(req.get_cur_total_len())
-        if seq_len <= 0:
-            return 0
-        return 1 if (seq_len - 1) % page_size == 0 else 0
-
-    def _get_dsv4_swa_page_size(self):
-        mem_manager = self.req_manager.mem_manager
-        allocator = getattr(mem_manager, "swa_page_allocator", None)
-        if allocator is None:
-            return None
-        return mem_manager.swa_pool.page_size
-
-    # ---- DeepSeek-V4 compressed-pool (c4/c128) admission, mirror of the swa helpers above ----
-    # c4 is paged for fp8_paged_mqa_logits: 64 c4-slots/page == 256 full tokens. The prompt-cache
-    # radix is 256-aligned (DSV4_PROMPT_CACHE_PAGE_SIZE) and c4 is NOT windowed, so reclaimable c4
-    # pages derive exactly from the unref token count (`// 256`) — no separate counter needed
-    # (unlike swa, which is windowed). c128 is slot-based: 1 slot per 128 full tokens (`// 128`).
     def get_can_alloc_dsv4_c4_page_num(self):
         allocator = getattr(self.req_manager.mem_manager, "c4_page_allocator", None)
         if allocator is None:
@@ -507,39 +434,6 @@ class InferenceContext:
                 self.radix_cache.get_tree_total_tokens_num() - self.radix_cache.get_refed_tokens_num()
             ) // 128
         return int(allocator.can_use_mem_size) + int(radix_unref_slot_num)
-
-    def get_dsv4_c4_decode_need_page_num(self, req: "InferReq"):
-        if getattr(self.req_manager.mem_manager, "c4_page_allocator", None) is None:
-            return 0
-        seq_len = int(req.get_cur_total_len())
-        # 与 _scatter_c4_decode_slots 一致: 关组(seq%4==0)且组末 c4-entry 落页首(entry%64==0) -> 开新页
-        if seq_len > 0 and seq_len % 4 == 0 and (seq_len // 4 - 1) % 64 == 0:
-            return 1
-        return 0
-
-    def get_dsv4_c128_decode_need_slot_num(self, req: "InferReq"):
-        if getattr(self.req_manager.mem_manager, "c128_allocator", None) is None:
-            return 0
-        seq_len = int(req.get_cur_total_len())
-        return 1 if (seq_len > 0 and seq_len % 128 == 0) else 0
-
-    def get_dsv4_c4_prefill_need_page_num(self, req: "InferReq", is_chuncked_prefill: bool):
-        if getattr(self.req_manager.mem_manager, "c4_page_allocator", None) is None:
-            return 0
-        start = int(req.cur_kv_len)
-        end = int(req.get_chuncked_input_token_len()) if is_chuncked_prefill else int(req.get_cur_total_len())
-        first, last = start // 4, end // 4
-        if last <= first:
-            return 0
-        # 安全上界: 覆盖 c4-entry 区间 [first,last) 触及的全部 64-页(忽略已分配的延续页 -> 偏多, 安全)
-        return (last - 1) // 64 - first // 64 + 1
-
-    def get_dsv4_c128_prefill_need_slot_num(self, req: "InferReq", is_chuncked_prefill: bool):
-        if getattr(self.req_manager.mem_manager, "c128_allocator", None) is None:
-            return 0
-        start = int(req.cur_kv_len)
-        end = int(req.get_chuncked_input_token_len()) if is_chuncked_prefill else int(req.get_cur_total_len())
-        return max(0, end // 128 - start // 128)
 
     def copy_linear_att_state_to_cache_buffer(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """
@@ -752,6 +646,15 @@ class InferReq:
         if g_infer_context.is_linear_att_mixed_model:
             self.get_chuncked_input_token_len = self.get_chuncked_input_token_len_for_linear_att
             self.get_chuncked_input_token_ids = self.get_chuncked_input_token_ids_for_linear_att
+
+        mem_manager = g_infer_context.req_manager.mem_manager
+        self.dsv4_swa_page_size: Optional[int] = (
+            mem_manager.swa_pool.page_size if getattr(mem_manager, "swa_pool", None) is not None else None
+        )
+        self.dsv4_c4_page_size: Optional[int] = (
+            mem_manager.c4_pool.page_size if getattr(mem_manager, "c4_pool", None) is not None else None
+        )
+        self.dsv4_has_c128: bool = getattr(mem_manager, "c128_pool", None) is not None
 
         self._init_all_state()
 
@@ -992,7 +895,6 @@ class InferReq:
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        chunked_end = self._align_chuncked_end_for_prompt_cache(chunked_start, chunked_end)
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_linear_att(self):
@@ -1013,23 +915,6 @@ class InferReq:
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        return self._align_chuncked_end_for_prompt_cache(chunked_start, chunked_end)
-
-    def _align_chuncked_end_for_prompt_cache(self, chunked_start: int, chunked_end: int):
-        radix_cache = g_infer_context.radix_cache
-        page_size = getattr(radix_cache, "page_size", 1) if radix_cache is not None else 1
-        if page_size <= 1 or self.sampling_param.disable_prompt_cache:
-            return chunked_end
-        prompt_end = int(self.shm_req.input_len)
-        chunked_start = int(chunked_start)
-        chunked_end = int(chunked_end)
-        if chunked_end >= prompt_end:
-            return chunked_end
-
-        assert self.args.chunked_prefill_size % page_size == 0, (
-            f"chunked_prefill_size={self.args.chunked_prefill_size} must be divisible by "
-            f"prompt-cache page_size={page_size}"
-        )
         return chunked_end
 
     def get_chuncked_input_token_len_for_linear_att(self):
@@ -1097,6 +982,41 @@ class InferReq:
 
     def _mtp_decode_need_token_num(self) -> int:
         return (1 + self.mtp_step) * 2
+
+    def get_dsv4_prefill_need_page_and_slot_num(self, is_chuncked_prefill: bool) -> Tuple[int, int, int]:
+        start = self.cur_kv_len
+        end = self.get_chuncked_input_token_len() if is_chuncked_prefill else self.get_cur_total_len()
+        if end <= start:
+            return 0, 0, 0
+
+        swa_page_num = 0
+        if self.dsv4_swa_page_size is not None:
+            first_new_page = (start + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
+            last_page = (end - 1) // self.dsv4_swa_page_size
+            swa_page_num = last_page - first_new_page + 1
+
+        c4_page_num = 0
+        if self.dsv4_c4_page_size is not None:
+            first, last = start // 4, end // 4
+            if last > first:
+                # Safe upper bound: touched c4 pages, including a possible already-allocated continuation page.
+                c4_page_num = (last - 1) // self.dsv4_c4_page_size - first // self.dsv4_c4_page_size + 1
+
+        c128_slot_num = max(0, end // 128 - start // 128) if self.dsv4_has_c128 else 0
+        return swa_page_num, c4_page_num, c128_slot_num
+
+    def get_dsv4_decode_need_page_and_slot_num(self) -> Tuple[int, int, int]:
+        seq_len = self.get_cur_total_len()
+        if seq_len <= 0:
+            return 0, 0, 0
+
+        swa_page_num = 1 if self.dsv4_swa_page_size is not None and (seq_len - 1) % self.dsv4_swa_page_size == 0 else 0
+        c4_page_num = 0
+        if self.dsv4_c4_page_size is not None and seq_len % 4 == 0:
+            entry = seq_len // 4 - 1
+            c4_page_num = 1 if entry % self.dsv4_c4_page_size == 0 else 0
+        c128_slot_num = 1 if self.dsv4_has_c128 and seq_len % 128 == 0 else 0
+        return swa_page_num, c4_page_num, c128_slot_num
 
 
 class InferReqUpdatePack:

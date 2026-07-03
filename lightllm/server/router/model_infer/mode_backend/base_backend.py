@@ -6,6 +6,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_model
@@ -153,7 +154,7 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
-        if hasattr(self.model.req_manager, "build_prompt_cache_payload"):
+        if isinstance(self.model, DeepseekV4TpPartModel):
             self.support_overlap = False
 
         if self.is_linear_att_mixed_model:
@@ -166,7 +167,6 @@ class ModeBackend:
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
-            setattr(self.args, "dynamic_prompt_cache_page_size", 1)
         else:
             if self.is_linear_att_mixed_model:
                 self.radix_cache = LinearAttPagedRadixCache(
@@ -178,14 +178,12 @@ class ModeBackend:
                     kv_cache_mem_manager=self.model.mem_manager,
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
-                setattr(self.args, "dynamic_prompt_cache_page_size", 1)
             else:
                 radix_page_size = 1
                 radix_extra_value_ops = None
-                if hasattr(self.model.req_manager, "get_prompt_cache_value_ops"):
+                if isinstance(self.model, DeepseekV4TpPartModel):
                     radix_page_size = self.model.req_manager.get_prompt_cache_page_size()
                     radix_extra_value_ops = self.model.req_manager.get_prompt_cache_value_ops()
-                setattr(self.args, "dynamic_prompt_cache_page_size", radix_page_size)
                 self.radix_cache = RadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
@@ -194,9 +192,14 @@ class ModeBackend:
                     page_size=radix_page_size,
                     extra_value_ops=radix_extra_value_ops,
                 )
-                if radix_extra_value_ops is not None and hasattr(self.model.mem_manager, "register_swa_free_hook"):
-                    # swa 页 allocator 触底时让 radix 对 ref==0 节点 free swa 页(DeepSeek-V4)。
+                if isinstance(self.model, DeepseekV4TpPartModel):
                     self.model.mem_manager.register_swa_free_hook(self.radix_cache.free_unreferenced_swa_pages)
+
+                if not self.disable_chunked_prefill and radix_page_size > 1:
+                    assert self.args.chunked_prefill_size % radix_page_size == 0, (
+                        f"chunked_prefill_size={self.args.chunked_prefill_size} must be divisible by "
+                        f"prompt-cache page_size={radix_page_size}"
+                    )
 
         if "prompt_cache_kv_buffer" in model_cfg:
             assert self.use_dynamic_prompt_cache
@@ -633,9 +636,7 @@ class ModeBackend:
 
             if is_decode:
                 token_num = req_obj.decode_need_token_num()
-                swa_page_num = g_infer_context.get_dsv4_swa_decode_need_page_num(req_obj)
-                c4_page_num = g_infer_context.get_dsv4_c4_decode_need_page_num(req_obj)
-                c128_slot_num = g_infer_context.get_dsv4_c128_decode_need_slot_num(req_obj)
+                swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_decode_need_page_and_slot_num()
                 if (
                     token_num <= can_alloc_token_num
                     and (can_alloc_dsv4_swa_page_num is None or swa_page_num <= can_alloc_dsv4_swa_page_num)
@@ -661,17 +662,12 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
-                token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+                is_chuncked_prefill = not self.disable_chunked_prefill
+                token_num = req_obj.prefill_need_token_num(is_chuncked_prefill=is_chuncked_prefill)
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
-                swa_page_num = g_infer_context.get_dsv4_swa_prefill_need_page_num(
-                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
-                )
-                c4_page_num = g_infer_context.get_dsv4_c4_prefill_need_page_num(
-                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
-                )
-                c128_slot_num = g_infer_context.get_dsv4_c128_prefill_need_slot_num(
-                    req_obj, is_chuncked_prefill=not self.disable_chunked_prefill
+                swa_page_num, c4_page_num, c128_slot_num = req_obj.get_dsv4_prefill_need_page_and_slot_num(
+                    is_chuncked_prefill=is_chuncked_prefill
                 )
                 if (
                     token_num <= can_alloc_token_num

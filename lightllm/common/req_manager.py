@@ -953,7 +953,6 @@ class DeepseekV4ReqManager(ReqManager):
 
     def build_prompt_cache_payload(
         self,
-        req_idx: int,
         cache_len: int,
     ) -> DeepseekV4PromptCachePayload:
         """构造插入载荷。compressor 状态不进载荷(c4 随 swa 页生灭、c128 边界自然归零),
