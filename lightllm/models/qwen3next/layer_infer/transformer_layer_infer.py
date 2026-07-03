@@ -325,6 +325,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
             def gdn_prefill_func(new_infer_state: Qwen3NextInferStateInfo):
                 conv_states, ssm_states = new_infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
+                # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
+                conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
                 mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba)
                 _z.copy_(tmp_z)
                 tmp_o = self._gdn_prefill_kernel(
@@ -338,6 +341,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return o, z
 
         conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+        # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
+        # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
+        conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
         return core_attn_out, z
