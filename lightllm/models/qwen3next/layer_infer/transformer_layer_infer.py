@@ -505,7 +505,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
 
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        assert infer_state.b_ssm_index_rows.dim() == 2, "SSM index rows must be 2D [N, S+1]"
+        assert infer_state.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
         # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
         # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
@@ -516,8 +516,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             initial_state=ssm_states,
             inplace_final_state=True,
             cu_seqlens=cu_seqlens_q.to(torch.long),
-            ssm_state_indices=infer_state.b_ssm_index_rows,
-            ssm_state_write_indices=infer_state.b_ssm_index_rows,
+            ssm_state_indices=infer_state.b_ssm_buffer_idx,
+            ssm_state_write_indices=infer_state.b_ssm_buffer_idx,
             num_accepted_tokens=infer_state.b_num_accepted_tokens,
             use_qk_l2norm_in_kernel=True,
             A_log=layer_weight.linear_A_log.weight,
