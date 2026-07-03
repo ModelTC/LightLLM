@@ -141,4 +141,13 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
     fi
 
 COPY . /lightllm
-RUN pip install -e /lightllm --no-cache-dir
+
+ARG ENABLE_RUST=1
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN if [ "${ENABLE_RUST}" = "1" ]; then \
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y && \
+      pip install --no-cache-dir --upgrade pip setuptools-rust wheel; \
+    fi
+
+RUN pip install -v -e /lightllm --no-cache-dir --no-build-isolation
+

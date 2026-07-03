@@ -3,6 +3,12 @@ from typing import Union, List, Tuple, Dict
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
+from lightllm.utils.log_utils import init_logger
+
+from .cache_aware import CacheAwarePolicy, CacheAwareConfig
+
+
+logger = init_logger(__name__)
 
 
 class PDSelector:
@@ -64,4 +70,43 @@ class AdaptiveLoadSelector(PDSelector):
         return p_node, d_node
 
     def _importance_sampling(self, nodes: List[PD_Client_Obj]):
-        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])
+        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
+
+
+class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
+    """refer to: https://github.com/sgl-project/sglang/blob/main/sgl-model-gateway/src/policies/cache_aware.rs"""
+
+    def __init__(self, pd_manager):
+        super().__init__(pd_manager)
+        self.policy = CacheAwarePolicy(CacheAwareConfig())
+        self.tree_workers = []
+
+    def update_nodes(self, prefill_nodes, decode_nodes):
+        super().update_nodes(prefill_nodes, decode_nodes)
+
+        add_workers = set(self.prefill_nodes) - set(self.tree_workers)
+        remove_workers = set(self.tree_workers) - set(self.prefill_nodes)
+
+        for worker in add_workers:
+            self.tree_workers.append(worker)
+
+        for worker in remove_workers:
+            self.tree_workers.remove(worker)
+
+        self.tree_workers = self.prefill_nodes
+
+    def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+        assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
+        p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        d_node = self._importance_sampling(self.decode_nodes)
+
+        p_node.update_load(len(prompt))
+
+        logger.info(
+            f"LoadBalancedCacheAwareSelector: selected p_node={p_node.url() if p_node else None}, "
+            f"d_node={d_node.url() if d_node else None}"
+        )
+
+        return p_node, d_node

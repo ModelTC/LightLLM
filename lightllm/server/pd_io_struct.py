@@ -54,6 +54,7 @@ class PD_Client_Obj:
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
+    processed_prompt_len: int = 0
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:
@@ -64,6 +65,15 @@ class PD_Client_Obj:
 
     def to_llm_url(self):
         return f"http://{self.client_ip_port}/pd_generate_stream"
+
+    def load(self):
+        return self.processed_prompt_len
+
+    def update_load(self, prompt_len: int):
+        self.processed_prompt_len += prompt_len
+
+    def url(self):
+        return self.client_ip_port
 
 
 @dataclass
