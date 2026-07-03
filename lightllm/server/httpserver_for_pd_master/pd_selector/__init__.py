@@ -1,4 +1,10 @@
-from .pd_selector import PDSelector, RandomSelector, RoundRobinSelector, AdaptiveLoadSelector, LoadBalancedCacheAwareSelector
+from .pd_selector import (
+    PDSelector,
+    RandomSelector,
+    RoundRobinSelector,
+    AdaptiveLoadSelector,
+    LoadBalancedCacheAwareSelector,
+)
 
 
 def create_selector(selector_type: str, pd_manager) -> PDSelector:

@@ -79,7 +79,21 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
     def __init__(self, pd_manager):
         super().__init__(pd_manager)
         self.policy = CacheAwarePolicy(CacheAwareConfig())
-        self.policy.init_workers(self.prefill_nodes)
+        self.tree_workers = []
+
+    def update_nodes(self, prefill_nodes, decode_nodes):
+        super().update_nodes(prefill_nodes, decode_nodes)
+
+        add_workers = set(self.prefill_nodes) - set(self.tree_workers)
+        remove_workers = set(self.tree_workers) - set(self.prefill_nodes)
+
+        for worker in add_workers:
+            self.tree_workers.append(worker)
+
+        for worker in remove_workers:
+            self.tree_workers.remove(worker)
+
+        self.tree_workers = self.prefill_nodes
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams

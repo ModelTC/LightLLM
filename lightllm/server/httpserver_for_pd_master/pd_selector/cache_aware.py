@@ -22,7 +22,6 @@ class CacheAwareConfig:
 
 
 class CacheAwarePolicy:
-
     def __init__(self, config: Optional[CacheAwareConfig] = None) -> None:
         self.config = config or CacheAwareConfig()
         self.tree: Tree = Tree()
@@ -78,6 +77,9 @@ class CacheAwarePolicy:
         self, workers: List[PD_Client_Obj], request_text: Optional[str] = None
     ) -> Optional[PD_Client_Obj]:
 
+        if not workers:
+            return None
+
         loads = [worker.load() for worker in workers]
         min_load = min(loads) if loads else 0
         max_load = max(loads) if loads else 0
@@ -88,7 +90,6 @@ class CacheAwarePolicy:
             f"CacheAwarePolicy: min_load={min_load:.4f}, max_load={max_load:.4f}, "
             f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
             f"is_imbalanced={is_imbalanced}"
-
         )
 
         if is_imbalanced:
@@ -100,11 +101,7 @@ class CacheAwarePolicy:
         text = request_text or ""
 
         result = self.tree.prefix_match_with_counts(text)
-        match_rate = (
-            0.0
-            if result.input_char_count == 0
-            else result.matched_char_count / result.input_char_count
-        )
+        match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
         logger.info(
             f"CacheAwarePolicy: matched_char_count={result.matched_char_count}, "
@@ -122,8 +119,7 @@ class CacheAwarePolicy:
             if selected_worker is None:
                 # If the matched tenant is not in the current workers, we can evict it from the tree
                 logger.info(f"Evicting tenant: {result.tenant}")
-                with self._lock:
-                    self.tree.remove_tenant(result.tenant)
+                self.tree.remove_tenant(result.tenant)
 
         logger.info(
             f"CacheAwarePolicy: selected_worker={selected_worker.url() if selected_worker else None}, "
@@ -138,7 +134,6 @@ class CacheAwarePolicy:
                 workers=workers,
                 request_text=request_text,
             )
-
 
     def __del__(self) -> None:
         self.close()

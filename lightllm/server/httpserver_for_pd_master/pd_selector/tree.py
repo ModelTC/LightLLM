@@ -84,9 +84,7 @@ class Tree:
                         parent=prev,
                         last_tenant=tenant,
                     )
-                    self.tenant_char_count[tenant] = (
-                        self.tenant_char_count.get(tenant, 0) + remaining_char_count
-                    )
+                    self.tenant_char_count[tenant] = self.tenant_char_count.get(tenant, 0) + remaining_char_count
                     prev.children[first_char] = new_node
                     return
 
@@ -111,18 +109,14 @@ class Tree:
                     prev.children[first_char] = new_node
 
                     if tenant not in new_node.tenant_last_access_time:
-                        self.tenant_char_count[tenant] = (
-                            self.tenant_char_count.get(tenant, 0) + matched_text_count
-                        )
+                        self.tenant_char_count[tenant] = self.tenant_char_count.get(tenant, 0) + matched_text_count
                         new_node.tenant_last_access_time[tenant] = 0
 
                     prev = new_node
                     remaining = remaining[shared_count:]
                 else:
                     if tenant not in child.tenant_last_access_time:
-                        self.tenant_char_count[tenant] = (
-                            self.tenant_char_count.get(tenant, 0) + child_len
-                        )
+                        self.tenant_char_count[tenant] = self.tenant_char_count.get(tenant, 0) + child_len
                         child.tenant_last_access_time[tenant] = 0
                     prev = child
                     remaining = remaining[shared_count:]
@@ -237,15 +231,11 @@ class Tree:
 
                 if tenant not in node.tenant_last_access_time:
                     continue
-                if any(
-                    tenant in child.tenant_last_access_time for child in node.children.values()
-                ):
+                if any(tenant in child.tenant_last_access_time for child in node.children.values()):
                     continue
 
                 node_len = len(node.text)
-                self.tenant_char_count[tenant] = max(
-                    0, self.tenant_char_count.get(tenant, 0) - node_len
-                )
+                self.tenant_char_count[tenant] = max(0, self.tenant_char_count.get(tenant, 0) - node_len)
 
                 node.tenant_last_access_time.pop(tenant, None)
                 if node.last_tenant == tenant:
@@ -258,8 +248,7 @@ class Tree:
 
                 if parent is not None and tenant in parent.tenant_last_access_time:
                     has_child_with_tenant = any(
-                        tenant in child.tenant_last_access_time
-                        for child in parent.children.values()
+                        tenant in child.tenant_last_access_time for child in parent.children.values()
                     )
                     if not has_child_with_tenant:
                         ts = parent.tenant_last_access_time.get(tenant)
@@ -280,8 +269,7 @@ class Tree:
 
                 if tenant in curr.tenant_last_access_time:
                     has_child_with_tenant = any(
-                        tenant in child.tenant_last_access_time
-                        for child in curr.children.values()
+                        tenant in child.tenant_last_access_time for child in curr.children.values()
                     )
                     if not has_child_with_tenant:
                         queue.append(curr)
@@ -299,8 +287,7 @@ class Tree:
 
                 if parent is not None and tenant in parent.tenant_last_access_time:
                     has_child_with_tenant = any(
-                        tenant in child.tenant_last_access_time
-                        for child in parent.children.values()
+                        tenant in child.tenant_last_access_time for child in parent.children.values()
                     )
                     if not has_child_with_tenant:
                         queue.append(parent)
@@ -319,9 +306,7 @@ class Tree:
                 curr = stack.pop()
                 text_count = len(curr.text)
                 for tenant in curr.tenant_last_access_time:
-                    used_size_per_tenant[tenant] = (
-                        used_size_per_tenant.get(tenant, 0) + text_count
-                    )
+                    used_size_per_tenant[tenant] = used_size_per_tenant.get(tenant, 0) + text_count
                 stack.extend(curr.children.values())
             return used_size_per_tenant
 
