@@ -233,9 +233,17 @@ class ReqManagerForMamba(ReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.mtp_step = get_env_start_args().mtp_step
-        self.req_to_accept_len = (
-            torch.ones((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
+        # 因为在mtp的推理中，需要标记每个请求对应的mtp index状态(conv state 和 ssm state)，在mtp对应序列中
+        # 的真实位置，所以需要需要一个标记来记录，不然算子无法找到真实的处理起点。
+        self.req_to_mtp_state_index = (
+            torch.zeros((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
         )
+        # 突然想到， 在linear att 开启mtp的模式中，现在的prefill linear att 算子默认是从0的位置读取信息进行操作
+        # 所以不能支持 prefill decode mixed 操作了，因为一个decode过的请求，重新用prefill 算子跑，会出现读错linear
+        # 状态位置的问题。导致bug, 在这里加个断言，以后可以支持上 TODO
+        if self.mtp_step > 0:
+            assert get_env_start_args().enable_prefill_decode_mixed is False
+        
         self.big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
@@ -264,8 +272,8 @@ class ReqManagerForMamba(ReqManager):
         # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
         # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
         self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
-        if self.req_to_accept_len is not None:
-            self.req_to_accept_len[req.req_idx] = 1
+        if self.req_to_mtp_state_index is not None:
+            self.req_to_mtp_state_index[req.req_idx] = 0
         return
 
     def get_mamba_cache(self, layer_idx_in_all: int):
@@ -288,8 +296,8 @@ class ReqManagerForMamba(ReqManager):
         conv_cache_width = conv_state.shape[-1]
         self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_accept_len is not None:
-            self.req_to_accept_len[req.req_idx] = 1
+        if self.req_to_mtp_state_index is not None:
+            self.req_to_mtp_state_index[req.req_idx] = 0
         return
 
     def copy_small_page_buffer_to_linear_att_state(
@@ -305,6 +313,6 @@ class ReqManagerForMamba(ReqManager):
         # 同时，非连续对象的拷贝，可能存在效率问题。
         self.req_to_conv_state.buffer[:, conv_dest, ..., :conv_cache_width] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
-        if self.req_to_accept_len is not None:
-            self.req_to_accept_len[req.req_idx] = 1
+        if self.req_to_mtp_state_index is not None:
+            self.req_to_mtp_state_index[req.req_idx] = 0
         return
