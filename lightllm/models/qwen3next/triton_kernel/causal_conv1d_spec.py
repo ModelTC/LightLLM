@@ -291,7 +291,7 @@ def _causal_conv1d_update_kernel(
 
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
-        mask_1d = (idx_token < seqlen) & (idx_feats < dim)  # token-index  # feature-index
+        mask_1d = idx_feats < dim  # feature-index
         o_ptrs = o_ptr + query_start_index * stride_o_token + idx_token * stride_o_token + (idx_feats * stride_o_dim)
 
         tl.store(o_ptrs, acc, mask=mask_1d)
