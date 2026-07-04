@@ -16,6 +16,7 @@ from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gd
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
+from lightllm.models.qwen3next.triton_kernel.mtp_fused_recurrent import mtp_fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
@@ -331,7 +332,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
                 # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
                 # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
                 if get_env_start_args().mtp_step > 0:
-                    conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
+                    conv_states = conv_states[:, :, : -get_env_start_args().mtp_step]
                 mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba)
                 _z.copy_(tmp_z)
                 tmp_o = self._gdn_prefill_kernel(
@@ -348,7 +349,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if get_env_start_args().mtp_step > 0:
-            conv_states = conv_states[:, :, :-get_env_start_args().mtp_step]
+            conv_states = conv_states[:, :, : -get_env_start_args().mtp_step]
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
         return core_attn_out, z
@@ -510,7 +511,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
         # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
         # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
+        core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
             v=value,
