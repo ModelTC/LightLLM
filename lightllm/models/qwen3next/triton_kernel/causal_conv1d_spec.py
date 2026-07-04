@@ -91,7 +91,6 @@ def _causal_conv1d_update_kernel(
     x_offset = query_start_index * stride_x_token
     o_offset = query_start_index * stride_o_token
 
-
     if query_start_index == query_end_index:
         return
 
@@ -144,7 +143,7 @@ def _causal_conv1d_update_kernel(
         + (conv_states_input_coord * stride_conv_state_seq)
         + conv_state_token_offset * stride_conv_state_tok
         + (idx_feats * stride_conv_state_dim)[None, :]
-        + ((idx_tokens + (1 if IS_SPEC_DECODING else seqlen)) * stride_conv_state_tok)[:, None]
+        + ((idx_tokens + 1) * stride_conv_state_tok)[:, None]
     )  # [BLOCK_M, BLOCK_N]
     mask = (
         (conv_states_input_coord < num_cache_lines)
@@ -363,14 +362,14 @@ def causal_conv1d_update(
     x = x.to(conv_state.dtype)
     # x shape is (att_batch_size * (mtp_step + 1), dim)
     assert conv_state_indices is not None
-    batch = conv_state_indices.size(0) # batch is att_batch_size
+    batch = conv_state_indices.size(0)  # batch is att_batch_size
     dim = x.size(1)
     # The MTP verify layout is uniform (mtp_step+1) tokens per request, so seqlen is
     # structurally x.size(0) // batch. Compute it without a D2H sync on query_start_loc on
     # BOTH the capture and eager paths (#8a) — the eager .item() ran once per GDN layer per
     # decode step. .item() is also illegal during CUDA-graph capture.
     assert x.size(0) % batch == 0, "varlen conv update expects a uniform per-request length"
-    seqlen = x.size(0) // batch # 输入的每个请求的token数量
+    seqlen = x.size(0) // batch  # 输入的每个请求的token数量
     _, width = weight.shape
     # conv_state: (num_slots, dim, state_len), where state_len >= width - 1
     num_cache_lines, _, state_len = conv_state.size()
