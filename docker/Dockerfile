@@ -3,7 +3,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
-ARG VLLM_VERSION=0.21.0
+ARG VLLM_VERSION=0.24.0
 ARG NIXL_REF=v1.2.0
 ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
@@ -60,7 +60,7 @@ RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cu
     git checkout ${FLASH_MLA_REF} && \
     git submodule update --init --recursive && \
     FLASH_MLA_DISABLE_SM100="$(if [ "${ENABLE_SM100}" = "1" ]; then echo 0; else echo 1; fi)" \
-    pip install --no-cache-dir .
+    pip install --no-build-isolation --no-cache-dir .
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 
@@ -128,7 +128,7 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
       ldconfig; \
       apt-get update && apt-get install -y pkg-config tmux net-tools && \
       cd /usr/local/src; \
-      pip install --upgrade meson pybind11 patchelf; \
+      pip install --upgrade meson meson-python pybind11 patchelf pyyaml types-PyYAML pytest build; \
       git clone https://github.com/ai-dynamo/nixl.git -b ${NIXL_REF} && \
       cd nixl && \
       rm -rf build && \
@@ -137,7 +137,7 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
       cd build && \
       ninja && \
       ninja install && \
-      cd .. && pip install . --no-deps; \
+      cd .. && pip install --no-build-isolation . --no-deps; \
     fi
 
 COPY . /lightllm
