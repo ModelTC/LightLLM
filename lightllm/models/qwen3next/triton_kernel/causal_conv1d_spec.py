@@ -1,11 +1,15 @@
 # Vendored from vLLM v0.14.1
 #   source: vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 #   commit: d7de043d55d1dd629554467e23874097e1c48993
-# Adapted for LightLLM: imports point at standard triton; the vLLM-specific
-# block-table params (block_idx_last_scheduled_token, initial_state_idx,
-# null_block_id) are dropped — LightLLM uses contiguous per-request slots.
-# Supports spec-decode: writes per-position conv state to a single widened slot
-# per request and reads from offset (num_accepted_tokens-1).
+# Adapted for LightLLM:
+#   - imports point at standard triton instead of vLLM's triton-lite.
+#   - vLLM block-table params (block_idx_last_scheduled_token, initial_state_idx,
+#     null_block_id) are dropped; LightLLM uses contiguous per-request slots.
+#   - IS_VARLEN / IS_SPEC_DECODING / non-spec paths removed; this kernel now
+#     exclusively serves the spec-decode varlen path (with num_accepted_tokens,
+#     query_start_loc and mtp_step all required).
+#   - One widened conv_state slot per request holds K-1+mtp_step positions.
+#     The read offset is num_accepted_tokens-1; writes go back to the same slot.
 #
 # Upstream copyright notice:
 #   SPDX-License-Identifier: Apache-2.0
@@ -23,18 +27,18 @@ import triton.language as tl
 @triton.jit()
 def _causal_conv1d_update_kernel(
     # Pointers to matrices
-    x_ptr,  # (token_num, dim)
+    x_ptr,  # (num_tokens, dim)
     w_ptr,  # (dim, width)
-    bias_ptr,
-    conv_state_ptr,
-    conv_state_indices_ptr,
-    num_accepted_tokens_ptr,
-    query_start_loc_ptr,  # (batch + 1)
-    o_ptr,  # (token_num, dim)
+    bias_ptr,  # (dim,) or nullptr
+    conv_state_ptr,  # (num_slots, dim, state_len)
+    conv_state_indices_ptr,  # (batch,)
+    num_accepted_tokens_ptr,  # (batch,)
+    query_start_loc_ptr,  # (batch + 1,)
+    o_ptr,  # (num_tokens, dim) — overwrites x in-place
     # Matrix dimensions
     batch: int,
     dim: tl.constexpr,
-    state_len: tl.constexpr,
+    state_len: tl.constexpr,  # width - 1 + mtp_step
     # Strides
     stride_x_dim: tl.constexpr,
     stride_x_token: tl.constexpr,
@@ -55,7 +59,6 @@ def _causal_conv1d_update_kernel(
     NP2_STATELEN: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    # ruff: noqa: E501
     idx_seq = tl.program_id(0)
     if idx_seq >= batch:
         return
@@ -63,8 +66,8 @@ def _causal_conv1d_update_kernel(
     # [BLOCK_N,] elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    # LightLLM uses contiguous per-request slots, so the cache block for both
-    # the initial-state read and the final write is always conv_state_indices[idx_seq].
+    # LightLLM uses contiguous per-request slots; read and write both target
+    # conv_state_indices[idx_seq].
     conv_state_init = 0
 
     # cache_idx
@@ -73,7 +76,7 @@ def _causal_conv1d_update_kernel(
     )
 
     if conv_states_input_coord == pad_slot_id:
-        # not processing as this is not the actual sequence
+        # padded entry — nothing to do
         return
 
     query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
@@ -99,7 +102,8 @@ def _causal_conv1d_update_kernel(
     conv_state_token_offset = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
     mask_w = idx_feats < dim
 
-    # STEP 1: READ init_state data
+    # STEP 1: load initial history columns from conv_state
+    #   col_k = conv_state[slot, :, offset + k]  for k = 0..KERNEL_WIDTH-2
     conv_states_base = (
         conv_state_ptr + (conv_states_input_coord * stride_conv_state_seq) + (idx_feats * stride_conv_state_dim)
     )
@@ -121,12 +125,18 @@ def _causal_conv1d_update_kernel(
         conv_states_ptrs = prior_tokens + 4 * stride_conv_state_tok  # [BLOCK_N]
         col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
 
-    # STEP 2: assume state_len > seqlen
+    # STEP 2: update conv_state with a sliding window
+    #
+    # Preserve KERNEL_WIDTH-2 tokens starting from offset+1, then append
+    # the seqlen incoming x tokens.  The resulting state is written back
+    # to positions 0..state_len-1 of the same slot.
+    #
+    # For KERNEL_WIDTH=2, restore_conv_state_len = 0 so the mask is
+    # always false — the state is fully overwritten by loaded_x.
     idx_tokens = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
 
-    # With speculative decoding, the conv_state updates works in a sliding
-    # window manner, at each forward pass, the tokens are shift by 1, so we
-    # load since idx_tokens + 1.
+    # read from conv_state at (offset + 1 + idx_tokens); the +1 accounts
+    # for the fact that the next call will slide offset by num_accepted.
     conv_state_ptrs_source = (
         conv_state_ptr
         + (conv_states_input_coord * stride_conv_state_seq)
@@ -134,13 +144,15 @@ def _causal_conv1d_update_kernel(
         + ((conv_state_token_offset + idx_tokens + 1) * stride_conv_state_tok)[:, None]
     )  # [BLOCK_M, BLOCK_N]
 
-    # 读取的数量一定是 kernel_width - 1 - 1
+    # preserve KERNEL_WIDTH-2 history tokens from the old state
     restore_conv_state_len = KERNEL_WIDTH - 1 - 1
     mask = (idx_tokens < restore_conv_state_len)[:, None] & (idx_feats < dim)[None, :]
     conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
     x_base = x_ptr + query_start_index * stride_x_token + (idx_feats * stride_x_dim)  # [BLOCK_N]
 
-    # idx_tokens - restore_conv_state_len 是为了进行错位读取，方便后面的tl.where进行更新
+    # move_idx_tokens = idx_tokens - restore_conv_state_len offsets the
+    # incoming x tokens so they fill positions after the preserved history
+    # inside new_conv_state via tl.where below.
     move_idx_tokens = idx_tokens - restore_conv_state_len
     x_ptrs = x_base[None, :] + (move_idx_tokens * stride_x_token)[:, None]  # [BLOCK_M, BLOCK_N]
 
@@ -152,14 +164,12 @@ def _causal_conv1d_update_kernel(
 
     new_conv_state = tl.where(mask, conv_state, loaded_x)
 
-    # Write the updated state back. In LightLLM the read and write slots are the
-    # same contiguous per-request slot (current_last_index == conv_state_init == 0),
-    # so this resolves to the same conv_state_indices[idx_seq] used for the read.
+    # Write the updated state back to the same slot that was read.
     conv_state_ptrs_target = (
         conv_state_ptr
-        + (conv_states_input_coord * stride_conv_state_seq)  # Offset from seq
-        + (idx_feats * stride_conv_state_dim)[None, :]  # Offset from dim
-        + idx_tokens[:, None] * stride_conv_state_tok  # Offset from token
+        + (conv_states_input_coord * stride_conv_state_seq)  # slot offset
+        + (idx_feats * stride_conv_state_dim)[None, :]  # dim offset
+        + idx_tokens[:, None] * stride_conv_state_tok  # token offset
     )  # [BLOCK_M, BLOCK_N]
     mask = (idx_tokens < state_len)[:, None] & (idx_feats < dim)[None, :]
     tl.store(conv_state_ptrs_target, new_conv_state, mask)
@@ -304,47 +314,48 @@ def causal_conv1d_update(
     query_start_loc: Optional[torch.Tensor] = None,
     pad_slot_id: int = -1,
 ):
-    """Spec-decode capable conv1d update. When num_accepted_tokens/query_start_loc
-    are None it must behave like a single-token decode update. x may be (batch, dim)
-    single-token or (num_tokens, dim) flattened varlen with query_start_loc grouping
-    each request's S+1 candidates. conv_state is (num_slots, dim, state_len) with
-    state_len = (width-1)+S widened. Read offset = num_accepted_tokens-1; writes to
-    the same slot.
+    """Spec-decode causal depthwise conv1d update.
+
+    Processes ``mtp_step + 1`` tokens per request in varlen layout.
+    Uses a single widened conv_state slot per request that holds
+    ``width - 1 + mtp_step`` positions.  The read offset for each request
+    is ``num_accepted_tokens[b] - 1``; after the forward pass the updated
+    state is written back to the same slot, ready for the next decode step.
 
     Args:
-        x: input tensor of shape ``(batch, dim)`` (single-token decode),
-            ``(batch, dim, seqlen)`` (single/multi token), or ``(num_tokens, dim)``
-            flattened varlen grouped by ``query_start_loc``.
-        conv_state: ``(num_slots, dim, state_len)`` with ``state_len >= width - 1``.
-            For spec decode the slot is widened to ``(width - 1) + S`` where ``S`` is
-            the number of speculative tokens (so ``seqlen == S + 1``).
+        x: ``(num_tokens, dim)`` float — flattened varlen input grouped by
+            ``query_start_loc``.  Each request contributes ``mtp_step + 1``
+            tokens.
+        conv_state: ``(num_slots, dim, state_len)`` float with
+            ``state_len == width - 1 + mtp_step``.
         weight: depthwise filter of shape ``(dim, width)``.
-        bias: optional ``(dim,)`` bias.
+        mtp_step: number of speculative (draft) tokens per request
+            (``seqlen == mtp_step + 1``).
+        bias: optional ``(dim,)`` float bias.
         activation: ``None``, ``"silu"`` or ``"swish"``.
-        conv_state_indices: ``(batch,)`` int32 mapping each request to its conv_state
-            slot. Required when ``query_start_loc`` is given.
-        num_accepted_tokens: ``(batch,)`` int32. When not None the conv_state read
-            offset for each request is ``num_accepted_tokens - 1`` (sliding window
-            spec-decode update).
-        query_start_loc: ``(batch + 1,)`` int32 varlen cumulative token offsets; when
-            None the call is a plain single-/multi-token decode update.
-        pad_slot_id: slot id that marks padded entries to skip.
+        conv_state_indices: ``(batch,)`` int32 — maps each request to a
+            conv_state slot.
+        num_accepted_tokens: ``(batch,)`` int32 — the conv_state read offset
+            for each request is ``num_accepted_tokens[b] - 1``.
+        query_start_loc: ``(batch + 1,)`` int32 — cumulative token offsets
+            for the varlen x tensor.
+        pad_slot_id: int — slot id that marks padded (skipped) entries.
 
     Returns:
-        Output tensor with the same shape as ``x`` (the kernel overwrites ``x`` in
-        place), one conv output per input token.
+        Output tensor with the same shape as ``x`` (the kernel overwrites
+        ``x`` in place), one conv output per input token.
     """
     if activation is not None:
         assert activation in ["silu", "swish"]
 
     original_x_dtype = x.dtype
     x = x.to(conv_state.dtype)
-    # x shape is (token_num, dim)
+    # x shape is (num_tokens, dim)
     assert conv_state_indices is not None
-    batch = conv_state_indices.size(0)  # batch is att_batch_size
+    batch = conv_state_indices.size(0)  # number of requests
     dim = x.size(1)
     _, width = weight.shape
-    # conv_state: (num_slots, dim, state_len), where state_len >= width - 1
+    # conv_state: (num_slots, dim, state_len) with state_len == width - 1 + mtp_step
     _, _, state_len = conv_state.size()
 
     assert state_len == width - 1 + mtp_step
