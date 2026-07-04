@@ -36,7 +36,6 @@ def _causal_conv1d_update_kernel(
     dim: tl.constexpr,
     seqlen: tl.constexpr,
     state_len: tl.constexpr,
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
@@ -145,11 +144,7 @@ def _causal_conv1d_update_kernel(
         + (idx_feats * stride_conv_state_dim)[None, :]
         + ((idx_tokens + 1) * stride_conv_state_tok)[:, None]
     )  # [BLOCK_M, BLOCK_N]
-    mask = (
-        (conv_states_input_coord < num_cache_lines)
-        & ((idx_tokens + seqlen) < state_len)[:, None]
-        & (idx_feats < dim)[None, :]
-    )
+    mask = ((idx_tokens + seqlen) < state_len)[:, None] & (idx_feats < dim)[None, :]
     conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
 
     VAL = state_len - seqlen
@@ -372,7 +367,7 @@ def causal_conv1d_update(
     seqlen = x.size(0) // batch  # 输入的每个请求的token数量
     _, width = weight.shape
     # conv_state: (num_slots, dim, state_len), where state_len >= width - 1
-    num_cache_lines, _, state_len = conv_state.size()
+    _, _, state_len = conv_state.size()
 
     assert state_len == width - 1 + mtp_step
 
@@ -412,7 +407,6 @@ def causal_conv1d_update(
         dim,
         seqlen,
         state_len,
-        num_cache_lines,
         # stride
         stride_x_seq,
         stride_x_dim,
