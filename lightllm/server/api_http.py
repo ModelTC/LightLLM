@@ -117,7 +117,6 @@ app = FastAPI()
 g_objs.app = app
 
 _ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
-_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
 _ACCESS_LOG_RESET = "\033[0m"
 
 
