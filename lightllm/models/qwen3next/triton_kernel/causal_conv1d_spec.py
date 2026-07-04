@@ -70,7 +70,6 @@ def _causal_conv1d_update_kernel(
     # LightLLM uses contiguous per-request slots, so the cache block for both
     # the initial-state read and the final write is always conv_state_indices[idx_seq].
     conv_state_init = 0
-    current_last_index = 0
 
     # cache_idx
     conv_states_input_coord = tl.load(conv_state_indices_ptr + idx_seq * stride_state_indices + conv_state_init).to(
@@ -84,8 +83,6 @@ def _causal_conv1d_update_kernel(
 
     query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
     query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
-    # revise state_len and seqlen
-    state_len = state_len - (seqlen - (query_end_index - query_start_index))
     seqlen = query_end_index - query_start_index
     x_offset = query_start_index * stride_x_token
     o_offset = query_start_index * stride_o_token
@@ -143,16 +140,19 @@ def _causal_conv1d_update_kernel(
         + (idx_feats * stride_conv_state_dim)[None, :]
         + ((conv_state_token_offset + idx_tokens + 1) * stride_conv_state_tok)[:, None]
     )  # [BLOCK_M, BLOCK_N]
-    mask = ((idx_tokens + seqlen) < state_len)[:, None] & (idx_feats < dim)[None, :]
-    conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
 
-    VAL = state_len - seqlen
+    # 读取的数量一定是 kernel_width - 1 - 1
+    restore_conv_state_len = KERNEL_WIDTH - 1 - 1
+    mask = (idx_tokens < restore_conv_state_len)[:, None] & (idx_feats < dim)[None, :]
+    conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
     x_base = x_ptr + x_offset + (idx_feats * stride_x_dim)  # [BLOCK_N]
 
-    x_ptrs = x_base[None, :] + ((idx_tokens - VAL) * stride_x_token)[:, None]  # [BLOCK_M, BLOCK_N]
+    # idx_tokens - restore_conv_state_len 是为了进行错位读取，方便后面的tl.where进行更新
+    move_idx_tokens = idx_tokens - restore_conv_state_len
+    x_ptrs = x_base[None, :] + (move_idx_tokens * stride_x_token)[:, None]  # [BLOCK_M, BLOCK_N]
 
     mask_x = (
-        (idx_tokens - VAL >= 0)[:, None] & (idx_tokens - VAL < seqlen)[:, None] & (idx_feats < dim)[None, :]
+        (move_idx_tokens >= 0)[:, None] & (move_idx_tokens < seqlen)[:, None] & (idx_feats < dim)[None, :]
     )  # token-index  # token-index  # feature-index
     loaded_x = tl.load(x_ptrs, mask_x, 0.0)
     tl.debug_barrier()
@@ -162,20 +162,12 @@ def _causal_conv1d_update_kernel(
     # Write the updated state back. In LightLLM the read and write slots are the
     # same contiguous per-request slot (current_last_index == conv_state_init == 0),
     # so this resolves to the same conv_state_indices[idx_seq] used for the read.
-    conv_states_offset = tl.load(conv_state_indices_ptr + idx_seq * stride_state_indices + current_last_index).to(
-        tl.int64
-    )
     conv_state_ptrs_target = (
         conv_state_ptr
-        + (conv_states_offset * stride_conv_state_seq)  # Offset from seq
-        + (idx_feats * stride_conv_state_dim)
-    )[
-        None, :
-    ] + (  # [BLOCK_N,]
-        idx_tokens * stride_conv_state_tok
-    )[
-        :, None
-    ]
+        + (conv_states_input_coord * stride_conv_state_seq)  # Offset from seq
+        + (idx_feats * stride_conv_state_dim)[None, :]  # Offset from dim
+        + idx_tokens[:, None] * stride_conv_state_tok  # Offset from token
+    )  # [BLOCK_M, BLOCK_N]
     mask = (idx_tokens < state_len)[:, None] & (idx_feats < dim)[None, :]
     tl.store(conv_state_ptrs_target, new_conv_state, mask)
 
