@@ -28,3 +28,4 @@ tmp
 *.pt
 *.pth
 *.safetensors
+*.log
