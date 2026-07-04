@@ -23,18 +23,17 @@ import triton.language as tl
 @triton.jit()
 def _causal_conv1d_update_kernel(
     # Pointers to matrices
-    x_ptr,  # (batch, dim, seqlen)
+    x_ptr,  # (token_num, dim)
     w_ptr,  # (dim, width)
     bias_ptr,
     conv_state_ptr,
     conv_state_indices_ptr,
     num_accepted_tokens_ptr,
     query_start_loc_ptr,  # (batch + 1)
-    o_ptr,  # (batch, dim, seqlen)
+    o_ptr,  # (token_num, dim)
     # Matrix dimensions
     batch: int,
     dim: tl.constexpr,
-    seqlen: tl.constexpr,
     state_len: tl.constexpr,
     # Strides
     stride_x_dim: tl.constexpr,
@@ -340,16 +339,10 @@ def causal_conv1d_update(
 
     original_x_dtype = x.dtype
     x = x.to(conv_state.dtype)
-    # x shape is (att_batch_size * (mtp_step + 1), dim)
+    # x shape is (token_num, dim)
     assert conv_state_indices is not None
     batch = conv_state_indices.size(0)  # batch is att_batch_size
     dim = x.size(1)
-    # The MTP verify layout is uniform (mtp_step+1) tokens per request, so seqlen is
-    # structurally x.size(0) // batch. Compute it without a D2H sync on query_start_loc on
-    # BOTH the capture and eager paths (#8a) — the eager .item() ran once per GDN layer per
-    # decode step. .item() is also illegal during CUDA-graph capture.
-    assert x.size(0) % batch == 0, "varlen conv update expects a uniform per-request length"
-    seqlen = x.size(0) // batch  # 输入的每个请求的token数量
     _, width = weight.shape
     # conv_state: (num_slots, dim, state_len), where state_len >= width - 1
     _, _, state_len = conv_state.size()
@@ -388,7 +381,6 @@ def causal_conv1d_update(
         # Matrix dimensions
         batch,
         dim,
-        seqlen,
         state_len,
         # stride
         stride_x_dim,
