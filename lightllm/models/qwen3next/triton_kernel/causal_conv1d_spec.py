@@ -84,8 +84,6 @@ def _causal_conv1d_update_kernel(
     query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
     query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
     seqlen = query_end_index - query_start_index
-    x_offset = query_start_index * stride_x_token
-    o_offset = query_start_index * stride_o_token
 
     if query_start_index == query_end_index:
         return
@@ -145,7 +143,7 @@ def _causal_conv1d_update_kernel(
     restore_conv_state_len = KERNEL_WIDTH - 1 - 1
     mask = (idx_tokens < restore_conv_state_len)[:, None] & (idx_feats < dim)[None, :]
     conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
-    x_base = x_ptr + x_offset + (idx_feats * stride_x_dim)  # [BLOCK_N]
+    x_base = x_ptr + query_start_index * stride_x_token + (idx_feats * stride_x_dim)  # [BLOCK_N]
 
     # idx_tokens - restore_conv_state_len 是为了进行错位读取，方便后面的tl.where进行更新
     move_idx_tokens = idx_tokens - restore_conv_state_len
@@ -294,7 +292,7 @@ def _causal_conv1d_update_kernel(
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
         mask_1d = (idx_token < seqlen) & (idx_feats < dim)  # token-index  # feature-index
-        o_ptrs = o_ptr + o_offset + idx_token * stride_o_token + (idx_feats * stride_o_dim)
+        o_ptrs = o_ptr + query_start_index * stride_o_token + idx_token * stride_o_token + (idx_feats * stride_o_dim)
 
         tl.store(o_ptrs, acc, mask=mask_1d)
 
