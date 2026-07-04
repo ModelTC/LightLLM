@@ -104,12 +104,12 @@ def _causal_conv1d_update_kernel(
     # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
     # - and so on.
     conv_state_token_offset = tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
+    mask_w = idx_feats < dim
 
     # STEP 1: READ init_state data
     conv_states_base = (
         conv_state_ptr + (conv_states_input_coord * stride_conv_state_seq) + (idx_feats * stride_conv_state_dim)
     )
-    mask_w = idx_feats < dim
 
     prior_tokens = conv_states_base + conv_state_token_offset * stride_conv_state_tok
     if KERNEL_WIDTH >= 2:
