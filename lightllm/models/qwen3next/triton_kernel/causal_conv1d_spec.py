@@ -37,7 +37,6 @@ def _causal_conv1d_update_kernel(
     seqlen: tl.constexpr,
     state_len: tl.constexpr,
     # Strides
-    stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
     stride_x_token: tl.constexpr,
     stride_w_dim: tl.constexpr,
@@ -46,7 +45,6 @@ def _causal_conv1d_update_kernel(
     stride_conv_state_dim: tl.constexpr,
     stride_conv_state_tok: tl.constexpr,
     stride_state_indices: tl.constexpr,
-    stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
     # others
@@ -56,7 +54,6 @@ def _causal_conv1d_update_kernel(
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
-    USE_PAD_SLOT: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     # ruff: noqa: E501
@@ -76,10 +73,9 @@ def _causal_conv1d_update_kernel(
         tl.int64
     )
 
-    if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
-            # not processing as this is not the actual sequence
-            return
+    if conv_states_input_coord == pad_slot_id:
+        # not processing as this is not the actual sequence
+        return
 
     query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
     query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
@@ -366,9 +362,7 @@ def causal_conv1d_update(
 
     # X (num_tokens, dim)
     stride_x_token, stride_x_dim = x.stride()
-    stride_x_seq = 0
     stride_o_token, stride_o_dim = out.stride()
-    stride_o_seq = 0
 
     stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride()
     stride_state_indices = conv_state_indices.stride(0)
@@ -397,7 +391,6 @@ def causal_conv1d_update(
         seqlen,
         state_len,
         # stride
-        stride_x_seq,
         stride_x_dim,
         stride_x_token,
         stride_w_dim,
@@ -406,7 +399,6 @@ def causal_conv1d_update(
         stride_istate_dim,
         stride_istate_token,
         stride_state_indices,
-        stride_o_seq,
         stride_o_dim,
         stride_o_token,
         # others
@@ -416,7 +408,6 @@ def causal_conv1d_update(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         NP2_STATELEN=np2_statelen,
-        USE_PAD_SLOT=pad_slot_id is not None,
         BLOCK_N=256,
     )
 
