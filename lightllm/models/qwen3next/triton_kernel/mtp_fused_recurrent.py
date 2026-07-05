@@ -49,15 +49,6 @@ def _ensure_gate_token_strided(x: torch.Tensor, inner_numel: int):
 # ---------------------------------------------------------------------------
 
 
-@triton.heuristics(
-    {
-        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
-        "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
-        "HAS_SEPARATE_WRITE_INDICES": lambda args: args["ssm_state_write_indices"] is not None,
-    }
-)
 @triton.jit(do_not_specialize=["N", "T"])
 def _fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
@@ -97,25 +88,16 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     stride_write_indices_tok: tl.constexpr,
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    IS_CONTINUOUS_BATCHING: tl.constexpr,
-    IS_SPEC_DECODING: tl.constexpr,
-    HAS_SEPARATE_WRITE_INDICES: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
-    if IS_VARLEN:
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int64),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-        )
-        all = T
-        T = eos - bos
-    else:
-        bos, eos = i_n * T, i_n * T + T
-        all = B * T
+    bos, eos = (
+        tl.load(cu_seqlens + i_n).to(tl.int64),
+        tl.load(cu_seqlens + i_n + 1).to(tl.int64),
+    )
+    all = T
+    T = eos - bos
 
     if T == 0:
         return
@@ -138,19 +120,10 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     mask_h = mask_k[:, None] & mask_v[None, :]
 
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
-    if USE_INITIAL_STATE:
-        if IS_CONTINUOUS_BATCHING:
-            if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
-            else:
-                i_t = 0
-            p_h0 = (
-                h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
-            )
-        else:
-            p_h0 = h0 + bos * HV * K * V
-        p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
-        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+    i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+    p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
+    p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+    b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
@@ -177,10 +150,7 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
         b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        if HAS_SEPARATE_WRITE_INDICES:
-            write_idx = tl.load(ssm_state_write_indices + i_n * stride_write_indices_seq + i_t).to(tl.int64)
-        else:
-            write_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64)
+        write_idx = tl.load(ssm_state_write_indices + i_n * stride_write_indices_seq + i_t).to(tl.int64)
         p_ht = ht + write_idx * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
