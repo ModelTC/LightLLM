@@ -111,5 +111,57 @@ def test_mtp_verify_path(mtp_step):
         )
 
 
+@pytest.mark.parametrize("seed", [1, 2, 3, 4])
+def test_variable_length_cu_seqlens(seed):
+    """Variable-length sequences via cu_seqlens: individual lengths vary,
+    each ≤ mtp_step+1, with some padded to shorter lengths."""
+    torch.manual_seed(seed)
+    batch, mtp_step, H, HV, K, V = 4, 3, 2, 8, 64, 64
+    max_len = mtp_step + 1  # 4
+    cache_slots = 64
+
+    # Random per-sequence lengths in [1, max_len]
+    lengths = torch.randint(1, max_len + 1, (batch,), device="cpu")
+    cu_seqlens = torch.zeros(batch + 1, dtype=torch.int32)
+    torch.cumsum(lengths, dim=0, out=cu_seqlens[1:])
+
+    num_tokens = int(cu_seqlens[-1].item())
+    q = torch.randn(1, num_tokens, H, K, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(1, num_tokens, H, K, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(1, num_tokens, HV, V, device="cuda", dtype=torch.bfloat16)
+    A_log = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
+    dt_bias = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
+    a_raw = torch.randn(num_tokens, HV, device="cuda", dtype=torch.bfloat16)
+    b_raw = torch.randn(num_tokens, HV, device="cuda", dtype=torch.bfloat16)
+    ssm_state = torch.randn(cache_slots, HV, K, V, device="cuda", dtype=torch.bfloat16)
+    # 2D indices: S+1 = max_len columns, unused columns for short seqs are irrelevant
+    ssm_idx = torch.randint(0, cache_slots, (batch, max_len), device="cuda", dtype=torch.int32)
+    num_accepted = lengths.to(device="cuda", dtype=torch.int32)
+
+    o_old, o_new, fs_old, fs_new = _run_both(
+        q,
+        k,
+        v,
+        ssm_state,
+        cu_seqlens.to(torch.long).cuda(),
+        ssm_idx,
+        ssm_idx,
+        num_accepted,
+        A_log,
+        dt_bias,
+        a_raw,
+        b_raw,
+    )
+
+    assert torch.equal(
+        o_old, o_new
+    ), f"seed={seed}: output mismatch, max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
+    if not torch.equal(fs_old, fs_new):
+        assert torch.allclose(fs_old.float(), fs_new.float(), rtol=1e-2, atol=5.0), (
+            f"seed={seed}: final_state mismatch, "
+            f"max diff={torch.abs(fs_old.float() - fs_new.float()).max().item():.6f}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -201,7 +201,8 @@ def mtp_fused_recurrent_gated_delta_rule(
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
-    stride_o_tok = HV * V
+    stride_o_tok = o.stride(1)
+    assert stride_o_tok == HV * V, f"stride_o_tok={stride_o_tok} must be HV*V"
     stride_state_hv = K * V
 
     assert ssm_state_indices.stride(-1) == 1, "2D ssm_state_indices must have contiguous rows"
