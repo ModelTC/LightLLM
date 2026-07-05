@@ -68,7 +68,6 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     scale,
     N: tl.int64,
     T: tl.int64,
-    B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -187,9 +186,9 @@ def mtp_fused_recurrent_gated_delta_rule(
     Directly launches the triton kernel — no ``torch.autograd.Function``.
 
     Args:
-        q:  ``[B, T, H, K]`` or ``[1, T, H, K]`` queries.
-        k:  ``[B, T, H, K]`` or ``[1, T, H, K]`` keys.
-        v:  ``[B, T, HV, V]`` or ``[1, T, HV, V]`` values (GVA when HV > H).
+        q:  ``[1, T, H, K]`` queries.
+        k:  ``[1, T, H, K]`` keys.
+        v:  ``[1, T, HV, V]`` values (GVA when HV > H).
         initial_state: ``[N, HV, K, V]`` initial SSM state.
         cu_seqlens: ``[N+1]`` int64 cumulative sequence lengths for the
             varlen (MTP verify) path.
@@ -199,16 +198,20 @@ def mtp_fused_recurrent_gated_delta_rule(
             sequence is ``num_accepted_tokens[i] - 1``.
         A_log: ``[HV]`` per-head log decay.
         dt_bias: ``[HV]`` per-head dt bias.
-        a_raw: ``[B*T, HV]`` raw alpha.
-        b_raw: ``[B*T, HV]`` raw beta.
+        a_raw: ``[T, HV]`` raw alpha.
+        b_raw: ``[T, HV]`` raw beta.
 
     Returns:
-        ``(o, final_state)`` where ``o`` is ``[B, T, HV, V]`` and
+        ``(o, final_state)`` where ``o`` is ``[1, T, HV, V]`` and
         ``final_state`` is ``[N, HV, K, V]``.
     """
     scale = k.shape[-1] ** -0.5
 
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    assert q.dim() == 4 and q.shape[0] == 1, "q must be [1, T, H, K]"
+    assert k.dim() == 4 and k.shape[0] == 1, "k must be [1, T, H, K]"
+    assert v.dim() == 4 and v.shape[0] == 1, "v must be [1, T, HV, V]"
+    T, H, K = k.shape[1], k.shape[2], k.shape[3]
+    V = v.shape[-1]
     HV = v.shape[2]
     N = len(cu_seqlens) - 1
     q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
@@ -217,14 +220,9 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV)
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
     BK = triton.next_power_of_2(K)
-    if T == 1:
-        BV = min(triton.next_power_of_2(V), 32)
-        num_warps = 4
-        num_stages = 1
-    else:
-        BV = min(triton.next_power_of_2(V), 8)
-        num_warps = 1
-        num_stages = 3
+    BV = min(triton.next_power_of_2(V), 8)
+    num_warps = 1
+    num_stages = 3
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 
@@ -259,7 +257,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         scale=scale,
         N=N,
         T=T,
-        B=B,
         H=H,
         HV=HV,
         K=K,
