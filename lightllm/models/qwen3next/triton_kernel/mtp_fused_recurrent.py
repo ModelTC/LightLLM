@@ -99,7 +99,6 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    INPLACE_FINAL_STATE: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -184,14 +183,11 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
         b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        if INPLACE_FINAL_STATE:
-            if HAS_SEPARATE_WRITE_INDICES:
-                write_idx = tl.load(ssm_state_write_indices + i_n * stride_write_indices_seq + i_t).to(tl.int64)
-            else:
-                write_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64)
-            p_ht = ht + write_idx * stride_final_state_token
+        if HAS_SEPARATE_WRITE_INDICES:
+            write_idx = tl.load(ssm_state_write_indices + i_n * stride_write_indices_seq + i_t).to(tl.int64)
         else:
-            p_ht = ht + (bos + i_t) * stride_final_state_token
+            write_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64)
+        p_ht = ht + write_idx * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
@@ -215,7 +211,6 @@ def mtp_fused_recurrent_gated_delta_rule(
     beta: torch.Tensor | None = None,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
-    inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     ssm_state_write_indices: torch.Tensor | None = None,
@@ -238,8 +233,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         beta: ``[B, T, HV]`` betas (unused when ``FUSE_GATING=True``).
         scale: sqrt(d_head) ** -0.5.  Defaults to ``K ** -0.5`` when None.
         initial_state: ``[N, HV, K, V]`` initial SSM state.
-        inplace_final_state: store the final state in-place inside
-            ``initial_state`` when True.
         cu_seqlens: ``[N+1]`` int64 cumulative sequence lengths for the
             varlen (MTP verify) path.  None for equal-length decode.
         ssm_state_indices: ``[N,]`` or ``[N, S+1]`` int32 slot indices.
@@ -290,10 +283,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         o = out.unsqueeze(0) if out.ndim == v.ndim else out
     else:
         o = q.new_empty(NK, *v.shape)
-    if inplace_final_state:
-        final_state = initial_state
-    else:
-        final_state = q.new_empty(T, HV, K, V, dtype=initial_state.dtype)
+    final_state = initial_state
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
@@ -356,7 +346,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         SOFTPLUS_THRESHOLD=20.0,
         IS_BETA_HEADWISE=False if fuse_gating else (beta.ndim == v.ndim),
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        INPLACE_FINAL_STATE=inplace_final_state,
         IS_KDA=False,
         FUSE_GATING=fuse_gating,
         num_warps=num_warps,

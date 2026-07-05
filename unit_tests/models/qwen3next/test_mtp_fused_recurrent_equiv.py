@@ -17,7 +17,6 @@ def _run_both(
     k,
     v,
     initial_state,
-    inplace_final_state,
     cu_seqlens,
     ssm_state_indices,
     num_accepted_tokens,
@@ -37,7 +36,7 @@ def _run_both(
         k=k,
         v=v,
         initial_state=state_old,
-        inplace_final_state=inplace_final_state,
+        inplace_final_state=True,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
@@ -53,7 +52,6 @@ def _run_both(
         k=k,
         v=v,
         initial_state=state_new,
-        inplace_final_state=inplace_final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
@@ -89,7 +87,6 @@ def test_decode_path_fused_gating(batch):
         k,
         v,
         ssm_state,
-        True,
         None,
         idx,
         None,
@@ -134,7 +131,6 @@ def test_mtp_verify_path(mtp_step):
         k,
         v,
         ssm_state,
-        True,
         cu_seqlens.to(torch.long),
         ssm_idx,
         num_accepted,
@@ -188,7 +184,6 @@ def test_strided_views_identical(batch):
         k,
         v,
         ssm_state,
-        True,
         None,
         idx,
         None,
@@ -227,7 +222,6 @@ def test_qk_l2norm_flag(without_qk_norm):
         k,
         v,
         ssm_state,
-        True,
         None,
         idx,
         None,
@@ -242,43 +236,6 @@ def test_qk_l2norm_flag(without_qk_norm):
         o_old, o_new
     ), f"l2norm={not without_qk_norm}: output mis, max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
     assert torch.equal(fs_old, fs_new), f"l2norm={not without_qk_norm}: final_state mismatch"
-
-
-@pytest.mark.parametrize("inplace", [True, False])
-def test_inplace_final_state(inplace):
-    """inplace_final_state=True/False produce identical outputs (only storage differs)."""
-    torch.manual_seed(271)
-    H, HV, K, V = 2, 8, 64, 64
-    batch, cache_slots = 1, 16
-
-    q = torch.randn(batch, 1, H, K, device="cuda", dtype=torch.bfloat16)
-    k = torch.randn(batch, 1, H, K, device="cuda", dtype=torch.bfloat16)
-    v = torch.randn(batch, 1, HV, V, device="cuda", dtype=torch.bfloat16)
-    A_log = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
-    dt_bias = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
-    a_raw = torch.randn(batch, HV, device="cuda", dtype=torch.bfloat16)
-    b_raw = torch.randn(batch, HV, device="cuda", dtype=torch.bfloat16)
-    ssm_state = torch.randn(cache_slots, HV, K, V, device="cuda", dtype=torch.bfloat16)
-    idx = torch.randperm(cache_slots, device="cuda")[:batch].to(torch.int32)
-
-    o_old, o_new, fs_old, fs_new = _run_both(
-        q,
-        k,
-        v,
-        ssm_state,
-        inplace,
-        None,
-        idx,
-        None,
-        A_log,
-        dt_bias,
-        a_raw,
-        b_raw,
-        True,
-    )
-
-    assert torch.equal(o_old, o_new), f"inplace={inplace}: output mismatch"
-    assert torch.equal(fs_old, fs_new), f"inplace={inplace}: final_state mismatch"
 
 
 if __name__ == "__main__":

@@ -516,7 +516,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             k=key,
             v=value,
             initial_state=ssm_states,
-            inplace_final_state=True,
             cu_seqlens=cu_seqlens_q.to(torch.long),
             ssm_state_indices=infer_state.b_ssm_buffer_idx,
             ssm_state_write_indices=infer_state.b_ssm_buffer_idx,
