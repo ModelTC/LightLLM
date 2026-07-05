@@ -214,7 +214,6 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
     use_qk_l2norm_in_kernel: bool = False,
-    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -235,7 +234,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         dt_bias: ``[HV]`` per-head dt bias.
         a_raw: ``[B*T, HV]`` raw alpha.
         b_raw: ``[B*T, HV]`` raw beta.
-        out: optional pre-allocated output tensor.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[B, T, HV, V]`` and
@@ -263,10 +261,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 
-    if out is not None:
-        o = out.unsqueeze(0) if out.ndim == v.ndim else out
-    else:
-        o = q.new_empty(NK, *v.shape)
+    o = q.new_empty(NK, *v.shape)
     final_state = initial_state
 
     stride_init_state_token = initial_state.stride(0)
