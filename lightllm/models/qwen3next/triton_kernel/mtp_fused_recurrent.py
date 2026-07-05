@@ -17,23 +17,6 @@ import triton.language as tl
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _ensure_qkv_token_strided(x: torch.Tensor):
-    if x.stride()[-2:] != (x.shape[-1], 1):
-        x = x.contiguous()
-    return x, x.stride(1)
-
-
-def _ensure_gate_token_strided(x: torch.Tensor):
-    if x.stride(1) != 1:
-        x = x.contiguous()
-    return x, x.stride(0)
-
-
-# ---------------------------------------------------------------------------
 # Triton kernel
 # ---------------------------------------------------------------------------
 
@@ -270,3 +253,20 @@ def mtp_fused_recurrent_gated_delta_rule(
     )
     o = o.squeeze(0)
     return o, final_state
+
+
+# ---------------------------------------------------------------------------
+# Stride helpers
+# ---------------------------------------------------------------------------
+
+
+def _ensure_qkv_token_strided(x: torch.Tensor):
+    if x.stride()[-2:] != (x.shape[-1], 1):
+        x = x.contiguous()
+    return x, x.stride(1)
+
+
+def _ensure_gate_token_strided(x: torch.Tensor):
+    if x.stride(1) != 1:
+        x = x.contiguous()
+    return x, x.stride(0)
