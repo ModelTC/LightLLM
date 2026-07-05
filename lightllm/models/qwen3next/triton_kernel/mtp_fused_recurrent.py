@@ -213,7 +213,6 @@ def mtp_fused_recurrent_gated_delta_rule(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
-    scale: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -236,17 +235,13 @@ def mtp_fused_recurrent_gated_delta_rule(
         dt_bias: ``[HV]`` per-head dt bias.
         a_raw: ``[B*T, HV]`` raw alpha.
         b_raw: ``[B*T, HV]`` raw beta.
-        scale: sqrt(d_head) ** -0.5.  Defaults to ``K ** -0.5`` when None.
         out: optional pre-allocated output tensor.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[B, T, HV, V]`` and
         ``final_state`` is ``[N, HV, K, V]``.
     """
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
+    scale = k.shape[-1] ** -0.5
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
