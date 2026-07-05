@@ -63,7 +63,6 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
     v,
-    beta,
     o,
     h0,
     ht,
@@ -99,14 +98,11 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    IS_BETA_HEADWISE: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
-    IS_KDA: tl.constexpr,
     HAS_SEPARATE_WRITE_INDICES: tl.constexpr,
-    FUSE_GATING: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -208,18 +204,17 @@ def mtp_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    beta: torch.Tensor | None = None,
+    initial_state: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    ssm_state_write_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    a_raw: torch.Tensor,
+    b_raw: torch.Tensor,
     scale: float | None = None,
-    initial_state: torch.Tensor | None = None,
-    cu_seqlens: torch.Tensor | None = None,
-    ssm_state_indices: torch.Tensor | None = None,
-    ssm_state_write_indices: torch.Tensor | None = None,
-    num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
-    A_log: torch.Tensor | None = None,
-    dt_bias: torch.Tensor | None = None,
-    a_raw: torch.Tensor | None = None,
-    b_raw: torch.Tensor | None = None,
     out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
@@ -230,38 +225,32 @@ def mtp_fused_recurrent_gated_delta_rule(
         q:  ``[B, T, H, K]`` or ``[1, T, H, K]`` queries.
         k:  ``[B, T, H, K]`` or ``[1, T, H, K]`` keys.
         v:  ``[B, T, HV, V]`` or ``[1, T, HV, V]`` values (GVA when HV > H).
-        beta: ``[B, T, HV]`` betas (unused when ``FUSE_GATING=True``).
-        scale: sqrt(d_head) ** -0.5.  Defaults to ``K ** -0.5`` when None.
         initial_state: ``[N, HV, K, V]`` initial SSM state.
         cu_seqlens: ``[N+1]`` int64 cumulative sequence lengths for the
-            varlen (MTP verify) path.  None for equal-length decode.
-        ssm_state_indices: ``[N,]`` or ``[N, S+1]`` int32 slot indices.
-        ssm_state_write_indices: separate write indices for the state
-            propagation optimisation.
-        num_accepted_tokens: ``[N,]`` int32.  When not None the read offset
-            for each sequence is ``num_accepted_tokens[i] - 1``.
-        A_log: ``[HV]`` per-head log decay (fused-gating mode).
-        dt_bias: ``[HV]`` per-head dt bias (fused-gating mode).
-        a_raw: ``[B*T, HV]`` raw alpha (fused-gating mode).
-        b_raw: ``[B*T, HV]`` raw beta (fused-gating mode).
+            varlen (MTP verify) path.
+        ssm_state_indices: ``[N, S+1]`` int32 slot indices (2D).
+        ssm_state_write_indices: ``[N, S+1]`` int32 write slot indices.
+        num_accepted_tokens: ``[N]`` int32.  The read offset for each
+            sequence is ``num_accepted_tokens[i] - 1``.
+        A_log: ``[HV]`` per-head log decay.
+        dt_bias: ``[HV]`` per-head dt bias.
+        a_raw: ``[B*T, HV]`` raw alpha.
+        b_raw: ``[B*T, HV]`` raw beta.
+        scale: sqrt(d_head) ** -0.5.  Defaults to ``K ** -0.5`` when None.
         out: optional pre-allocated output tensor.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[B, T, HV, V]`` and
         ``final_state`` is ``[N, HV, K, V]``.
     """
-    fuse_gating = A_log is not None
-
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
-    if not fuse_gating and beta is None:
-        beta = torch.ones_like(q[..., 0])
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    N = len(cu_seqlens) - 1
     q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
     k, stride_k_tok = _ensure_qkv_token_strided(k, H * K)
     v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
@@ -288,28 +277,17 @@ def mtp_fused_recurrent_gated_delta_rule(
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
 
-    if ssm_state_indices is None:
-        stride_indices_seq, stride_indices_tok = 1, 1
-    elif ssm_state_indices.ndim == 1:
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
-    else:
-        assert ssm_state_indices.stride(-1) == 1, "2D ssm_state_indices must have contiguous rows"
-        stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
+    assert ssm_state_indices.stride(-1) == 1, "2D ssm_state_indices must have contiguous rows"
+    stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    if ssm_state_write_indices is None:
-        stride_write_indices_seq, stride_write_indices_tok = 1, 1
-    elif ssm_state_write_indices.ndim == 1:
-        stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride(0), 1
-    else:
-        assert ssm_state_write_indices.stride(-1) == 1, "2D ssm_state_write_indices must have contiguous rows"
-        stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride()
+    assert ssm_state_write_indices.stride(-1) == 1, "2D ssm_state_write_indices must have contiguous rows"
+    stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride()
 
     grid = (NK, NV, N * HV)
     _fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
-        beta=beta,
         o=o,
         h0=initial_state,
         ht=final_state,
@@ -344,10 +322,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         stride_write_indices_tok=stride_write_indices_tok,
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
-        IS_BETA_HEADWISE=False if fuse_gating else (beta.ndim == v.ndim),
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        IS_KDA=False,
-        FUSE_GATING=fuse_gating,
         num_warps=num_warps,
         num_stages=num_stages,
     )
