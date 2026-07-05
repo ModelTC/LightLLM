@@ -21,26 +21,15 @@ import triton.language as tl
 # ---------------------------------------------------------------------------
 
 
-def _ensure_qkv_token_strided(x: torch.Tensor, inner_numel: int):
-    if x is None:
-        return None, 0
-
-    assert x.shape[0] == 1 or x.shape[1] == 1, "q/k/v must use layout [tokens, 1, head, dim] or [1, tokens, head, dim]"
-
-    tail_contiguous = x.stride()[-2:] == (x.shape[-1], 1)
-    if not tail_contiguous:
+def _ensure_qkv_token_strided(x: torch.Tensor):
+    if x.stride()[-2:] != (x.shape[-1], 1):
         x = x.contiguous()
-        return x, inner_numel
-    tok_dim = 0 if x.shape[1] == 1 else 1
-    return x, x.stride(tok_dim)
+    return x, x.stride(1)
 
 
-def _ensure_gate_token_strided(x: torch.Tensor, inner_numel: int):
-    if x is None:
-        return None, 0
+def _ensure_gate_token_strided(x: torch.Tensor):
     if x.stride(1) != 1:
         x = x.contiguous()
-        return x, inner_numel
     return x, x.stride(0)
 
 
@@ -214,11 +203,11 @@ def mtp_fused_recurrent_gated_delta_rule(
     V = v.shape[-1]
     HV = v.shape[2]
     N = len(cu_seqlens) - 1
-    q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
-    k, stride_k_tok = _ensure_qkv_token_strided(k, H * K)
-    v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
-    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw, HV)
-    b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw, HV)
+    q, stride_q_tok = _ensure_qkv_token_strided(q)
+    k, stride_k_tok = _ensure_qkv_token_strided(k)
+    v, stride_v_tok = _ensure_qkv_token_strided(v)
+    a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw)
+    b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw)
     BK = triton.next_power_of_2(K)
     BV = min(triton.next_power_of_2(V), 8)
     num_warps = 1
