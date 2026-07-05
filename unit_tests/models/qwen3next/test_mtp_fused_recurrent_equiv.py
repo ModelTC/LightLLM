@@ -25,7 +25,6 @@ def _run_both(
     dt_bias,
     a_raw,
     b_raw,
-    use_qk_l2norm_in_kernel,
 ):
     """Run old (via autograd.Function) and new (direct kernel) side-by-side."""
     state_old = initial_state.clone()
@@ -41,7 +40,7 @@ def _run_both(
         ssm_state_indices=ssm_state_indices,
         ssm_state_write_indices=ssm_state_write_indices,
         num_accepted_tokens=num_accepted_tokens,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_qk_l2norm_in_kernel=True,
         A_log=A_log,
         dt_bias=dt_bias,
         a_raw=a_raw,
@@ -57,7 +56,6 @@ def _run_both(
         ssm_state_indices=ssm_state_indices,
         ssm_state_write_indices=ssm_state_write_indices,
         num_accepted_tokens=num_accepted_tokens,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         A_log=A_log,
         dt_bias=dt_bias,
         a_raw=a_raw,
@@ -106,7 +104,6 @@ def test_decode_path_fused_gating(batch):
         dt_bias,
         a_raw,
         b_raw,
-        True,
     )
 
     assert torch.equal(
@@ -149,7 +146,6 @@ def test_mtp_verify_path(mtp_step):
         dt_bias,
         a_raw,
         b_raw,
-        True,
     )
 
     assert torch.equal(
@@ -200,53 +196,12 @@ def test_strided_views_identical(batch):
         dt_bias,
         a_raw,
         b_raw,
-        True,
     )
 
     assert torch.equal(
         o_old, o_new
     ), f"strided output mismatch, max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
     assert torch.equal(fs_old, fs_new), "strided final_state mismatch"
-
-
-@pytest.mark.parametrize("without_qk_norm", [True, False])
-def test_qk_l2norm_flag(without_qk_norm):
-    """use_qk_l2norm_in_kernel flag behaves the same."""
-    torch.manual_seed(314)
-    H, HV, K, V = 2, 8, 128, 128
-    batch, cache_slots = 2, 32
-
-    q = torch.randn(batch, 1, H, K, device="cuda", dtype=torch.bfloat16)
-    k = torch.randn(batch, 1, H, K, device="cuda", dtype=torch.bfloat16)
-    v = torch.randn(batch, 1, HV, V, device="cuda", dtype=torch.bfloat16)
-    A_log = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
-    dt_bias = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
-    a_raw = torch.randn(batch, HV, device="cuda", dtype=torch.bfloat16)
-    b_raw = torch.randn(batch, HV, device="cuda", dtype=torch.bfloat16)
-    ssm_state = torch.randn(cache_slots, HV, K, V, device="cuda", dtype=torch.bfloat16)
-    cu, idx, widx, nac = _decode_meta(batch, cache_slots)
-
-    o_old, o_new, fs_old, fs_new = _run_both(
-        q,
-        k,
-        v,
-        ssm_state,
-        cu.to(torch.long),
-        idx,
-        widx,
-        nac,
-        A_log,
-        dt_bias,
-        a_raw,
-        b_raw,
-        not without_qk_norm,
-    )
-
-    assert torch.equal(o_old, o_new), (
-        f"l2norm={not without_qk_norm}: output mismatch, "
-        f"max diff={torch.abs(o_old.float() - o_new.float()).max().item():.6f}"
-    )
-    assert torch.equal(fs_old, fs_new), f"l2norm={not without_qk_norm}: final_state mismatch"
 
 
 if __name__ == "__main__":

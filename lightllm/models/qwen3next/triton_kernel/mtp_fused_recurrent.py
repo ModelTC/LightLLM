@@ -98,7 +98,6 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
@@ -158,9 +157,8 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
 
-        if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         b_a = tl.load(p_a_raw).to(tl.float32)
         x = b_a + b_dt_bias
@@ -213,7 +211,6 @@ def mtp_fused_recurrent_gated_delta_rule(
     dt_bias: torch.Tensor,
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
-    use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -312,7 +309,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         stride_write_indices_tok=stride_write_indices_tok,
         SOFTPLUS_BETA=1.0,
         SOFTPLUS_THRESHOLD=20.0,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         num_warps=num_warps,
         num_stages=num_stages,
     )

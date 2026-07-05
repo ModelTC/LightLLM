@@ -520,7 +520,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             ssm_state_indices=infer_state.b_ssm_buffer_idx,
             ssm_state_write_indices=infer_state.b_ssm_buffer_idx,
             num_accepted_tokens=infer_state.b_num_accepted_tokens,
-            use_qk_l2norm_in_kernel=True,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,
             a_raw=a,
