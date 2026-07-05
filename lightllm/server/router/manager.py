@@ -26,6 +26,7 @@ from .dynamic_prompt.radix_cache import RadixCacheReadOnlyClient
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.server.core.objs.shm_objs_io_buffer import ShmObjsIOBuffer
 from lightllm.utils.log_utils import init_logger, log_time_ready
+from lightllm.utils.gc_utils import freeze_gc
 from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
@@ -569,5 +570,6 @@ def start_router_process(args, pipe_writer):
         raise
 
     pipe_writer.send("init ok")
+    freeze_gc("router")
     loop.run_until_complete(router.loop_for_fwd())
     return

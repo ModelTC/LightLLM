@@ -16,6 +16,7 @@ from ..tokenizer import get_tokenizer
 import pickle
 import time
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.gc_utils import freeze_gc
 from lightllm.utils.envs_utils import get_unique_server_name
 
 logger = init_logger(__name__)
@@ -179,5 +180,6 @@ def start_detokenization_process(args, pipe_writer):
         pipe_writer.send(str(e))
         raise
     pipe_writer.send("init ok")
+    freeze_gc("detokenization")
     manager.handle_loop()
     return
