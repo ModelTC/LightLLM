@@ -63,7 +63,6 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
     v,
-    g,
     beta,
     o,
     h0,
@@ -133,21 +132,10 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     p_q = q + bos * stride_q_tok + i_h * K + o_k
     p_k = k + bos * stride_k_tok + i_h * K + o_k
     p_v = v + bos * stride_v_tok + i_hv * V + o_v
-    if FUSE_GATING:
-        b_A_log = tl.load(A_log + i_hv).to(tl.float32)
-        b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
-        p_a_raw = a_raw + bos * stride_a_tok + i_hv
-        p_b_raw = b_raw + bos * stride_b_tok + i_hv
-    else:
-        if IS_BETA_HEADWISE:
-            p_beta = beta + (bos * HV + i_hv) * V + o_v
-        else:
-            p_beta = beta + bos * HV + i_hv
-
-        if not IS_KDA:
-            p_g = g + bos * HV + i_hv
-        else:
-            p_gk = g + (bos * HV + i_hv) * K + o_k
+    b_A_log = tl.load(A_log + i_hv).to(tl.float32)
+    b_dt_bias = tl.load(dt_bias + i_hv).to(tl.float32)
+    p_a_raw = a_raw + bos * stride_a_tok + i_hv
+    p_b_raw = b_raw + bos * stride_b_tok + i_hv
 
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
@@ -179,29 +167,17 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        if FUSE_GATING:
-            b_a = tl.load(p_a_raw).to(tl.float32)
-            x = b_a + b_dt_bias
-            softplus_x = tl.where(
-                SOFTPLUS_BETA * x <= SOFTPLUS_THRESHOLD,
-                (1.0 / SOFTPLUS_BETA) * tl.log(1.0 + tl.exp(SOFTPLUS_BETA * x)),
-                x,
-            )
-            b_g = -tl.exp(b_A_log) * softplus_x
-            b_h *= tl.exp(b_g)
-            b_b = tl.load(p_b_raw).to(tl.float32)
-            b_beta = tl.sigmoid(b_b)
-        else:
-            if not IS_KDA:
-                b_g = tl.load(p_g).to(tl.float32)
-                b_h *= tl.exp(b_g)
-            else:
-                b_gk = tl.load(p_gk).to(tl.float32)
-                b_h *= tl.exp(b_gk[:, None])
-            if IS_BETA_HEADWISE:
-                b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
-            else:
-                b_beta = tl.load(p_beta).to(tl.float32)
+        b_a = tl.load(p_a_raw).to(tl.float32)
+        x = b_a + b_dt_bias
+        softplus_x = tl.where(
+            SOFTPLUS_BETA * x <= SOFTPLUS_THRESHOLD,
+            (1.0 / SOFTPLUS_BETA) * tl.log(1.0 + tl.exp(SOFTPLUS_BETA * x)),
+            x,
+        )
+        b_g = -tl.exp(b_A_log) * softplus_x
+        b_h *= tl.exp(b_g)
+        b_b = tl.load(p_b_raw).to(tl.float32)
+        b_beta = tl.sigmoid(b_b)
         b_v -= tl.sum(b_h * b_k[:, None], 0)
         b_v *= b_beta
         b_h += b_k[:, None] * b_v[None, :]
@@ -223,15 +199,8 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
         p_k += stride_k_tok
         p_o += HV * V
         p_v += stride_v_tok
-        if FUSE_GATING:
-            p_a_raw += stride_a_tok
-            p_b_raw += stride_b_tok
-        else:
-            if not IS_KDA:
-                p_g += HV
-            else:
-                p_gk += HV * K
-            p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+        p_a_raw += stride_a_tok
+        p_b_raw += stride_b_tok
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +212,6 @@ def mtp_fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
@@ -267,7 +235,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         q:  ``[B, T, H, K]`` or ``[1, T, H, K]`` queries.
         k:  ``[B, T, H, K]`` or ``[1, T, H, K]`` keys.
         v:  ``[B, T, HV, V]`` or ``[1, T, HV, V]`` values (GVA when HV > H).
-        g:  ``[B, T, HV]`` decays (unused when ``FUSE_GATING=True``).
         beta: ``[B, T, HV]`` betas (unused when ``FUSE_GATING=True``).
         scale: sqrt(d_head) ** -0.5.  Defaults to ``K ** -0.5`` when None.
         initial_state: ``[N, HV, K, V]`` initial SSM state.
@@ -352,7 +319,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         q=q,
         k=k,
         v=v,
-        g=g,
         beta=beta,
         o=o,
         h0=initial_state,
