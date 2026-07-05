@@ -21,7 +21,7 @@ import triton.language as tl
 # ---------------------------------------------------------------------------
 
 
-@triton.jit(do_not_specialize=["N", "T"])
+@triton.jit
 def _fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -38,21 +38,21 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     a_raw,
     b_raw,
     scale,
-    N: tl.int64,
-    T: tl.int64,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_q_tok: tl.constexpr,
+    stride_q_tok: tl.constexpr,  # token stride in q/k/v/a/b
     stride_k_tok: tl.constexpr,
     stride_v_tok: tl.constexpr,
     stride_a_tok: tl.constexpr,
     stride_b_tok: tl.constexpr,
-    stride_init_state_token: tl.constexpr,
+    stride_o_tok: tl.constexpr,  # token stride in output ([HV, V] contiguous → HV*V)
+    stride_init_state_token: tl.constexpr,  # stride per slot in initial/final state
     stride_final_state_token: tl.constexpr,
+    stride_state_hv: tl.constexpr,  # stride per HV-head inside a state slot (K*V)
     stride_indices_seq: tl.constexpr,
     stride_indices_tok: tl.constexpr,
     stride_write_indices_seq: tl.constexpr,
@@ -60,20 +60,18 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     SOFTPLUS_BETA: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_v, i_n, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_hv // (HV // H)
     bos, eos = (
         tl.load(cu_seqlens + i_n).to(tl.int64),
         tl.load(cu_seqlens + i_n + 1).to(tl.int64),
     )
-    all = T
     T = eos - bos
 
     if T == 0:
         return
 
-    o_k = i_k * BK + tl.arange(0, BK)
+    o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
     p_q = q + bos * stride_q_tok + i_h * K + o_k
@@ -84,7 +82,7 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     p_a_raw = a_raw + bos * stride_a_tok + i_hv
     p_b_raw = b_raw + bos * stride_b_tok + i_hv
 
-    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
+    p_o = o + bos * stride_o_tok + i_hv * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
@@ -93,7 +91,7 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
     p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(tl.int64) * stride_init_state_token
-    p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+    p_h0 = p_h0 + i_hv * stride_state_hv + o_k[:, None] * V + o_v[None, :]
     b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in range(0, T):
@@ -123,12 +121,12 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
 
         write_idx = tl.load(ssm_state_write_indices + i_n * stride_write_indices_seq + i_t).to(tl.int64)
         p_ht = ht + write_idx * stride_final_state_token
-        p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+        p_ht = p_ht + i_hv * stride_state_hv + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += stride_q_tok
         p_k += stride_k_tok
-        p_o += HV * V
+        p_o += stride_o_tok
         p_v += stride_v_tok
         p_a_raw += stride_a_tok
         p_b_raw += stride_b_tok
@@ -182,7 +180,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     assert q.dim() == 4 and q.shape[0] == 1, "q must be [1, T, H, K]"
     assert k.dim() == 4 and k.shape[0] == 1, "k must be [1, T, H, K]"
     assert v.dim() == 4 and v.shape[0] == 1, "v must be [1, T, HV, V]"
-    T, H, K = k.shape[1], k.shape[2], k.shape[3]
+    _, H, K = k.shape[1], k.shape[2], k.shape[3]
     V = v.shape[-1]
     HV = v.shape[2]
     N = len(cu_seqlens) - 1
@@ -192,17 +190,19 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw, stride_a_tok = _ensure_gate_token_strided(a_raw)
     b_raw, stride_b_tok = _ensure_gate_token_strided(b_raw)
     BK = triton.next_power_of_2(K)
+    assert K == BK, f"K={K} must be a power of 2"
     BV = min(triton.next_power_of_2(V), 8)
     num_warps = 1
     num_stages = 3
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, "NK > 1 is not supported yet"
+    NV = triton.cdiv(V, BV)
 
-    o = q.new_empty(NK, *v.shape)
+    o = q.new_empty(v.shape)
     final_state = initial_state
 
     stride_init_state_token = initial_state.stride(0)
     stride_final_state_token = final_state.stride(0)
+    stride_o_tok = HV * V
+    stride_state_hv = K * V
 
     assert ssm_state_indices.stride(-1) == 1, "2D ssm_state_indices must have contiguous rows"
     stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
@@ -210,7 +210,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     assert ssm_state_write_indices.stride(-1) == 1, "2D ssm_state_write_indices must have contiguous rows"
     stride_write_indices_seq, stride_write_indices_tok = ssm_state_write_indices.stride()
 
-    grid = (NK, NV, N * HV)
+    grid = (NV, N, HV)
     _fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
@@ -227,8 +227,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         a_raw=a_raw,
         b_raw=b_raw,
         scale=scale,
-        N=N,
-        T=T,
         H=H,
         HV=HV,
         K=K,
@@ -240,8 +238,10 @@ def mtp_fused_recurrent_gated_delta_rule(
         stride_v_tok=stride_v_tok,
         stride_a_tok=stride_a_tok,
         stride_b_tok=stride_b_tok,
+        stride_o_tok=stride_o_tok,
         stride_init_state_token=stride_init_state_token,
         stride_final_state_token=stride_final_state_token,
+        stride_state_hv=stride_state_hv,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
         stride_write_indices_seq=stride_write_indices_seq,
@@ -251,7 +251,6 @@ def mtp_fused_recurrent_gated_delta_rule(
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    o = o.squeeze(0)
     return o, final_state
 
 
