@@ -132,13 +132,17 @@ Static Inference Performance Testing (Static Inference Benchmark)
 ------------------------------------------------------------------
 
 Static inference testing is used to evaluate model inference performance under fixed input conditions, mainly evaluating operator quality.
+The unified entry is ``test/benchmark/static_inference/test_model.py``. The
+core implementation lives in ``test/benchmark/static_inference/static_benchmark.py``.
 
-Model Inference Testing (model_infer.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Model Inference Testing
+~~~~~~~~~~~~~~~~~~~~~~~
 
 **Main Features:**
 
 - Supports prefill and decode stage performance testing
+- Supports prefill static TPS with multiple input lengths, batch sizes, and chunked prefill sizes
+- Supports decode static TPS with multiple batch sizes, context lengths, and output lengths
 - Supports microbatch overlap optimization
 - Supports multi-GPU parallel inference
 - Provides detailed throughput statistics
@@ -149,23 +153,28 @@ Model Inference Testing (model_infer.py)
 
     python test/benchmark/static_inference/test_model.py \
         --model_dir /path/to/model \
-        --batch_size 32 \
-        --input_len 1024 \
-        --output_len 128 \
+        --benchmark all \
+        --batch_sizes 8,16,32 \
+        --input_lens 1024,2048 \
+        --context_lens 1024,4096 \
+        --output_lens 128 \
+        --chunked_prefill_sizes 512 \
         --tp 2 \
         --data_type bf16
 
 **Main Parameters:**
 
 - ``--model_dir``: Model path
-- ``--batch_size``: Batch size
-- ``--input_len``: Input sequence length
-- ``--output_len``: Output sequence length
+- ``--benchmark``: Benchmark stage, one of ``all``, ``prefill``, or ``decode``
+- ``--batch_size`` / ``--batch_sizes``: Single or multiple batch sizes
+- ``--input_len`` / ``--input_lens``: Prefill input lengths
+- ``--context_lens``: Decode context lengths
+- ``--output_len`` / ``--output_lens``: Decode output lengths
+- ``--chunked_prefill_sizes``: Prefill chunk sizes, default ``4096``; use ``full``, ``none``, or ``0`` for unchunked prefill
 - ``--tp``: Tensor Parallel degree
 - ``--data_type``: Data type (bf16/fp16/fp32)
 - ``--enable_prefill_microbatch_overlap``: Enable prefill microbatch overlap, only applicable to DeepSeek model EP mode
 - ``--enable_decode_microbatch_overlap``: Enable decode microbatch overlap, only applicable to DeepSeek model EP mode
-- ``--torch_profile``: Enable torch profiler for performance analysis
 
 .. note::
     Complete startup parameters are not listed here. Static testing scripts also share Lightllm's startup parameters. For more startup configurations, please refer to :ref:`tutorial/api_server_args_zh`.
@@ -176,10 +185,14 @@ Model Inference Testing (model_infer.py)
 - Decode stage throughput (tokens/s)
 - Latency statistics for each stage
 
-Multi-Token Prediction Performance Testing (model_infer_mtp.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Multi-Token Prediction Performance Testing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Multi-token prediction static performance testing with 100% acceptance rate by default, used to evaluate the ultimate performance of multi-token prediction. Currently only supports DeepSeek series models.
+Multi-token prediction static performance testing defaults to
+``--mtp_accept_rate 1.0``, which accepts all draft tokens. Lower values simulate
+MTP decode throughput with lower acceptance. DeepSeek R1 can use a main/draft
+model pair such as ``/mtc/models/DeepSeek-R1`` and
+``/mtc/models/DeepSeek-R1-NextN``.
 
 **Usage:**
 
@@ -187,13 +200,19 @@ Multi-token prediction static performance testing with 100% acceptance rate by d
 
     python test/benchmark/static_inference/test_model.py \
         --model_dir /path/to/main_model \
-        --mtp_mode deepseekv3 \
-        --mtp_step 1 \
+        --benchmark decode \
+        --mtp_mode eagle_with_att \
+        --mtp_step 2 \
         --mtp_draft_model_dir /path/to/draft_model \
-        --batch_size 32 \
-        --input_len 1024 \
-        --output_len 128
+        --mtp_accept_rate 0.8 \
+        --batch_sizes 8,16 \
+        --context_lens 1024,4096 \
+        --output_lens 128
 
 Parameter Description:
 
-- ``--model_dir``: Main model path 
+- ``--model_dir``: Main model path
+- ``--mtp_mode``: MTP mode, for example ``eagle_with_att``, ``vanilla_with_att``, ``eagle_no_att``, or ``vanilla_no_att``
+- ``--mtp_step``: Number of extra draft tokens predicted per decode step
+- ``--mtp_draft_model_dir``: Draft model path
+- ``--mtp_accept_rate``: Simulated per-draft-token accept probability; sampling is excluded from decode timing

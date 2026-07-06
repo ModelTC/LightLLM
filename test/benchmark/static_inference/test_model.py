@@ -1,52 +1,81 @@
-import os
 import sys
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-import unittest
-from model_infer import test_model_inference
-from model_infer_mtp import test_model_inference_mtp
-from lightllm.server.api_cli import make_argument_parser
-from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args
-from lightllm.utils.config_utils import get_config_json, get_dtype
+from pathlib import Path
+from types import SimpleNamespace
 
 
-class TestModelInfer(unittest.TestCase):
-    def test_model_infer(self):
-        args = get_env_start_args()
-        if args.data_type is None:
-            args.data_type = get_dtype(args.model_dir)
-        if args.mtp_mode == "deepseekv3":
-            test_model_inference_mtp(args)
-        else:
-            test_model_inference(args)
-        return
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
+for path in (SCRIPT_DIR, REPO_ROOT):
+    if str(path) not in sys.path:
+        sys.path.append(str(path))
+
+import static_benchmark
+from static_benchmark import main
+
+
+class _FakeDraftModel:
+    def __init__(self, kvargs):
+        self.kvargs = kvargs
+
+
+def _mtp_args(model_dir):
+    return SimpleNamespace(
+        mtp_mode="vanilla_with_att",
+        mtp_draft_model_dir=[model_dir],
+        disable_chunked_prefill=False,
+    )
+
+
+def _main_kvargs():
+    return {
+        "load_way": "HF",
+        "max_req_num": 4,
+        "max_seq_length": 128,
+        "data_type": "float16",
+        "graph_max_batch_size": 1,
+        "graph_max_len_in_batch": 128,
+        "disable_cudagraph": True,
+        "mem_fraction": 0.9,
+        "batch_max_tokens": None,
+        "quant_type": None,
+        "quant_cfg": None,
+        "expert_dtype": None,
+    }
+
+
+def _main_model():
+    return SimpleNamespace(mem_manager=SimpleNamespace(size=1024))
+
+
+def test_static_benchmark_accepts_qwen35_mtp_draft(monkeypatch):
+    monkeypatch.setattr(
+        static_benchmark.PretrainedConfig,
+        "get_config_dict",
+        lambda _: ({"model_type": "qwen3_5"}, None),
+    )
+    monkeypatch.setattr(static_benchmark, "Qwen3_5MTPModel", _FakeDraftModel, raising=False)
+
+    draft_models = static_benchmark.init_mtp_draft_models(_mtp_args("/draft"), _main_kvargs(), _main_model())
+
+    assert len(draft_models) == 1
+    assert isinstance(draft_models[0], _FakeDraftModel)
+    assert draft_models[0].kvargs["weight_dir"] == "/draft"
+
+
+def test_static_benchmark_accepts_qwen35_moe_text_mtp_draft(monkeypatch):
+    monkeypatch.setattr(
+        static_benchmark.PretrainedConfig,
+        "get_config_dict",
+        lambda _: ({"model_type": "qwen3_5_moe_text"}, None),
+    )
+    monkeypatch.setattr(static_benchmark, "Qwen3_5MoeMTPModel", _FakeDraftModel, raising=False)
+
+    draft_models = static_benchmark.init_mtp_draft_models(_mtp_args("/draft-moe"), _main_kvargs(), _main_model())
+
+    assert len(draft_models) == 1
+    assert isinstance(draft_models[0], _FakeDraftModel)
+    assert draft_models[0].kvargs["weight_dir"] == "/draft-moe"
 
 
 if __name__ == "__main__":
-    import torch
-
-    parser = make_argument_parser()
-    parser.add_argument("--batch_size", type=int, default=None, help="batch size")
-    parser.add_argument("--input_len", type=int, default=64, help="input sequence length")
-    parser.add_argument("--output_len", type=int, default=128, help="output sequence length")
-    parser.add_argument(
-        "--static_max_req_num",
-        type=int,
-        default=2048,
-        help="max_req_num used by the standalone static benchmark harness",
-    )
-    parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
-    )
-    parser.add_argument(
-        "--torch_profile",
-        action="store_true",
-        help="Enable torch profiler to profile the model",
-    )
-    args = parser.parse_args()
-    set_env_start_args(args)
-    torch.multiprocessing.set_start_method("spawn")
-    unittest.main(argv=["first-arg-is-ignored"])
+    main()
