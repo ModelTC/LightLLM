@@ -1,3 +1,4 @@
+import os
 import torch
 import time
 import copy
@@ -232,6 +233,27 @@ class ChunkedPrefillBackend(ModeBackend):
         event_pack.notify_pre_post_handle()
         return
 
+    def _init_mtp_fused_graph(self):
+        self.mtp_fused_graph = None
+        if get_env_start_args().disable_cudagraph:
+            return
+        if not (self.is_mtp_eagle and self.num_mtp_models == 1):
+            return
+        if self.enable_decode_microbatch_overlap or self.args.dp > 1:
+            return
+        from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
+
+        if enable_diverse_mode_gqa_decode_fast_kernel():
+            return
+        if os.getenv("LIGHTLLM_DISABLE_MTP_FUSED_GRAPH", "0") == "1":
+            logger.info("mtp fused decode graph disabled by env")
+            return
+        from .mtp_fused_decode_graph import MTPFusedDecodeGraph
+
+        self.mtp_fused_graph = MTPFusedDecodeGraph(backend=self)
+        self.mtp_fused_graph.warmup()
+        return
+
     def decode_mtp(
         self,
         event_pack: OverlapEventPack,
@@ -241,6 +263,19 @@ class ChunkedPrefillBackend(ModeBackend):
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+
+        if self.mtp_fused_graph is not None and self.mtp_fused_graph.can_run(
+            decode_reqs=decode_reqs,
+            max_kv_seq_len=model_input.max_kv_seq_len,
+            batch_size=model_input.batch_size,
+        ):
+            self._decode_mtp_fused(
+                event_pack=event_pack,
+                model_input=model_input,
+                run_reqs=run_reqs,
+                decode_reqs=decode_reqs,
+            )
+            return
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
@@ -310,6 +345,68 @@ class ChunkedPrefillBackend(ModeBackend):
             run_reqs=verify_ok_reqs,
             next_token_ids=next_token_ids_cpu[select_mask],
             next_token_logprobs=next_token_logprobs_cpu[select_mask],
+            run_reqs_update_packs=update_packs,
+            extra_post_req_handle_func=self.extra_post_req_handle_func,
+        )
+
+        if len(need_free_mem_indexes) > 0:
+            g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
+
+        # 第四阶段
+        event_pack.notify_pre_post_handle()
+        return
+
+    def _decode_mtp_fused(
+        self,
+        event_pack: OverlapEventPack,
+        model_input: ModelInput,
+        run_reqs: List[InferReq],
+        decode_reqs: List[InferReq],
+    ):
+        """
+        整个 mtp decode step (verify fwd + 采样 + verify + draft chain) 单 cuda graph 的执行路径。
+        与 decode_mtp 的阶段/事件协议保持一致。
+        """
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            fused_out = self.mtp_fused_graph.replay_verify(model_input=model_input, run_reqs=run_reqs)
+            accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="accepted_index",
+                gpu_tensor=fused_out.accepted_index,
+            )
+            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="mtp_accept_len",
+                gpu_tensor=fused_out.mtp_accept_len,
+            )
+            next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="next_token_ids",
+                gpu_tensor=fused_out.next_token_ids,
+            )
+            verify_event = torch.cuda.Event()
+            verify_event.record()
+
+            self.mtp_fused_graph.replay_draft()
+            sync_event = torch.cuda.Event()
+            sync_event.record()
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        verify_event.synchronize()
+        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu[i] == 1]
+        update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+
+        # 第三阶段
+        event_pack.notify_forward_and_wait_post_handle()
+        sync_event.synchronize()
+
+        need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
+        need_free_mem_indexes = torch.cat([need_free_mem_indexes, fused_out.eagle_mem_indexes_cpu], dim=0)
+
+        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
+        select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
+        self._post_handle(
+            run_reqs=verify_ok_reqs,
+            next_token_ids=next_token_ids_cpu[select_mask],
+            next_token_logprobs=None,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
