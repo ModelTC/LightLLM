@@ -91,6 +91,10 @@ def get_lightllm_gunicorn_keep_alive():
     return int(os.getenv("LIGHTLMM_GUNICORN_KEEP_ALIVE", 10))
 
 
+def get_lightllm_hypercorn_backlog():
+    return int(os.getenv("LIGHTLLM_HYPERCORN_BACKLOG", 1024))
+
+
 @lru_cache(maxsize=None)
 def get_lightllm_websocket_max_message_size():
     """

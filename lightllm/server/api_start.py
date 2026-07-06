@@ -11,7 +11,7 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
+from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive, get_lightllm_hypercorn_backlog
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -26,8 +26,15 @@ from lightllm.utils.config_utils import (
     auto_set_fused_shared_experts,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from .startup_status import log_machine_status
 
 logger = init_logger(__name__)
+
+
+def _check_anthropic_pdf_parsing_startup():
+    from . import api_anthropic
+
+    api_anthropic.check_pdf_parsing_supported_at_startup()
 
 
 def setup_signal_handlers(http_server_process, process_manager):
@@ -71,10 +78,30 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
+def _auto_set_parsers(args):
+    # 如果 tool_call_parser / reasoning_parser 是 None，尝试根据模型类型自动设置
+    if args.tool_call_parser is None:
+        from lightllm.utils.config_utils import get_tool_call_parser_for_model
+
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    if args.reasoning_parser is None:
+        from lightllm.utils.config_utils import get_reasoning_parser_for_model
+
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
+
 def normal_or_p_d_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+
+    if args.run_mode in ["normal", "prefill", "decode", "visual_only"]:
+        _check_anthropic_pdf_parsing_startup()
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -316,21 +343,7 @@ def normal_or_p_d_start(args):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
-    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
-    if args.tool_call_parser is None:
-        from lightllm.utils.config_utils import get_tool_call_parser_for_model
-
-        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
-        if args.tool_call_parser:
-            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
-
-    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
-    if args.reasoning_parser is None:
-        from lightllm.utils.config_utils import get_reasoning_parser_for_model
-
-        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
-        if args.reasoning_parser:
-            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+    _auto_set_parsers(args)
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
@@ -415,6 +428,7 @@ def normal_or_p_d_start(args):
     auto_configure_allreduce_flags_from_args(args)
 
     set_env_start_args(args)
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     ports_locker.release_port()
@@ -503,6 +517,8 @@ def normal_or_p_d_start(args):
         "lightllm.server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
+        "--backlog",
+        f"{get_lightllm_hypercorn_backlog()}",
     ]
 
     # 启动子进程
@@ -527,7 +543,10 @@ def pd_master_start(args):
     if args.run_mode != "pd_master":
         return
 
+    _check_anthropic_pdf_parsing_startup()
+
     auto_set_max_req_total_len(args)
+    _auto_set_parsers(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
@@ -538,6 +557,7 @@ def pd_master_start(args):
         args.pd_node_id = 0
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     can_use_ports = alloc_can_use_network_port(
@@ -572,6 +592,8 @@ def pd_master_start(args):
         "lightllm.server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
+        "--backlog",
+        f"{get_lightllm_hypercorn_backlog()}",
     ]
 
     http_server_process = subprocess.Popen(command)
@@ -616,6 +638,7 @@ def visual_only_start(args):
     can_use_ports = can_use_ports[args.visual_dp :]
     args.visual_node_id = uuid.uuid4().int
 
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
@@ -646,6 +669,7 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    log_machine_status(args)
     logger.info(f"all start args:{args}")
 
     if args.config_server_visual_redis_port is not None:
@@ -666,6 +690,8 @@ def config_server_start(args):
         "lightllm.server.config_server.api_http:app",
         "--keep-alive",
         f"{get_lightllm_gunicorn_keep_alive()}",
+        "--backlog",
+        f"{get_lightllm_hypercorn_backlog()}",
     ]
 
     http_server_process = subprocess.Popen(command)

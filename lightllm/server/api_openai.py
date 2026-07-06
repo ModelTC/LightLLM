@@ -30,7 +30,7 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
-from lightllm.utils.error_utils import ClientDisconnected
+from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -60,6 +60,23 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
+def _record_request_failure_metric():
+    try:
+        from .api_http import g_objs
+
+        if g_objs.metric_client is not None:
+            g_objs.metric_client.counter_inc("lightllm_request_failure")
+    except Exception:
+        logger.warning("Failed to record lightllm_request_failure metric", exc_info=True)
+
+
+def _stream_error_chunk(message: str, err_type: str, code: Optional[int] = None):
+    error = {"message": message, "type": err_type}
+    if code is not None:
+        error["code"] = code
+    return f"data: {json.dumps({'error': error}, ensure_ascii=False)}\n\n"
+
+
 async def _safe_stream_wrapper(stream_generator):
     """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
     event instead of letting the exception propagate to Starlette which prints a long traceback."""
@@ -67,12 +84,22 @@ async def _safe_stream_wrapper(stream_generator):
         async for item in stream_generator:
             yield item
     except ValueError as e:
-        error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
-        yield f"data: {error_data}\n\n"
+        _record_request_failure_metric()
+        yield _stream_error_chunk(str(e), "invalid_request_error")
+    except ServerBusyError as e:
+        logger.error("%s", str(e), exc_info=True)
+        _record_request_failure_metric()
+        yield _stream_error_chunk(str(e), "ServerBusyError", e.status_code)
     except ClientDisconnected as e:
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error("An error occurred in streaming response: %s", str(e), exc_info=True)
+        _record_request_failure_metric()
+        yield _stream_error_chunk(str(e), "InternalServerError")
 
 
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
@@ -234,6 +261,20 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             "The logit_bias parameter is not currently supported",
         )
 
+    if request.logprobs is True:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The logprobs parameter is not currently supported for chat completions",
+            param="logprobs",
+        )
+
+    if request.top_logprobs is not None:
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            "The top_logprobs parameter is not currently supported for chat completions",
+            param="top_logprobs",
+        )
+
     if request.function_call != "none":
         return create_error_response(HTTPStatus.BAD_REQUEST, "The function call feature is not supported")
 
@@ -314,7 +355,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
-        "return_logprobs": request.logprobs is True,
+        "return_logprobs": False,
         "seed": request.seed,
     }
 

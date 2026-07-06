@@ -281,11 +281,17 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     try:
         resp = await chat_completions_impl(request, raw_request)
+    except ServerBusyError as e:
+        logger.error("%s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
     return resp
 
 
@@ -298,11 +304,17 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
     try:
         resp = await completions_impl(request, raw_request)
+    except ServerBusyError as e:
+        logger.error("%s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
     return resp
 
 
