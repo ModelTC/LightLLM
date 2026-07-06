@@ -1,5 +1,6 @@
 import dataclasses
 import torch
+import torch.nn.functional as F
 from typing import TYPE_CHECKING, Tuple
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
@@ -70,10 +71,9 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         packed_kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        import flash_mla
+        from flash_mla import flash_mla_sparse_fwd
 
         nsa_dict = att_control.nsa_prefill_dict
-        topk_indices = nsa_dict["topk_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
         topk_mem_indices = nsa_dict["topk_mem_indices"]
@@ -91,18 +91,25 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             )
         else:
             kv = prefill_cache_kv
+            topk_indices = nsa_dict["topk_indices"]
 
         if topk_indices.ndim == 2:
             topk_indices = topk_indices.unsqueeze(1)
 
-        mla_out, _, _ = flash_mla.flash_mla_sparse_fwd(
+        real_head_num = q.shape[1]
+        head_block_size = 64
+        pad_head_num = (-real_head_num) % head_block_size
+        if pad_head_num:
+            q = F.pad(q, (0, 0, 0, pad_head_num))
+
+        mla_out, _, _ = flash_mla_sparse_fwd(
             q=q,
             kv=kv,
             indices=topk_indices,
             sm_scale=softmax_scale,
             d_v=kv_lora_rank,
         )
-        return mla_out
+        return mla_out[:, :real_head_num, :]
 
 
 @dataclasses.dataclass
@@ -141,9 +148,9 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
-        import flash_mla
+        from flash_mla import get_mla_metadata
 
-        self.flashmla_sched_meta, _ = flash_mla.get_mla_metadata()
+        self.flashmla_sched_meta, _ = get_mla_metadata()
         return
 
     def decode_att(
@@ -164,7 +171,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         packed_kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        import flash_mla
+        from flash_mla import flash_mla_with_kvcache
 
         nsa_dict = att_control.nsa_decode_dict
         topk_mem_indices = nsa_dict["topk_mem_indices"]
@@ -177,13 +184,26 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
 
         q_nope, q_rope = q
         q_all = torch.cat([q_nope, q_rope], dim=-1).unsqueeze(1).contiguous()
+
+        real_head_num = q_all.shape[2]
+        if real_head_num <= 64:
+            padded_head_num = 64
+        elif real_head_num <= 128:
+            padded_head_num = 128
+        else:
+            padded_head_num = real_head_num
+        if padded_head_num != real_head_num:
+            q_all = F.pad(q_all, (0, 0, 0, padded_head_num - real_head_num))
+
+        # Token-granular "pages": indices=topk_mem_indices are absolute KV-pool slots,
+        # so the kv cache is viewed as (num_tokens, 1, 1, bytes) and no block_table is needed.
         kv = torch.as_strided(
             packed_kv,
             size=(packed_kv.shape[0], 1, 1, packed_kv.shape[-1]),
             stride=(packed_kv.stride(0), packed_kv.shape[-1], packed_kv.shape[-1], packed_kv.stride(-1)),
         )
 
-        o_tensor, _ = flash_mla.flash_mla_with_kvcache(
+        o_tensor, _ = flash_mla_with_kvcache(
             q=q_all,
             k_cache=kv,
             block_table=None,
@@ -193,6 +213,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             softmax_scale=softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
-            indices=topk_mem_indices,
+            indices=topk_mem_indices.to(dtype=torch.int32),
         )
+        o_tensor = o_tensor[:, :, :real_head_num, :]
         return o_tensor[:, 0, :, :]  # [b, 1, h, d] -> [b, h, d]
