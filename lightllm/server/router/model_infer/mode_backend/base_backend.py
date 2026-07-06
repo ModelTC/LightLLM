@@ -237,6 +237,7 @@ class ModeBackend:
         # 开启 mtp 模式，需要完成mtp model的初始化
         if self.args.mtp_mode:
             self.init_mtp_draft_model(kvargs)
+            self._init_mtp_fused_graph()
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -288,6 +289,11 @@ class ModeBackend:
 
     def decode(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         raise NotImplementedError()
+
+    def _init_mtp_fused_graph(self):
+        # 由支持 mtp fused decode cuda graph 的子类 backend 重载。
+        self.mtp_fused_graph = None
+        return
 
     def init_mtp_draft_model(self, main_kvargs: dict):
         self.mtp_step = self.args.mtp_step

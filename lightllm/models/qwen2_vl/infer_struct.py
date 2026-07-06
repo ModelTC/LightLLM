@@ -20,13 +20,18 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         if self.is_prefill:
             self.position_ids = self.get_mrope_position(self.multimodal_params)
         else:
-            b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
-            for batch_idx, p in enumerate(self.multimodal_params):
-                position_delta = 0
-                for image in p["images"]:
-                    position_delta += image["grid_thwd"][3]
-                b_position_delta[batch_idx] = position_delta
-            position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
+            b_position_delta_gpu = getattr(self, "b_position_delta_gpu", None)
+            if b_position_delta_gpu is not None:
+                # mtp fused cuda graph 路径: delta 由静态显存 buffer 提供, 保持捕获安全
+                position_ids = self.position_ids + b_position_delta_gpu
+            else:
+                b_position_delta = [0 for _ in range(self.b_seq_len.shape[0])]
+                for batch_idx, p in enumerate(self.multimodal_params):
+                    position_delta = 0
+                    for image in p["images"]:
+                        position_delta += image["grid_thwd"][3]
+                    b_position_delta[batch_idx] = position_delta
+                position_ids = self.position_ids + torch.tensor(b_position_delta, device=self.position_ids.device)
             self.position_ids = position_ids.unsqueeze(0).expand(3, -1)
 
         self.position_ids = self.position_ids.contiguous()
