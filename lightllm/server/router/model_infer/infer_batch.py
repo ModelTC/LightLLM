@@ -195,7 +195,10 @@ class InferenceContext:
                 req.shared_kv_node = None
             return
 
-        if shared_kv_len < tail_big_page_token_num <= req.cur_kv_len:
+        # PD decode 节点的请求 kv 由 prefill 节点传输而来，本地没有 prefill 过程，不会记录大页
+        # linear att state 的 buffer id（linear_att_len_to_big_page_id 为空）。此时无法向 radix
+        # cache 插入大页节点（_insert_helper 会因取不到 buffer id 断言），只能走下方的纯释放分支。
+        if shared_kv_len < tail_big_page_token_num <= req.cur_kv_len and req.linear_att_len_to_big_page_id:
             free_token_index.append(
                 self.req_manager.req_to_token_indexs[req.req_idx][tail_big_page_token_num : req.cur_kv_len]
             )

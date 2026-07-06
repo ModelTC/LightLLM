@@ -69,6 +69,17 @@ class Qwen3NextMemManager(MemoryManager):
         self.req_to_ssm_state = req_manager.req_to_ssm_state
         return super().write_to_shm(req_manager)
 
+    def __getstate__(self):
+        # write_to_shm 用 ForkingPickler 序列化本对象时，torch 会把 CPU tensor 的 storage
+        # 原地迁移到共享内存，使本进程中大页 state cache 原本 pinned(cudaHostAlloc) 的内存
+        # 退化为普通 shm mmap，之后 Triton kernel 携带该指针启动会报
+        # "Pointer argument cannot be accessed from Triton (cpu tensor?)"。
+        # pd trans 进程 / dp prompt cache fetch 等跨进程消费方并不使用 cpu 侧大页 state
+        # cache，序列化时直接剔除，保住本进程 buffer 的 pinned 属性。
+        state = self.__dict__.copy()
+        state["linear_att_big_page_buffers"] = None
+        return state
+
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
         Qwen3NextLinearAttPageHelper(self).assert_page_size()

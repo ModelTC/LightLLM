@@ -113,6 +113,30 @@ def copy_linear_att_state_to_kv_buffer(
 
     grid = (layer_num, b_req_idx.shape[0])
 
+    # pinned(cudaHostAlloc) 的 host buffer 可以直接被 Triton kernel 访问（设计路径）；
+    # 只有普通 pageable/shm CPU tensor 无法作为 kernel 指针参数，需要走 host 回退拷贝。
+    def _triton_accessible(t: torch.Tensor) -> bool:
+        return t.is_cuda or t.is_pinned()
+
+    if not _triton_accessible(cpu_kv_conv_state) or not _triton_accessible(cpu_kv_ssm_state):
+        b_req_idx_cpu = b_req_idx.detach().cpu()
+        big_page_buffer_ids_cpu = big_page_buffer_ids.detach().cpu()
+        for cur_batch, big_page_buffer_idx in enumerate(big_page_buffer_ids_cpu.tolist()):
+            if big_page_buffer_idx == -1:
+                continue
+
+            cur_req_idx = int(b_req_idx_cpu[cur_batch])
+            cpu_kv_conv_state[big_page_buffer_idx].copy_(
+                gpu_conv_state[:, cur_req_idx, :, :conv_narrow_row_bytes],
+                non_blocking=False,
+            )
+            ssm_src_slot = cur_req_idx * (mtp_step + 1)
+            cpu_kv_ssm_state[big_page_buffer_idx].copy_(
+                gpu_ssm_state[:, ssm_src_slot, :gpu_ssm_tail_dim],
+                non_blocking=False,
+            )
+        return
+
     _copy_linear_att_state_to_kv_buffer[grid](
         gpu_conv_ptr=gpu_conv_state,
         gpu_ssm_ptr=gpu_ssm_state,
