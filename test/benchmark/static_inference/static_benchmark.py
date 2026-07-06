@@ -35,7 +35,7 @@ from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
     prepare_mtp_prefill_inputs,
 )
-from lightllm.utils.config_utils import get_dtype, get_vocab_size
+from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import set_env_start_args
 
@@ -551,6 +551,7 @@ class StaticBenchmarkExecutor:
             b_req_idx=req_idx,
             b_mtp_index=mtp_index,
             b_seq_len=seq_len,
+            b_position_delta=cpu_i32_zeros(batch_size),
             mem_indexes_cpu=mem_indexes,
             is_prefill=False,
             multimodal_params=empty_multimodal_params(batch_size),
@@ -638,6 +639,7 @@ class StaticBenchmarkExecutor:
             b_req_idx=model_input.b_req_idx[batch_start:batch_end].clone(),
             b_mtp_index=model_input.b_mtp_index[batch_start:batch_end].clone(),
             b_seq_len=b_seq_len,
+            b_position_delta=model_input.b_position_delta[batch_start:batch_end].clone(),
             mem_indexes_cpu=model_input.mem_indexes_cpu[batch_start:batch_end].contiguous(),
             is_prefill=False,
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
@@ -1409,6 +1411,7 @@ def main(argv: Optional[Sequence[str]] = None):
     parser = make_argument_parser()
     add_static_benchmark_args(parser)
     args = parser.parse_args(argv)
+    auto_set_fused_shared_experts(args)
     if args.benchmark in {"all", "prefill"} and args.batch_max_tokens is None:
         args.batch_max_tokens = 8192
     cases = build_cases(args)
