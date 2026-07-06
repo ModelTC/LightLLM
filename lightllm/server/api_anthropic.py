@@ -10,19 +10,39 @@ chat_completions_impl and re-emits it as the Anthropic event sequence
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import hashlib
+import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 import ujson as json
+from collections import OrderedDict
 from http import HTTPStatus
+from threading import Lock
 from typing import Any, Dict, Tuple
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
 _cached_adapter: Any = None
+_PDF_MAX_BYTES = 20 * 1024 * 1024
+_PDF_MAX_RENDER_PAGES = 20
+_PDF_PARSING_ENV = "LIGHTLLM_ANTHROPIC_ENABLE_PDF_PARSING"
+_PDF_REQUIRED_TOOLS = ("pdftotext", "pdftoppm", "pdfinfo")
+_PDF_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_PDF_CACHE: OrderedDict[tuple[str, bytes, int], tuple[int, Any]] = OrderedDict()
+_PDF_CACHE_BYTES = 0
+_PDF_CACHE_LOCK = Lock()
+_PDF_CACHE_MISS = object()
 
 
 def get_anthropic_messages_adapter() -> Any:
@@ -66,6 +86,7 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     """
     adapter = get_anthropic_messages_adapter()
 
+    _replace_anthropic_pdf_documents(anthropic_body)
     openai_request, tool_name_mapping = adapter.translate_anthropic_to_openai(anthropic_body)
 
     if hasattr(openai_request, "model_dump"):
@@ -76,6 +97,8 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     if "max_tokens" not in openai_dict and "max_completion_tokens" not in openai_dict:
         if "max_tokens" in anthropic_body:
             openai_dict["max_tokens"] = anthropic_body["max_tokens"]
+
+    _restore_tool_result_image_urls(openai_dict)
 
     # Forward LightLLM-specific fields nested under ``extra_body`` (OpenAI SDK
     # convention) so clients hitting /v1/messages can reach ChatCompletionRequest
@@ -96,6 +119,317 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         openai_dict.pop(key, None)
 
     return openai_dict, tool_name_mapping
+
+
+def _restore_tool_result_image_urls(openai_dict: Dict[str, Any]) -> None:
+    """LiteLLM flattens Anthropic tool_result image blocks into data URL text.
+
+    LightLLM's multimodal path only sees OpenAI image_url content parts, so
+    restore image-only tool results to that shape before constructing the
+    ChatCompletionRequest.
+    """
+    for msg in openai_dict.get("messages") or []:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        if not content.startswith("data:image/") or ";base64," not in content:
+            continue
+        msg["content"] = [{"type": "image_url", "image_url": {"url": content}}]
+
+
+def _pdf_data_url_to_anthropic_parts(data_url: str) -> list[Dict[str, Any]]:
+    _ensure_pdf_parsing_supported()
+    pdf_bytes = _decode_pdf_data_url(data_url)
+    _ensure_pdf_page_limit(pdf_bytes)
+    if _is_vision_enabled():
+        pages = _render_pdf_pages_to_png_b64(pdf_bytes)
+        if pages:
+            return [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": page}}
+                for page in pages
+            ]
+    return [_pdf_bytes_to_text_part(pdf_bytes)]
+
+
+def check_pdf_parsing_supported_at_startup() -> None:
+    if _is_pdf_parsing_enabled():
+        _ensure_pdf_tools_installed()
+
+
+def _ensure_pdf_parsing_supported() -> None:
+    if not _is_pdf_parsing_enabled():
+        raise RuntimeError(
+            f"PDF document parsing is disabled. Set {_PDF_PARSING_ENV}=1 to enable it; "
+            "requires Poppler tools: pdftotext, pdftoppm, pdfinfo."
+        )
+    _ensure_pdf_tools_installed()
+
+
+def _is_pdf_parsing_enabled() -> bool:
+    return os.getenv(_PDF_PARSING_ENV, "False").upper() in {"1", "TRUE", "ON"}
+
+
+def _ensure_pdf_tools_installed() -> None:
+    missing = [tool for tool in _PDF_REQUIRED_TOOLS if shutil.which(tool) is None]
+    if missing:
+        raise RuntimeError(
+            f"PDF document parsing requires Poppler tools when {_PDF_PARSING_ENV}=1. "
+            f"Missing: {', '.join(missing)}. Required: {', '.join(_PDF_REQUIRED_TOOLS)}."
+        )
+
+
+def _ensure_pdf_page_limit(pdf_bytes: bytes) -> None:
+    page_count = _pdf_page_count(pdf_bytes)
+    if page_count is None:
+        raise ValueError("Unable to determine PDF page count")
+    if page_count > _PDF_MAX_RENDER_PAGES:
+        raise ValueError(
+            f"PDF document has {page_count} pages and exceeds configured page limit "
+            f"of {_PDF_MAX_RENDER_PAGES}"
+        )
+
+
+def _pdf_page_count(pdf_bytes: bytes) -> int | None:
+    pdfinfo = shutil.which("pdfinfo")
+    if not pdfinfo:
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+    try:
+        try:
+            proc = subprocess.run(
+                [pdfinfo, tmp_path],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
+        except Exception:
+            return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        key, _, value = line.partition(":")
+        if key == "Pages":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _pdf_bytes_to_text_part(pdf_bytes: bytes) -> Dict[str, str]:
+    text = _extract_pdf_text(pdf_bytes).strip()
+    if not text:
+        text = (
+            "[PDF document attached, but no extractable text was found. "
+            "This backend does not OCR scanned PDFs in the Anthropic adapter. "
+            "Ask the client to read specific pages or use an OCR/vision-enabled backend.]"
+        )
+    return {"type": "text", "text": f"[PDF extracted text]\n{text}"}
+
+
+def _is_vision_enabled() -> bool:
+    try:
+        args = get_env_start_args()
+    except Exception:
+        return False
+    return bool(getattr(args, "enable_multimodal", False) and not getattr(args, "disable_vision", True))
+
+
+def _decode_pdf_data_url(data_url: str) -> bytes:
+    try:
+        _, encoded = data_url.split("base64,", 1)
+    except ValueError as exc:
+        raise ValueError("Invalid base64 PDF document block") from exc
+    if len(encoded) > ((_PDF_MAX_BYTES + 2) // 3 * 4 + 4):
+        raise ValueError("PDF document block exceeds configured size limit")
+    try:
+        pdf_bytes = base64.b64decode(encoded, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("Invalid base64 PDF document block") from exc
+    if len(pdf_bytes) > _PDF_MAX_BYTES:
+        raise ValueError("PDF document block exceeds configured size limit")
+    return pdf_bytes
+
+
+def _extract_pdf_text(pdf_bytes: bytes) -> str:
+    key = _pdf_cache_key("text", pdf_bytes)
+    cached = _pdf_cache_get(key)
+    if cached is not _PDF_CACHE_MISS:
+        return cached
+
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        text = ""
+    else:
+        try:
+            text = _extract_pdf_text_with_pdftotext(pdftotext, pdf_bytes)
+        except Exception:
+            text = ""
+        text = text if text.strip() else ""
+    _pdf_cache_set(key, text)
+    return text
+
+
+def _extract_pdf_text_with_pdftotext(pdftotext: str, pdf_bytes: bytes) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(
+            [pdftotext, "-layout", tmp_path, "-"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def _render_pdf_pages_to_png_b64(pdf_bytes: bytes) -> tuple[str, ...]:
+    key = _pdf_cache_key("vision", pdf_bytes)
+    cached = _pdf_cache_get(key)
+    if cached is not _PDF_CACHE_MISS:
+        return cached
+
+    pdftoppm = shutil.which("pdftoppm")
+    if not pdftoppm:
+        pages: tuple[str, ...] = ()
+        _pdf_cache_set(key, pages)
+        return pages
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+    try:
+        with tempfile.TemporaryDirectory() as out_dir:
+            prefix = os.path.join(out_dir, "page")
+            try:
+                proc = subprocess.run(
+                    [pdftoppm, "-png", "-f", "1", "-l", str(_PDF_MAX_RENDER_PAGES), tmp_path, prefix],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=30,
+                )
+            except Exception:
+                pages = ()
+                _pdf_cache_set(key, pages)
+                return pages
+            if proc.returncode != 0:
+                pages = ()
+                _pdf_cache_set(key, pages)
+                return pages
+            pages = []
+            for name in sorted(
+                (n for n in os.listdir(out_dir) if n.startswith("page-") and n.endswith(".png")),
+                key=lambda n: int(n[5:-4]),
+            ):
+                with open(os.path.join(out_dir, name), "rb") as f:
+                    pages.append(base64.b64encode(f.read()).decode("ascii"))
+            pages = tuple(pages)
+            _pdf_cache_set(key, pages)
+            return pages
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _pdf_cache_key(kind: str, pdf_bytes: bytes) -> tuple[str, bytes, int]:
+    return (kind, hashlib.sha256(pdf_bytes).digest(), len(pdf_bytes))
+
+
+def _pdf_cache_get(key: tuple[str, bytes, int]) -> Any:
+    with _PDF_CACHE_LOCK:
+        item = _PDF_CACHE.get(key)
+        if item is None:
+            return _PDF_CACHE_MISS
+        _PDF_CACHE.move_to_end(key)
+        return item[1]
+
+
+def _pdf_cache_set(key: tuple[str, bytes, int], value: Any) -> None:
+    global _PDF_CACHE_BYTES
+    size = _pdf_cache_size(value)
+    if size > _PDF_CACHE_MAX_BYTES:
+        return
+    with _PDF_CACHE_LOCK:
+        old = _PDF_CACHE.pop(key, None)
+        if old is not None:
+            _PDF_CACHE_BYTES -= old[0]
+        while _PDF_CACHE_BYTES + size > _PDF_CACHE_MAX_BYTES and _PDF_CACHE:
+            _, (old_size, _) = _PDF_CACHE.popitem(last=False)
+            _PDF_CACHE_BYTES -= old_size
+        _PDF_CACHE[key] = (size, value)
+        _PDF_CACHE_BYTES += size
+
+
+def _pdf_cache_size(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, tuple):
+        return sum(len(item.encode("utf-8")) for item in value if isinstance(item, str))
+    return 0
+
+
+def _clear_pdf_cache() -> None:
+    global _PDF_CACHE_BYTES
+    with _PDF_CACHE_LOCK:
+        _PDF_CACHE.clear()
+        _PDF_CACHE_BYTES = 0
+
+
+_extract_pdf_text.cache_clear = _clear_pdf_cache
+_render_pdf_pages_to_png_b64.cache_clear = _clear_pdf_cache
+
+
+def _replace_anthropic_pdf_documents(value: Any) -> None:
+    if isinstance(value, list):
+        new_items = []
+        changed = False
+        for item in value:
+            if _is_anthropic_pdf_document(item):
+                source = item["source"]
+                new_items.extend(_pdf_data_url_to_anthropic_parts(f"data:application/pdf;base64,{source['data']}"))
+                changed = True
+            else:
+                _replace_anthropic_pdf_documents(item)
+                new_items.append(item)
+        if changed:
+            value[:] = new_items
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _replace_anthropic_pdf_documents(item)
+
+
+def _is_anthropic_pdf_document(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("type") != "document":
+        return False
+    source = value.get("source")
+    return (
+        isinstance(source, dict)
+        and source.get("type") == "base64"
+        and source.get("media_type") == "application/pdf"
+        and isinstance(source.get("data"), str)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +887,7 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
     is_stream = bool(raw_body.get("stream"))
 
     try:
-        chat_dict, tool_name_mapping = _anthropic_to_chat_request(raw_body)
+        chat_dict, tool_name_mapping = await asyncio.to_thread(_anthropic_to_chat_request, raw_body)
     except Exception as exc:
         logger.exception("Failed to translate Anthropic request")
         return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Request translation failed: {exc}")
