@@ -115,7 +115,12 @@ class HttpServerManagerForPDMaster:
         start_time = time.time()
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
+        # preload 用于获取图片/音频的尺寸信息以进行 token 计数，prefill 节点
+        # 会从原始 _data 重新 preload，所以计数后清掉解码数据，避免转发时重复传输。
+        await multimodal_params.verify_and_preload(request)
         input_token_num = self.tokens(prompt, multimodal_params, sampling_params)
+        for item in multimodal_params.images + multimodal_params.audios:
+            item._preload_data = None
         fake_prompt_ids = [0 for _ in range(input_token_num)]
         from lightllm.server.httpserver.manager import HttpServerManager
 

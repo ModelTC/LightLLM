@@ -58,6 +58,9 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
 
         # <img><image_pad></img> -> <img></img>
         origin_ids = [token for token in origin_ids if token != self.image_token_id]
+        if multimodal_params is None:
+            # token-counting path (pd_master / /tokens): image tokens are counted separately
+            return origin_ids
         # <img></img> --> <img>id,id+1...id+num</img>
         input_ids = []
         image_id = 0
