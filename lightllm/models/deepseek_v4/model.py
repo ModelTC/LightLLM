@@ -257,6 +257,11 @@ class DeepSeekV4Tokenizer:
         # missing. Re-serialize dicts back to JSON strings so the encoder emits one
         # <parameter> per real arg.
         for msg in msgs:
+            content = msg.get("content")
+            if isinstance(content, list) and all(
+                isinstance(part, dict) and part.get("type") == "text" for part in content
+            ):
+                msg["content"] = "".join(part.get("text") or "" for part in content)
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function")
                 if isinstance(fn, dict) and isinstance(fn.get("arguments"), dict):
