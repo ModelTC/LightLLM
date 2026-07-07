@@ -10,6 +10,7 @@ from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from functools import partial
 from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
+from lightllm.distributed.communication_op import all_reduce_residual_rmsnorm
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.log_utils import init_logger
@@ -50,6 +51,13 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
                 mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
         self.enable_cc_method = not os.getenv("DISABLE_CC_METHOD", "False").upper() in ["ON", "TRUE", "1"]
+        # Fuse the post-attention residual add into the ffn RMSNorm (one Triton launch instead
+        # of a separate add_ + rmsnorm). Bit-identical; gate exists only for A/B measurement.
+        self.enable_fused_add_norm = os.environ.get("LIGHTLLM_FUSED_ADD_RMSNORM", "1") == "1"
+        # Additionally fold the attention-output all-reduce into that residual-add + RMSNorm via
+        # flashinfer kARResidualRMSNorm (SGLang #22390). Only fires when flashinfer AR is the
+        # active backend (small messages / low concurrency); falls back otherwise.
+        self.enable_fused_ar_norm = os.environ.get("LIGHTLLM_FUSED_AR_RMSNORM", "1") == "1"
         super().__init__(layer_num, network_config)
         self.num_heads = network_config["num_attention_heads"]
         self.num_kv_heads = network_config["num_key_value_heads"]
@@ -200,7 +208,11 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             return q, cache_kv
 
     def _get_o(
-        self, input: torch.Tensor, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
+        self,
+        input: torch.Tensor,
+        infer_state: Deepseek2InferStateInfo,
+        layer_weight: Deepseek2TransformerLayerWeight,
+        reduce: bool = True,
     ) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
@@ -208,7 +220,10 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         if input.shape[2] == self.kv_lora_rank:
             input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
         o_tensor = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
-        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
+        # reduce=False leaves o un-reduced so the caller can fuse the all-reduce into the
+        # following residual-add + RMSNorm (flashinfer kARResidualRMSNorm).
+        if reduce:
+            o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
     def _moe_ffn_tp(
@@ -287,6 +302,73 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         ffn2_out = self._moe_ffn_edp(input=input, infer_state=infer_state, layer_weight=layer_weight)
 
         return ffn2_out
+
+    def _fused_add_ffn_norm(self, input_embdings: torch.Tensor, o: torch.Tensor, infer_state, layer_weight):
+        # Fuse the post-attention residual add (input_embdings += o) into the following ffn
+        # RMSNorm in a single Triton launch — eliminates one tiny elementwise-add kernel per
+        # layer. Bit-identical to `input_embdings.add_(o); self._ffn_norm(input_embdings)`.
+        if self.enable_fused_add_norm:
+            return layer_weight.ffn_norm_weight_.fused_add_forward(
+                residual=input_embdings.view(-1, self.embed_dim_),
+                x=o.view(-1, self.embed_dim_),
+                eps=self.eps_,
+                alloc_func=self.alloc_tensor,
+            )
+        input_embdings.add_(o.view(-1, self.embed_dim_))
+        return self._ffn_norm(input_embdings, infer_state, layer_weight)
+
+    def _attn_out_add_ffn_norm(self, o_attn, input_embdings, infer_state, layer_weight):
+        """Combine the attention-output all-reduce, the residual add, and the ffn RMSNorm.
+
+        Fast path (flashinfer kARResidualRMSNorm): all three fold into one kernel; ``o`` is kept
+        un-reduced and the reduction happens inside the fused op. Returns the new (normed_input,
+        residual). Falls back to the standard all-reduce + (fused-add) RMSNorm when flashinfer
+        AR is not the active backend (large messages / SP mode / disabled).
+        """
+        if self.enable_fused_ar_norm and self.tp_world_size_ > 1 and not get_env_start_args().enable_tpsp_mix_mode:
+            o = self._get_o(o_attn, infer_state, layer_weight, reduce=False).view(-1, self.embed_dim_)
+            fused = all_reduce_residual_rmsnorm(
+                inp=o,
+                residual=input_embdings.view(-1, self.embed_dim_),
+                rms_weight=layer_weight.ffn_norm_weight_.weight,
+                eps=self.eps_,
+                group=infer_state.dist_group,
+                alloc_func=self.alloc_tensor,
+            )
+            if fused is not None:
+                norm_out, residual_out = fused
+                return norm_out, residual_out
+            # flashinfer not applicable for this message size: finish the all-reduce normally.
+            o = self._tpsp_reduce(input=o, infer_state=infer_state)
+            return self._fused_add_ffn_norm(input_embdings, o, infer_state, layer_weight), input_embdings
+
+        o = self._get_o(o_attn, infer_state, layer_weight, reduce=True)
+        return self._fused_add_ffn_norm(input_embdings, o, infer_state, layer_weight), input_embdings
+
+    def context_forward(self, input_embdings, infer_state: Deepseek2InferStateInfo, layer_weight):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        o = self.context_attention_forward(input1, infer_state, layer_weight)
+        input1 = self._fused_add_ffn_norm(input_embdings, o, infer_state, layer_weight)
+        o = None
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        input1 = None
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        return input_embdings
+
+    def token_forward(self, input_embdings, infer_state: Deepseek2InferStateInfo, layer_weight):
+        input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        # Inline the decode attention so the output projection stays un-reduced and its
+        # all-reduce can fold into the residual-add + ffn RMSNorm (see _attn_out_add_ffn_norm).
+        q, cache_kv = self._get_qkv(input1, infer_state, layer_weight)
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        o = self._token_attention_kernel(q, infer_state, layer_weight)
+        input1 = None
+        input1, input_embdings = self._attn_out_add_ffn_norm(o, input_embdings, infer_state, layer_weight)
+        o = None
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        input1 = None
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+        return input_embdings
 
     def overlap_tpsp_token_forward(
         self,

@@ -66,7 +66,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         assert att_control.use_alibi is False
-        return self._nomarl_prefill_att(
+        return self._normal_prefill_att(
             q=q,
             k=k,
             v=v,
@@ -74,7 +74,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             alloc_func=alloc_func,
         )
 
-    def _nomarl_prefill_att(
+    def _normal_prefill_att(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
     ) -> torch.Tensor:
         self.backend: Fa3AttBackend = self.backend  # for typing

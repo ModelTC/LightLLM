@@ -62,7 +62,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(weight.cuda(device), self.block_size, use_ue8m0_scales=True)
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -90,6 +90,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=alloc_func,
+                use_ue8m0_scales=True,
             )
 
         if out is None:
@@ -182,11 +183,28 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         assert in_dim % 2 == 0, "FP4 packed weight requires even input dimension"
         assert in_dim % self.block_size == 0, "FP4 scale dimension must be divisible by block_size"
+        scales_per_int32 = 4
+        scale_layout_k = self.block_size * scales_per_int32
+        assert in_dim % scale_layout_k == 0, (
+            f"FP4 required scale layout needs input dimension divisible by {scale_layout_k}"
+        )
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.int32).cuda(
-            device_id
-        )
+        scale_dim = in_dim // scale_layout_k
+        if num_experts > 1:
+            weight_scale = torch.empty_strided(
+                (num_experts, out_dim, scale_dim),
+                (out_dim * scale_dim, 1, out_dim),
+                dtype=torch.int32,
+                device=f"cuda:{device_id}",
+            )
+        else:
+            weight_scale = torch.empty_strided(
+                (out_dim, scale_dim),
+                (1, out_dim),
+                dtype=torch.int32,
+                device=f"cuda:{device_id}",
+            )
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,

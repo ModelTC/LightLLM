@@ -11,7 +11,7 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
+from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive, get_page_size, set_page_size
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -28,6 +28,20 @@ from lightllm.utils.config_utils import (
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
+
+
+def _auto_set_fa4_page_size(args, requested_backends):
+    if "fa4" not in requested_backends or "PAGE_SIZE" in os.environ:
+        return
+
+    from lightllm.utils.fa4_utils import infer_fa4_page_size
+
+    page_size = infer_fa4_page_size(args.model_dir)
+    if page_size is None:
+        return
+
+    set_page_size(page_size)
+    logger.info(f"auto set PAGE_SIZE={page_size} for FA4 backend")
 
 
 def setup_signal_handlers(http_server_process, process_manager):
@@ -198,7 +212,7 @@ def normal_or_p_d_start(args):
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
     if args.enable_ep_moe:
-        allowed_ep_att_backends = {"auto", "fa3", "triton"}
+        allowed_ep_att_backends = {"auto", "fa3", "fa4", "triton"}
         for backend in args.llm_prefill_att_backend:
             assert backend in allowed_ep_att_backends, (
                 "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
@@ -210,13 +224,34 @@ def normal_or_p_d_start(args):
                 f"{sorted(allowed_ep_att_backends)}; flashinfer is not supported."
             )
 
+    llm_requested_backends = list(args.llm_prefill_att_backend) + list(args.llm_decode_att_backend)
+    requested_backends = llm_requested_backends + list(args.vit_att_backend)
+    if "fa4" in requested_backends:
+        _auto_set_fa4_page_size(args, llm_requested_backends)
+
     # mtp params check
     if args.mtp_mode is not None:
         assert args.mtp_draft_model_dir is not None
         assert args.mtp_step > 0
+        assert get_page_size() == 1, "page_size > 1 is not supported with MTP, please set PAGE_SIZE=1"
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
+
+    # page_size > 1 compatibility check
+    if get_page_size() > 1:
+        assert args.run_mode not in (
+            "prefill",
+            "decode",
+        ), "page_size > 1 is not supported with RPyC PD split mode, please set PAGE_SIZE=1"
+        assert args.run_mode not in (
+            "nixl_prefill",
+            "nixl_decode",
+        ), "page_size > 1 is not supported with NIXL PD split mode, please set PAGE_SIZE=1"
+        assert (
+            not args.enable_dp_prefill_balance
+        ), "page_size > 1 is not supported with DP prefill balance, please set PAGE_SIZE=1"
+        assert not args.enable_cpu_cache, "page_size > 1 is not supported with CPU cache, please set PAGE_SIZE=1"
 
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)

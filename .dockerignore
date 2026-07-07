@@ -1,0 +1,13 @@
+.git
+.conda
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.vscode
+.idea
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+*.log
