@@ -7,6 +7,7 @@ chunked prefill, decode, and MTP decode cases.
 import argparse
 import math
 import os
+import queue
 import sys
 import time
 import traceback
@@ -140,7 +141,6 @@ class StaticBenchmarkExecutor:
         self.model = model
         self.draft_models = draft_models
         self.token_source = token_source
-        self.dp = int(args.dp or 1)
 
     def _case_iters(self, warmup: bool) -> int:
         return self.args.warmup_iters if warmup else self.args.bench_iters
@@ -699,8 +699,8 @@ class StaticBenchmarkExecutor:
     ) -> BenchmarkResult:
         """Convert raw timings into reported TPS and latency metrics."""
         iters = self._case_iters(warmup)
-        scaled_tokens = measured_tokens * self.dp * iters
-        qps = case.batch_size * self.dp * iters / elapsed_s if elapsed_s > 0 else 0.0
+        scaled_tokens = measured_tokens * iters
+        qps = case.batch_size * iters / elapsed_s if elapsed_s > 0 else 0.0
         tps = scaled_tokens / elapsed_s if elapsed_s > 0 else 0.0
         ttft_ms = ttft_elapsed_s * 1000.0 / max(1, iters) if ttft_elapsed_s is not None else None
         logical_tps = None
@@ -710,7 +710,7 @@ class StaticBenchmarkExecutor:
             uncached_len = int(case.prefill_uncached_len or case.context_len)
             prefill_uncached_len = uncached_len
             prefill_cached_len = max(0, case.context_len - uncached_len)
-            token_count = case.batch_size * case.context_len * self.dp * iters
+            token_count = case.batch_size * case.context_len * iters
             logical_tps = token_count / elapsed_s if elapsed_s > 0 else 0.0
         return BenchmarkResult(
             case=case.name,
@@ -1204,8 +1204,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
             if args.warmup_iters > 0:
                 executor.run_case(case, warmup=True)
             result = executor.run_case(case, warmup=False)
-            if rank_id == 0:
-                results.append(asdict(result))
+            results.append(asdict(result))
             dist.barrier()
 
         ans_queue.put({"ok": True, "rank": rank_id, "results": results})
@@ -1290,6 +1289,83 @@ def print_results_table(results: Sequence[BenchmarkResult]):
         print_aligned_table(DECODE_TABLE_HEADERS, decode_rows)
 
 
+def _dp_size(args: SimpleNamespace) -> int:
+    return max(1, int(args.dp or 1))
+
+
+def _dp_world_size(args: SimpleNamespace) -> int:
+    return max(1, int(args.tp) // _dp_size(args))
+
+
+def _is_dp_group_leader(args: SimpleNamespace, rank_id: int) -> bool:
+    return rank_id % _dp_world_size(args) == 0
+
+
+def _raw_decode_step_count(result: Dict) -> int:
+    inter_token_latency_ms = result.get("inter_token_latency_ms")
+    if inter_token_latency_ms is None or inter_token_latency_ms <= 0:
+        return 0
+    return max(1, int(round(float(result["elapsed_ms"]) / float(inter_token_latency_ms))))
+
+
+def aggregate_rank_results(args: SimpleNamespace, messages: Sequence[Dict]) -> List[Dict]:
+    """Aggregate rank-local measurements into one global result per case."""
+    by_case: Dict[int, List[Dict]] = {}
+    for message in messages:
+        rank_id = int(message["rank"])
+        for case_index, result in enumerate(message.get("results") or []):
+            by_case.setdefault(case_index, []).append({"rank": rank_id, "result": result})
+
+    aggregated_results: List[Dict] = []
+    iters = int(args.bench_iters)
+    for case_index in sorted(by_case):
+        rank_items = sorted(by_case[case_index], key=lambda item: int(item["rank"]))
+        leader_items = [item for item in rank_items if _is_dp_group_leader(args, int(item["rank"]))]
+        if not leader_items:
+            leader_items = rank_items
+
+        first = dict(leader_items[0]["result"])
+        elapsed_ms = max(float(item["result"]["elapsed_ms"]) for item in rank_items)
+        elapsed_s = elapsed_ms / 1000.0
+        batch_size = sum(int(item["result"]["batch_size"]) for item in leader_items)
+        measured_tokens = sum(int(item["result"]["measured_tokens"]) for item in leader_items)
+
+        first["batch_size"] = batch_size
+        first["elapsed_ms"] = elapsed_ms
+        first["measured_tokens"] = measured_tokens
+        first["qps"] = batch_size * iters / elapsed_s if elapsed_s > 0 else 0.0
+        first["tps"] = measured_tokens / elapsed_s if elapsed_s > 0 else 0.0
+
+        profiled_values = [
+            int(item["result"]["profiled_max_total_token_num"])
+            for item in leader_items
+            if item["result"].get("profiled_max_total_token_num") is not None
+        ]
+        if profiled_values:
+            first["profiled_max_total_token_num"] = sum(profiled_values)
+
+        if first["stage"] == "prefill":
+            logical_tokens = batch_size * int(first["context_len"]) * iters
+            first["logical_tps"] = logical_tokens / elapsed_s if elapsed_s > 0 else 0.0
+
+        slowest_item = max(rank_items, key=lambda item: float(item["result"]["elapsed_ms"]))
+        decode_step_count = _raw_decode_step_count(slowest_item["result"])
+        if decode_step_count > 0:
+            first["inter_token_latency_ms"] = elapsed_ms / decode_step_count
+
+        ttft_values = [
+            float(item["result"]["ttft_ms"])
+            for item in rank_items
+            if item["result"].get("ttft_ms") is not None
+        ]
+        if ttft_values:
+            first["ttft_ms"] = max(ttft_values)
+
+        aggregated_results.append(first)
+
+    return aggregated_results
+
+
 def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List[Dict]:
     ctx = mp.get_context("spawn")
     ans_queue = ctx.Queue()
@@ -1304,22 +1380,37 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
         proc.start()
         workers.append(proc)
 
+    messages = []
+    while len(messages) < len(workers):
+        try:
+            messages.append(ans_queue.get(timeout=5))
+            continue
+        except queue.Empty:
+            if all(not proc.is_alive() for proc in workers):
+                break
+
     for proc in workers:
         proc.join()
 
-    messages = []
-    while not ans_queue.empty():
-        messages.append(ans_queue.get())
-
     failed = [message for message in messages if not message.get("ok")]
+    reported_ranks = {int(message["rank"]) for message in messages if "rank" in message}
     failed.extend(
         {
             "ok": False,
-            "rank": index,
+            "rank": rank_start + index,
             "traceback": f"worker exited with code {proc.exitcode}",
         }
         for index, proc in enumerate(workers)
         if proc.exitcode not in (0, None)
+    )
+    failed.extend(
+        {
+            "ok": False,
+            "rank": rank_start + index,
+            "traceback": "worker did not report a result",
+        }
+        for index, proc in enumerate(workers)
+        if rank_start + index not in reported_ranks and proc.exitcode in (0, None)
     )
     if failed:
         for item in failed:
@@ -1329,9 +1420,7 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
             )
         raise RuntimeError(f"{len(failed)} worker(s) failed")
 
-    results = []
-    for message in messages:
-        results.extend(message.get("results") or [])
+    results = aggregate_rank_results(args, messages)
     result_objs = [BenchmarkResult(**result) for result in results]
     print_results_table(result_objs)
     return results
