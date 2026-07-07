@@ -241,7 +241,7 @@ class ChunkedPrefillBackend(ModeBackend):
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            b_mtp_index_cpu = model_input.b_mtp_index
+            b_mtp_index_cpu = model_input.b_mtp_index_cpu
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(model_output.logits, run_reqs, self.eos_id)
             # verify the next_token_ids
@@ -345,7 +345,7 @@ class ChunkedPrefillBackend(ModeBackend):
         b_req_mtp_start_loc: torch.Tensor,
     ):
         # share some inference info with the main model
-        draft_model_input = main_model_input
+        draft_model_input = main_model_input.make_mtp_draft_input()
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []
@@ -387,7 +387,7 @@ class ChunkedPrefillBackend(ModeBackend):
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
 
         # share some inference info with the main model
-        draft_model_input = main_model_input
+        draft_model_input = main_model_input.make_mtp_draft_input()
         draft_model_output = main_model_output
         draft_next_token_ids = next_token_ids
         all_next_token_ids = []
@@ -401,14 +401,13 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-            draft_model_input.b_seq_len += 1
-            draft_model_input.b_seq_len_cpu += 1
-            draft_model_input.max_kv_seq_len += 1
+            eagle_mem_indexes_cpu_i = eagle_mem_indexes_cpu[_step * num_reqs : (_step + 1) * num_reqs]
             eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
-            draft_model_input.mem_indexes = torch.cat(
-                [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+            draft_model_input.advance_mtp_decode_step(
+                eagle_mem_indexes_cpu_i,
+                eagle_mem_indexes_i,
+                self.mtp_step,
+            )
             all_next_token_ids.append(draft_next_token_ids)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]

@@ -174,9 +174,16 @@ class ReqManager:
         prefill KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
         return
 
-    def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu):
-        """每个 decode step 在 to_cuda 之前调用的钩子 (优先使用 CPU mirror, 且已在 forward 的
-        CUDA stream 上)。基类 no-op; 需要 per-step KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
+    def prepare_decode(
+        self,
+        b_req_idx_cpu,
+        b_seq_len_cpu,
+        b_mtp_index_cpu,
+        mem_indexes,
+        mtp_decode_slot_prepare_indices,
+    ):
+        """每个 decode step 在 attention metadata 构建前调用的钩子。基类 no-op; 需要
+        per-step KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
         return
 
 
@@ -491,11 +498,37 @@ class DeepseekV4ReqManager(ReqManager):
         )
         return
 
-    def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu):
-        """decode 每步槽位 prep: 先 swa 再 compress。由 BaseModel.forward / microbatch_overlap_decode
-        在 to_cuda 之前调用 (CPU mirror + forward 的 CUDA stream); 不再放在 _decode 里。"""
-        self.prepare_decode_swa(b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu)
-        self.prepare_decode_compress_slots(b_req_idx_cpu, b_seq_len_cpu, mem_indexes_cpu)
+    def prepare_decode(
+        self,
+        b_req_idx_cpu,
+        b_seq_len_cpu,
+        b_mtp_index_cpu,
+        mem_indexes,
+        mtp_decode_slot_prepare_indices,
+    ):
+        """decode 每步槽位 prep: 先 swa 再 compress。由 BaseModel 在 copy_kv_index_to_req
+        之后、attention metadata 构建前调用。"""
+        max_mtp_index = int(b_mtp_index_cpu.max().item())
+        if mtp_decode_slot_prepare_indices is None:
+            steps = range(max_mtp_index + 1)
+        else:
+            steps = mtp_decode_slot_prepare_indices
+
+        batch_size = b_mtp_index_cpu.shape[0]
+        slots_per_req = max_mtp_index + 1
+        assert batch_size % slots_per_req == 0
+        for step in steps:
+            rows = slice(step, batch_size, slots_per_req)
+            self.prepare_decode_swa(
+                b_req_idx_cpu[rows],
+                b_seq_len_cpu[rows],
+                mem_indexes[rows],
+            )
+            self.prepare_decode_compress_slots(
+                b_req_idx_cpu[rows],
+                b_seq_len_cpu[rows],
+                mem_indexes[rows],
+            )
         return
 
     def prepare_prefill(
@@ -869,7 +902,7 @@ class DeepseekV4ReqManager(ReqManager):
         mem_indexes: torch.Tensor,
     ) -> None:
         """decode prep: 本步 token 关闭一个组(seq_len % ratio == 0)时为其分配压缩槽并 scatter。
-        组末 full 槽即本步的 mem_index(此刻 req_to_token_indexs 尚未写入本步槽位)。
+        组末 full 槽即本步的 mem_index。
         从 CPU 镜像读 seq_len/req_idx(host 算术,无 D2H);非关组步 rows 为空 => 不调 _scatter,零同步。"""
         if self.n_c4 == 0 and self.n_c128 == 0:
             return

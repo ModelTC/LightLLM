@@ -433,7 +433,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         model_input, run_reqs, _ = padded_prepare_decode_inputs(decode_reqs)
-        b_mtp_index_cpu = model_input.b_mtp_index
+        b_mtp_index_cpu = model_input.b_mtp_index_cpu
         req_num = len(run_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
@@ -537,13 +537,12 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         # share some inference info with the main model
-        draft_model_input = model_input
+        draft_model_input = model_input.make_mtp_draft_input()
         draft_model_output = model_output
+        all_next_token_ids.append(next_token_ids)
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
         if req_num > 0:
             draft_next_token_ids_gpu[:req_num].copy_(next_token_ids, non_blocking=True)
-
-        all_next_token_ids.append(draft_next_token_ids_gpu)
 
         # process the draft model output
         for draft_model_idx in range(self.mtp_step):
@@ -578,7 +577,7 @@ class DPChunkedPrefillBackend(ModeBackend):
     ):
         all_next_token_ids = []
         # share some inference info with the main model
-        draft_model_input = model_input
+        draft_model_input = model_input.make_mtp_draft_input()
         draft_model_output = model_output
         all_next_token_ids.append(next_token_ids)
         draft_next_token_ids_gpu = torch.zeros((model_input.batch_size), dtype=torch.int64, device="cuda")
@@ -587,7 +586,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         real_req_num = req_num // (self.mtp_step + 1)
         padded_req_num = model_input.batch_size // (self.mtp_step + 1) - real_req_num
-        eagle_mem_indexes_cpu = None
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
@@ -602,20 +600,25 @@ class DPChunkedPrefillBackend(ModeBackend):
             draft_model_idx = _step % self.num_mtp_models
             draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
             # update the meta info of the inference
-            draft_model_input.b_seq_len += 1
-            draft_model_input.b_seq_len_cpu += 1
-            draft_model_input.max_kv_seq_len += 1
+            eagle_mem_indexes_cpu_i = eagle_mem_indexes_cpu[_step * real_req_num : (_step + 1) * real_req_num]
             eagle_mem_indexes_i = eagle_mem_indexes[_step * real_req_num : (_step + 1) * real_req_num]
+            eagle_mem_indexes_cpu_i = F.pad(
+                input=eagle_mem_indexes_cpu_i,
+                pad=(0, padded_req_num),
+                mode="constant",
+                value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
+            )
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
                 pad=(0, padded_req_num),
                 mode="constant",
                 value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
             )
-            draft_model_input.mem_indexes = torch.cat(
-                [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+            draft_model_input.advance_mtp_decode_step(
+                eagle_mem_indexes_cpu_i,
+                eagle_mem_indexes_i,
+                self.mtp_step,
+            )
             draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
             all_next_token_ids.append(draft_next_token_ids_gpu)
 
@@ -740,8 +743,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         ) = padded_overlap_prepare_decode_inputs(decode_reqs)
         req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
         all_next_token_ids = []
-        b_mtp_index_cpu0 = model_input0.b_mtp_index
-        b_mtp_index_cpu1 = model_input1.b_mtp_index
+        b_mtp_index_cpu0 = model_input0.b_mtp_index_cpu
+        b_mtp_index_cpu1 = model_input1.b_mtp_index_cpu
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
 
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
@@ -873,7 +876,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
         # share some inference info with the main model
-        draft_model_input0, draft_model_input1 = model_input0, model_input1
+        draft_model_input0 = model_input0.make_mtp_draft_input()
+        draft_model_input1 = model_input1.make_mtp_draft_input()
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
@@ -931,7 +935,8 @@ class DPChunkedPrefillBackend(ModeBackend):
         all_next_token_ids = []
         all_next_token_ids.append(next_token_ids)
         # share some inference info with the main model
-        draft_model_input0, draft_model_input1 = model_input0, model_input1
+        draft_model_input0 = model_input0.make_mtp_draft_input()
+        draft_model_input1 = model_input1.make_mtp_draft_input()
         draft_model_output0, draft_model_output1 = model_output0, model_output1
 
         draft_next_token_ids_gpu0 = torch.zeros((model_input0.batch_size), dtype=torch.int64, device="cuda")
@@ -951,6 +956,8 @@ class DPChunkedPrefillBackend(ModeBackend):
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
         eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
+        eagle_mem_indexes_cpu0 = eagle_mem_indexes_cpu[0 : real_req_num0 * self.mtp_step]
+        eagle_mem_indexes_cpu1 = eagle_mem_indexes_cpu[real_req_num0 * self.mtp_step : real_req_num * self.mtp_step]
         eagle_mem_indexes0 = eagle_mem_indexes[0 : real_req_num0 * self.mtp_step]
         eagle_mem_indexes1 = eagle_mem_indexes[real_req_num0 * self.mtp_step : real_req_num * self.mtp_step]
 
@@ -967,35 +974,45 @@ class DPChunkedPrefillBackend(ModeBackend):
                 draft_model_input0, draft_model_input1
             )
 
-            draft_model_input0.b_seq_len += 1
-            draft_model_input0.b_seq_len_cpu += 1
-            draft_model_input0.max_kv_seq_len += 1
+            eagle_mem_indexes_cpu_i = eagle_mem_indexes_cpu0[_step * real_req_num0 : (_step + 1) * real_req_num0]
             eagle_mem_indexes_i = eagle_mem_indexes0[_step * real_req_num0 : (_step + 1) * real_req_num0]
+            eagle_mem_indexes_cpu_i = F.pad(
+                input=eagle_mem_indexes_cpu_i,
+                pad=(0, padded_req_num0),
+                mode="constant",
+                value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
+            )
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
                 pad=(0, padded_req_num0),
                 mode="constant",
                 value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
             )
-            draft_model_input0.mem_indexes = torch.cat(
-                [draft_model_input0.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+            draft_model_input0.advance_mtp_decode_step(
+                eagle_mem_indexes_cpu_i,
+                eagle_mem_indexes_i,
+                self.mtp_step,
+            )
 
-            draft_model_input1.b_seq_len += 1
-            draft_model_input1.b_seq_len_cpu += 1
-            draft_model_input1.max_kv_seq_len += 1
+            eagle_mem_indexes_cpu_i = eagle_mem_indexes_cpu1[_step * real_req_num1 : (_step + 1) * real_req_num1]
             eagle_mem_indexes_i = eagle_mem_indexes1[_step * real_req_num1 : (_step + 1) * real_req_num1]
+            eagle_mem_indexes_cpu_i = F.pad(
+                input=eagle_mem_indexes_cpu_i,
+                pad=(0, padded_req_num1),
+                mode="constant",
+                value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
+            )
             eagle_mem_indexes_i = F.pad(
                 input=eagle_mem_indexes_i,
                 pad=(0, padded_req_num1),
                 mode="constant",
                 value=g_infer_context.req_manager.mem_manager.HOLD_TOKEN_MEMINDEX,
             )
-            draft_model_input1.mem_indexes = torch.cat(
-                [draft_model_input1.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+            draft_model_input1.advance_mtp_decode_step(
+                eagle_mem_indexes_cpu_i,
+                eagle_mem_indexes_i,
+                self.mtp_step,
+            )
 
             draft_next_token_ids_gpu0 = self._gen_argmax_token_ids(draft_model_output0)
             draft_next_token_ids_gpu1 = self._gen_argmax_token_ids(draft_model_output1)

@@ -120,8 +120,6 @@ def normal_or_p_d_start(args):
             raise NotImplementedError("DeepSeek-V4 currently supports only run_mode=normal in LightLLM.")
         if args.enable_cpu_cache or args.enable_disk_cache:
             raise NotImplementedError("DeepSeek-V4 CPU/disk KV cache is not supported yet.")
-        if args.mtp_mode is not None or args.mtp_draft_model_dir is not None or args.mtp_step != 0:
-            raise NotImplementedError("DeepSeek-V4 MTP/speculative decoding is not supported yet.")
         if args.enable_ep_moe:
             raise NotImplementedError("DeepSeek-V4 EP MoE is not supported yet; use TP for now.")
         if "prompt_cache_kv_buffer" in get_config_json(args.model_dir):

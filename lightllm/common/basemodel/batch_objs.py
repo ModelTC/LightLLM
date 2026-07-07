@@ -1,3 +1,4 @@
+import copy
 import torch
 from dataclasses import dataclass, field
 from typing import Optional
@@ -43,6 +44,7 @@ class ModelInput:
     # cpu 变量
     mem_indexes_cpu: torch.Tensor = None
     b_req_idx_cpu: torch.Tensor = None
+    b_mtp_index_cpu: torch.Tensor = None
     b_seq_len_cpu: torch.Tensor = None
     b_ready_cache_len_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
@@ -55,6 +57,8 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    # 主模型为 None: 准备所有 MTP 列；draft 首轮为 (): 无新槽；draft 追加后为 (k,): 只准备新槽。
+    mtp_decode_slot_prepare_indices: Optional[tuple] = None
 
     def _capture_cpu_mirror(self, tensor_name: str, mirror_name: str):
         tensor = getattr(self, tensor_name)
@@ -64,8 +68,43 @@ class ModelInput:
 
     def capture_cpu_mirrors(self):
         self._capture_cpu_mirror("b_req_idx", "b_req_idx_cpu")
+        self._capture_cpu_mirror("b_mtp_index", "b_mtp_index_cpu")
         self._capture_cpu_mirror("b_seq_len", "b_seq_len_cpu")
         self._capture_cpu_mirror("b_ready_cache_len", "b_ready_cache_len_cpu")
+        return
+
+    def make_mtp_draft_input(self):
+        model_input = copy.copy(self)
+        model_input.b_seq_len = self.b_seq_len.clone()
+        model_input.b_seq_len_cpu = self.b_seq_len_cpu.clone()
+        model_input.mtp_decode_slot_prepare_indices = ()
+        return model_input
+
+    def advance_mtp_decode_step(
+        self,
+        new_mem_indexes_cpu: torch.Tensor,
+        new_mem_indexes: torch.Tensor,
+        max_mtp_index: int,
+    ):
+        self.b_seq_len += 1
+        self.b_seq_len_cpu += 1
+        self.max_kv_seq_len += 1
+        self.mtp_decode_slot_prepare_indices = (max_mtp_index,)
+        slots_per_req = max_mtp_index + 1
+        self.mem_indexes_cpu = torch.cat(
+            [
+                self.mem_indexes_cpu.view(-1, slots_per_req)[:, 1:],
+                new_mem_indexes_cpu.view(-1, 1),
+            ],
+            dim=1,
+        ).view(-1)
+        self.mem_indexes = torch.cat(
+            [
+                self.mem_indexes.view(-1, slots_per_req)[:, 1:],
+                new_mem_indexes.view(-1, 1),
+            ],
+            dim=1,
+        ).view(-1)
         return
 
     def to_cuda(self):

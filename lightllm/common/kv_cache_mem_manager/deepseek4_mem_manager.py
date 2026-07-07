@@ -444,10 +444,10 @@ class DeepseekV4MemoryManager(MemoryManager):
         req_to_token_indexs: torch.Tensor,
     ) -> None:
         """decode prep: 本步 token(位置 seq-1)的 swa 槽。整页起点开新页,否则上一 token 槽 +1
-        (位置对齐不变式保证同页连续)。scatter 目标用 mem_indexes(此刻 req_to_token 尚未写本步)。
+        (位置对齐不变式保证同页连续)。scatter 目标用当前步 mem_indexes。
 
-        注意: 续槽从上一位置的映射派生,故同一请求的多行(MTP 多 token/步)在同一批内不支持
-        (DSV4 启动参数已拒绝 MTP;支持需按步内顺序分段派生)。"""
+        注意: 续槽从上一位置的映射派生,故同一请求的多行(MTP 多 token/步)需要调用方按
+        b_mtp_index 分段准备。"""
         page = DSV4_SWA_PAGE_SIZE
         hold_req_id = self.max_request_num
         req_list = b_req_idx_cpu.tolist()
@@ -700,9 +700,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         from lightllm.third_party.sglang_jit.dsv4 import fused_k_norm_rope_flashmla
 
         swa_slots = self.full_to_swa_indexs[mem_index.cuda().long().reshape(-1)]
-        # 未映射槽位(-1, 如 decode 图 warmup 的 HOLD 行: prep 跳过 alloc_swa)对老 triton
-        # 写入核是显式 no-op;sglang fused 核无负槽位防护(负页偏移=非法访存),mask 到
-        # swa HOLD 槽(垃圾桶语义,与 padding 行写入一致)。
         swa_slots = torch.where(swa_slots < 0, torch.full_like(swa_slots, self.swa_pool.HOLD_TOKEN_MEMINDEX), swa_slots)
         fused_k_norm_rope_flashmla(
             kv=kv,
