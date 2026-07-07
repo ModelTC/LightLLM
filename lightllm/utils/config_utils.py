@@ -170,6 +170,7 @@ def auto_set_fused_shared_experts(args) -> None:
         "deepseek_v3",
         "deepseek_v31",
         "deepseek_v32",
+        "glm_moe_dsa",
         "qwen3_next",
         "qwen3_5",
         "qwen3_5_text",

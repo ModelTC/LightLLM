@@ -72,6 +72,7 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
         topk_indices: torch.Tensor,
         prefill_mem_index: torch.Tensor,
         prefill_cache_kv: torch.Tensor,
+        ragged_mem_index: torch.Tensor = None,
     ):
         from lightllm.models.deepseek3_2.triton_kernel.prefill_compact_kv_flashmla_fp8 import (
             get_prefill_kv_cache_and_remap_indices_triton,
@@ -83,4 +84,5 @@ class FP8PerTokenGroupQuantDeepseek3_2MemoryManager(Deepseek2MemoryManager):
             prefill_mem_index=prefill_mem_index,
             prefill_cache_kv=prefill_cache_kv,
             prefill_dtype=self.prefill_dtype,
+            ragged_mem_index=ragged_mem_index,
         )
