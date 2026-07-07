@@ -319,6 +319,37 @@ class Req(ctypes.Structure):
                 pass
         return
 
+    def get_prompt_topk_shm_name(self):
+        service_uni_name = get_unique_server_name()
+        return f"{service_uni_name}_shm_prompt_topk_{self.index_in_shm_mem}"
+
+    def create_prompt_topk_shm_array(self, num_rows: int, k: int):
+        self.shm_prompt_topk = ShmArray(self.get_prompt_topk_shm_name(), (num_rows, 2 * k + 1), dtype=np.float32)
+        self.shm_prompt_topk.create_shm()
+        return
+
+    def link_prompt_topk_shm_array(self, num_rows: int, k: int):
+        if num_rows <= 0 or k <= 0:
+            return None
+        shm_prompt_topk = ShmArray(self.get_prompt_topk_shm_name(), (num_rows, 2 * k + 1), dtype=np.float32)
+        shm_prompt_topk.link_shm()
+        self.shm_prompt_topk = shm_prompt_topk
+        return self.shm_prompt_topk.arr
+
+    def close_prompt_topk_shm_array(self):
+        """Close and unlink prompt top-k SHM (on-demand, same lifecycle as routing SHM)."""
+        if getattr(self, "shm_prompt_topk", None) is not None:
+            self.shm_prompt_topk.close_shm()
+            self.shm_prompt_topk = None
+        else:
+            try:
+                shm = shared_memory.SharedMemory(name=self.get_prompt_topk_shm_name())
+                shm.close()
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        return
+
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
 
@@ -376,6 +407,39 @@ class Req(ctypes.Structure):
         metadata["prompt_logprobs"] = all_prompts
         metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
         self._cache_prompt_metadata = metadata
+        return metadata
+
+    def get_prompt_logprobs_metadata(self):
+        if hasattr(self, "_cache_prompt_logprobs_metadata"):
+            return self._cache_prompt_logprobs_metadata
+        k = self.sample_params.prompt_logprobs
+        cur_ids = self.shm_prompt_ids.arr[0 : self.input_len]
+        topk_arr = None
+        if k > 0 and self.input_len > 1:
+            try:
+                topk_arr = self.link_prompt_topk_shm_array(self.input_len - 1, k)
+            except Exception as e:
+                logger.warning(f"Failed to link prompt topk shm for req {self.request_id}: {e}")
+        prompt_logprobs = [None]
+        for pos in range(1, self.input_len):
+            token_id = int(cur_ids[pos])
+            token_logprob = float(self.shm_logprobs.arr[pos])
+            if topk_arr is None:
+                pos_dict = {token_id: {"logprob": token_logprob, "rank": None, "decoded_token": None}}
+            else:
+                row = topk_arr[pos - 1]
+                pos_dict = {
+                    int(row[j]): {"logprob": float(row[k + j]), "rank": j + 1, "decoded_token": None}
+                    for j in range(k)
+                }
+                if token_id not in pos_dict:
+                    pos_dict[token_id] = {"logprob": token_logprob, "rank": int(row[2 * k]), "decoded_token": None}
+            prompt_logprobs.append(pos_dict)
+        metadata = {
+            "prompt_logprobs": prompt_logprobs,
+            "prompt_token_ids": [int(e) for e in cur_ids],
+        }
+        self._cache_prompt_logprobs_metadata = metadata
         return metadata
 
     def is_infer_decode(self) -> bool:
@@ -449,7 +513,6 @@ class ChunkedPrefillReq(Req):
         return need_tokens
 
     def get_first_router_need_tokens(self):
-
         return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
 
 

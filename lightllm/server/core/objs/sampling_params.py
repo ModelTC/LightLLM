@@ -18,6 +18,7 @@ REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_L
 GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 2048))
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
+MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 
 
 class StopSequence(ctypes.Structure):
@@ -305,6 +306,10 @@ class SamplingParams(ctypes.Structure):
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
         ("seed", ctypes.c_int64),  # random seed
+        # logprobs: -1 disable, 0 only the actual prompt token,
+        # K > 0 top-K tokens plus the actual token at every prompt position.
+        # only usable on a server started with --return_all_prompt_logprobs.
+        ("prompt_logprobs", ctypes.c_int),
     ]
 
     _do_sample: bool = False
@@ -341,6 +346,8 @@ class SamplingParams(ctypes.Structure):
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
         self.seed = kwargs.get("seed", -1)
+        prompt_logprobs = kwargs.get("prompt_logprobs", None)
+        self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
@@ -438,6 +445,8 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
+        if self.prompt_logprobs < -1 or self.prompt_logprobs > MAX_PROMPT_LOGPROBS:
+            raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 
@@ -490,6 +499,7 @@ class SamplingParams(ctypes.Structure):
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
             "seed": self.seed,
+            "prompt_logprobs": self.prompt_logprobs,
         }
 
     def to_origin_dict(self):

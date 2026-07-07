@@ -1,20 +1,39 @@
+import atexit
 import torch
+from multiprocessing import shared_memory
 from .impl import ChunkedPrefillBackend
 from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.pre import prepare_prefill_inputs
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
+from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
+
+
+def _cleanup_prompt_topk_shm_pool() -> None:
+    """Unlink leftover prompt top-k SHM segments at server shutdown, same as the routing SHM pool."""
+    try:
+        args = get_env_start_args()
+    except Exception:
+        return
+    service_name = get_unique_server_name()
+    for i in range(args.running_max_req_size):
+        try:
+            shm = shared_memory.SharedMemory(name=f"{service_name}_shm_prompt_topk_{i}")
+            shm.close()
+            shm.unlink()
+        except Exception:
+            pass
 
 
 class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
         self.prefill = self.return_all_prompt_logprobs_prefill
+        atexit.register(_cleanup_prompt_topk_shm_pool)
         return
 
     def return_all_prompt_logprobs_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
-
         # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
         assert self.radix_cache is None
         assert self.disable_chunked_prefill is True
@@ -39,12 +58,28 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
             req_obj: InferReq = req_obj
             cur_ids: torch.Tensor = input_ids[start_loc : start_loc + q_seq_len]
             cur_logits = prompt_all_logits[start_loc : start_loc + q_seq_len]
-            cur_logprobs = torch.log_softmax(cur_logits, dim=-1, dtype=torch.float)[0:-1, :]
-            cur_logprobs = torch.gather(cur_logprobs, dim=1, index=cur_ids[1:].view(-1, 1)).detach().cpu().numpy()
+            all_logprobs = torch.log_softmax(cur_logits, dim=-1, dtype=torch.float)[0:-1, :]
+            cur_logprobs = torch.gather(all_logprobs, dim=1, index=cur_ids[1:].view(-1, 1))
 
             if req_obj.shm_req.input_len > 1:
                 if self.is_master_in_dp:
-                    req_obj.shm_req.shm_logprobs.arr[1 : req_obj.shm_req.input_len] = cur_logprobs.flatten()
+                    req_obj.shm_req.shm_logprobs.arr[1 : req_obj.shm_req.input_len] = (
+                        cur_logprobs.detach().cpu().numpy().flatten()
+                    )
+                    k = req_obj.sampling_param.shm_param.prompt_logprobs
+                    if k > 0:
+                        kk = min(k, all_logprobs.shape[-1])
+                        topk_logprobs, topk_ids = all_logprobs.topk(kk, dim=-1)
+                        if kk < k:
+                            topk_logprobs = torch.nn.functional.pad(topk_logprobs, (0, k - kk), value=float("-inf"))
+                            topk_ids = torch.nn.functional.pad(topk_ids, (0, k - kk), value=0)
+                        ranks = (all_logprobs > cur_logprobs).sum(dim=-1, keepdim=True) + 1
+                        # pack ids, logprobs and actual-token rank into one float32 shm array,
+                        # see Req.create_prompt_topk_shm_array for the layout
+                        packed = torch.cat([topk_ids.float(), topk_logprobs, ranks.float()], dim=1)
+                        req_obj.shm_req.create_prompt_topk_shm_array(req_obj.shm_req.input_len - 1, k)
+                        req_obj.shm_req.shm_prompt_topk.arr[:] = packed.detach().cpu().numpy()
+                        req_obj.shm_req.shm_prompt_topk.detach_shm()
 
         if self.prefill_mask_func is not None:
             self.prefill_mask_func(run_reqs, logits)

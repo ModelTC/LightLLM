@@ -14,6 +14,7 @@ def setup_module_env():
                 "llm_decode_att_backend": ["None"],
                 "cpu_cache_token_page_size": 256,
                 "enable_cpu_cache": False,
+                "model_dir": "",
             }
         )
     )
@@ -38,6 +39,21 @@ def test_create_prompt_ids_shm_array(req):
 def test_get_used_tokens(req):
     req.shm_cur_kv_len = 5
     assert req.get_used_tokens() == 5
+
+
+def test_get_prompt_logprobs_metadata_returns_actual_prompt_tokens(req):
+    req.sample_params.prompt_logprobs = 0
+    req.shm_logprobs.arr[1] = -0.5
+    req.shm_logprobs.arr[2] = -1.25
+
+    metadata = req.get_prompt_logprobs_metadata()
+
+    assert metadata["prompt_token_ids"] == [1, 2, 3]
+    assert metadata["prompt_logprobs"] == [
+        None,
+        {2: {"logprob": -0.5, "rank": None, "decoded_token": None}},
+        {3: {"logprob": -1.25, "rank": None, "decoded_token": None}},
+    ]
 
 
 def test_token_healing_req_post_init():
