@@ -71,6 +71,8 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
         )
+        self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
+        self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 mtp_layer_index,
@@ -111,12 +113,7 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
         assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 MTP requires model.safetensors.index.json."
         weight_map = utils.PetrelHelper.load_json(index_file)["weight_map"]
-        mtp_keys_by_file = {}
-        for key, file_ in weight_map.items():
-            if key.startswith("mtp.0."):
-                mtp_keys_by_file.setdefault(file_, []).append(key)
-
-        candidate_files = sorted(mtp_keys_by_file.keys())
+        candidate_files = sorted({file_ for key, file_ in weight_map.items() if key.startswith("mtp.0.")})
         assert len(candidate_files) > 0, "DeepSeek-V4 MTP weights with prefix mtp.0. were not found."
 
         loaded_key_count = 0
@@ -124,8 +121,9 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         for file_ in tqdm(candidate_files, total=len(candidate_files), desc=desc):
             weights = {}
             with safe_open(os.path.join(self.weight_dir_, file_), "pt", "cpu") as f:
-                for key in mtp_keys_by_file[file_]:
-                    weights[key] = f.get_tensor(key)
+                for key in f.keys():
+                    if key.startswith("mtp.0."):
+                        weights[key] = f.get_tensor(key)
 
             loaded_key_count += len(weights)
             self.pre_post_weight.load_hf_weights(weights)

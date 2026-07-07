@@ -24,4 +24,5 @@ class DeepseekV4PostLayerInfer(LlamaPostLayerInfer):
             cfg.get("hc_eps", 1e-6),
             self.alloc_tensor,
         )
-        return super().token_forward(collapsed, infer_state, layer_weight)
+        logits = super().token_forward(collapsed, infer_state, layer_weight)
+        return logits, input_embdings
