@@ -76,22 +76,24 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         nsa_dict = att_control.nsa_prefill_dict
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
+        topk_mem_indices = nsa_dict.get("topk_mem_indices")
+        topk_indices = nsa_dict["topk_indices"]
         prefill_cache_kv = nsa_dict["prefill_cache_kv"]
 
         if self.infer_state.prefix_total_token_num > 0:
             # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
             # 部分kv 从 packed_kv 中获取, 并进行反量化，这样可以避免 prefill_cache_kv
             # 部分的数据进行重复的反量化操作，提升整体的性能。
+            use_full_ragged_kv = topk_mem_indices is None or self.ragged_mem_index.numel() <= topk_indices.numel()
             kv, topk_indices = self.infer_state.mem_manager.get_prefill_kv_cache_and_remap_indices(
                 packed_kv=packed_kv,
-                topk_indices=topk_mem_indices,
+                topk_indices=topk_indices if use_full_ragged_kv else topk_mem_indices,
                 prefill_mem_index=self.infer_state.mem_index,
                 prefill_cache_kv=prefill_cache_kv,
+                ragged_mem_index=self.ragged_mem_index if use_full_ragged_kv else None,
             )
         else:
             kv = prefill_cache_kv
-            topk_indices = nsa_dict["topk_indices"]
 
         if topk_indices.ndim == 2:
             topk_indices = topk_indices.unsqueeze(1)
@@ -213,7 +215,9 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             softmax_scale=softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
-            indices=topk_mem_indices.to(dtype=torch.int32),
+            indices=(
+                topk_mem_indices if topk_mem_indices.dtype == torch.int32 else topk_mem_indices.to(dtype=torch.int32)
+            ),
         )
         o_tensor = o_tensor[:, :, :real_head_num, :]
         return o_tensor[:, 0, :, :]  # [b, 1, h, d] -> [b, h, d]
