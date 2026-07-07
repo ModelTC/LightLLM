@@ -123,7 +123,7 @@ class X2IParams(ctypes.Structure):
             return
         from lightllm.models.neo_chat_moe.vision_process import smart_resize
 
-        h, w = smart_resize(height, width, factor=32, min_pixels=512 * 512, max_pixels=2048 * 2048)
+        h, w = smart_resize(height, width, factor=32, min_pixels=512 * 512, max_pixels=4096 * 4096)
         self.width = w
         self.height = h
         self.has_updated_hw = True
