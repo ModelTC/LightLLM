@@ -169,7 +169,7 @@ class NsaInfer:
         self.scale_fmt = quantization_config.get("scale_fmt", "ue8m0")
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = (self.index_n_heads**-0.5) * self.softmax_scale
+        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
         self.indexer_rope_interleave = network_config.get("indexer_rope_interleave", False)
@@ -266,6 +266,9 @@ class NsaInfer:
             topk=self.index_topk,
         )
         b_topk_index = torch.where(b_topk_index != -1, b_topk_index + ks.view(-1, 1), -1)
+        if infer_state.is_prefill and att_state.ragged_mem_index.numel() <= b_topk_index.numel():
+            return None, b_topk_index
+
         # 将 topk index 转化为 mem index
         from ..triton_kernel.topk_index_to_mem_index import trans_topk_index_to_mem_index
 
@@ -283,7 +286,7 @@ class NsaInfer:
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size**-0.5)
+        return hadamard_transform(x, scale=hidden_size ** -0.5)
 
     def _get_q_k_bf16(
         self,
