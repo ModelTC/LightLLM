@@ -711,7 +711,12 @@ class ModeBackend:
 
         if recover_paused:
             g_infer_context.recover_paused_reqs(
-                paused_reqs=paused_reqs, is_master_in_dp=self.is_master_in_dp, can_alloc_token_num=can_alloc_token_num
+                paused_reqs=paused_reqs,
+                is_master_in_dp=self.is_master_in_dp,
+                can_alloc_token_num=can_alloc_token_num,
+                can_alloc_dsv4_swa_page_num=can_alloc_dsv4_swa_page_num,
+                can_alloc_dsv4_c4_page_num=can_alloc_dsv4_c4_page_num,
+                can_alloc_dsv4_c128_slot_num=can_alloc_dsv4_c128_slot_num,
             )
 
         # 在 enable_prefill_decode_mixed 模式下，如果存在 prefill 请求和 decode 请求，

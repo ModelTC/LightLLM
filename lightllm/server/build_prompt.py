@@ -169,5 +169,11 @@ async def build_prompt(request, tools) -> str:
     try:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except Exception as e:
-        raise ValueError(f"Failed to build prompt: {e}") from None
+        logger.exception(
+            "Failed to build prompt. request=%s tools=%s template_kwargs=%s",
+            json.dumps(request.model_dump(by_alias=True, exclude_none=True), ensure_ascii=False, default=str),
+            json.dumps(tools, ensure_ascii=False, default=str),
+            json.dumps(kwargs, ensure_ascii=False, default=str),
+        )
+        raise ValueError(f"Failed to build prompt: {e}") from e
     return input_str

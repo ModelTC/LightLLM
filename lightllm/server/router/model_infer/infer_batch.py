@@ -375,6 +375,9 @@ class InferenceContext:
         paused_reqs: List["InferReq"],
         is_master_in_dp: bool,
         can_alloc_token_num: int,
+        can_alloc_dsv4_swa_page_num: int = None,
+        can_alloc_dsv4_c4_page_num: int = None,
+        can_alloc_dsv4_c128_slot_num: int = None,
     ):
         if paused_reqs:
 
@@ -382,6 +385,27 @@ class InferenceContext:
                 prefill_need_token_num = req.get_cur_total_len()
                 if prefill_need_token_num > can_alloc_token_num:
                     break
+
+                if can_alloc_dsv4_swa_page_num is not None:
+                    swa_page_num = self.get_dsv4_swa_prefill_need_page_num(req, is_chuncked_prefill=False)
+                    if swa_page_num > can_alloc_dsv4_swa_page_num:
+                        break
+                else:
+                    swa_page_num = 0
+
+                if can_alloc_dsv4_c4_page_num is not None:
+                    c4_page_num = self.get_dsv4_c4_prefill_need_page_num(req, is_chuncked_prefill=False)
+                    if c4_page_num > can_alloc_dsv4_c4_page_num:
+                        break
+                else:
+                    c4_page_num = 0
+
+                if can_alloc_dsv4_c128_slot_num is not None:
+                    c128_slot_num = self.get_dsv4_c128_prefill_need_slot_num(req, is_chuncked_prefill=False)
+                    if c128_slot_num > can_alloc_dsv4_c128_slot_num:
+                        break
+                else:
+                    c128_slot_num = 0
 
                 if g_infer_context.is_linear_att_mixed_model:
                     req._linear_match_radix_cache()
@@ -394,6 +418,12 @@ class InferenceContext:
                     req.shm_req.is_paused = False
                     logger.debug(f"infer recover paused req id {req.req_id}")
                 can_alloc_token_num -= prefill_need_token_num
+                if can_alloc_dsv4_swa_page_num is not None:
+                    can_alloc_dsv4_swa_page_num -= swa_page_num
+                if can_alloc_dsv4_c4_page_num is not None:
+                    can_alloc_dsv4_c4_page_num -= c4_page_num
+                if can_alloc_dsv4_c128_slot_num is not None:
+                    can_alloc_dsv4_c128_slot_num -= c128_slot_num
         return
 
     def get_can_alloc_token_num(self):
