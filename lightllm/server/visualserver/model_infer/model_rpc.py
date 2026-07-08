@@ -28,7 +28,6 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.visualserver.model_infer.mem_reserve import publish_vit_reserved_mem, reserve_guard_tensor
 from lightllm.server.visualserver.model_infer.worst_case_reserve import WorstCaseReserveMixin
 
 
@@ -148,37 +147,29 @@ class VisualModelRpcServer(rpyc.Service):
     def _reserve_vit_worst_case_mem(self):
         args = get_env_start_args()
         global_rank = self.dp_rank_id * self.vit_tp + self.tp_rank_id
-        reserved_bytes = 0
-        if getattr(args, "visual_reserved_mem_gb", None) is not None:
-            # Manual override: hold an explicit guard tensor, skip the dummy probe.
-            self._mem_reserve_guard, reserved_bytes = reserve_guard_tensor(self.device_id, args.visual_reserved_mem_gb)
-        elif os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None:
-            # Preserved escape hatch: probe disabled. Reservation is skipped -> co-location OOM risk.
+        if os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None:
             logger.warning(
                 "DISABLE_CHECK_MAX_LEN_INFER is set: skipping ViT worst-case reservation. "
-                "A co-located LLM may OOM at runtime. Unset it, or set --visual_reserved_mem_gb instead."
+                "A co-located LLM may OOM at runtime."
             )
-        elif isinstance(self.model, WorstCaseReserveMixin):
+            return
+        if isinstance(self.model, WorstCaseReserveMixin):
             reserved_bytes = self.model.reserve_worst_case_activation(
                 self.device_id,
                 self.infer_max_batch_size,
                 args.max_image_pixels,
                 args.max_image_token_count,
             )
-        else:
-            logger.warning(
-                f"co-location OOM risk: model_type={self.model_type} has no ViT worst-case reservation. "
-                f"Set --visual_reserved_mem_gb to reserve headroom, or place the ViT on a separate GPU "
-                f"with --visual_gpu_ids."
-            )
-        publish_vit_reserved_mem(self.device_id, global_rank, reserved_bytes)
-        # publishing reserved_bytes (including 0 on the skip paths) tells the router exactly how much
-        # this rank holds on its device; 0 means "nothing held here".
-        if reserved_bytes > 0:
-            logger.info(
-                f"ViT rank {global_rank} on device {self.device_id} reserved "
-                f"{reserved_bytes / 1024 ** 3:.2f} GB worst-case activation memory."
-            )
+            if reserved_bytes > 0:
+                logger.info(
+                    f"ViT rank {global_rank} on device {self.device_id} reserved "
+                    f"{reserved_bytes / 1024 ** 3:.2f} GB worst-case activation memory."
+                )
+            return
+        logger.warning(
+            f"co-location OOM risk: model_type={self.model_type} has no ViT worst-case reservation. "
+            f"Place the ViT on a separate GPU with --visual_gpu_ids."
+        )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:

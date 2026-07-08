@@ -1,5 +1,6 @@
+import math
 import torch
-from lightllm.server.visualserver.model_infer.mem_reserve import compute_qwen_worst_case_grid
+from typing import List, Tuple
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -52,8 +53,49 @@ class WorstCaseReserveMixin:
 class QwenVLWorstCaseMixin(WorstCaseReserveMixin):
     """Worst-case builder for Qwen2/2.5/3-VL visual towers (shared forward(hidden_states, grid_thw))."""
 
+    def compute_qwen_worst_case_grid(
+        self,
+        batch_size: int,
+        max_image_pixels: int,
+        max_image_token_count: int,
+        patch_size: int,
+        temporal_patch_size: int,
+        in_channels: int,
+        spatial_merge_size: int,
+    ) -> Tuple[Tuple[int, int], List[List[int]]]:
+        """Pure shape math for the Qwen-VL worst case.
+
+        Returns ((total_patches, row_width), grid_thw) where pixel_values has shape
+        (total_patches, row_width) and grid_thw is one [t, h, w] triple per dummy image.
+        Bounds each image by BOTH the per-image token cap and pixel cap (whichever is tighter),
+        using the smallest square grid (sides multiples of spatial_merge_size) whose patch count
+        is >= that cap. The side is rounded UP so the probe is an upper bound on the largest valid
+        request and never under-reserves (a square floor could undershoot, e.g. isqrt(32768)=181
+        -> 180x180 = 32400 patches < the 32768-patch cap).
+
+        Assumes valid inputs (max_image_token_count > 0 and max_image_pixels >= (patch_size *
+        spatial_merge_size)**2); smaller budgets are clamped up to a single spatial_merge_size tile.
+        """
+        spatial_merge_unit = spatial_merge_size * spatial_merge_size
+        patches_by_tokens = max_image_token_count * spatial_merge_unit
+        patches_by_pixels = max_image_pixels // (patch_size * patch_size)
+        max_patches = max(1, min(patches_by_tokens, patches_by_pixels))
+
+        side = int(math.isqrt(max_patches))
+        if side * side < max_patches:
+            side += 1  # ceil(sqrt) so side*side >= max_patches (never undershoot)
+        if side % spatial_merge_size:
+            side += spatial_merge_size - (side % spatial_merge_size)  # round up to a merge-unit multiple
+        side = max(side, spatial_merge_size)  # never smaller than one merge unit
+
+        grid_h = grid_w = side
+        row_width = in_channels * temporal_patch_size * patch_size * patch_size
+        total_patches = grid_h * grid_w * batch_size
+        grid_thw = [[1, grid_h, grid_w] for _ in range(batch_size)]
+        return (total_patches, row_width), grid_thw
+
     def build_worst_case_input(self, batch_size, max_image_pixels, max_image_token_count) -> dict:
-        (total_patches, row_width), grid_thw = compute_qwen_worst_case_grid(
+        (total_patches, row_width), grid_thw = self.compute_qwen_worst_case_grid(
             batch_size=batch_size,
             max_image_pixels=max_image_pixels,
             max_image_token_count=max_image_token_count,
