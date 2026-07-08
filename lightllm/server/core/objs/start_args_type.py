@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # 只是为了更好的编程提示
 
@@ -57,6 +57,7 @@ class StartArgs:
         },
     )
     chat_template: Optional[str] = field(default=None)
+    default_chat_template_kwargs: Optional[Dict] = field(default=None)
     running_max_req_size: int = field(default=512)
     tp: int = field(default=1)
     dp: int = field(default=1)

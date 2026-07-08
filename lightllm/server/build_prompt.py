@@ -4,6 +4,7 @@ from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 from functools import lru_cache
 from lightllm.utils.config_utils import get_model_type_v1
+from lightllm.utils.envs_utils import get_env_start_args
 
 logger = init_logger(__name__)
 
@@ -126,6 +127,16 @@ def _normalize_multimodal_content_types(messages: list) -> None:
                 part["type"] = "audio"
 
 
+def get_effective_chat_template_kwargs(request) -> dict:
+    kwargs = {}
+    default_kwargs = getattr(get_env_start_args(), "default_chat_template_kwargs", None)
+    if default_kwargs:
+        kwargs.update(default_kwargs)
+    if request.chat_template_kwargs:
+        kwargs.update(request.chat_template_kwargs)
+    return kwargs
+
+
 async def build_prompt(request, tools) -> str:
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
@@ -141,8 +152,9 @@ async def build_prompt(request, tools) -> str:
     if request.role_settings:
         kwargs["role_setting"] = request.role_settings
 
-    if request.chat_template_kwargs:
-        kwargs.update(request.chat_template_kwargs)
+    chat_template_kwargs = get_effective_chat_template_kwargs(request)
+    if chat_template_kwargs:
+        kwargs.update(chat_template_kwargs)
 
     # 修复一些parser类型是默认打开thinking，但是 tokenizer有时候不知道打开了thinking。导致
     # 构建的reasoning parser 和 tokenizer 的行为不对齐导致的问题。
