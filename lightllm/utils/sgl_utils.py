@@ -6,9 +6,6 @@ from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
-
-_DEFAULT_NUM_SPLITS = 0
-
 try:
     import sgl_kernel
 
@@ -25,16 +22,14 @@ except:
     )
 
 try:
-    from sgl_kernel.flash_attn import (
-        flash_attn_varlen_func,
-        flash_attn_with_kvcache as _flash_attn_with_kvcache,
-    )
+    from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
-    flash_attn_varlen_func = flash_attn_varlen_func
+    flash_attn_with_kvcache_autotune = flash_attn_with_kvcache
     merge_state_v2 = sgl_ops.merge_state_v2
 except:
     flash_attn_varlen_func = None
-    _flash_attn_with_kvcache = None
+    flash_attn_with_kvcache = None
+    flash_attn_with_kvcache_autotune = None
     merge_state_v2 = None
     logger.warning(
         "sgl_kernel is not installed, or the installed version did not support fa3. \
@@ -66,11 +61,7 @@ def _flash_attn_kvcache_static_key(q, k_cache, v_cache, causal, window_size, sof
 
 
 def _flash_attn_max_q_len(q, max_seqlen_q):
-    if max_seqlen_q is not None:
-        return int(max_seqlen_q)
-    if q.dim() >= 4:
-        return int(q.shape[1])
-    return int(q.shape[0])
+    return int(max_seqlen_q if max_seqlen_q is not None else q.shape[1] if q.dim() >= 4 else q.shape[0])
 
 
 def _flash_attn_kvcache_run_key(q, page_table, max_seqlen_q):
@@ -80,23 +71,11 @@ def _flash_attn_kvcache_run_key(q, page_table, max_seqlen_q):
     return batch_size * 1_000_000_000_000 + max_q_len * 1_000_000 + max_kv_len
 
 
-def _flash_attn_is_decode_like(q, page_table, max_seqlen_q=None):
-    if page_table is None or page_table.dim() < 2:
-        return False
-
-    max_q_len = _flash_attn_max_q_len(q, max_seqlen_q)
-    if max_q_len <= 0 or int(page_table.shape[1]) <= max_q_len:
-        return False
-
-    q_token_num = int(q.shape[0]) * int(q.shape[1]) if q.dim() >= 4 else int(q.shape[0])
-    return q_token_num == int(page_table.shape[0]) * max_q_len
-
-
 class _FlashAttnKvcacheAutotuner(Autotuner):
     def _bench(self, *args, n_repeat=3, n_retries=3, **kwargs):
         page_table = kwargs.get("page_table")
         cache_seqlens = kwargs.get("cache_seqlens")
-        max_kv_len = int(page_table.shape[1]) if page_table is not None and page_table.dim() >= 2 else 0
+        max_kv_len = int(page_table.shape[1])
 
         bench_times = []
         for bench_kv_len in sorted({kv_len for kv_len in [10240, max_kv_len] if 0 < kv_len <= max_kv_len}):
@@ -120,13 +99,12 @@ class _FlashAttnKvcacheAutotuner(Autotuner):
 
             bench_times.append(super()._bench(*args, n_repeat=n_repeat, n_retries=n_retries, **bench_kwargs))
 
-        if bench_times:
-            return sum(bench_times) / len(bench_times)
-
-        return super()._bench(*args, n_repeat=n_repeat, n_retries=n_retries, **kwargs)
+        return sum(bench_times) / len(bench_times)
 
 
-if _flash_attn_with_kvcache is not None and torch.cuda.is_available():
+_flash_attn_with_kvcache_autotuned = None
+
+if flash_attn_with_kvcache is not None and torch.cuda.is_available():
 
     @torch.no_grad()
     def _flash_attn_with_kvcache_autotuned_impl(
@@ -148,7 +126,7 @@ if _flash_attn_with_kvcache is not None and torch.cuda.is_available():
     ):
         if run_config is not None:
             num_splits = run_config["num_splits"]
-        return _flash_attn_with_kvcache(
+        return flash_attn_with_kvcache(
             q=q,
             k_cache=k_cache,
             v_cache=v_cache,
@@ -173,40 +151,13 @@ if _flash_attn_with_kvcache is not None and torch.cuda.is_available():
         run_key_func=_flash_attn_kvcache_run_key,
     )
 
-else:
-    _flash_attn_with_kvcache_autotuned = None
-
-
-flash_attn_with_kvcache = _flash_attn_with_kvcache
-
-if _flash_attn_with_kvcache_autotuned is not None:
-
     def _flash_attn_with_kvcache_autotune(q, k_cache, v_cache, **kwargs):
-        if (
-            kwargs.get("num_splits", _DEFAULT_NUM_SPLITS) != _DEFAULT_NUM_SPLITS
-            or any(
-                kwargs.get(name) is not None
-                for name in (
-                    "k",
-                    "v",
-                    "out",
-                    "qv",
-                    "q_descale",
-                    "k_descale",
-                    "v_descale",
-                )
-            )
-            or not _flash_attn_is_decode_like(q, kwargs.get("page_table"), kwargs.get("max_seqlen_q"))
-        ):
-            return _flash_attn_with_kvcache(q=q, k_cache=k_cache, v_cache=v_cache, **kwargs)
-
         tuner = _flash_attn_with_kvcache_autotuned
         call_kwargs = {"q": q, "k_cache": k_cache, "v_cache": v_cache, **kwargs}
         call_kwargs.setdefault("causal", False)
         call_kwargs.setdefault("window_size", (-1, -1))
         call_kwargs.setdefault("softcap", 0.0)
         call_kwargs.setdefault("sinks", None)
-        call_kwargs.setdefault("num_splits", _DEFAULT_NUM_SPLITS)
 
         if get_triton_autotune_level() == AutotuneLevel.ADAPTIVE_AUTOTUNE:
             static_key = frozendict(tuner._static_key(**call_kwargs))
@@ -223,8 +174,6 @@ if _flash_attn_with_kvcache_autotuned is not None:
         return tuner(**call_kwargs)
 
     flash_attn_with_kvcache_autotune = _flash_attn_with_kvcache_autotune
-else:
-    flash_attn_with_kvcache_autotune = _flash_attn_with_kvcache
 
 
 def fa3_decode_autotune(model, cuda_graph_batch_sizes):

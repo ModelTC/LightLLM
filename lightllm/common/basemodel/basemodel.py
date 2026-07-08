@@ -293,10 +293,9 @@ class TpPartBaseModel:
     def _extra_autotune(self):
         if self.disable_cudagraph:
             return
-        from lightllm.common.basemodel.cuda_graph import gen_cuda_graph_batch_sizes
         from lightllm.utils.sgl_utils import fa3_decode_autotune
 
-        cuda_graph_batch_sizes = gen_cuda_graph_batch_sizes(
+        cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
             max_batch_size=self.graph_max_batch_size,
             tp_world_size=self.tp_world_size_,
         )
