@@ -146,10 +146,9 @@ class VisualModelRpcServer(rpyc.Service):
 
     def _hold_vision_peak_vram(self):
         args = get_env_start_args()
-        global_rank = self.dp_rank_id * self.vit_tp + self.tp_rank_id
-        if os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None:
+        if os.getenv("DISABLE_VISION_PEAK_VRAM_WARMUP", None) is not None:
             logger.warning(
-                "DISABLE_CHECK_MAX_LEN_INFER is set: skipping vision peak VRAM hold. "
+                "DISABLE_VISION_PEAK_VRAM_WARMUP is set: skipping vision peak VRAM hold. "
                 "A co-located LLM may OOM at runtime."
             )
             return
@@ -158,10 +157,13 @@ class VisualModelRpcServer(rpyc.Service):
             self.infer_max_batch_size,
             args.max_image_pixels,
             args.max_image_token_count,
+            tp_rank_id=self.tp_rank_id,
+            vit_tp=self.vit_tp,
+            dp_rank_id=self.dp_rank_id,
         )
         if held_vram_bytes > 0:
             logger.info(
-                f"Vision rank {global_rank} on device {self.device_id} held "
+                f"Vision model on device {self.device_id} held "
                 f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
             )
 
