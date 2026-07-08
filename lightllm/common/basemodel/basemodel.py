@@ -650,6 +650,7 @@ class TpPartBaseModel:
     def _context_forward(self, infer_state: InferStateInfo):
 
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
+        infer_state.mtp_draft_input_hiddens = None
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
             infer_state.prepare_prefill_dp_balance()
@@ -720,6 +721,7 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        infer_state.mtp_draft_input_hiddens = None
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
         for i in range(self.layers_num):
