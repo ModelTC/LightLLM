@@ -675,6 +675,7 @@ class HttpServerManager:
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
+        sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -711,6 +712,7 @@ class HttpServerManager:
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+                    sub_req_id_to_mtp_verify_token_num[sub_req_id] = metadata.get("mtp_verify_token_num", 0)
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -740,8 +742,10 @@ class HttpServerManager:
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
-                        mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
+                        mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+                        mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
+                        mtp_avg_verify_tokens_per_step = sum(sub_req_id_to_mtp_verify_token_num.values()) / max(
+                            mtp_total_step, 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
@@ -761,6 +765,7 @@ class HttpServerManager:
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+                            f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )
 
                         self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
@@ -911,6 +916,7 @@ class HttpServerManager:
                                     "cpu_prompt_cache_len": req.cpu_prompt_cache_len,
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
+                                    "mtp_verify_token_num": req.mtp_verify_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:
                                     metadata.update(req.get_all_prompt_metadata())

@@ -135,16 +135,15 @@ def sample_requests(
             rendered_text = "\n".join(parts)
         rendered_prompts.append(rendered_text)
 
-    # Tokenize the prompts and completions.
+    # Tokenize the prompts.
     prompt_token_ids = tokenizer(rendered_prompts).input_ids if rendered_prompts else []
-    completion_texts = [completion for _, completion in built_examples]
-    completion_token_ids = tokenizer(completion_texts).input_ids if completion_texts else []
 
     tokenized_dataset: List[Tuple[List[dict], str, int, int]] = []
     for i in range(len(built_examples)):
         messages, _ = built_examples[i]
         prompt_len = len(prompt_token_ids[i])
-        output_len = min(len(completion_token_ids[i]), 128)
+        # output_len = min(len(completion_token_ids[i]), 128)
+        output_len = 128
         tokenized_dataset.append((messages, rendered_prompts[i], prompt_len, output_len))
 
     # Filter out too long or too short sequences.
@@ -214,7 +213,7 @@ async def send_request(
             "top_k": 1,
             "top_p": 1.0,
             "temperature": 0,
-            "stream": True,
+            # "stream": True,
             "ignore_eos": True,
             "max_tokens": output_len,
         }
@@ -223,20 +222,41 @@ async def send_request(
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=headers, json=data) as response:
+                response.raise_for_status()
                 chunks = []
                 text = ""
                 start_time = time.time()
                 is_first = True
+                sse_buffer = ""
                 async for chunk, _ in response.content.iter_chunks():
                     now_time = time.time()
                     delta_time = now_time - start_time
                     if is_first:
                         is_first = False
                         ttft = delta_time
-                    text += json.loads(chunk.decode("utf-8")[6:])["choices"][0]["delta"].get("content", "")
-                    if delta_time < 0.005:
-                        receive_n += 1
                     chunks.append(delta_time)
+                    # OpenAI-compatible stream is SSE; one TCP chunk may contain
+                    # partial/multiple events. Parse by complete lines safely.
+                    sse_buffer += chunk.decode("utf-8", errors="ignore")
+                    while "\n" in sse_buffer:
+                        line, sse_buffer = sse_buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        if not payload:
+                            continue
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError:
+                            # In rare cases malformed/partial payload slips in;
+                            # skip and continue to keep benchmark running.
+                            continue
+                        text += event.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if delta_time < 0.005:
+                            receive_n += 1
                     start_time = now_time
         # print("messages", messages)
         # print("text", text)

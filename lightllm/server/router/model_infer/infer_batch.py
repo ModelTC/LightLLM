@@ -36,6 +36,7 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
+    dynamic_mtp_planner: Optional[Any] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -69,6 +70,15 @@ class InferenceContext:
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+        return
+
+    def init_dynamic_mtp_planner(self, mtp_step: int):
+        if self.dynamic_mtp_planner is not None and self.dynamic_mtp_planner.mtp_step == mtp_step:
+            return
+
+        from lightllm.server.router.model_infer.mode_backend.dynamic_mtp_planner import DynamicMTPPlanner
+
+        self.dynamic_mtp_planner = DynamicMTPPlanner(mtp_step=mtp_step)
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
@@ -554,6 +564,7 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+
         if self.mtp_step > 0:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
@@ -834,6 +845,10 @@ class InferReq:
     def update_mtp_accepted_token_num(self, accept_token_num: int):
         # 用于统计 mtp 的接受率
         self.shm_req.mtp_accepted_token_num += accept_token_num
+
+    def update_mtp_verify_token_num(self, verify_token_num: int):
+        # 用于统计 mtp 验证时发送给主模型的 token 总数
+        self.shm_req.mtp_verify_token_num += verify_token_num
 
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]

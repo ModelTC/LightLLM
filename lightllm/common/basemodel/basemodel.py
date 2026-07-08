@@ -25,14 +25,23 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
+from lightllm.utils.envs_utils import (
+    enable_triton_mtp_kernel,
+    get_env_start_args,
+    get_llm_data_type,
+    get_added_mtp_kv_layer_num,
+)
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, OutHiddenState
 from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import (
+    set_model_init_status,
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_dynamic_mtp_verify,
+)
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.infer_utils import calculate_time, post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
 
@@ -89,16 +98,11 @@ class TpPartBaseModel:
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
-
-        self.is_mtp_mode = self.args.mtp_mode in [
-            "vanilla_with_att",
-            "eagle_with_att",
-            "vanilla_no_att",
-            "eagle_no_att",
-        ]
         self.prefill_graph: PrefillCudaGraph = None
 
         self._init_config()
+        self._init_speculative_algo(kvargs)
+
         self._verify_must()
         self._verify_params()
         self._init_quant()
@@ -134,6 +138,43 @@ class TpPartBaseModel:
         set_model_init_status(True)
         return
 
+    def _init_speculative_algo(self, kvargs):
+        self.is_mtp_draft_model = kvargs.get("is_mtp_draft_model", False)
+        self.is_mtp_mode = self.args.mtp_mode in [
+            "vanilla_with_att",
+            "eagle_with_att",
+            "vanilla_no_att",
+            "eagle_no_att",
+            "eagle3",
+        ]
+        if not self.is_mtp_mode:
+            self.output_hidden_layers = []
+            return
+
+        if not self.is_mtp_draft_model:
+            # 主 main model 需要输出 hidden state 用于 draft 模型进行 mtp 预测。
+            if self.args.mtp_mode == "eagle3":
+                # assert not self.args.enable_prefill_cudagraph, "eagle3 mode does not support prefill cudagraph"
+                assert (
+                    not self.args.enable_decode_microbatch_overlap
+                ), "eagle3 mode does not support decode microbatch overlap"
+                assert (
+                    not self.args.enable_prefill_microbatch_overlap
+                ), "eagle3 mode does not support prefill microbatch overlap"
+                self.output_hidden_layers = [1, self.config["n_layer"] // 2 - 1, self.config["n_layer"] - 4]
+            else:
+                self.output_hidden_layers = [self.config["n_layer"] - 1]
+        else:
+            # draft model 需要输出 hidden state 用于 多步 mtp 预测
+            self.output_hidden_layers = [self.config["n_layer"] - 1]
+
+        return
+
+    def _wait_other_modules_ready(self):
+        for event in self.wait_events:
+            event.wait()
+        return
+
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = json.load(json_file)
@@ -143,6 +184,12 @@ class TpPartBaseModel:
         repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
+
+        # eagle3 mode 下，需要修改 vocab_size 为 draft_vocab_size, 其他场景
+        # 这个代码并不会生效。
+        if "draft_vocab_size" in self.config.keys():
+            self.config["target_vocab_size"] = self.config["vocab_size"]
+            self.config["vocab_size"] = self.config["draft_vocab_size"]
         return
 
     @final
@@ -325,6 +372,8 @@ class TpPartBaseModel:
             if enable_diverse_mode_gqa_decode_fast_kernel():
                 infer_state.b_shared_seq_len = model_input.b_shared_seq_len
                 infer_state.b_mark_shared_group = model_input.b_mark_shared_group
+            elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
+                infer_state.b_mark_shared_group = model_input.b_mark_shared_group
 
         infer_state.multimodal_params = model_input.multimodal_params
 
@@ -395,6 +444,11 @@ class TpPartBaseModel:
                 new_model_input.b_mark_shared_group = F.pad(
                     new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=1
                 )
+        elif enable_dynamic_mtp_verify() or enable_triton_mtp_kernel():
+            assert new_model_input.b_mark_shared_group is not None
+            new_model_input.b_mark_shared_group = F.pad(
+                new_model_input.b_mark_shared_group, (0, padded_batch_size), mode="constant", value=0
+            )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
         if new_model_input.mtp_draft_input_hiddens is not None:
@@ -615,11 +669,22 @@ class TpPartBaseModel:
         input_tensors = [input_embs]
 
         def prefill_func(input_tensors, infer_state):
+            mtp_out_hidden_state = OutHiddenState(selected_layers=self.output_hidden_layers)
             _input_embs = input_tensors[0]
             for i in range(self.layers_num):
                 layer = self.layers_infer[i]
                 _input_embs = layer.context_forward(_input_embs, infer_state, self.trans_layers_weight[i])
-            return [_input_embs]
+                mtp_out_hidden_state.add_hidden(
+                    layer_index=i,
+                    layer_num=self.layers_num,
+                    hidden=_input_embs,
+                )
+
+            capture_hiddens = mtp_out_hidden_state.get_captured_hiddens()
+            if capture_hiddens is not None:
+                return [_input_embs, capture_hiddens]
+            else:
+                return [_input_embs]
 
         handle_token_num = infer_state.input_ids.shape[0]
 
@@ -655,10 +720,13 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
+            mtp_main_output_hiddens = output_tensors[1] if len(output_tensors) > 1 else input_embs
+            mtp_main_output_hiddens = self.pre_infer._tpsp_allgather(
+                input=mtp_main_output_hiddens, infer_state=infer_state
+            )
             if infer_state.need_dp_prefill_balance:
-                input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+                mtp_main_output_hiddens = infer_state._all_to_all_unbalance_get(data=mtp_main_output_hiddens)
+            model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -672,10 +740,13 @@ class TpPartBaseModel:
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
+        mtp_out_hidden_state = OutHiddenState(selected_layers=self.output_hidden_layers)
         for i in range(self.layers_num):
             layer = self.layers_infer[i]
             input_embs: torch.Tensor = layer.token_forward(input_embs, infer_state, self.trans_layers_weight[i])
+            mtp_out_hidden_state.add_hidden(layer_index=i, layer_num=self.layers_num, hidden=input_embs)
 
+        capture_hiddens = mtp_out_hidden_state.get_captured_hiddens()
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         predict_logits: torch.Tensor = self.post_infer.token_forward(
             last_input_embs, infer_state=infer_state, layer_weight=self.pre_post_weight
@@ -685,8 +756,11 @@ class TpPartBaseModel:
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
-            input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            mtp_main_output_hiddens = capture_hiddens if capture_hiddens is not None else input_embs
+            mtp_main_output_hiddens = self.pre_infer._tpsp_allgather(
+                input=mtp_main_output_hiddens, infer_state=infer_state
+            )
+            model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
@@ -1182,6 +1256,7 @@ class TpPartBaseModel:
             or "Qwen3MOEMTPModel" in str(self.__class__)
             or "MistralMTPModel" in str(self.__class__)
             or "Glm4MoeLiteMTPModel" in str(self.__class__)
+            or "Qwen3EagleModel" in str(self.__class__)
         )
         if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
