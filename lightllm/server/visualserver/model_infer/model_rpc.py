@@ -153,23 +153,17 @@ class VisualModelRpcServer(rpyc.Service):
                 "A co-located LLM may OOM at runtime."
             )
             return
-        if VisionPeakVramHolder.supports(self.model):
-            held_vram_bytes = VisionPeakVramHolder(self.model).hold(
-                self.device_id,
-                self.infer_max_batch_size,
-                args.max_image_pixels,
-                args.max_image_token_count,
-            )
-            if held_vram_bytes > 0:
-                logger.info(
-                    f"Vision rank {global_rank} on device {self.device_id} held "
-                    f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
-                )
-            return
-        logger.warning(
-            f"co-location OOM risk: model_type={self.model_type} has no peak VRAM hold. "
-            f"Place the vision model on a separate GPU with --visual_gpu_ids."
+        held_vram_bytes = VisionPeakVramHolder(self.model).hold(
+            self.device_id,
+            self.infer_max_batch_size,
+            args.max_image_pixels,
+            args.max_image_token_count,
         )
+        if held_vram_bytes > 0:
+            logger.info(
+                f"Vision rank {global_rank} on device {self.device_id} held "
+                f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
+            )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:
