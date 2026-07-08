@@ -32,9 +32,8 @@ def _worst_case_image_size(max_image_pixels: int) -> Tuple[int, int]:
     """Largest valid landscape aspect ratio under the pixel budget (width >= height)."""
     height = max(1, int(math.sqrt(max_image_pixels / _MAX_ASPECT_RATIO)))
     width = min(max_image_pixels // height, height * _MAX_ASPECT_RATIO)
-    while width > 1 and width * height > max_image_pixels:
-        width -= 1
-    assert width > 0 and height > 0
+    height = int(max(1, height))
+    width = int(max(1, width))
     return width, height
 
 
@@ -49,18 +48,6 @@ class VisionPeakVramHolder:
 
     def __init__(self, model):
         self.model = model
-
-    @classmethod
-    def supports(cls, model) -> bool:
-        encode = getattr(model, "encode", None)
-        if not callable(encode):
-            return False
-        import inspect
-
-        params = [
-            p for p in inspect.signature(encode).parameters.values() if p.name not in ("self", "cls")
-        ]
-        return len(params) >= 1 and params[0].name == "images"
 
     @torch.no_grad()
     def hold(
