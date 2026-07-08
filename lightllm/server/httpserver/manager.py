@@ -742,8 +742,10 @@ class HttpServerManager:
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
+                        # 首 token 由 prefill 产生, 不属于 verify step; 分母只数 decode verify 步数,
+                        # 与 sglang 的 accept length 口径对齐。
                         mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
+                            (out_token_counter - 1 - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
                         )
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.debug(

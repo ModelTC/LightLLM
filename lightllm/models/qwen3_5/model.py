@@ -59,6 +59,14 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
 
     infer_state_class = Qwen35InferStateInfo
 
+    def _gen_mtp_main_output_hiddens(self, input_embs, infer_state):
+        # qwen3.5 的 mtp 训练约定: draft 输入 hidden 是 final norm(GEMMA +1)之后的值
+        # (主模型 verify 与 draft 链式 step 都是), 与 sglang 的 capture 语义对齐。
+        if os.getenv("LIGHTLLM_QWEN35_MTP_PRENORM_HIDDENS", "0") == "1":
+            return input_embs.contiguous()
+        hiddens = self.post_infer._norm(input_embs, infer_state, self.pre_post_weight)
+        return hiddens.contiguous()
+
     def _init_config(self):
         config_path = os.path.join(self.weight_dir_, "config.json")
 
