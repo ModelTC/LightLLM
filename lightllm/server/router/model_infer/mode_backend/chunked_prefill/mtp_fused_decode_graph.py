@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 @dataclass
 class FusedStepOutput:
     next_token_ids: torch.Tensor
+    next_token_logprobs: torch.Tensor
     mtp_accept_len: torch.Tensor
     accepted_index: torch.Tensor
 
@@ -109,6 +110,7 @@ class MTPFusedDecodeGraph:
 
         # 静态输出 buffer (采样 token 拷贝到此供 D2H / verify / draft chain 使用)。
         self.out_next_token_ids = torch.zeros(B, dtype=torch.int64, device="cuda")
+        self.out_next_token_logprobs = torch.zeros(B, dtype=torch.float32, device="cuda")
 
         self.graphs = {}
 
@@ -139,8 +141,6 @@ class MTPFusedDecodeGraph:
             if req.mtp_step != self.mtp_step:
                 return False
             shm_param = req.sampling_param.shm_param
-            if shm_param.return_logprobs:
-                return False
             if req.generator is not None:
                 return False
             if len(req.sampling_param.invalid_token_ids) != 0:
@@ -264,6 +264,9 @@ class MTPFusedDecodeGraph:
         self.philox_offset += 4 * ((batch_size * self.vocab_size + 3) // 4)
         next_token_ids = self.out_next_token_ids[:batch_size]
         next_token_ids.copy_(sampled_ids)
+        # 与 eager sample() 一致: 采样 token 的 logprob = log_softmax(温度缩放后 logits)。
+        token_logprobs = torch.log_softmax(logits, dim=-1).gather(1, next_token_ids.view(-1, 1)).view(-1)
+        self.out_next_token_logprobs[:batch_size].copy_(token_logprobs)
 
         b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * self.mtp_size
         mtp_accept_len, accepted_index = mtp_verify(
@@ -392,6 +395,7 @@ class MTPFusedDecodeGraph:
 
         return FusedStepOutput(
             next_token_ids=self.out_next_token_ids[:real_batch_size],
+            next_token_logprobs=self.out_next_token_logprobs[:real_batch_size],
             mtp_accept_len=bundle.mtp_accept_len[:real_n],
             accepted_index=bundle.accepted_index[:real_batch_size],
         )

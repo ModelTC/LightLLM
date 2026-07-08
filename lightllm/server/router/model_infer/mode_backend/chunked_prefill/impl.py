@@ -250,6 +250,15 @@ class ChunkedPrefillBackend(ModeBackend):
         if os.getenv("LIGHTLLM_DISABLE_MTP_FUSED_GRAPH", "0") == "1":
             logger.info("mtp fused decode graph disabled by env")
             return
+        from lightllm.common.basemodel.attention.flashinfer.fp import FlashInferAttBackend
+
+        if isinstance(self.model.decode_att_backend, FlashInferAttBackend) or isinstance(
+            self.draft_models[0].decode_att_backend, FlashInferAttBackend
+        ):
+            # flashinfer 的 decode init_state 每步构建 wrapper 并 plan (含 D2H 拷贝),
+            # 无法被捕获进图内; 用 --llm_decode_att_backend fa3/triton 可启用 fused graph。
+            logger.warning("mtp fused decode graph disabled: flashinfer decode att backend is not capture-safe")
+            return
         from .mtp_fused_decode_graph import MTPFusedDecodeGraph
 
         self.mtp_fused_graph = MTPFusedDecodeGraph(backend=self)
@@ -396,6 +405,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 key="next_token_ids",
                 gpu_tensor=fused_out.next_token_ids,
             )
+            next_token_logprobs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="next_token_logprobs",
+                gpu_tensor=fused_out.next_token_logprobs,
+            )
             verify_event = torch.cuda.Event()
             verify_event.record()
 
@@ -420,7 +433,7 @@ class ChunkedPrefillBackend(ModeBackend):
         self._post_handle(
             run_reqs=verify_ok_reqs,
             next_token_ids=next_token_ids_cpu[select_mask],
-            next_token_logprobs=None,
+            next_token_logprobs=next_token_logprobs_cpu[select_mask],
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
