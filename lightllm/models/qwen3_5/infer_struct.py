@@ -16,7 +16,7 @@ class Qwen35InferStateInfo(Qwen2VLInferStateInfo):
         is_mtp_draft_model = getattr(model, "is_mtp_draft_model", False)
         if is_mtp_draft_model:
             return
-         
+
         # prefill 模式下
         if self.is_prefill:
             self.b_conv_buffer_idx = self.b_req_idx
@@ -42,8 +42,9 @@ class Qwen35InferStateInfo(Qwen2VLInferStateInfo):
             )
             # shape 为 [att_batch_size]
             self.b_conv_buffer_idx = self.b_req_idx.view(att_batch_size, mtp_step + 1)[:, 0].contiguous()
-            # shape 为 [att_batch_size, mtp_step + 1]
-            self.b_ssm_buffer_idx = self.b_conv_buffer_idx.view(att_batch_size, 1) + torch.arange(mtp_step + 1, device=self.b_req_idx.device, dtype=self.b_req_idx.dtype).view(1, mtp_step + 1)
+            self.b_ssm_buffer_idx = (self.b_conv_buffer_idx * (mtp_step + 1)).view(att_batch_size, 1) + torch.arange(
+                mtp_step + 1, device=self.b_req_idx.device, dtype=self.b_req_idx.dtype
+            ).view(1, mtp_step + 1)
             # shape 为 [att_batch_size]
             # 上一步接受的数量，用于linear att 的decode mtp 算子定位正确的conv 和 ssm信息的起点。
             self.b_num_accepted_tokens = model.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1

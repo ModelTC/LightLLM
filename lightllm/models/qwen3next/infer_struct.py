@@ -43,7 +43,7 @@ class Qwen3NextInferStateInfo(LlamaInferStateInfo):
             # shape 为 [att_batch_size]
             self.b_conv_buffer_idx = self.b_req_idx.view(att_batch_size, mtp_step + 1)[:, 0].contiguous()
             # shape 为 [att_batch_size, mtp_step + 1]
-            self.b_ssm_buffer_idx = self.b_conv_buffer_idx.view(att_batch_size, 1) + torch.arange(
+            self.b_ssm_buffer_idx = (self.b_conv_buffer_idx * (mtp_step + 1)).view(att_batch_size, 1) + torch.arange(
                 mtp_step + 1, device=self.b_req_idx.device, dtype=self.b_req_idx.dtype
             ).view(1, mtp_step + 1)
             # shape 为 [att_batch_size]

@@ -94,13 +94,13 @@ def copy_linear_att_state_to_kv_buffer(
     assert gpu_conv_state.dim() == 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
     assert cpu_kv_conv_state.dim() == 4, "cpu_kv_conv_state must be [size, layer, conv_dim, width_narrow]"
     # 因为存在mtp模式，gpu_conv_state 的最后一个维度可能存在冗余的部分，需要进行切片对齐。
-    gpu_conv_state = gpu_conv_state[:, :, :, :cpu_kv_conv_state.shape[-1]]
+    gpu_conv_state = gpu_conv_state[:, :, :, : cpu_kv_conv_state.shape[-1]]
     gpu_conv_state = gpu_conv_state.view(
         gpu_conv_state.shape[0], gpu_conv_state.shape[1], gpu_conv_state.shape[2], -1
     ).view(dtype=torch.uint8)
-    cpu_kv_conv_state = cpu_kv_conv_state.view(
-        cpu_kv_conv_state.shape[0], cpu_kv_conv_state.shape[1], -1
-    ).view(dtype=torch.uint8)
+    cpu_kv_conv_state = cpu_kv_conv_state.view(cpu_kv_conv_state.shape[0], cpu_kv_conv_state.shape[1], -1).view(
+        dtype=torch.uint8
+    )
     gpu_ssm_state = gpu_ssm_state.view(gpu_ssm_state.shape[0], gpu_ssm_state.shape[1], -1).view(dtype=torch.uint8)
     cpu_kv_ssm_state = cpu_kv_ssm_state.view(cpu_kv_ssm_state.shape[0], cpu_kv_ssm_state.shape[1], -1).view(
         dtype=torch.uint8
@@ -109,7 +109,7 @@ def copy_linear_att_state_to_kv_buffer(
 
     gpu_conv_dim = gpu_conv_state.shape[2]
     gpu_conv_tail_dim_bytes = gpu_conv_state.shape[3]
-    
+
     assert gpu_conv_tail_dim_bytes * gpu_conv_dim == cpu_kv_conv_state.shape[-1]
 
     assert (
