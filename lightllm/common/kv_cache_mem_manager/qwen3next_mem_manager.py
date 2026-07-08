@@ -29,7 +29,10 @@ class Qwen3NextMemManager(MemoryManager):
         super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
-        layer_index = layer_index // self.linear_config.full_attention_interval
+        if layer_index >= self.linear_config.all_layer_num:
+            layer_index -= self.linear_layer_num
+        else:
+            layer_index = layer_index // self.linear_config.full_attention_interval
         return super().get_att_input_params(layer_index)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
