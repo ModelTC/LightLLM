@@ -605,6 +605,9 @@ class ModeBackend:
 
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
         is_deepseek_v4 = self.is_deepseek_v4
+        can_alloc_dsv4_swa_page_num = None
+        can_alloc_dsv4_c4_page_num = None
+        can_alloc_dsv4_c128_slot_num = None
         if is_deepseek_v4:
             (
                 can_alloc_dsv4_swa_page_num,
