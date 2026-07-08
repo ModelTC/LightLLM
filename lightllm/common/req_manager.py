@@ -135,7 +135,6 @@ class ReqSamplingParamsManager:
             )
 
     def init_req_sampling_params(self, req: "InferReq"):
-
         shm_param = req.sampling_param.shm_param
         self.req_to_next_token_ids[req.req_idx][0:1].fill_(req.get_last_gen_token())
         self.req_to_presence_penalty[req.req_idx].fill_(shm_param.presence_penalty)
@@ -243,7 +242,7 @@ class ReqManagerForMamba(ReqManager):
         # 状态位置的问题。导致bug, 在这里加个断言，以后可以支持上 TODO
         if self.mtp_step > 0:
             assert get_env_start_args().enable_prefill_decode_mixed is False
-        
+
         self.big_page_token_num = (
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
