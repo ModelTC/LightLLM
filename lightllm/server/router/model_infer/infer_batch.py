@@ -1028,12 +1028,20 @@ class InferReq:
         if seq_len <= 0:
             return 0, 0, 0
 
-        swa_page_num = 1 if (seq_len - 1) % self.dsv4_swa_page_size == 0 else 0
+        swa_page_num = 0
         c4_page_num = 0
-        if seq_len % 4 == 0:
-            entry = seq_len // 4 - 1
-            c4_page_num = 1 if entry % self.dsv4_c4_page_size == 0 else 0
-        c128_slot_num = 1 if self.dsv4_has_c128 and seq_len % 128 == 0 else 0
+        c128_slot_num = 0
+        # MTP decode prepares slots for the current token plus draft-verify rows.
+        for step in range(self.mtp_step + 1):
+            cur_seq_len = seq_len + step
+            if (cur_seq_len - 1) % self.dsv4_swa_page_size == 0:
+                swa_page_num += 1
+            if cur_seq_len % 4 == 0:
+                entry = cur_seq_len // 4 - 1
+                if entry % self.dsv4_c4_page_size == 0:
+                    c4_page_num += 1
+            if self.dsv4_has_c128 and cur_seq_len % 128 == 0:
+                c128_slot_num += 1
         return swa_page_num, c4_page_num, c128_slot_num
 
 
