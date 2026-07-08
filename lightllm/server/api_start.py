@@ -278,18 +278,20 @@ def normal_or_p_d_start(args):
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len
         else:
-            assert args.batch_max_tokens >= args.max_req_total_len, f"batch_max_tokens must >= max_req_total_len"
-            f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
+            assert args.batch_max_tokens >= args.max_req_total_len, (
+                f"batch_max_tokens must >= max_req_total_len, "
+                f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
+            )
     else:
         # chunked 模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = 16384 // args.dp
         if args.chunked_prefill_size is None:
             args.chunked_prefill_size = args.batch_max_tokens // 2
-        assert (
-            args.batch_max_tokens >= args.chunked_prefill_size
-        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
-        f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        assert args.batch_max_tokens >= args.chunked_prefill_size, (
+            "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
+            f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        )
 
     # linear att cache 参数自动设置
     if args.linear_att_cache_size is None:
