@@ -386,26 +386,21 @@ class InferenceContext:
                 if prefill_need_token_num > can_alloc_token_num:
                     break
 
-                if can_alloc_dsv4_swa_page_num is not None:
-                    swa_page_num = self.get_dsv4_swa_prefill_need_page_num(req, is_chuncked_prefill=False)
-                    if swa_page_num > can_alloc_dsv4_swa_page_num:
+                swa_page_num = c4_page_num = c128_slot_num = 0
+                if (
+                    can_alloc_dsv4_swa_page_num is not None
+                    or can_alloc_dsv4_c4_page_num is not None
+                    or can_alloc_dsv4_c128_slot_num is not None
+                ):
+                    swa_page_num, c4_page_num, c128_slot_num = req.get_dsv4_prefill_need_page_and_slot_num(
+                        is_chuncked_prefill=False
+                    )
+                    if can_alloc_dsv4_swa_page_num is not None and swa_page_num > can_alloc_dsv4_swa_page_num:
                         break
-                else:
-                    swa_page_num = 0
-
-                if can_alloc_dsv4_c4_page_num is not None:
-                    c4_page_num = self.get_dsv4_c4_prefill_need_page_num(req, is_chuncked_prefill=False)
-                    if c4_page_num > can_alloc_dsv4_c4_page_num:
+                    if can_alloc_dsv4_c4_page_num is not None and c4_page_num > can_alloc_dsv4_c4_page_num:
                         break
-                else:
-                    c4_page_num = 0
-
-                if can_alloc_dsv4_c128_slot_num is not None:
-                    c128_slot_num = self.get_dsv4_c128_prefill_need_slot_num(req, is_chuncked_prefill=False)
-                    if c128_slot_num > can_alloc_dsv4_c128_slot_num:
+                    if can_alloc_dsv4_c128_slot_num is not None and c128_slot_num > can_alloc_dsv4_c128_slot_num:
                         break
-                else:
-                    c128_slot_num = 0
 
                 if g_infer_context.is_linear_att_mixed_model:
                     req._linear_match_radix_cache()
