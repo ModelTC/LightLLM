@@ -5,13 +5,11 @@ run the normal encode() path, then keep the CUDA allocator high-water mark.
 """
 
 import math
-from io import BytesIO
-from typing import List, Tuple
-
 import torch
 import torch.distributed as dist
+from io import BytesIO
+from typing import List, Tuple
 from PIL import Image
-
 from lightllm.server.embed_cache.utils import create_shm, free_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.utils.envs_utils import get_unique_server_name
