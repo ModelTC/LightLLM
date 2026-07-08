@@ -16,7 +16,6 @@ from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
-from lightllm.server.visualserver.model_infer.vision_peak_activation_hold import QwenVLWorstCaseMixin
 
 
 class Qwen2RMSNorm(nn.Module):
@@ -136,7 +135,7 @@ class Qwen2_5_VLPatchMerger(nn.Module):
         return x
 
 
-class Qwen2_5_VisionTransformerPretrainedModel(QwenVLWorstCaseMixin, nn.Module):
+class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
     def __init__(
         self,
         kvargs,
