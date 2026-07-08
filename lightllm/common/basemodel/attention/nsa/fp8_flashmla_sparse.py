@@ -85,11 +85,16 @@ def _metadata_from_dict(infer_state, nsa_dict: dict) -> "_Dsv4Metadata":
 class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
-        device = get_current_device_id()
-        self.ragged_mem_buffers = [
-            torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
-            for _ in range(2)
-        ]
+        self.use_dsv4_flashmla_kvcache = model.config.get("model_type") == "deepseek_v4"
+        if self.use_dsv4_flashmla_kvcache:
+            self.ragged_mem_buffers = None
+            logger.info("DSV4 FlashMLA kvcache path skips generic NSA ragged decode buffers")
+        else:
+            device = get_current_device_id()
+            self.ragged_mem_buffers = [
+                torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
+                for _ in range(2)
+            ]
         self.prefill_flash_mla, self.prefill_flash_mla_supports_out = self._load_prefill_flash_mla()
         self.prefill_q_workspace = None
         self.prefill_out_workspace = None
@@ -331,32 +336,33 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
 
     def init_state(self):
         self.backend: NsaFlashMlaFp8SparseAttBackend = self.backend
-        model = self.backend.model
-        use_cuda_graph = (
-            self.infer_state.batch_size <= model.graph_max_batch_size
-            and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
-        )
-
-        if use_cuda_graph:
-            self.ragged_mem_index = self.backend.ragged_mem_buffers[self.infer_state.microbatch_index]
-        else:
-            self.ragged_mem_index = torch.empty(
-                self.infer_state.total_token_num,
-                dtype=torch.int32,
-                device=get_current_device_id(),
+        if not self.backend.use_dsv4_flashmla_kvcache:
+            model = self.backend.model
+            use_cuda_graph = (
+                self.infer_state.batch_size <= model.graph_max_batch_size
+                and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
             )
 
-        from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
+            if use_cuda_graph:
+                self.ragged_mem_index = self.backend.ragged_mem_buffers[self.infer_state.microbatch_index]
+            else:
+                self.ragged_mem_index = torch.empty(
+                    self.infer_state.total_token_num,
+                    dtype=torch.int32,
+                    device=get_current_device_id(),
+                )
 
-        self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
-            b_seq_len=self.infer_state.b_seq_len,
-            b_q_seq_len=self.infer_state.b_q_seq_len,
-            b_req_idx=self.infer_state.b_req_idx,
-            req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
-            q_token_num=self.infer_state.b_seq_len.shape[0],
-            ragged_mem_index=self.ragged_mem_index,
-            hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
+            from lightllm.common.basemodel.triton_kernel.gen_nsa_ks_ke import gen_nsa_ks_ke
+
+            self.ks, self.ke, self.lengths = gen_nsa_ks_ke(
+                b_seq_len=self.infer_state.b_seq_len,
+                b_q_seq_len=self.infer_state.b_q_seq_len,
+                b_req_idx=self.infer_state.b_req_idx,
+                req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
+                q_token_num=self.infer_state.b_seq_len.shape[0],
+                ragged_mem_index=self.ragged_mem_index,
+                hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
+            )
         import flash_mla
 
         # one sched_meta per layer type: the lazy config locks extra-cache geometry (page size,
