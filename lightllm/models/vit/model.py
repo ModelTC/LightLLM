@@ -20,7 +20,7 @@ from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.server.visualserver.model_infer.worst_case_reserve import WorstCaseReserveMixin
+from lightllm.server.visualserver.model_infer.vision_peak_activation_hold import WorstCaseReserveMixin
 
 
 logger = init_logger(__name__)
@@ -56,7 +56,7 @@ class VisionTransformer(WorstCaseReserveMixin):
         return
 
     def build_worst_case_input(self, batch_size, max_image_pixels, max_image_token_count) -> dict:
-        # InternVL uses fixed-size tiles: worst case is batch_size * MAX_PATH_NUM tiles of (3, IMAGE_H, IMAGE_W).
+        # InternVL uses fixed-size tiles; peak hold probe uses batch_size * MAX_PATH_NUM tiles.
         num_tiles = int(self.MAX_PATH_NUM) * int(batch_size)
         dummy_images = torch.randn((num_tiles, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type, device="cuda")
         return {"pixel_values": dummy_images}

@@ -30,7 +30,7 @@ from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.models.qwen2_vl.vision_process import resize_image, Qwen2VLImageProcessor
 from lightllm.models.qwen2_vl.qwen2_visual import VisionRotaryEmbedding, VisionFlashAttention
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.visualserver.model_infer.worst_case_reserve import QwenVLWorstCaseMixin
+from lightllm.server.visualserver.model_infer.vision_peak_activation_hold import QwenVLWorstCaseMixin
 
 logger = init_logger(__name__)
 

@@ -16,7 +16,7 @@ from lightllm.models.vit.triton_kernel.rms_norm_vit import rms_norm
 from lightllm.server.visualserver import get_vit_attn_backend
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.models.qwen2_vl.triton_kernel.rotary_pos_emb import apply_rotary_pos_emb_triton
-from lightllm.server.visualserver.model_infer.worst_case_reserve import QwenVLWorstCaseMixin
+from lightllm.server.visualserver.model_infer.vision_peak_activation_hold import QwenVLWorstCaseMixin
 
 
 class Qwen2RMSNorm(nn.Module):

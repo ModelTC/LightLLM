@@ -28,7 +28,7 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.visualserver.model_infer.worst_case_reserve import WorstCaseReserveMixin
+from lightllm.server.visualserver.model_infer.vision_peak_activation_hold import WorstCaseReserveMixin
 
 
 logger = init_logger(__name__)
@@ -114,7 +114,7 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
-            self._reserve_vit_worst_case_mem()
+            self._hold_vision_peak_activation()
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -144,31 +144,31 @@ class VisualModelRpcServer(rpyc.Service):
         set_random_seed(2147483647)
         return
 
-    def _reserve_vit_worst_case_mem(self):
+    def _hold_vision_peak_activation(self):
         args = get_env_start_args()
         global_rank = self.dp_rank_id * self.vit_tp + self.tp_rank_id
         if os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None:
             logger.warning(
-                "DISABLE_CHECK_MAX_LEN_INFER is set: skipping ViT worst-case reservation. "
+                "DISABLE_CHECK_MAX_LEN_INFER is set: skipping vision peak activation hold. "
                 "A co-located LLM may OOM at runtime."
             )
             return
         if isinstance(self.model, WorstCaseReserveMixin):
-            reserved_bytes = self.model.reserve_worst_case_activation(
+            held_activation_bytes = self.model.reserve_worst_case_activation(
                 self.device_id,
                 self.infer_max_batch_size,
                 args.max_image_pixels,
                 args.max_image_token_count,
             )
-            if reserved_bytes > 0:
+            if held_activation_bytes > 0:
                 logger.info(
-                    f"ViT rank {global_rank} on device {self.device_id} reserved "
-                    f"{reserved_bytes / 1024 ** 3:.2f} GB worst-case activation memory."
+                    f"Vision rank {global_rank} on device {self.device_id} held "
+                    f"{held_activation_bytes / 1024 ** 3:.2f} GB peak activation memory."
                 )
             return
         logger.warning(
-            f"co-location OOM risk: model_type={self.model_type} has no ViT worst-case reservation. "
-            f"Place the ViT on a separate GPU with --visual_gpu_ids."
+            f"co-location OOM risk: model_type={self.model_type} has no peak activation hold. "
+            f"Place the vision model on a separate GPU with --visual_gpu_ids."
         )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
