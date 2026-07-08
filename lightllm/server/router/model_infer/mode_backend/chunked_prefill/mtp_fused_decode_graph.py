@@ -27,7 +27,6 @@ class FusedStepOutput:
     next_token_ids: torch.Tensor
     mtp_accept_len: torch.Tensor
     accepted_index: torch.Tensor
-    eagle_mem_indexes_cpu: torch.Tensor
 
 
 @dataclass
@@ -86,7 +85,8 @@ class MTPFusedDecodeGraph:
         self.b_seq_len = torch.zeros(B, dtype=torch.int32, device="cuda")
         self.b_mtp_index = torch.arange(self.mtp_size, dtype=torch.int32, device="cuda").repeat(n_max)
         self.mem_indexes = torch.zeros(B, dtype=torch.int32, device="cuda")
-        self.eagle_mem_indexes = torch.zeros(n_max * self.mtp_step, dtype=torch.int32, device="cuda")
+        # chain step>=1 的静态 scratch kv 槽位 (backend 启动时保留, 每轮复用, 图内当常量捕获)。
+        self.chain_scratch = backend.mtp_chain_scratch
         self.input_ids = torch.zeros(B, dtype=torch.int64, device="cuda")
         self.b_position_delta = torch.zeros(B, dtype=torch.int64, device="cuda")
         self._position_delta_dirty = False
@@ -102,7 +102,6 @@ class MTPFusedDecodeGraph:
         self.b_req_idx_pin = torch.zeros(B, **pin)
         self.b_seq_len_pin = torch.zeros(B, **pin)
         self.mem_indexes_pin = torch.zeros(B, **pin)
-        self.eagle_mem_indexes_pin = torch.zeros(n_max * self.mtp_step, **pin)
         self.temperature_pin = torch.ones(B, dtype=torch.float32, device="cpu", pin_memory=True)
         self.top_k_pin = torch.ones(B, dtype=torch.int32, device="cpu", pin_memory=True)
         self.top_p_pin = torch.ones(B, dtype=torch.float32, device="cpu", pin_memory=True)
@@ -199,7 +198,6 @@ class MTPFusedDecodeGraph:
         seq_pattern = torch.arange(2, self.mtp_size + 2, dtype=torch.int32, device="cuda")
         self.b_seq_len[:batch_size].copy_(seq_pattern.repeat(n_real))
         self.mem_indexes[:batch_size].fill_(self.hold_mem_index)
-        self.eagle_mem_indexes[: n_real * self.mtp_step].fill_(self.hold_mem_index)
         self.temperature[:batch_size].fill_(1.0)
         self.top_k[:batch_size].fill_(1)
         self.top_p[:batch_size].fill_(1.0)
@@ -288,7 +286,9 @@ class MTPFusedDecodeGraph:
         return mtp_accept_len, accepted_index, model_output.mtp_main_output_hiddens
 
     def _run_draft_body(self, batch_size: int, verify_ctx):
-        """draft chain, 与 _draft_decode_eagle 相同的滑动窗口语义。"""
+        """draft chain: step0 写 verify 槽位((采样 token, 主模型 hidden) 正确 kv), step>=1 只写
+        scratch 槽位; 链内注意力内容与滑窗版一致, 结束后恢复 verify 位置映射, 下一轮 draft 的
+        前缀 kv 保持 step0 内容 (对齐 sglang draft re-extend 语义)。"""
         mtp_accept_len, _, main_hiddens = verify_ctx
         mtp_size = self.mtp_size
         n_real = batch_size // mtp_size
@@ -297,25 +297,31 @@ class MTPFusedDecodeGraph:
         req_to_next_token_ids = self.sampling_manager.req_to_next_token_ids
 
         draft_model_input = self._build_model_input(batch_size)
-        draft_mem_indexes = self.mem_indexes[:batch_size]
         draft_next_token_ids = self.out_next_token_ids[:batch_size]
         draft_hiddens = main_hiddens
         all_next_token_ids = [draft_next_token_ids]
         for _step in range(self.mtp_step):
             draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.mem_indexes = draft_mem_indexes
+            if _step == 0:
+                draft_model_input.mem_indexes = self.mem_indexes[:batch_size]
+            else:
+                draft_model_input.mem_indexes = self.chain_scratch[(_step - 1) * batch_size : _step * batch_size]
             draft_model_input.mtp_draft_input_hiddens = draft_hiddens
             draft_model_output = self._forward_in_body(self.draft_model, draft_model_input)
             draft_next_token_ids = torch.argmax(draft_model_output.logits, dim=-1)
             draft_hiddens = draft_model_output.mtp_main_output_hiddens
             all_next_token_ids.append(draft_next_token_ids)
-
             b_seq_len += 1
-            eagle_mem_indexes_i = self.eagle_mem_indexes[_step * n_real : (_step + 1) * n_real]
-            draft_mem_indexes = torch.cat(
-                [draft_mem_indexes.view(-1, mtp_size)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+
+        if self.mtp_step > 1:
+            b_seq_len -= self.mtp_step
+            copy_kv_index_to_req(
+                self.req_manager.req_to_token_indexs,
+                b_req_idx,
+                b_seq_len,
+                self.mem_indexes[:batch_size],
+            )
+            b_seq_len += self.mtp_step
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)
         b_req_mtp_start_loc = torch.arange(n_real, dtype=torch.int32, device="cuda") * mtp_size
@@ -340,25 +346,17 @@ class MTPFusedDecodeGraph:
         self._replay_batch_size = batch_size
         n_real = batch_size // self.mtp_size
         real_n = real_batch_size // self.mtp_size
-        mtp_step = self.mtp_step
-
-        # eagle 额外 kv 槽位分配 (真实请求) + HOLD padding
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_n * mtp_step)
-        eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_n * mtp_step)
 
         # staging: 填 pinned buffer, 单次 H2D 到静态输入
         self.b_req_idx_pin[:real_batch_size].copy_(model_input.b_req_idx)
         self.b_seq_len_pin[:real_batch_size].copy_(model_input.b_seq_len)
         self.mem_indexes_pin[:real_batch_size].copy_(model_input.mem_indexes_cpu)
-        self.eagle_mem_indexes_pin[: real_n * mtp_step].copy_(eagle_mem_indexes_cpu)
         if batch_size != real_batch_size:
             self.b_req_idx_pin[real_batch_size:batch_size].fill_(self.hold_req_idx)
             pad_n = n_real - real_n
             pad_seq = torch.arange(2, self.mtp_size + 2, dtype=torch.int32).repeat(pad_n)
             self.b_seq_len_pin[real_batch_size:batch_size].copy_(pad_seq)
             self.mem_indexes_pin[real_batch_size:batch_size].fill_(self.hold_mem_index)
-            self.eagle_mem_indexes_pin[real_n * mtp_step : n_real * mtp_step].fill_(self.hold_mem_index)
 
         has_delta = False
         for i, req in enumerate(run_reqs):
@@ -382,9 +380,6 @@ class MTPFusedDecodeGraph:
         self.b_req_idx[:batch_size].copy_(self.b_req_idx_pin[:batch_size], non_blocking=True)
         self.b_seq_len[:batch_size].copy_(self.b_seq_len_pin[:batch_size], non_blocking=True)
         self.mem_indexes[:batch_size].copy_(self.mem_indexes_pin[:batch_size], non_blocking=True)
-        self.eagle_mem_indexes[: n_real * mtp_step].copy_(
-            self.eagle_mem_indexes_pin[: n_real * mtp_step], non_blocking=True
-        )
         self.temperature[:batch_size].copy_(self.temperature_pin[:batch_size], non_blocking=True)
         self.top_k[:batch_size].copy_(self.top_k_pin[:batch_size], non_blocking=True)
         self.top_p[:batch_size].copy_(self.top_p_pin[:batch_size], non_blocking=True)
@@ -399,7 +394,6 @@ class MTPFusedDecodeGraph:
             next_token_ids=self.out_next_token_ids[:real_batch_size],
             mtp_accept_len=bundle.mtp_accept_len[:real_n],
             accepted_index=bundle.accepted_index[:real_batch_size],
-            eagle_mem_indexes_cpu=eagle_mem_indexes_cpu,
         )
 
     def replay_draft(self):

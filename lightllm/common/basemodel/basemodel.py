@@ -706,7 +706,7 @@ class TpPartBaseModel:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -734,13 +734,18 @@ class TpPartBaseModel:
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()
 
         return model_output
+
+    def _gen_mtp_main_output_hiddens(self, input_embs: torch.Tensor, infer_state: InferStateInfo) -> torch.Tensor:
+        # mtp draft 输入 hidden 的捕获约定: 默认(deepseek 系)使用 final norm 之前的 hidden,
+        # 需要 post-norm 约定的模型(如 qwen3.5)在子类中 override。
+        return input_embs.contiguous()
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
@@ -981,8 +986,8 @@ class TpPartBaseModel:
             if infer_state.need_dp_prefill_balance:
                 input_embs = infer_state._all_to_all_unbalance_get(data=input_embs)
                 input_embs1 = infer_state1._all_to_all_unbalance_get(data=input_embs1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
+            model_output1.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs1, infer_state1)
 
         return model_output, model_output1
 
@@ -1016,8 +1021,8 @@ class TpPartBaseModel:
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
             input_embs1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-            model_output.mtp_main_output_hiddens = input_embs.contiguous()
-            model_output1.mtp_main_output_hiddens = input_embs1.contiguous()
+            model_output.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs, infer_state)
+            model_output1.mtp_main_output_hiddens = self._gen_mtp_main_output_hiddens(input_embs1, infer_state1)
 
         if infer_state.is_cuda_graph:
             model_output.to_no_ref_tensor()

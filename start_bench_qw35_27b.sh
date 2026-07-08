@@ -51,6 +51,8 @@ docker run -d --init --name "${CONTAINER_NAME}" \
   -e LOADWORKER=18 \
   -e LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 \
   -e LIGHTLLM_TRACE_DIR=/lightllm_trace \
+  -e LIGHTLLM_QWEN35_MTP_PRENORM_HIDDENS="${PRENORM_HIDDENS:-0}" \
+  -e LIGHTLLM_DISABLE_MTP_FUSED_GRAPH="${DISABLE_MTP_FUSED_GRAPH:-0}" \
   "${IMAGE}" \
   bash -lc "python -m lightllm.server.api_server \
       --model_dir ${MODEL_DIR} \

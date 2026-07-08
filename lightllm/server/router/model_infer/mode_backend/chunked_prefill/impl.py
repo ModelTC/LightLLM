@@ -19,6 +19,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
     scatter_mtp_accept_len,
@@ -235,6 +236,7 @@ class ChunkedPrefillBackend(ModeBackend):
 
     def _init_mtp_fused_graph(self):
         self.mtp_fused_graph = None
+        self._init_mtp_chain_scratch()
         if get_env_start_args().disable_cudagraph:
             return
         if not (self.is_mtp_eagle and self.num_mtp_models == 1):
@@ -252,6 +254,19 @@ class ChunkedPrefillBackend(ModeBackend):
 
         self.mtp_fused_graph = MTPFusedDecodeGraph(backend=self)
         self.mtp_fused_graph.warmup()
+        return
+
+    def _init_mtp_chain_scratch(self):
+        # chain step>=1 的 kv scratch 槽位: 每轮内容都是丢弃的, 启动时(池空)一次性分配、
+        # 每轮复用, 避免运行期在 kv 高水位下按轮分配触发 radix 驱逐失败。
+        self.mtp_chain_scratch = None
+        if not (self.is_mtp_eagle and self.mtp_step > 1):
+            return
+        max_rows = get_env_start_args().running_max_req_size * (self.mtp_step + 1)
+        scratch_num = max_rows * (self.mtp_step - 1)
+        scratch_cpu = g_infer_context.req_manager.mem_manager.alloc(scratch_num)
+        self.mtp_chain_scratch = scratch_cpu.cuda()
+        logger.info(f"mtp chain scratch kv slots reserved: {scratch_num}")
         return
 
     def decode_mtp(
@@ -399,7 +414,6 @@ class ChunkedPrefillBackend(ModeBackend):
         sync_event.synchronize()
 
         need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
-        need_free_mem_indexes = torch.cat([need_free_mem_indexes, fused_out.eagle_mem_indexes_cpu], dim=0)
 
         self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
         select_mask = torch.tensor(accepted_index_cpu, dtype=torch.bool, device="cpu")
@@ -477,11 +491,10 @@ class ChunkedPrefillBackend(ModeBackend):
         b_req_mtp_start_loc: torch.Tensor,
     ):
         batch_size = main_model_input.batch_size
-        num_reqs = batch_size // (self.mtp_step + 1)
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * self.mtp_step)
-        eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * self.mtp_step)
-        eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
+        # chain step>=1 只写静态 scratch 槽位, 不覆盖 verify 槽位 (那里保存着 step0 写入的
+        # (采样 token, 主模型 hidden) 正确 kv, 是下一轮 draft 的前缀上下文)。
+        verify_mem_indexes = main_model_input.mem_indexes
+        verify_b_seq_len = main_model_input.b_seq_len.clone()
 
         # share some inference info with the main model
         draft_model_input = main_model_input
@@ -500,12 +513,20 @@ class ChunkedPrefillBackend(ModeBackend):
             draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
             draft_model_input.b_seq_len += 1
             draft_model_input.max_kv_seq_len += 1
-            eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
-            draft_model_input.mem_indexes = torch.cat(
-                [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                dim=1,
-            ).view(-1)
+            if _step + 1 < self.mtp_step:
+                draft_model_input.mem_indexes = self.mtp_chain_scratch[_step * batch_size : (_step + 1) * batch_size]
             all_next_token_ids.append(draft_next_token_ids)
+
+        if self.mtp_step > 1:
+            # 恢复 verify 位置 -> verify 槽位的映射 (step0 的正确 kv), 消除 chain 写入的污染。
+            copy_kv_index_to_req(
+                self.model.req_manager.req_to_token_indexs,
+                main_model_input.b_req_idx,
+                verify_b_seq_len,
+                verify_mem_indexes,
+            )
+        draft_model_input.mem_indexes = verify_mem_indexes
+        draft_model_input.b_seq_len.copy_(verify_b_seq_len)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
 
@@ -516,4 +537,4 @@ class ChunkedPrefillBackend(ModeBackend):
             b_req_idx=main_model_input.b_req_idx,
             mtp_accept_len=mtp_accept_len,
         )
-        return eagle_mem_indexes_cpu
+        return None
