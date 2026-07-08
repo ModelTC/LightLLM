@@ -199,18 +199,6 @@ class TpPartBaseModel:
     def _check_mem_size(self):
         self.max_total_token_num = self.mem_manager.size
 
-        from lightllm.server.visualserver.model_infer.mem_reserve import read_vit_reserved_mem_for_device
-        from lightllm.utils.dist_utils import get_current_device_id
-
-        device_id = get_current_device_id()
-        vit_reserved_bytes = read_vit_reserved_mem_for_device(self.args, device_id)
-        if vit_reserved_bytes > 0:
-            logger.info(
-                f"[mem] device {device_id}: co-located ViT worst-case reserved "
-                f"{vit_reserved_bytes / 1024 ** 3:.2f} GB; KV pool max_total_token_num="
-                f"{self.max_total_token_num}"
-            )
-
         assert (
             self.max_total_token_num > self.batch_max_tokens
         ), "max_total_token_num must be greater than batch_max_tokens"
@@ -220,18 +208,11 @@ class TpPartBaseModel:
         # 特别大，可能能分配的 kv 容量有限，无法支持 max_seq_length 的推理。所以个人模式下
         # 可以适当放宽这个限制，不做这个校验。
         if self.args.performance_mode != "personal":
-            vit_hint = ""
-            if vit_reserved_bytes > 0:
-                vit_hint = (
-                    f" A co-located ViT reserved {vit_reserved_bytes / 1024 ** 3:.2f} GB on this device; "
-                    f"lower --visual_infer_batch_size / --max_image_pixels / --max_image_token_count, "
-                    f"reduce --mem_fraction, or move the ViT to another GPU with --visual_gpu_ids."
-                )
             assert self.max_seq_length <= self.max_total_token_num, (
                 f"max_total_token_num must be >= max_seq_length, "
                 f"got max_total_token_num={self.max_total_token_num}, "
                 f"max_seq_length={self.max_seq_length}. "
-                f"Try set --max_req_total_len a smaller value < {self.max_total_token_num}.{vit_hint}"
+                f"Try set --max_req_total_len a smaller value < {self.max_total_token_num}."
             )
 
         return
@@ -623,6 +604,7 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
+
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
