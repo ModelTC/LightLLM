@@ -340,11 +340,19 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         )
 
     # ------------------------------------------------------------------ moe
-    def _routed_experts(self, x, weights, indices, layer_weight: DeepseekV4TransformerLayerWeight):
+    def _routed_experts(
+        self,
+        x,
+        weights,
+        indices,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+    ):
         return layer_weight.experts_.experts_with_preselected(
             input_tensor=x,
             topk_weights=weights,
             topk_ids=indices,
+            is_prefill=infer_state.is_prefill,
             clamp_limit=float(self.swiglu_limit),
         )
 
@@ -371,7 +379,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
         # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
-        routed = self._routed_experts(x, weights, indices, layer_weight)
+        routed = self._routed_experts(x, weights, indices, infer_state, layer_weight)
         if self.enable_ep_moe:
             if self.tp_world_size_ > 1:
                 all_reduce(

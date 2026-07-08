@@ -66,6 +66,7 @@ def masked_group_gemm(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     expected_m: int,
+    clamp_limit: Optional[float] = None,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -80,7 +81,7 @@ def masked_group_gemm(
 
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
+    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m, limit=clamp_limit)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
@@ -193,9 +194,12 @@ def fused_experts(
     quant_method: Any,
     is_prefill: Optional[bool],
     previous_event: Optional[Any] = None,
+    clamp_limit: Optional[float] = None,
 ):
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
+        if clamp_limit is not None:
+            raise RuntimeError("SM100 Mega MoE does not support clamped SwiGLU yet.")
         return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
 
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
@@ -214,6 +218,7 @@ def fused_experts(
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
         previous_event=previous_event,
+        clamp_limit=clamp_limit,
     )
 
 
@@ -232,6 +237,7 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     previous_event: Optional[Any] = None,
+    clamp_limit: Optional[float] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -321,7 +327,7 @@ def fused_experts_impl(
             # TODO fused kernel
             silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
 
-            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
+            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out, limit=clamp_limit)
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                 silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
             )
@@ -365,7 +371,9 @@ def fused_experts_impl(
             return_recv_hook=False,
         )
         # deepgemm
-        gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
+        gemm_out_b = masked_group_gemm(
+            recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m, clamp_limit=clamp_limit
+        )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False

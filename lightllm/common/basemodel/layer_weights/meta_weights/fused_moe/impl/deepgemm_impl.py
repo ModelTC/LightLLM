@@ -78,7 +78,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
     ):
-        assert clamp_limit is None, "EP deepgemm fused MoE does not support clamp_limit yet"
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
@@ -89,6 +88,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            clamp_limit=clamp_limit,
         )
         return output
 
@@ -194,6 +194,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         masked_m: torch.Tensor,
         dtype: torch.dtype,
         expected_m: int,
+        clamp_limit: Optional[float] = None,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -206,6 +207,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
+            clamp_limit=clamp_limit,
         )
 
     def prefilled_group_gemm(

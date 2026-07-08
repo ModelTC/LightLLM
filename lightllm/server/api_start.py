@@ -114,17 +114,6 @@ def normal_or_p_d_start(args):
     else:
         args.enable_multimodal = True
 
-    model_type = get_model_type(args.model_dir)
-    if model_type == "deepseek_v4":
-        if args.run_mode != "normal":
-            raise NotImplementedError("DeepSeek-V4 currently supports only run_mode=normal in LightLLM.")
-        if args.enable_cpu_cache or args.enable_disk_cache:
-            raise NotImplementedError("DeepSeek-V4 CPU/disk KV cache is not supported yet.")
-        if args.enable_ep_moe:
-            raise NotImplementedError("DeepSeek-V4 EP MoE is not supported yet; use TP for now.")
-        if "prompt_cache_kv_buffer" in get_config_json(args.model_dir):
-            raise NotImplementedError("DeepSeek-V4 prompt_cache_kv_buffer is not supported yet.")
-
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789
