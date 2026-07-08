@@ -18,6 +18,7 @@ from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    linear_att_mtp_state_index_update,
     mtp_scatter_next_token_ids,
 )
 from lightllm.utils.log_utils import init_logger
@@ -257,6 +258,15 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
             )
+            if self.is_linear_att_mixed_model:
+                linear_att_mtp_state_index_update(
+                    req_to_mtp_state_index=self.model.req_manager.req_to_mtp_state_index,
+                    b_req_mtp_start_loc=b_req_mtp_start_loc,
+                    b_req_idx=model_input.b_req_idx,
+                    b_mtp_index=model_input.b_mtp_index,
+                    accepted_index=accepted_index,
+                    max_mtp_step=self.mtp_step + 1,
+                )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",
                 gpu_tensor=accepted_index,

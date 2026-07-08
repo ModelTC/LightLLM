@@ -60,23 +60,11 @@ def test_decode_strided_views_match_contiguous(batch):
     assert torch.equal(state_ref, state_strided)
 
 
-def test_cu_seqlens_is_not_supported():
-    """The fused recurrent kernel is decode-only in LightLLM's Qwen3Next path."""
-    H, HV, K, V = 2, 2, 4, 4
-    q = torch.randn(1, 2, H, K, device="cuda", dtype=torch.bfloat16)
-    k = torch.randn(1, 2, H, K, device="cuda", dtype=torch.bfloat16)
-    v = torch.randn(1, 2, HV, V, device="cuda", dtype=torch.bfloat16)
-    initial_state = torch.randn(1, HV, K, V, device="cuda", dtype=torch.bfloat16)
-    cu_seqlens = torch.tensor([0, 2], device="cuda", dtype=torch.long)
-
-    with pytest.raises(AssertionError, match="decode-only fused recurrent kernel"):
-        fused_recurrent_gated_delta_rule(
-            q=q,
-            k=k,
-            v=v,
-            initial_state=initial_state,
-            cu_seqlens=cu_seqlens,
-        )
+# NOTE: the decode-only `cu_seqlens is None` contract from upstream #1349 was
+# intentionally lifted on this branch so the Qwen3Next MTP verify path can drive
+# the kernel with variable-length verify chunks (cu_seqlens + 2D SSM index
+# rows). That varlen path is exercised end-to-end by the MTP GSM8K accuracy
+# check rather than a hand-rolled unit test.
 
 
 if __name__ == "__main__":

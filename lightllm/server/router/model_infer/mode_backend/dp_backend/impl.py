@@ -20,7 +20,10 @@ from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_scatter_next_token_ids
+from lightllm.common.basemodel.triton_kernel.mtp_utils import (
+    linear_att_mtp_state_index_update,
+    mtp_scatter_next_token_ids,
+)
 from .control_state import DPControlState
 
 
@@ -462,6 +465,15 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                 )
+                if self.is_linear_att_mixed_model:
+                    linear_att_mtp_state_index_update(
+                        req_to_mtp_state_index=self.model.req_manager.req_to_mtp_state_index,
+                        b_req_mtp_start_loc=b_req_mtp_start_loc,
+                        b_req_idx=b_req_idx,
+                        b_mtp_index=model_input.b_mtp_index[0:req_num],
+                        accepted_index=accepted_index,
+                        max_mtp_step=self.mtp_step + 1,
+                    )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
                     gpu_tensor=accepted_index,
@@ -587,7 +599,6 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         real_req_num = req_num // (self.mtp_step + 1)
         padded_req_num = model_input.batch_size // (self.mtp_step + 1) - real_req_num
-        eagle_mem_indexes_cpu = None
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(real_req_num * self.mtp_step)
         eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(real_req_num * self.mtp_step)
@@ -773,6 +784,18 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                 )
+                if self.is_linear_att_mixed_model:
+                    b_mtp_index = torch.cat(
+                        (model_input0.b_mtp_index[0:req_num0], model_input1.b_mtp_index[0:req_num1]), dim=0
+                    )
+                    linear_att_mtp_state_index_update(
+                        req_to_mtp_state_index=self.model.req_manager.req_to_mtp_state_index,
+                        b_req_mtp_start_loc=b_req_mtp_start_loc,
+                        b_req_idx=b_req_idx,
+                        b_mtp_index=b_mtp_index,
+                        accepted_index=accepted_index,
+                        max_mtp_step=self.mtp_step + 1,
+                    )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
                     gpu_tensor=accepted_index,
@@ -879,7 +902,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         draft_next_token_ids_gpu1 = torch.zeros((model_input1.batch_size), dtype=torch.int64, device="cuda")
         if req_num0 > 0:
             draft_next_token_ids_gpu0[0:req_num0].copy_(next_token_ids[0:req_num0], non_blocking=True)
-        if req_num1 > 1:
+        if req_num1 > 0:
             draft_next_token_ids_gpu1[0:req_num1].copy_(
                 next_token_ids[req_num0 : (req_num0 + req_num1)], non_blocking=True
             )
@@ -937,7 +960,7 @@ class DPChunkedPrefillBackend(ModeBackend):
         draft_next_token_ids_gpu1 = torch.zeros((model_input1.batch_size), dtype=torch.int64, device="cuda")
         if req_num0 > 0:
             draft_next_token_ids_gpu0[0:req_num0].copy_(next_token_ids[0:req_num0], non_blocking=True)
-        if req_num1 > 1:
+        if req_num1 > 0:
             draft_next_token_ids_gpu1[0:req_num1].copy_(
                 next_token_ids[req_num0 : (req_num0 + req_num1)], non_blocking=True
             )

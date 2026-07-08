@@ -45,9 +45,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             torch.arange(batch_size, device=device), self.infer_state.b_q_seq_len
         )
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
     def prefill_att(
         self,
@@ -120,7 +123,6 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
         assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
 
-        device = self.infer_state.input_ids.device
         batch_size = att_batch_size
         mem_manager = self.backend.model.mem_manager
 
@@ -128,8 +130,12 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         head_num = mem_manager.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
         return
 
@@ -180,11 +186,11 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             k_cache=cache_k,
             v_cache=cache_v,
             page_table=self.page_table,
-            cache_seqlens=self.infer_state.b_seq_len,
+            cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
-            causal=False,
+            causal=True,
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale.view(self.infer_state.batch_size, k_head_num),

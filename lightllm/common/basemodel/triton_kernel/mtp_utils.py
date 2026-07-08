@@ -180,6 +180,77 @@ def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
     return b_req_mtp_start_loc
 
 
+@triton.jit
+def _fwd_kernel_linear_att_mtp_state_index_update(
+    req_to_mtp_state_index,
+    b_req_mtp_start_loc,
+    b_req_idx,
+    b_mtp_index,
+    accepted_index,
+    req_mtp_all_num,
+    BLOCK_SIZE: tl.constexpr,
+):
+    cur_index = tl.program_id(0)
+    req_nums = tl.num_programs(axis=0)
+
+    req_start_loc = tl.load(b_req_mtp_start_loc + cur_index)
+    req_start_end = tl.load(b_req_mtp_start_loc + cur_index + 1, mask=cur_index + 1 < req_nums, other=req_mtp_all_num)
+    req_mtp_num = req_start_end - req_start_loc
+    cur_req_idx = tl.load(b_req_idx + req_start_loc)
+
+    offset = tl.arange(0, BLOCK_SIZE)
+    req_offset = req_start_loc + offset
+
+    cur_mtp_index = tl.load(b_mtp_index + req_offset, mask=offset < req_mtp_num, other=-1)
+    cur_accepted = tl.load(accepted_index + req_offset, mask=offset < req_mtp_num, other=0)
+
+    valid_mtp_index = tl.where(cur_accepted == 1, cur_mtp_index, -1)
+    max_mtp_index = tl.max(valid_mtp_index, axis=0)
+
+    tl.store(req_to_mtp_state_index + cur_req_idx, max_mtp_index)
+    return
+
+
+def linear_att_mtp_state_index_update(
+    req_to_mtp_state_index: torch.Tensor,
+    b_req_mtp_start_loc: torch.Tensor,
+    b_req_idx: torch.Tensor,
+    b_mtp_index: torch.Tensor,
+    accepted_index: torch.Tensor,
+    max_mtp_step: int,
+):
+    """
+    Update req_to_mtp_state_index with the max b_mtp_index among accepted tokens per request.
+    Args:
+        req_to_mtp_state_index: (max_req_num + 1,)
+        b_req_mtp_start_loc: (num_reqs,)
+        b_req_idx: (batch_size,)
+        b_mtp_index: (batch_size,)
+        accepted_index: (batch_size,), 1 means accepted, 0 means not accepted.
+        max_mtp_step: max mtp step per request, typically mtp_step + 1.
+    """
+    BLOCK_SIZE = 16
+    assert max_mtp_step <= BLOCK_SIZE, f"max_mtp_step must be less than {BLOCK_SIZE}"
+    num_reqs = b_req_mtp_start_loc.shape[0]
+    req_mtp_all_num = b_req_idx.shape[0]
+
+    assert len(b_req_idx) == len(b_mtp_index) == len(accepted_index)
+
+    grid = (num_reqs,)
+    num_warps = 1
+    _fwd_kernel_linear_att_mtp_state_index_update[grid](
+        req_to_mtp_state_index=req_to_mtp_state_index,
+        b_req_mtp_start_loc=b_req_mtp_start_loc,
+        b_req_idx=b_req_idx,
+        b_mtp_index=b_mtp_index,
+        accepted_index=accepted_index,
+        req_mtp_all_num=req_mtp_all_num,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=num_warps,
+        num_stages=1,
+    )
+
+
 def test_mtp_verify():
     req_to_next_token_ids = torch.tensor(
         [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"

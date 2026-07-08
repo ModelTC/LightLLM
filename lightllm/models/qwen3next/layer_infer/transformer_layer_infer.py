@@ -16,6 +16,7 @@ from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gd
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
 from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
+from lightllm.models.qwen3next.triton_kernel.mtp_fused_recurrent import mtp_fused_recurrent_gated_delta_rule
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
@@ -261,18 +262,33 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if is_prefill:
             core_attn_out, z = self._gdn_prefill_wrapper_run(mixed_qkvzba, infer_state, layer_weight)
         else:
-            mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
-            conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
-            core_attn_out, z = self._gdn_decode_kernel(
-                mixed_qkv,
-                z,
-                conv_states,
-                ssm_states,
-                a,
-                b,
-                infer_state,
-                layer_weight,
-            )
+            if get_env_start_args().mtp_step > 0:
+                # MTP 模式下，使用线性层 MTP 状态。
+                mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+                conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                core_attn_out = self._gdn_mtp_kernel(
+                    mixed_qkv,
+                    conv_states,
+                    ssm_states,
+                    a,
+                    b,
+                    infer_state,
+                    layer_weight,
+                )
+            else:
+                # 非 MTP 模式下，使用线性层 decode 状态。
+                mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
+                conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                core_attn_out, z = self._gdn_decode_kernel(
+                    mixed_qkv,
+                    z,
+                    conv_states,
+                    ssm_states,
+                    a,
+                    b,
+                    infer_state,
+                    layer_weight,
+                )
 
         num_tokens = z.shape[0]
         core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
@@ -313,6 +329,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
             def gdn_prefill_func(new_infer_state: Qwen3NextInferStateInfo):
                 conv_states, ssm_states = new_infer_state.req_manager.get_mamba_cache(self.layer_num_)
+                # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
+                # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
+                if get_env_start_args().mtp_step > 0:
+                    conv_states = conv_states[:, :, : -get_env_start_args().mtp_step]
                 mixed_qkv, tmp_z, b, a = self._split_qkvzba(_mixed_qkvzba)
                 _z.copy_(tmp_z)
                 tmp_o = self._gdn_prefill_kernel(
@@ -326,6 +346,10 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             return o, z
 
         conv_states, ssm_states = infer_state.req_manager.get_mamba_cache(self.layer_num_)
+        # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
+        # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
+        if get_env_start_args().mtp_step > 0:
+            conv_states = conv_states[:, :, : -get_env_start_args().mtp_step]
         mixed_qkv, z, b, a = self._split_qkvzba(mixed_qkvzba)
         core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, infer_state, layer_weight)
         return core_attn_out, z
@@ -381,7 +405,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight.linear_conv1d.mm_param.weight,
             bias=layer_weight.linear_conv1d.bias,
             query_start_loc=infer_state.b1_cu_q_seq_len,
-            cache_indices=infer_state.b_buffer_idx,
+            cache_indices=infer_state.b_conv_buffer_idx,
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=self.activation,
@@ -390,7 +414,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # Recurrent processing
         query, key, value = self._rearrange_mixed_qkv(mixed_qkv)
-        initial_state = ssm_states[infer_state.b_buffer_idx]
+        initial_state = ssm_states[infer_state.b_ssm_buffer_idx]
         # g and beta have shape (total_tokens, num_heads), need to unsqueeze to get (1, total_tokens, num_heads)
         core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
             q=query,
@@ -405,9 +429,9 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_qk_l2norm_in_kernel=True,
         )
         if self.needs_ssm_dtype_conversion:
-            ssm_states[infer_state.b_buffer_idx] = last_recurrent_state.to(self.ssm_state_dtype, copy=False)
+            ssm_states[infer_state.b_ssm_buffer_idx] = last_recurrent_state.to(self.ssm_state_dtype, copy=False)
         else:
-            ssm_states[infer_state.b_buffer_idx] = last_recurrent_state
+            ssm_states[infer_state.b_ssm_buffer_idx] = last_recurrent_state
         return core_attn_out
 
     def _gdn_decode_kernel(
@@ -432,7 +456,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             conv_states,
             layer_weight.linear_conv1d.mm_param.weight,
             layer_weight.linear_conv1d.bias,
-            infer_state.b_buffer_idx,
+            infer_state.b_conv_buffer_idx,
             self.activation,
             self.conv_kernel_dim,
             self.tp_num_k_heads,
@@ -446,7 +470,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             v=value,
             initial_state=ssm_states,
             inplace_final_state=True,
-            ssm_state_indices=infer_state.b_buffer_idx,
+            ssm_state_indices=infer_state.b_ssm_buffer_idx,
             use_qk_l2norm_in_kernel=True,
             A_log=layer_weight.linear_A_log.weight,
             dt_bias=layer_weight.linear_dt_bias.weight,
@@ -454,3 +478,51 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             b_raw=b,
         )
         return core_attn_out, z
+
+    def _gdn_mtp_kernel(
+        self,
+        mixed_qkv: torch.Tensor,
+        conv_states: torch.Tensor,
+        ssm_states: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        infer_state: Qwen3NextInferStateInfo,
+        layer_weight: Qwen3NextTransformerLayerWeight,
+    ):
+        from lightllm.models.qwen3next.triton_kernel.causal_conv1d_spec import (
+            causal_conv1d_update as causal_conv1d_update_spec,
+        )
+
+        cu_seqlens_q = infer_state.b1_mtp_cu_q_seq_len
+        mixed_qkv = causal_conv1d_update_spec(
+            mixed_qkv,
+            conv_states,
+            layer_weight.linear_conv1d.mm_param.weight,
+            mtp_step=get_env_start_args().mtp_step,
+            bias=layer_weight.linear_conv1d.bias,
+            activation=self.activation,
+            conv_state_indices=infer_state.b_conv_buffer_idx,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
+            query_start_loc=cu_seqlens_q,
+        )
+
+        query, key, value = self._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        assert infer_state.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
+        # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
+        # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step
+        # .all() D2H sync stalled the GPU on the eager decode hot path; it is redundant here.
+        core_attn_out, _ = mtp_fused_recurrent_gated_delta_rule(
+            q=query,
+            k=key,
+            v=value,
+            initial_state=ssm_states,
+            cu_seqlens=cu_seqlens_q.to(torch.long),
+            ssm_state_indices=infer_state.b_ssm_buffer_idx,
+            ssm_state_write_indices=infer_state.b_ssm_buffer_idx,
+            num_accepted_tokens=infer_state.b_num_accepted_tokens,
+            A_log=layer_weight.linear_A_log.weight,
+            dt_bias=layer_weight.linear_dt_bias.weight,
+            a_raw=a,
+            b_raw=b,
+        )
+        return core_attn_out
