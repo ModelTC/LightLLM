@@ -74,15 +74,20 @@ class VisionPeakVramHolder:
         self, batch_size: int, max_image_pixels: int, max_image_token_count: int
     ) -> List[ImageItem]:
         width, height = _worst_case_image_size(max_image_pixels)
-        image_bytes = _solid_rgb_jpeg_bytes(width, height, color=(0, 0, 0))
         items = []
-        for _ in range(batch_size):
+        for batch_id in range(batch_size):
+            # Alternate solid black/white so each batch slot gets a distinct JPEG payload.
+            color = (255, 255, 255) if batch_id % 2 else (0, 0, 0)
+            image_bytes = _solid_rgb_jpeg_bytes(width, height, color=color)
             item = ImageItem(type="base64", data="")
-            item.uuid = f"vision_peak_hold_{uuid.uuid4().hex}"
+            item.uuid = f"vision_peak_hold_{batch_id}_{uuid.uuid4().hex}"
             item.image_w = width
             item.image_h = height
+            # InternVL encode() reads image_patch_max_num from extra_params (normally set by
+            # InternvlTokenizer.init_imageitem_extral_params). Use MAX_PATH_NUM for worst-case tile count.
             if hasattr(self.model, "MAX_PATH_NUM"):
                 item.extra_params["image_patch_max_num"] = int(self.model.MAX_PATH_NUM)
+
             create_shm(get_shm_name_data(item.uuid), image_bytes)
             items.append(item)
         return items
