@@ -338,8 +338,9 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-
         start_time = time.time()
+        if sampling_params.prompt_logprobs >= 0 and not self.args.return_all_prompt_logprobs:
+            raise ValueError("prompt_logprobs requires a server started with --return_all_prompt_logprobs")
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -579,7 +580,6 @@ class HttpServerManager:
             await asyncio.sleep(0.005)
 
     async def _log_req_header(self, request_headers, group_request_id: int):
-
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
 
@@ -669,7 +669,6 @@ class HttpServerManager:
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
         if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:
-
             # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
             # 修改 max_new_tokens 的值，使其满足合法约束。
             new_max_new_tokens = real_supported_max_req_total_len - prompt_tokens
@@ -717,7 +716,6 @@ class HttpServerManager:
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -760,7 +758,6 @@ class HttpServerManager:
         req_status: "ReqStatus",
         request: Request,
     ):
-
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
@@ -914,7 +911,6 @@ class HttpServerManager:
         pre_time_mark = time.time()
 
         while True:
-
             try:
                 await asyncio.wait_for(self.recycle_event.wait(), timeout=0.02)
             except asyncio.TimeoutError:
@@ -936,6 +932,10 @@ class HttpServerManager:
                         req.close_routing_data_shm_array()
                     except Exception as e:
                         logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
+                    try:
+                        req.close_prompt_topk_shm_array()
+                    except Exception as e:
+                        logger.debug(f"Failed to close prompt topk shm for req {req.request_id}: {e}")
                     _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
@@ -995,7 +995,6 @@ class HttpServerManager:
 
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
-
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
                                 req.cumlogprob += float(req.shm_logprobs.arr[src_index])
                                 metadata = {
@@ -1010,7 +1009,11 @@ class HttpServerManager:
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
                                 if self.args.return_all_prompt_logprobs:
-                                    metadata.update(req.get_all_prompt_metadata())
+                                    if req.sample_params.prompt_logprobs >= 0:
+                                        if count_output_tokens == 1:
+                                            metadata.update(req.get_prompt_logprobs_metadata())
+                                    else:
+                                        metadata.update(req.get_all_prompt_metadata())
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 
