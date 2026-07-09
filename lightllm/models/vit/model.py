@@ -145,9 +145,8 @@ class VisionTransformer:
     @torch.no_grad()
     def encode(self, images: List[ImageItem]):
         img_tensors = []
-        valid_ids = []
-        valid_id = 0
         uuids = []
+        patch_nums = []
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
@@ -155,19 +154,24 @@ class VisionTransformer:
                 image_data = Image.open(BytesIO(image_data))
                 t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                 img_tensors.append(t)
+                patch_nums.append(t.shape[0])
             else:
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
-
-            cur_num = img.token_num
-            valid_ids.append([valid_id, valid_id + cur_num])
-            valid_id += cur_num
 
         if len(img_tensors) <= 0:
             return None
 
         imgs = torch.cat(img_tensors, dim=0)
         pixel_values = imgs.cuda().to(dtype=self.data_type)
+        # [total_patches, tokens_per_patch, hidden]
         all_img_embeds = self.forward(pixel_values)
+        tokens_per_patch = all_img_embeds.shape[1]
+        valid_ids = []
+        valid_id = 0
+        for n_patches in patch_nums:
+            cur_num = n_patches * tokens_per_patch
+            valid_ids.append([valid_id, valid_id + cur_num])
+            valid_id += cur_num
         return all_img_embeds.view(-1, all_img_embeds.shape[-1]), uuids, valid_ids
 
     def cuda(self):
