@@ -145,6 +145,12 @@ class VisualModelRpcServer(rpyc.Service):
         return
 
     def _hold_vision_peak_vram(self):
+        """通过 warmup 预先保留 ViT 推理所需的最大显存。
+
+        ViT 与 LLM 同卡时，LLM 启动会按 mem_get_info 划分 KV pool。若此时 ViT 尚未跑过
+        峰值 activation，LLM 可能多占显存；之后大图 ViT 推理会因启动顺序不同而 OOM。
+        这里用 worst-case encode warmup，提前占住 ViT 峰值显存，避免后续不够用。
+        """
         args = get_env_start_args()
         if os.getenv("DISABLE_VISION_PEAK_VRAM_WARMUP", None) is not None:
             logger.warning(
