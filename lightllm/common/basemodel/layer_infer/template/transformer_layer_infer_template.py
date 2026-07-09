@@ -98,6 +98,41 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
+    def token_forward_with_next_att_norm(
+        self,
+        input_embdings,
+        infer_state: InferStateInfo,
+        layer_weight,
+        att_normed_input=None,
+        next_layer=None,
+        next_layer_weight=None,
+    ):
+        input1 = att_normed_input
+        if input1 is None:
+            input1 = self._att_norm(input_embdings, infer_state, layer_weight)
+        o = self.token_attention_forward(input1, infer_state, layer_weight)
+        input1 = layer_weight.ffn_norm_weight_.add_rmsnorm(
+            input=input_embdings,
+            residual=o.view(-1, self.embed_dim_),
+            eps=self.eps_,
+            alloc_func=self.alloc_tensor,
+        )
+        o = None
+
+        ffn_out = self._ffn(input1, infer_state, layer_weight)
+        ffn_out = ffn_out.view(-1, self.embed_dim_)
+
+        if next_layer is not None:
+            return input_embdings, next_layer_weight.att_norm_weight_.add_rmsnorm(
+                input=input_embdings,
+                residual=ffn_out,
+                eps=next_layer.eps_,
+                alloc_func=next_layer.alloc_tensor,
+            )
+
+        input_embdings.add_(ffn_out)
+        return input_embdings, None
+
     def _context_attention_wrapper_run(
         self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
     ) -> torch.Tensor:
