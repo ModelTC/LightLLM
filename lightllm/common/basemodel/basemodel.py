@@ -1100,7 +1100,7 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup()
         torch.distributed.barrier()
 
-        warmup_lengths = [1, 4, 8, 16, 32, 64, 100, 128, 256, 1024, 2048, 4096]
+        warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)
