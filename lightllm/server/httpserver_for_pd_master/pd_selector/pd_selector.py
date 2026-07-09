@@ -1,4 +1,5 @@
 import random
+from collections import OrderedDict
 from typing import Union, List, Tuple, Dict
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
@@ -64,4 +65,60 @@ class AdaptiveLoadSelector(PDSelector):
         return p_node, d_node
 
     def _importance_sampling(self, nodes: List[PD_Client_Obj]):
-        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])
+        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
+
+
+class CacheAwareSelector(PDSelector):
+    """前缀亲和选择器"""
+
+    CHUNK_SIZE = 256
+    MATCH_RATIO = 0.25
+    LOAD_MARGIN = 0.3
+    MAX_ENTRIES = 100000
+
+    def __init__(self, pd_manager):
+        super().__init__(pd_manager)
+        self.prefix_to_node: "OrderedDict[int, int]" = OrderedDict()
+
+    def select_p_d_node(
+        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+    ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
+        chain_hashes = self._chain_hashes(prompt)
+        p_node = self._select_p_node(prompt, chain_hashes)
+        self._record(chain_hashes, p_node.node_id)
+        d_node = self._sample_by_load(self.decode_nodes)
+        return p_node, d_node
+
+    def _chain_hashes(self, prompt: Union[str, List[int]]) -> List[int]:
+        hashes = []
+        h = 0
+        for i in range(0, len(prompt) - self.CHUNK_SIZE + 1, self.CHUNK_SIZE):
+            chunk = prompt[i : i + self.CHUNK_SIZE]
+            h = hash((h, chunk if isinstance(chunk, str) else tuple(chunk)))
+            hashes.append(h)
+        return hashes
+
+    def _select_p_node(self, prompt, chain_hashes: List[int]) -> PD_Client_Obj:
+        id_to_node = {node.node_id: node for node in self.prefill_nodes}
+        for depth in range(len(chain_hashes), 0, -1):
+            node_id = self.prefix_to_node.get(chain_hashes[depth - 1])
+            if node_id is None:
+                continue
+            self.prefix_to_node.move_to_end(chain_hashes[depth - 1])
+            node = id_to_node.get(node_id)
+            if node is not None and depth * self.CHUNK_SIZE / len(prompt) >= self.MATCH_RATIO:
+                min_usage = min(e.run_status.total_token_usage_rate for e in self.prefill_nodes)
+                if node.run_status.total_token_usage_rate - min_usage < self.LOAD_MARGIN:
+                    return node
+            break
+        return self._sample_by_load(self.prefill_nodes)
+
+    def _record(self, chain_hashes: List[int], node_id: int):
+        for h in chain_hashes:
+            self.prefix_to_node[h] = node_id
+            self.prefix_to_node.move_to_end(h)
+        while len(self.prefix_to_node) > self.MAX_ENTRIES:
+            self.prefix_to_node.popitem(last=False)
+
+    def _sample_by_load(self, nodes: List[PD_Client_Obj]) -> PD_Client_Obj:
+        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
