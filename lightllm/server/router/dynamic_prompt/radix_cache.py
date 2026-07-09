@@ -660,35 +660,60 @@ class RadixCache:
         return
 
     def free_unreferenced_swa_pages(self, need_pages: int) -> None:
-        """DeepSeek-V4 swa free hook: 页 allocator 触底时，沿 LRU 序(evict_tree_set)只对
-        ref_count==0 的节点链 free 其 swa 页(full 槽与压缩条目保留——节点仍可服务更长前缀的
-        中段命中)，并清载荷 bitmap 位使后续命中按缩短语义裁剪。所有权判定直接复用 radix
-        引用计数: 节点被任何活跃请求借用即 ref>0，其页不可达。不够时由 allocator 的 assert
-        兜底(最后防线)。"""
+        """DeepSeek-V4 swa free hook: 页 allocator 触底时，回收 ref_count==0 节点的 swa 页。"""
         if self.mem_manager is None or self.extra_value_ops is None:
-            return
-        invalidate = getattr(self.extra_value_ops, "invalidate_swa_pages", None)
-        if invalidate is None:
             return
         allocator = self.mem_manager.swa_page_allocator
         target = allocator.can_use_mem_size + int(need_pages)
-        for leaf in list(self.evict_tree_set):
-            if allocator.can_use_mem_size >= target:
+        evict_slots = []
+        invalidate_payloads = []
+        evict_swa_pages = 0
+        for free_last in (False, True):
+            visited = set()
+            for leaf in self.evict_tree_set:
+                if allocator.can_use_mem_size + evict_swa_pages >= target:
+                    break
+                node = leaf
+                while node is not None and node is not self.root_node and node.ref_counter == 0:
+                    node_id = id(node)
+                    if node_id in visited:
+                        node = node.parent
+                        continue
+                    visited.add(node_id)
+
+                    payload = node.token_extra_value
+                    if (
+                        len(node.token_mem_index_value) > 0
+                        and payload is not None
+                        and payload.swa_page_valid is not None
+                    ):
+                        last_page = int(payload.swa_last_valid_page)
+                        if last_page >= 0:
+                            if free_last:
+                                page_slice = slice(last_page, last_page + 1)
+                            else:
+                                page_slice = slice(0, last_page)
+                            valid_pages = int(payload.swa_page_valid[page_slice].sum().item())
+                            if valid_pages > 0:
+                                start = page_slice.start * self.page_size
+                                end = min(page_slice.stop * self.page_size, len(node.token_mem_index_value))
+                                if end > start:
+                                    evict_slots.append(node.token_mem_index_value[start:end])
+                                    invalidate_payloads.append((payload, page_slice, free_last))
+                                    evict_swa_pages += valid_pages * self._swa_pages_per_prompt_page
+                                    if allocator.can_use_mem_size + evict_swa_pages >= target:
+                                        break
+                    node = node.parent
+            if allocator.can_use_mem_size + evict_swa_pages >= target:
                 break
-            node = leaf
-            # 叶子起步沿父链回收: 引用计数向上累加(add_node_ref_counter 走父链)，
-            # 因此 ref==0 的祖先必无任何活跃借用方。重复访问无害(evict_swa/-1 跳过)。
-            # 每回收一个节点就复查目标,避免多回收(无谓削减命中可用性)。
-            while node is not None and node is not self.root_node and node.ref_counter == 0:
-                if len(node.token_mem_index_value) > 0:
-                    old_pages = self._node_swa_pages_num(node)
-                    self.mem_manager.evict_swa(node.token_mem_index_value)
-                    if node.token_extra_value is not None:
-                        invalidate(node.token_extra_value)
-                    self.swa_tree_total_pages_num -= old_pages - self._node_swa_pages_num(node)
-                    if allocator.can_use_mem_size >= target:
-                        return
-                node = node.parent
+        if len(evict_slots) == 0:
+            return
+        self.mem_manager.evict_swa(torch.cat(evict_slots))
+        for payload, page_slice, free_last in invalidate_payloads:
+            payload.swa_page_valid[page_slice] = False
+            if free_last:
+                payload.swa_last_valid_page = -1
+        self.swa_tree_total_pages_num -= evict_swa_pages
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):

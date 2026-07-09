@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class DeepseekV4PromptCachePayload:
-    """prompt cache 载荷: 只剩 swa 按页有效性 bitmap。
+    """prompt cache 载荷: swa 按页有效性 bitmap 和最后有效页。
 
     槽位与 compressor 状态都不进载荷: full_to_swa/full_to_c4/full_to_c128 以 full token 槽位
     为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4/c128 compressor 状态以 swa
@@ -43,6 +43,20 @@ class DeepseekV4PromptCachePayload:
 
     cache_len: int
     swa_page_valid: Optional[torch.Tensor] = None
+    swa_last_valid_page: int = -1
+
+    def refresh_swa_last_valid_page(self) -> None:
+        if self.swa_page_valid is None:
+            self.swa_last_valid_page = -1
+            return
+        valid_idx = torch.nonzero(self.swa_page_valid).flatten()
+        self.swa_last_valid_page = -1 if valid_idx.numel() == 0 else int(valid_idx[-1].item())
+        return
+
+    def valid_match_length(self, natural_len: int, page: int) -> int:
+        if self.swa_last_valid_page < 0:
+            return 0
+        return (int(self.swa_last_valid_page) + 1) * page
 
 
 class DeepseekV4PromptCacheValueOps:
@@ -59,25 +73,14 @@ class DeepseekV4PromptCacheValueOps:
         # 槽位资源全部由 mem_manager.free(full_slots) 级联回收，载荷本身没有需要释放的资源。
         return
 
-    def invalidate_swa_pages(self, payload: DeepseekV4PromptCachePayload) -> None:
-        """swa 压力阀回收了该节点的 swa 页后清 bitmap: 后续命中按缩短语义裁剪,不会复活。"""
-        if payload is not None and payload.swa_page_valid is not None:
-            payload.swa_page_valid.fill_(False)
-        return
-
     def valid_match_length(self, payload: Optional[DeepseekV4PromptCachePayload], natural_len: int) -> int:
         """radix 匹配裁剪: 返回 <= natural_len 的最大 prompt-cache 边界 L'，使结尾页有效。
 
-        有效性可能非单调(owner 生前从左驱逐、后续阀从尾回收)，按候选边界回查 bitmap;
-        中段 invalid 页不挡更靠后的有效命中(注意力只回看最后一个窗口)。"""
-        page = self.req_manager.get_prompt_cache_page_size()
-        if payload is None or payload.swa_page_valid is None:
+        有效性可能非单调(owner 生前从左驱逐、后续阀从尾回收)，中段 invalid 页不挡更
+        靠后的有效命中(注意力只回看最后一个窗口)。"""
+        if payload is None:
             return 0
-        n_pages = min(natural_len // page, int(payload.swa_page_valid.numel()))
-        valid_idx = torch.nonzero(payload.swa_page_valid[:n_pages])
-        if valid_idx.numel() == 0:
-            return 0
-        return (int(valid_idx[-1]) + 1) * page
+        return payload.valid_match_length(natural_len, self.req_manager.get_prompt_cache_page_size())
 
 
 class _ReqNode:
@@ -451,6 +454,15 @@ class DeepseekV4ReqManager(ReqManager):
         V4 prompt-cache 页取 256 token，正好覆盖一个 c4 物理页对应的 token 范围。"""
         return int(self.sliding_window) + self.get_prompt_cache_page_size()
 
+    def _align_swa_evict_frontier(self, raw_frontier: int) -> int:
+        """SWA 回收水位线按 prompt-cache 页向下对齐。
+
+        bitmap 的有效性是 prompt-cache page 粒度；若水位线切进页面中间，该页会被判为
+        invalid，即使靠近命中边界的窗口实际仍完整驻留。"""
+        page = self.get_prompt_cache_page_size()
+        raw_frontier = max(0, int(raw_frontier))
+        return raw_frontier // page * page
+
     def prepare_prefill_swa(
         self,
         b_req_idx: torch.Tensor,
@@ -480,9 +492,9 @@ class DeepseekV4ReqManager(ReqManager):
                 mark = self._swa_evict_marks[req_idx]
                 if mark < 0:
                     # 首个 chunk: [0, ready_len) 是 radix 共享前缀，其 swa 槽归 radix 所有，不可回收。
-                    self._swa_evict_marks[req_idx] = ready_len
+                    self._swa_evict_marks[req_idx] = self._align_swa_evict_frontier(ready_len)
                     continue
-                evict_end = ready_len - retain + 1
+                evict_end = self._align_swa_evict_frontier(ready_len - retain + 1)
                 if evict_end > mark:
                     evict_slots.append(self.req_to_token_indexs[req_idx, mark:evict_end])
                     self._swa_evict_marks[req_idx] = evict_end
@@ -585,9 +597,9 @@ class DeepseekV4ReqManager(ReqManager):
                 mark = self._swa_evict_marks[req_idx]
                 if mark < 0:
                     # 未经过 prefill prep 的保守路径: 不回收旧位置，仅推进水位线。
-                    self._swa_evict_marks[req_idx] = max(0, seq_len - retain)
+                    self._swa_evict_marks[req_idx] = self._align_swa_evict_frontier(seq_len - retain)
                     continue
-                evict_end = seq_len - retain
+                evict_end = self._align_swa_evict_frontier(seq_len - retain)
                 if evict_end > mark:
                     evict_slots.append(self.req_to_token_indexs[req_idx, mark:evict_end])
                     self._swa_evict_marks[req_idx] = evict_end
@@ -955,7 +967,7 @@ class DeepseekV4ReqManager(ReqManager):
 
     def swa_page_valid_from_watermark(self, req_idx: int, cache_len: int) -> torch.Tensor:
         """插入时的按页有效性,纯 CPU: 请求自有 token 的 swa 映射只被出窗水位线回收
-        (阀不触活跃请求,级联只在 free 时),页 p 全驻留 ⟺ 页起点 128p >= 水位线。
+        (阀不触活跃请求,级联只在 free 时),页 p 全驻留 ⟺ 页起点 page*p >= 水位线。
 
         与 compute_swa_page_valid 在插入时刻对自有 token 等价,但不做 GPU gather/同步——
         router 关键路径上每次插入省一次对全部在途 kernel 的等待。bitmap 中借入前缀
@@ -971,21 +983,36 @@ class DeepseekV4ReqManager(ReqManager):
         end = int(end)
         page = self.get_prompt_cache_page_size()
         # radix page 保证分裂点页对齐，bitmap 可整页切分。
-        return DeepseekV4PromptCachePayload(
+        ans = DeepseekV4PromptCachePayload(
             cache_len=end - start,
             swa_page_valid=payload.swa_page_valid[start // page : end // page].clone()
             if payload.swa_page_valid is not None
             else None,
         )
+        ans.refresh_swa_last_valid_page()
+        return ans
 
     def concat_prompt_cache_payloads(self, payloads: List[DeepseekV4PromptCachePayload]):
         if len(payloads) == 0:
             return None
         bitmaps = [p.swa_page_valid for p in payloads]
-        return DeepseekV4PromptCachePayload(
+        ans = DeepseekV4PromptCachePayload(
             cache_len=sum(p.cache_len for p in payloads),
             swa_page_valid=torch.cat(bitmaps, dim=0) if all(b is not None for b in bitmaps) else None,
         )
+        if ans.swa_page_valid is None:
+            return ans
+
+        page = self.get_prompt_cache_page_size()
+        page_offset = 0
+        last_valid_page = -1
+        for item in payloads:
+            item_last = int(getattr(item, "swa_last_valid_page", -1))
+            if item_last >= 0:
+                last_valid_page = page_offset + item_last
+            page_offset += int(item.cache_len) // page
+        ans.swa_last_valid_page = last_valid_page
+        return ans
 
     def build_prompt_cache_payload(
         self,

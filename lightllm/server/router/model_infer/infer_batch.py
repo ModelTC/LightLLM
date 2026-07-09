@@ -173,6 +173,7 @@ class InferenceContext:
             value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_len].detach().cpu()
 
             payload.swa_page_valid = self.req_manager.swa_page_valid_from_watermark(req.req_idx, cache_len)
+            payload.refresh_swa_last_valid_page()
 
             key = torch.tensor(req.get_input_token_ids()[0:cache_len], dtype=torch.int64, device="cpu")
             duplicate_prefix_len, _ = self.radix_cache.insert(key, value[:cache_len], extra_value=payload)
