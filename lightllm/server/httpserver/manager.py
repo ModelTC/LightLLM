@@ -496,22 +496,24 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except (ClientDisconnected, Exception) as e:
-            logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
-
+        except (asyncio.CancelledError, Exception) as e:
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+            elif isinstance(e, asyncio.CancelledError):
+                logger.warning(f"group_request_id: {group_request_id} has been cancelled")
+            else:
+                logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
 
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
             if group_request_id not in self.req_id_to_out_inf:
-                await self.rl_controller.unregister_generation_admission(group_request_id)
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
-            raise e
+            raise
         finally:
+            await self.rl_controller.unregister_generation_admission(group_request_id)
             async with self._run_reqs_count_lock:
                 self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return

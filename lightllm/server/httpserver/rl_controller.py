@@ -72,7 +72,15 @@ class _GenerationPauseGate:
 
         resume_task = asyncio.create_task(resume_event.wait())
         abort_task = asyncio.create_task(abort_event.wait())
-        done, pending = await asyncio.wait({resume_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        try:
+            done, pending = await asyncio.wait({resume_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            resume_task.cancel()
+            abort_task.cancel()
+            await asyncio.gather(resume_task, abort_task, return_exceptions=True)
+            await self.unregister_pending_request(request_id)
+            raise
+
         for task in pending:
             task.cancel()
         if pending:
