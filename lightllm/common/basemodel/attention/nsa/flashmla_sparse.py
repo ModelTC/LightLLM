@@ -162,7 +162,7 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
         kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+        from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
         nsa_dict = att_control.nsa_decode_dict
         topk_mem_indices = nsa_dict["topk_mem_indices"]
