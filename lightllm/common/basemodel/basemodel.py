@@ -312,6 +312,7 @@ class TpPartBaseModel:
             model_input.b_mtp_index_cpu,
             mem_indexes,
             model_input.mtp_decode_slot_prepare_indices,
+            prepare_compress_slots=not self.is_mtp_draft_model,
         )
         return
 
@@ -602,8 +603,10 @@ class TpPartBaseModel:
         else:
             infer_batch_size = model_input.batch_size
 
-        if self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len
+        if (
+            self.graph is not None
+            and not self.is_mtp_draft_model
+            and self.graph.can_run(batch_size=infer_batch_size, max_len_in_batch=model_input.max_kv_seq_len)
         ):
             infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
             model_input = self._create_padded_decode_model_input(

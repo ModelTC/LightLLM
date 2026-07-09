@@ -92,6 +92,7 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
             [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]
         )
         self.layers_infer = [self.transformer_layer_infer_class(total_pre_layers_num, network_config=self.config)]
+        assert self.layers_infer[0].compress_ratio == 0, "DeepSeek-V4 MTP draft layer must be SWA-only"
         return
 
     def _init_some_value(self):

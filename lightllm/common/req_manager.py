@@ -181,6 +181,7 @@ class ReqManager:
         b_mtp_index_cpu,
         mem_indexes,
         mtp_decode_slot_prepare_indices,
+        prepare_compress_slots=True,
     ):
         """每个 decode step 在 attention metadata 构建前调用的钩子。基类 no-op; 需要
         per-step KV 槽位 prep 的模型 (DeepSeek-V4) override。"""
@@ -505,9 +506,10 @@ class DeepseekV4ReqManager(ReqManager):
         b_mtp_index_cpu,
         mem_indexes,
         mtp_decode_slot_prepare_indices,
+        prepare_compress_slots=True,
     ):
-        """decode 每步槽位 prep: 先 swa 再 compress。由 BaseModel 在 copy_kv_index_to_req
-        之后、attention metadata 构建前调用。"""
+        """decode 每步槽位 prep。由 BaseModel 在 copy_kv_index_to_req 之后、attention
+        metadata 构建前调用。DeepSeek-V4 MTP draft layer 只需要 SWA 槽位。"""
         max_mtp_index = int(b_mtp_index_cpu.max().item())
         if mtp_decode_slot_prepare_indices is None:
             steps = range(max_mtp_index + 1)
@@ -524,11 +526,12 @@ class DeepseekV4ReqManager(ReqManager):
                 b_seq_len_cpu[rows],
                 mem_indexes[rows],
             )
-            self.prepare_decode_compress_slots(
-                b_req_idx_cpu[rows],
-                b_seq_len_cpu[rows],
-                mem_indexes[rows],
-            )
+            if prepare_compress_slots:
+                self.prepare_decode_compress_slots(
+                    b_req_idx_cpu[rows],
+                    b_seq_len_cpu[rows],
+                    mem_indexes[rows],
+                )
         return
 
     def prepare_prefill(
