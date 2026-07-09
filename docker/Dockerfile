@@ -7,6 +7,9 @@ ARG VLLM_VERSION=0.21.0
 ARG NIXL_REF=v1.2.0
 ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
+ARG DEEPEP_REF=099d5f2bad488b9c534ea785062b12f2e91d1d41
+ARG DEEPEP_NCCL_VERSION=2.30.4
+ARG DEEPEP_NVSHMEM_VERSION=3.3.24
 ARG TARGETPLATFORM
 ARG ENABLE_DEEPEP=1
 ARG ENABLE_NIXL=1
@@ -89,9 +92,9 @@ RUN if [ "${ENABLE_DEEPEP}" = "1" ]; then \
       set -e; \
       ln -sf /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so; \
       python -m pip install --upgrade --no-deps \
-        "nvidia-nccl-cu13==2.30.4" \
-        "nvidia-nvshmem-cu13==3.6.5"; \
-      cd /root && git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout b306af06afd412c88e51e71802951606e40b7358; \
+        "nvidia-nccl-cu13==${DEEPEP_NCCL_VERSION}" \
+        "nvidia-nvshmem-cu13==${DEEPEP_NVSHMEM_VERSION}"; \
+      cd /root && git clone https://github.com/deepseek-ai/DeepEP.git && cd DeepEP && git checkout ${DEEPEP_REF}; \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so; \
       ln -sf /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so.2 /opt/conda/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/libnccl.so; \
       pip install --no-build-isolation .; \
