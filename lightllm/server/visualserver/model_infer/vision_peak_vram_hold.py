@@ -59,7 +59,7 @@ class VisionPeakVramHolder:
             dp_rank_id=dp_rank_id,
             gloo_group=gloo_group,
         )
-        
+
         try:
             out = self.model.encode(image_items)
             del out
@@ -68,7 +68,7 @@ class VisionPeakVramHolder:
             raise Exception(_PEAK_VRAM_HOLD_OOM_HINT)
         finally:
             dist.barrier(group=gloo_group)
-            
+
             if tp_rank_id == 0:
                 self._free_image_items(image_items)
 
@@ -100,9 +100,7 @@ class VisionPeakVramHolder:
     ) -> List[ImageItem]:
         """Return probe ImageItems; under tp>1 only rank 0 writes shm and broadcasts the list."""
         if vit_tp == 1:
-            return self._build_worst_case_image_items(
-                batch_size, max_image_pixels, max_image_token_count, dp_rank_id
-            )
+            return self._build_worst_case_image_items(batch_size, max_image_pixels, max_image_token_count, dp_rank_id)
 
         payload: List[ImageItem] = [None]
         if tp_rank_id == 0:

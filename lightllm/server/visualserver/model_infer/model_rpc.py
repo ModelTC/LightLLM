@@ -169,8 +169,7 @@ class VisualModelRpcServer(rpyc.Service):
         )
         if held_vram_bytes > 0:
             logger.info(
-                f"Vision model on device {self.device_id} held "
-                f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
+                f"Vision model on device {self.device_id} held " f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
             )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
