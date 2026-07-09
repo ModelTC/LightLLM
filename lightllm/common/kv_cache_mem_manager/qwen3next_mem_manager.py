@@ -30,7 +30,8 @@ class Qwen3NextMemManager(MemoryManager):
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         if layer_index >= self.linear_config.all_layer_num:
-            layer_index -= self.linear_layer_num
+            # MTP draft full-attn layers are packed after the main model layers.
+            layer_index -= self.linear_config.linear_layer_num
         else:
             layer_index = layer_index // self.linear_config.full_attention_interval
         return super().get_att_input_params(layer_index)
