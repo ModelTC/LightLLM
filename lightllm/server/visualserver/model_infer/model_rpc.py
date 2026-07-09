@@ -1,3 +1,4 @@
+import os
 import rpyc
 import torch
 import socket
@@ -11,7 +12,6 @@ from transformers.configuration_utils import PretrainedConfig
 from rpyc.utils.classic import obtain
 from lightllm.models.qwen_vl.qwen_visual import QWenVisionTransformer
 from lightllm.models.llava.llava_visual import LlavaVisionModel
-from lightllm.models.internvl.internvl_visual import InternVLVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.vit.model import VisionTransformer
@@ -28,6 +28,7 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.visualserver.model_infer.vision_peak_vram_hold import VisionPeakVramHolder
 
 
 logger = init_logger(__name__)
@@ -95,7 +96,6 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = LlavaVisionModel()
             elif self.model_type == "internvl_chat":
                 self.model = VisionTransformer(kvargs)
-                # self.model = InternVLVisionModel()
             elif self.model_type == "gemma3":
                 self.model = Gemma3VisionModel()
             elif self.model_type == "gemma4":
@@ -114,6 +114,7 @@ class VisualModelRpcServer(rpyc.Service):
 
             self.model.load_model(weight_dir)
             self.model = self.model.cuda()
+            self._hold_vision_peak_vram()
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
                 self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -142,6 +143,34 @@ class VisualModelRpcServer(rpyc.Service):
 
         set_random_seed(2147483647)
         return
+
+    def _hold_vision_peak_vram(self):
+        """通过 warmup 预先保留 ViT 推理所需的最大显存。
+
+        ViT 与 LLM 同卡时，LLM 启动会按 mem_get_info 划分 KV pool。若此时 ViT 尚未跑过
+        峰值 activation，LLM 可能多占显存；之后大图 ViT 推理会因启动顺序不同而 OOM。
+        这里用 worst-case encode warmup，提前占住 ViT 峰值显存，避免后续不够用。
+        """
+        args = get_env_start_args()
+        if os.getenv("DISABLE_VISION_PEAK_VRAM_WARMUP", None) is not None:
+            logger.warning(
+                "DISABLE_VISION_PEAK_VRAM_WARMUP is set: skipping vision peak VRAM hold. "
+                "A co-located LLM may OOM at runtime."
+            )
+            return
+        held_vram_bytes = VisionPeakVramHolder(self.model).hold(
+            self.device_id,
+            self.infer_max_batch_size,
+            args.max_image_pixels,
+            args.max_image_token_count,
+            tp_rank_id=self.tp_rank_id,
+            vit_tp=self.vit_tp,
+            dp_rank_id=self.dp_rank_id,
+        )
+        if held_vram_bytes > 0:
+            logger.info(
+                f"Vision model on device {self.device_id} held " f"{held_vram_bytes / 1024 ** 3:.2f} GB peak VRAM."
+            )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
         try:

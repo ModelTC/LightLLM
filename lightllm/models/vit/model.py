@@ -14,7 +14,7 @@ from lightllm.models.vit import get_load_image_func
 import torchvision.transforms as T
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from PIL import Image
-from typing import List, Union, final
+from typing import List, Union
 from io import BytesIO
 from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
@@ -26,7 +26,6 @@ logger = init_logger(__name__)
 
 
 class VisionTransformer:
-
     # weight class
     pre_and_post_weight_class = ViTPreAndPostLayerWeight
     transformer_weight_class = ViTTransformerLayerWeight
@@ -53,30 +52,6 @@ class VisionTransformer:
         self._init_quant()
         self._init_weights()
         self._init_infer_layer()
-        self._check_max_len_infer()
-        return
-
-    @final
-    @torch.no_grad()
-    def _check_max_len_infer(self):
-        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-        if disable_check_max_len_infer:
-            return
-
-        try:
-            dummy_images = torch.randn(
-                (self.MAX_PATH_NUM * self.max_batch_size, 3, self.IMAGE_H, self.IMAGE_W), dtype=self.data_type
-            ).cuda()
-            all_img_embeds = self.forward(dummy_images)
-            del all_img_embeds
-            logger.info(f"vit check max_len {self.max_batch_size} infer ok")
-        except (RuntimeError, torch.OutOfMemoryError) as e:
-            logger.exception(str(e))
-            exception_str = (
-                "Vit check max len infer fail, you can try:" "1.Set the --visual_infer_batch_size to a smaller value."
-            )
-            logger.error(exception_str)
-            raise Exception(exception_str)
         return
 
     def _init_config(self):
@@ -170,9 +145,8 @@ class VisionTransformer:
     @torch.no_grad()
     def encode(self, images: List[ImageItem]):
         img_tensors = []
-        valid_ids = []
-        valid_id = 0
         uuids = []
+        patch_nums = []
         for i, img in enumerate(images):
             if isinstance(img, ImageItem):
                 uuids.append(img.uuid)
@@ -180,19 +154,24 @@ class VisionTransformer:
                 image_data = Image.open(BytesIO(image_data))
                 t = self.load_image_func(image_data, max_num=img.extra_params["image_patch_max_num"])
                 img_tensors.append(t)
+                patch_nums.append(t.shape[0])
             else:
                 raise Exception("Unsupported input types: {} for {}".format(type(img), img))
-
-            cur_num = img.token_num
-            valid_ids.append([valid_id, valid_id + cur_num])
-            valid_id += cur_num
 
         if len(img_tensors) <= 0:
             return None
 
         imgs = torch.cat(img_tensors, dim=0)
         pixel_values = imgs.cuda().to(dtype=self.data_type)
+        # [total_patches, tokens_per_patch, hidden]
         all_img_embeds = self.forward(pixel_values)
+        tokens_per_patch = all_img_embeds.shape[1]
+        valid_ids = []
+        valid_id = 0
+        for n_patches in patch_nums:
+            cur_num = n_patches * tokens_per_patch
+            valid_ids.append([valid_id, valid_id + cur_num])
+            valid_id += cur_num
         return all_img_embeds.view(-1, all_img_embeds.shape[-1]), uuids, valid_ids
 
     def cuda(self):
