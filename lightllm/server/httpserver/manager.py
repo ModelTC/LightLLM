@@ -546,7 +546,7 @@ class HttpServerManager:
         if self._routing_config is None:
             return None
         num_moe_layers, topk, dtype_id = self._routing_config
-        num_tokens = req.input_len + req.shm_cur_output_len
+        num_tokens = req.input_len + req.shm_cur_output_len - 1
         if num_tokens <= 0:
             return None
 

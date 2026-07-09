@@ -125,10 +125,12 @@ class InferenceContext:
     def _extract_routing_data(self, req: "InferReq"):
         if not (req.shm_req.finish_status.is_finished() or req.shm_req.stop_str_matched):
             return
-        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
+        visible_total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
+        capture_len = min(req.cur_kv_len, visible_total_len - 1)
+        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0:capture_len]
         mgr = _routing_mgr.g_routing_capture_manager
         routing_data = mgr.extract_routing_data(mem_indexes)
-        req.shm_req.create_routing_data_shm_array(mgr.num_moe_layers, req.cur_kv_len, mgr.topk, np_dtype=mgr.np_dtype)
+        req.shm_req.create_routing_data_shm_array(mgr.num_moe_layers, capture_len, mgr.topk, np_dtype=mgr.np_dtype)
         req.shm_req.shm_routing_data.arr[:] = routing_data
         req.shm_req.shm_routing_data.detach_shm()
 
