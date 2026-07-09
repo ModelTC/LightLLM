@@ -49,7 +49,7 @@ def _flash_attn_kvcache_static_key(q, k_cache, v_cache, causal, window_size, sof
         "kh": int(k_cache.shape[-2]),
         "hd": int(q.shape[-1]),
         "vh": int(v_cache.shape[-1]),
-        "pb": int(k_cache.shape[-3]),
+        "pb": int(k_cache.shape[-3]),  # page size
         "c": int(bool(causal)),
         "wl": int(window_size[0]),
         "wr": int(window_size[1]),
@@ -123,6 +123,7 @@ def flash_attn_with_kvcache_autotune(
 
 
 def fa3_decode_autotune(model, cuda_graph_batch_sizes):
+    # 是否开启自动调优
     if get_triton_autotune_level() not in [
         AutotuneLevel.ADAPTIVE_AUTOTUNE,
         AutotuneLevel.FORCE_AUTOTUNE,
