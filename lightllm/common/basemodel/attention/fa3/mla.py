@@ -4,8 +4,8 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_env_start_args
+from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_mtp_fa3_decode_params, page_table_copy
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.utils.sgl_utils import flash_attn_varlen_func
 
@@ -90,7 +90,7 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
             max_seqlen_q=self.infer_state.max_q_seq_len,
             max_seqlen_k=self.infer_state.max_kv_seq_len,
             softmax_scale=softmax_scale,
-            causal=True,
+            causal=getattr(self.infer_state, "prefill_causal", True),
             return_softmax_lse=False,
         )
         return o_tensor
@@ -107,9 +107,27 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
 
     def init_state(self):
         self.backend: MlaFa3AttBackend = self.backend
-        args_mtp_step = get_env_start_args().mtp_step
+        args_mtp_step = getattr(self.infer_state, "decode_mtp_step", None)
+        if args_mtp_step is None:
+            args_mtp_step = get_env_start_args().mtp_step
+        if self.infer_state.disable_mtp_decode_att:
+            args_mtp_step = 0
+        is_block_draft_decode = getattr(self.infer_state, "is_draft_model", False)
+        is_dynamic_mtp = args_mtp_step > 0 and enable_dynamic_mtp_verify() and not is_block_draft_decode
 
-        if args_mtp_step > 0:
+        if is_dynamic_mtp:
+            att_batch_size = self.infer_state.batch_size
+            (b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len,) = build_dynamic_mtp_fa3_decode_params(
+                b_req_idx=self.infer_state.b_req_idx,
+                b_seq_len=self.infer_state.b_seq_len,
+                b_mark_shared_group=self.infer_state.b_mark_shared_group,
+                att_batch_size=att_batch_size,
+                hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+            )
+            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
+            self.cu_seqlens_q = b1_cu_q_seq_len.int()
+            self.cu_seqlens_k = b1_cu_kv_seq_len.int()
+        elif args_mtp_step > 0:
             # 修正 mtp 在 fa3 下的输入。
             mtp_size = args_mtp_step + 1
             b_q_seq_len = torch.full(
@@ -126,8 +144,9 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
             self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
             self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
 
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
+        if not is_dynamic_mtp:
+            assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
+            att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
 
         model = self.backend.model
         # 可以使用 cuda graph的时候从 buffer中申请
@@ -146,7 +165,14 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
                 device=self.infer_state.input_ids.device,
             )
 
-        if args_mtp_step > 0:
+        if is_dynamic_mtp:
+            page_table_copy(
+                page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
+                req_to_token_indexs=model.req_manager.req_to_token_indexs,
+                b_req_idx=b_att_req_idx,
+            )
+            self.decode_max_q_seq_len = args_mtp_step + 1
+        elif args_mtp_step > 0:
             page_table_copy(
                 page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
                 req_to_token_indexs=model.req_manager.req_to_token_indexs,
@@ -219,7 +245,7 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=softmax_scale,
-            causal=True,
+            causal=getattr(self.infer_state, "decode_causal", True),
             window_size=(-1, -1),
             softcap=0.0,
             k_descale=k_descale,

@@ -5,7 +5,6 @@ import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils1 import sample_dynamic_mtp_req_mask
-from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size, get_env_start_args
 
 
@@ -518,25 +517,18 @@ def prepare_dynamic_mtp_model_input(
         mtp_step=mtp_step,
     )
 
-    selected_mask_cpu = selected_mask_gpu.detach().cpu().to(dtype=torch.bool)
-    assert int(selected_mask_cpu.sum().item()) == dynamic_batch_size
-
-    if model_input.mem_indexes_cpu is not None and len(model_input.mem_indexes_cpu) > 0:
-        release_mem_indexes_cpu = model_input.mem_indexes_cpu[~selected_mask_cpu]
-        if len(release_mem_indexes_cpu) > 0:
-            g_infer_context.req_manager.mem_manager.free(release_mem_indexes_cpu)
-        model_input.mem_indexes_cpu = model_input.mem_indexes_cpu[selected_mask_cpu]
-
-    if model_input.multimodal_params is not None:
-        model_input.multimodal_params = [
-            params for params, selected in zip(model_input.multimodal_params, selected_mask_cpu.tolist()) if selected
-        ]
-
     model_input = _trim_decode_model_input_inplace(
         model_input=model_input,
         selected_mask_gpu=selected_mask_gpu,
         dynamic_batch_size=dynamic_batch_size,
     )
+    # Keep CPU mem_indexes unfiltered here.  Copying selected_mask_gpu back to
+    # CPU in this hot path synchronizes the overlap stream; the router frees
+    # unselected/rejected CPU mem indexes after its existing async mask copy is
+    # consumed.  Decode only needs b_position_delta on device, so placeholder
+    # multimodal metadata keeps padded ModelInput checks shape-consistent.
+    if model_input.multimodal_params is not None:
+        model_input.multimodal_params = [{"images": [], "audios": []} for _ in range(dynamic_batch_size)]
 
     # ! 现在这些值没有实际作用，同时修改这些值还会导致阻塞操作，因此暂时不修改这些值了
     # model_input.total_token_num = int(model_input.b_seq_len.sum().item())
@@ -575,165 +567,3 @@ def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
         num_warps=8,
     )
     return b_req_mtp_start_loc
-
-
-def test_mtp_verify():
-    req_to_next_token_ids = torch.tensor(
-        [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"
-    )
-    b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
-    b_req_mtp_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
-    new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int32, device="cuda")
-    all_next_token_ids = torch.tensor(
-        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
-    )
-    mtp_accept_len, accepted_index = mtp_verify(
-        req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx
-    )
-    mtp_scatter_next_token_ids(
-        req_to_next_token_ids, b_req_mtp_start_loc, all_next_token_ids, b_req_idx, mtp_accept_len
-    )
-    print(mtp_accept_len)
-    print(req_to_next_token_ids)
-    print(accepted_index)
-
-
-def test_gen_b_req_mtp_start_loc():
-    b_mtp_index = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32, device="cuda")
-    gt_output = torch.where(b_mtp_index == 0)[0]
-    b_req_mtp_start_loc = gen_b_req_mtp_start_loc(b_mtp_index, 2)
-    print(b_req_mtp_start_loc, gt_output)
-
-
-def test_sample_dynamic_mtp_req_mask():
-    torch.manual_seed(1234)
-
-    req_to_next_token_ids = torch.tensor(
-        [
-            [100, 101, 102, 103, 0, 0],
-            [200, 201, 202, 203, 0, 0],
-            [300, 301, 302, 303, 0, 0],
-        ],
-        dtype=torch.int64,
-        device="cuda",
-    )
-    req_to_next_token_probs = torch.tensor(
-        [
-            [1.0, 0.95, 0.90, 0.10, 0.0, 0.0],
-            [1.0, 0.20, 0.80, 0.80, 0.0, 0.0],
-            [1.0, 0.99, 0.99, 0.99, 0.0, 0.0],
-        ],
-        dtype=torch.float32,
-        device="cuda",
-    )
-
-    # 3 个请求，每个请求展开成 4 个 decode row
-    b_req_idx = torch.tensor(
-        [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2],
-        dtype=torch.int32,
-        device="cuda",
-    )
-    b_mtp_index = torch.tensor(
-        [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-        dtype=torch.int32,
-        device="cuda",
-    )
-
-    dynamic_batch_size = 8
-    selected_mask = sample_dynamic_mtp_req_mask(
-        dynamic_batch_size=dynamic_batch_size,
-        b_req_idx=b_req_idx,
-        req_to_next_token_probs=req_to_next_token_probs,
-        mtp_step=3,
-    )
-
-    print("==== test_sample_dynamic_mtp_req_mask ====")
-    print("req_to_next_token_ids:")
-    print(req_to_next_token_ids.cpu())
-    print("req_to_next_token_probs:")
-    print(req_to_next_token_probs.cpu())
-    print("b_req_idx:")
-    print(b_req_idx.cpu())
-    print("b_mtp_index:")
-    print(b_mtp_index.cpu())
-    print("selected_mask:")
-    print(selected_mask.cpu())
-    print("selected rows [req_idx, mtp_index]:")
-    selected_pos = torch.where(selected_mask == 1)[0]
-    print(torch.stack([b_req_idx[selected_pos], b_mtp_index[selected_pos]], dim=-1).cpu())
-
-
-def test_trim_dynamic_mtp_model_input():
-    torch.manual_seed(1234)
-    origin_b_position_delta = torch.arange(12, dtype=torch.int32, device="cuda")
-    origin_mem_indexes = torch.arange(12, dtype=torch.int32, device="cuda")
-
-    model_input = ModelInput(
-        batch_size=12,
-        total_token_num=54,
-        max_q_seq_len=1,
-        max_kv_seq_len=6,
-        input_ids=None,
-        b_req_idx=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32, device="cuda"),
-        b_mtp_index=torch.tensor([0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.int32, device="cuda"),
-        b_seq_len=torch.tensor([3, 4, 5, 6, 3, 4, 5, 6, 3, 4, 5, 6], dtype=torch.int32, device="cuda"),
-        b_position_delta=origin_b_position_delta,
-        b_shared_seq_len=None,
-        b_mark_shared_group=torch.tensor([0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 4], dtype=torch.int32, device="cuda"),
-        mem_indexes=origin_mem_indexes,
-        mem_indexes_cpu=torch.arange(12, dtype=torch.int32, device="cpu"),
-        is_prefill=False,
-        multimodal_params=[{"images": [], "audios": []} for _ in range(12)],
-    )
-    req_to_next_token_probs = torch.tensor(
-        [
-            [1.0, 0.95, 0.90, 0.10, 0.0, 0.0],
-            [1.0, 0.20, 0.80, 0.80, 0.0, 0.0],
-            [1.0, 0.99, 0.99, 0.99, 0.0, 0.0],
-        ],
-        dtype=torch.float32,
-        device="cuda",
-    )
-
-    selected_mask = sample_dynamic_mtp_req_mask(
-        dynamic_batch_size=8,
-        b_req_idx=model_input.b_req_idx,
-        req_to_next_token_probs=req_to_next_token_probs,
-        mtp_step=3,
-    )
-    model_input = _trim_decode_model_input_inplace(
-        model_input=model_input,
-        selected_mask_gpu=selected_mask,
-        dynamic_batch_size=8,
-    )
-    selected_pos = torch.where(selected_mask == 1)[0]
-    assert torch.equal(model_input.b_position_delta, origin_b_position_delta[selected_pos])
-    assert torch.equal(model_input.mem_indexes, origin_mem_indexes[selected_pos])
-
-    print("==== test_trim_dynamic_mtp_model_input ====")
-    print("selected_mask:")
-    print(selected_mask.cpu())
-    print("batch_size:", model_input.batch_size)
-    print("total_token_num:", model_input.total_token_num)
-    print("max_kv_seq_len:", model_input.max_kv_seq_len)
-    print("b_req_idx:")
-    print(model_input.b_req_idx.cpu())
-    print("b_mtp_index:")
-    print(model_input.b_mtp_index.cpu())
-    print("b_seq_len:")
-    print(model_input.b_seq_len.cpu())
-    print("b_position_delta:")
-    print(model_input.b_position_delta.cpu())
-    print("b_mark_shared_group:")
-    print(model_input.b_mark_shared_group.cpu())
-    print("mem_indexes:")
-    print(model_input.mem_indexes.cpu())
-    print("mem_indexes_cpu:")
-    print(model_input.mem_indexes_cpu)
-
-
-if __name__ == "__main__":
-    # test_mtp_verify()
-    # test_gen_b_req_mtp_start_loc()
-    test_trim_dynamic_mtp_model_input()
-    # test_trim_dynamic_mtp_model_input()

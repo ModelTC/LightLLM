@@ -99,7 +99,11 @@ class TritonDecodeAttState(BaseDecodeAttState):
     b_mark_shared_group: torch.Tensor = None
 
     def init_state(self):
-        args_mtp_step = get_env_start_args().mtp_step
+        args_mtp_step = getattr(self.infer_state, "decode_mtp_step", None)
+        if args_mtp_step is None:
+            args_mtp_step = get_env_start_args().mtp_step
+        if self.infer_state.disable_mtp_decode_att:
+            args_mtp_step = 0
 
         if args_mtp_step > 0:
             # MTP mode initialization
@@ -123,8 +127,11 @@ class TritonDecodeAttState(BaseDecodeAttState):
             assert att_control.tp_alibi is not None
             return self._alibi_decode_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
         else:
-
-            args_mtp_step = get_env_start_args().mtp_step
+            args_mtp_step = getattr(self.infer_state, "decode_mtp_step", None)
+            if args_mtp_step is None:
+                args_mtp_step = get_env_start_args().mtp_step
+            if self.infer_state.disable_mtp_decode_att:
+                args_mtp_step = 0
 
             q_head_num = q.shape[1]
             k_head_num = k.shape[1]

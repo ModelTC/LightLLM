@@ -1,13 +1,16 @@
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
-from typing import List, Tuple, Optional
+from typing import TYPE_CHECKING, List, Tuple, Optional
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token import apply_invalid_token_ids
-from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
+
+if TYPE_CHECKING:
+    from lightllm.server.router.model_infer.infer_batch import InferReq
 
 
 def sample(
@@ -17,6 +20,9 @@ def sample(
     dynamic_batch_size: Optional[int] = None,
     selected_run_reqs: Optional[torch.Tensor] = None,
 ):
+    from lightllm.server.router.model_infer.infer_batch import g_infer_context
+    from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+
     (
         b_req_idx,
         b_temperatures,
@@ -193,6 +199,8 @@ def _random_sample(probs: torch.Tensor, reqs: List[InferReq], exist_req_use_rand
 
 
 def _get_post_sample_tensors(reqs: List[InferReq]):
+    from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+
     req_idxes: List[int] = []
     temperatures: List[float] = []
     top_ps: List[float] = []
@@ -277,6 +285,8 @@ def _get_selected_reqs(reqs: List[InferReq], selected_run_reqs: torch.Tensor):
 
 
 def _get_invalid_token_tensors(reqs: List[InferReq]):
+    from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
+
     invalid_token_ids: List[int] = []
     has_invalid_token_ids = False
     cu_invalid_token_num = [0]

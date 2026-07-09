@@ -61,10 +61,7 @@ class PrefillCudaGraph:
 
     def need_capture(self, handle_token_num: int):
         finded_handle_token_num = self.find_closest_graph_handle_token_num(handle_token_num=handle_token_num)
-        if finded_handle_token_num is not None:
-            return finded_handle_token_num not in self.graph
-        else:
-            assert False, "dead code"
+        return finded_handle_token_num is not None and finded_handle_token_num not in self.graph
 
     def find_closest_graph_handle_token_num(self, handle_token_num: int):
         index = bisect.bisect_left(self.graph_handle_token_nums, handle_token_num)

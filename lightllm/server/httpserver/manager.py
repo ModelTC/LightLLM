@@ -35,6 +35,7 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
+from lightllm.common.speculative import SpeculativeConfig
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
@@ -676,6 +677,9 @@ class HttpServerManager:
         out_token_counter = 0
         sub_req_id_to_mtp_accepted_token_num: Dict[int, int] = {}
         sub_req_id_to_mtp_verify_token_num: Dict[int, int] = {}
+        mtp_verify_step_num = 0
+        spec_config = SpeculativeConfig.from_args(self.args)
+        is_static_mtp = spec_config.step > 0 and not spec_config.dynamic_verify
         first_token_cost_ms = sys.float_info.max
         prompt_tokens = len(prompt_ids)
         is_first_token = True
@@ -712,7 +716,13 @@ class HttpServerManager:
                     disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
                     sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
-                    sub_req_id_to_mtp_verify_token_num[sub_req_id] = metadata.get("mtp_verify_token_num", 0)
+                    cur_mtp_verify_token_num = metadata.get("mtp_verify_token_num", 0)
+                    prev_mtp_verify_token_num = sub_req_id_to_mtp_verify_token_num.get(sub_req_id, 0)
+                    sub_req_id_to_mtp_verify_token_num[sub_req_id] = cur_mtp_verify_token_num
+                    if is_static_mtp and cur_mtp_verify_token_num > prev_mtp_verify_token_num:
+                        mtp_verify_step_num += (cur_mtp_verify_token_num - prev_mtp_verify_token_num) // (
+                            self.args.mtp_step + 1
+                        )
 
                     if is_first_token:
                         first_token_cost_ms = (time.time() - start_time) * 1000
@@ -742,11 +752,12 @@ class HttpServerManager:
                         prompt_cache_ratio = prompt_cache_len / prompt_tokens
                         generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
 
+                        mtp_verify_token_num = sum(sub_req_id_to_mtp_verify_token_num.values())
                         mtp_total_step = out_token_counter - sum(sub_req_id_to_mtp_accepted_token_num.values())
+                        if is_static_mtp and mtp_verify_step_num > 0:
+                            mtp_total_step = mtp_verify_step_num
                         mtp_avg_token_per_step = out_token_counter / max(mtp_total_step, 1)
-                        mtp_avg_verify_tokens_per_step = sum(sub_req_id_to_mtp_verify_token_num.values()) / max(
-                            mtp_total_step, 1
-                        )
+                        mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_step, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
                         logger.info(
                             f"X-Request-Id:{x_request_id} "

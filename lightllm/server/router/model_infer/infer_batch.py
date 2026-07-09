@@ -72,13 +72,32 @@ class InferenceContext:
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         return
 
-    def init_dynamic_mtp_planner(self, mtp_step: int):
-        if self.dynamic_mtp_planner is not None and self.dynamic_mtp_planner.mtp_step == mtp_step:
+    def init_dynamic_mtp_planner(self, mtp_step: int, mode: str = None):
+        planner_mode = "dspark" if mode == "dspark" else "default"
+        if (
+            self.dynamic_mtp_planner is not None
+            and self.dynamic_mtp_planner.mtp_step == mtp_step
+            and getattr(self.dynamic_mtp_planner, "planner_mode", "default") == planner_mode
+        ):
             return
 
-        from lightllm.server.router.model_infer.mode_backend.dynamic_mtp_planner import DynamicMTPPlanner
+        from lightllm.server.router.model_infer.speculative.planner import DSparkDynamicMTPPlanner, DynamicMTPPlanner
 
-        self.dynamic_mtp_planner = DynamicMTPPlanner(mtp_step=mtp_step)
+        planner_cls = DSparkDynamicMTPPlanner if planner_mode == "dspark" else DynamicMTPPlanner
+        self.dynamic_mtp_planner = planner_cls(mtp_step=mtp_step)
+        return
+
+    def record_dynamic_mtp_infer_cost(self, *, batch_size: int, infer_cost_ms: float, is_draft_model: bool):
+        if self.dynamic_mtp_planner is None:
+            self.init_dynamic_mtp_planner(
+                mtp_step=get_env_start_args().mtp_step,
+                mode=get_env_start_args().mtp_mode,
+            )
+        self.dynamic_mtp_planner.update_infer_cost(
+            batch_size=batch_size,
+            infer_cost_ms=infer_cost_ms,
+            is_draft_model=is_draft_model,
+        )
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:

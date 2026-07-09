@@ -21,13 +21,15 @@ def _fwd_kernel_cumprod_probs(
     store_mask = offset < (mtp_step + 1)
 
     probs = tl.load(base_ptr + offset, mask=store_mask, other=0.0)
-    # 对于 probs 中大于 0.99 的值，设置为 0.99，避免错误的值，照成后续的采样操作失败。
-    # 对于 probs 中小于 0.01 的值，设置为 0.01，避免错误的值，照成后续的采样操作失败。
+    # offset 0 是 target sample，本轮恒接受；只有 draft 条件接受概率需要 clamp。
+    probs = tl.where(offset == 0, 1.0, probs)
+    # 对于 draft probs 中大于 0.99 的值，设置为 0.99，避免错误的值，照成后续的采样操作失败。
+    # 对于 draft probs 中小于 0.01 的值，设置为 0.01，避免错误的值，照成后续的采样操作失败。
     # 这样修改后，我们可以做到，对于一个req的所有mtp step 步的概率的cumprod是降序的
     # 从而在采样时，我们只需要进行排序，则选中的位置，必然满足先后关系，避免一些复杂的
     # 额外操作。
-    probs = tl.where(probs >= 0.99, 0.99, probs)
-    probs = tl.where(probs <= 0.01, 0.01, probs)
+    probs = tl.where((offset != 0) & (probs >= 0.99), 0.99, probs)
+    probs = tl.where((offset != 0) & (probs <= 0.01), 0.01, probs)
 
     cum_probs = tl.cumprod(probs, axis=0)
 
@@ -38,7 +40,7 @@ def _fwd_kernel_cumprod_probs(
 @triton.jit
 def _compare_and_swap(x, ids, flip, i: tl.core.constexpr, n_dims: tl.core.constexpr):
     n_outer: tl.core.constexpr = x.numel >> n_dims
-    shape: tl.core.constexpr = [n_outer * 2**i, 2, 2 ** (n_dims - i - 1)]
+    shape: tl.core.constexpr = [n_outer * 2 ** i, 2, 2 ** (n_dims - i - 1)]
     y = tl.core.reshape(x, shape)
     # slice left/right with 'stride' 2**(n_dims - i - 1)
     mask = tl.core.arange(0, 2)[None, :, None]
@@ -76,7 +78,7 @@ def _bitonic_merge(x, ids, stage: tl.core.constexpr, order: tl.core.constexpr, n
     n_outer: tl.core.constexpr = x.numel >> n_dims
     tl.core.static_assert(stage <= n_dims)
     if order == 2:
-        shape: tl.core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2**stage]
+        shape: tl.core.constexpr = [n_outer * 2 ** (n_dims - 1 - stage), 2, 2 ** stage]
         flip = tl.core.reshape(tl.core.broadcast_to(tl.core.arange(0, 2)[None, :, None], shape), x.shape)
     else:
         flip = order

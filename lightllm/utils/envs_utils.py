@@ -5,6 +5,7 @@ import uuid
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.speculative import SpeculativeConfig
 
 
 logger = init_logger(__name__)
@@ -214,9 +215,10 @@ def enable_dynamic_mtp_verify() -> bool:
     """
     启用动态 MTP 长度验证功能
     在 MTP 模式下，根据每步的 prob 分布动态调整验证长度
-    通过启动参数 --mtp_dynamic_verify 控制
+    通过启动参数 --mtp_dynamic_verify 控制；DSpark 模式固定使用
+    confidence-scheduled dynamic verify。
     """
-    return get_env_start_args().mtp_dynamic_verify
+    return SpeculativeConfig.from_args(get_env_start_args()).dynamic_verify
 
 
 @lru_cache(maxsize=None)
@@ -247,14 +249,20 @@ def enable_huge_page():
 
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
-    # mtp 模式下需要在mem manger上扩展draft model使用的layer
-    added_mtp_layer_num = 0
-    if get_env_start_args().mtp_mode == "eagle_with_att":
-        added_mtp_layer_num += 1
-    elif get_env_start_args().mtp_mode == "vanilla_with_att":
-        added_mtp_layer_num += get_env_start_args().mtp_step
-
-    return added_mtp_layer_num
+    args = get_env_start_args()
+    spec_config = SpeculativeConfig.from_args(args)
+    if not spec_config.uses_attention_draft:
+        return 0
+    if spec_config.is_dflash or spec_config.is_dspark or spec_config.is_eagle3:
+        draft_model_dir = args.mtp_draft_model_dir
+        if isinstance(draft_model_dir, list):
+            draft_model_dir = draft_model_dir[0]
+        if not draft_model_dir:
+            return spec_config.draft_model_count
+        with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
+            draft_config = json.load(json_file)
+        return int(draft_config.get("num_hidden_layers", draft_config.get("n_layer", spec_config.draft_model_count)))
+    return spec_config.draft_model_count
 
 
 @lru_cache(maxsize=None)

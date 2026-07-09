@@ -1,5 +1,5 @@
 import torch
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from typing import List
 from lightllm.utils.envs_utils import (
@@ -59,6 +59,9 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    # 部分 spec draft 模型会在服务 MTP 模式下执行普通 decode batch
+    # （例如 Eagle3 commit accepted rows），此时 attention 不应按 MTP 展开布局建参。
+    disable_mtp_decode_att: bool = False
 
     def to_cuda(self):
         if self.input_ids is not None:
@@ -113,42 +116,11 @@ class ModelOutput:
     logits: torch.Tensor
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
-
-    # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
-    # 的输出变量。只在特殊的模型模式下才会具体使用和生效。
-
-    # mtp_main_output_hiddens 用于在mtp模式下，llm main model
-    # 输出最后一层的hidden state 状态用于 draft 模型的 mtp_draft_input_hiddens
-    # 输入
-    mtp_main_output_hiddens: Optional[torch.Tensor] = None
+    # DSpark dynamic verify 使用的 raw confidence logits，由 draft model
+    # post layer 产生，proposer 只负责 scatter 到 verify batch。
+    mtp_draft_confidence_logits: Optional[torch.Tensor] = None
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
-        if self.mtp_main_output_hiddens is not None:
-            self.mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.mtp_main_output_hiddens)
-
-
-class OutHiddenState:
-    def __init__(self, selected_layers: List[int]):
-        self.selected_layers = selected_layers
-        self.capture_hiddens = []
-
-    def add_hidden(self, layer_index: int, layer_num: int, hidden: torch.Tensor):
-        if layer_index in self.selected_layers:
-            is_last_layer = layer_index == layer_num - 1
-            if not is_last_layer:
-                self.capture_hiddens.append(hidden.clone())
-            else:
-                # 最后一层可以不clone，直接使用提升性能
-                self.capture_hiddens.append(hidden)
-
-    def get_captured_hiddens(self) -> Optional[torch.Tensor]:
-        if self.capture_hiddens:
-            if len(self.capture_hiddens) > 1:
-                self.capture_hiddens = torch.cat(self.capture_hiddens, dim=-1)
-            else:
-                # 减少一次 clone 操作， 可以提升性能
-                self.capture_hiddens = self.capture_hiddens[0]
-        else:
-            self.capture_hiddens = None
-        return self.capture_hiddens
+        if self.mtp_draft_confidence_logits is not None:
+            self.mtp_draft_confidence_logits = tensor_to_no_ref_tensor(self.mtp_draft_confidence_logits)

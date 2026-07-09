@@ -219,36 +219,3 @@ def build_dynamic_mtp_fa3_decode_params(
         num_stages=1,
     )
     return b_q_seq_len, b_kv_seq_len, b_att_req_idx, b_att_seq_len
-
-
-def test_page_table_copy():
-    import torch
-
-    batch_size, seq_len = 2, 8
-
-    req_to_token_indexs = torch.arange(batch_size * seq_len, dtype=torch.int32).reshape(batch_size, seq_len).cuda()
-
-    page_table = torch.full((batch_size, seq_len), -1, dtype=torch.int32, device="cuda")
-
-    b_req_idx = torch.tensor([0, 2, 1, 3], dtype=torch.int32, device="cuda")[::2]
-    print(b_req_idx.stride())
-
-    page_table_copy(page_table, req_to_token_indexs, b_req_idx)
-
-    print("req_to_token_indexs:")
-    print(req_to_token_indexs.cpu().numpy())
-    print("b_req_idx:", b_req_idx.cpu().numpy())
-    print("page_table:")
-    print(page_table.cpu().numpy())
-
-    for batch in range(batch_size):
-        src_idx = b_req_idx[batch].item()
-        expected = req_to_token_indexs[src_idx].cpu().numpy()
-        got = page_table[batch].cpu().numpy()
-        assert (expected == got).all(), f"Batch {batch} mismatch: expected {expected}, got {got}"
-
-    print("✅ Test passed!")
-
-
-if __name__ == "__main__":
-    test_page_table_copy()

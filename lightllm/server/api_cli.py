@@ -687,7 +687,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mtp_mode",
-        choices=["vanilla_with_att", "eagle_with_att", "vanilla_no_att", "eagle_no_att", "eagle3", None],
+        choices=[
+            "vanilla_with_att",
+            "eagle_with_att",
+            "vanilla_no_att",
+            "eagle_no_att",
+            "eagle3",
+            "qwen3next_vanilla",
+            "qwen3next_eagle",
+            "dspark",
+            "dflash",
+            None,
+        ],
         default=None,
         help="""Supported MTP modes.
         None: Disables MTP.

@@ -1,10 +1,7 @@
 import torch
 import time
-import collections
 import torch.distributed as dist
-from typing import List, Optional, Callable, Dict, Any, Tuple
-from queue import Queue
-from lightllm.server.router.model_infer.mode_backend.update_mem_index import update_eagle_mem_indexes_triton
+from typing import List
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -12,22 +9,10 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
     prepare_prefill_inputs,
     prepare_decode_inputs,
 )
-from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
-    prepare_mtp_prefill_inputs,
-)
 from lightllm.server.router.model_infer.mode_backend.generic_post_process import sample
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
-from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
-from lightllm.common.basemodel.triton_kernel.mtp_utils import (
-    gen_b_req_mtp_start_loc,
-    mtp_scatter_next_token_ids,
-    prepare_dynamic_mtp_model_input,
-)
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.envs_utils import get_env_start_args, enable_dynamic_mtp_verify
 from .control_state import ControlState
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 
@@ -43,13 +28,10 @@ class ChunkedPrefillBackend(ModeBackend):
         self.enable_dynamic_mtp = False
 
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
-        if get_env_start_args().mtp_mode:
+        if self.spec_config.enabled:
             self.prefill = self.prefill_mtp
             self.decode = self.decode_mtp
-            self.is_mtp_eagle = get_env_start_args().mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle3"]
-            self.num_mtp_models = 1 if self.is_mtp_eagle else get_env_start_args().mtp_step
-            self._draft_decode_func = self._draft_decode_eagle if self.is_mtp_eagle else self._draft_decode_vanilla
-            self.enable_dynamic_mtp = enable_dynamic_mtp_verify()
+            self.enable_dynamic_mtp = self.spec_config.dynamic_verify
         else:
             self.prefill = self.prefill_normal
             self.decode = self.decode_normal
@@ -214,8 +196,10 @@ class ChunkedPrefillBackend(ModeBackend):
                 mask_func=self.prefill_mask_func,
             )
             # mtp kv fill
-            self._draft_prefill_forward(
-                model_input=model_input, model_output=model_output, next_token_ids=next_token_ids
+            spec_runtime = self.spec_adapter
+            spec_runtime.build_initial_draft_state(
+                model_input=model_input,
+                next_token_ids=next_token_ids,
             )
             g_infer_context.copy_linear_att_state_to_cache_buffer(
                 b_req_idx=model_input.b_req_idx,
@@ -254,389 +238,74 @@ class ChunkedPrefillBackend(ModeBackend):
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
-        original_run_reqs = run_reqs
-        draft_step = self.mtp_step
-
-        # skip_verify_sync: 上一轮 draft_step 为 0 时，本轮没有真实 draft 候选需要验证，
-        # accept_len 恒为 1，因此 Phase 2 无需等待 GPU verify 结果即可执行 pre_post_handle。
-        skip_verify_sync = False
+        spec_runtime = self.spec_adapter
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-
-            if self.enable_dynamic_mtp:
-                pre_draft_step = g_infer_context.dynamic_mtp_planner.pre_draft_step
-                # 防止出现不正常的值
-                self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs[
-                    :, (pre_draft_step + 1) :
-                ].fill_(0.0)
-
-                (
-                    dynamic_batch_size,
-                    draft_step,
-                    pre_draft_step,
-                ) = g_infer_context.dynamic_mtp_planner.get_dynamic_batch_size(
-                    req_num=len(decode_reqs),
-                    original_batch_size=model_input.batch_size,
-                )
-                skip_verify_sync = pre_draft_step == 0
-                # TODO: 需要根据实际情况实现 trans_to_dynamic_model_input
-                model_input, selected_run_reqs = prepare_dynamic_mtp_model_input(
-                    model_input=model_input,
-                    req_num=len(decode_reqs),
-                    dynamic_batch_size=dynamic_batch_size,
-                    req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                    req_to_next_token_probs=self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
-                )
-                # selected_run_reqs 是一个 gpu tensor, 类型为 int, 0, 表示没有选中， 1 表示选中。
-                selected_run_reqs_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                    key="selected_run_reqs",
-                    gpu_tensor=selected_run_reqs,
-                )
-
-            start_time_event = torch.cuda.Event(enable_timing=True)
-            start_time_event.record()
+            spec_plan = spec_runtime.plan_decode(model_input=model_input, req_num=len(decode_reqs))
+            model_input, selected_run_reqs = spec_runtime.prepare_decode_model_input(
+                model_input=model_input,
+                req_num=len(decode_reqs),
+                plan=spec_plan,
+            )
+            selected_run_reqs_cpu = spec_runtime.async_copy_selected_run_reqs(selected_run_reqs)
 
             model_output = self.model.forward(model_input)
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
                 self.eos_id,
-                dynamic_batch_size=dynamic_batch_size if self.enable_dynamic_mtp else None,
-                selected_run_reqs=selected_run_reqs if self.enable_dynamic_mtp else None,
-            )
-            # verify the next_token_ids
-            # TODO: 需要根据实际情况实现 get_b_req_mtp_start_loc
-            b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=len(decode_reqs))
-            # b_req_mtp_start_loc 是一个 gpu tensor, 类型为 int, 表示每个请求的 mtp_start_loc, shape 为 len(decode_reqs)
-            mtp_accept_len, accepted_index = self._verify_mtp_v2(
-                new_next_token_ids=next_token_ids,
-                b_req_idx=model_input.b_req_idx,
-                b_req_mtp_start_loc=b_req_mtp_start_loc,
-            )
-            accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="accepted_index",
-                gpu_tensor=accepted_index,
+                dynamic_batch_size=spec_plan.dynamic_batch_size,
+                selected_run_reqs=selected_run_reqs,
             )
 
-            verify_event = torch.cuda.Event(enable_timing=True)
-            verify_event.record()
-
-            if self.enable_dynamic_mtp:
-                all_next_token_ids, additional_mem_indexes_cpu, draft_probs_list = self._draft_decode_func(
-                    main_model_input=model_input,
-                    main_model_output=model_output,
-                    next_token_ids=next_token_ids,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    draft_step=draft_step,
-                )
-            else:
-                all_next_token_ids, additional_mem_indexes_cpu = self._draft_decode_func(
-                    main_model_input=model_input,
-                    main_model_output=model_output,
-                    next_token_ids=next_token_ids,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    draft_step=draft_step,
-                )
-
-            if self.enable_dynamic_mtp:
-                # 构建概率矩阵
-
-                one_probs = torch.ones(
-                    size=(next_token_logprobs.shape[0], 1), dtype=torch.float32, device=next_token_logprobs.device
-                )
-                zero_probs = torch.zeros(
-                    size=(next_token_logprobs.shape[0], 1), dtype=torch.float32, device=next_token_logprobs.device
-                )
-
-                draft_probs_list = [e.view(-1, 1) for e in draft_probs_list]
-                draft_probs_list = (
-                    [one_probs] + draft_probs_list + [zero_probs for _ in range(self.mtp_step - draft_step)]
-                )
-                all_next_token_probs = torch.cat(draft_probs_list, dim=-1)  # [batch_size, mtp_step + 1]
-
-                # 都 pad 到完整mtp_step的长度，方便处理，同时代价较低
-                if draft_step < self.mtp_step:
-                    append_next_token_ids = torch.ones(
-                        size=(all_next_token_ids.shape[0], self.mtp_step - draft_step),
-                        dtype=all_next_token_ids.dtype,
-                        device=all_next_token_ids.device,
-                    )
-                    all_next_token_ids = torch.cat([all_next_token_ids, append_next_token_ids], dim=-1)
-
-            else:
-                all_next_token_probs = None
-
-            mtp_scatter_next_token_ids(
-                req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                b_req_mtp_start_loc=b_req_mtp_start_loc,
-                all_next_token_ids=all_next_token_ids,
-                b_req_idx=model_input.b_req_idx,
-                mtp_accept_len=mtp_accept_len,
-                req_to_next_token_probs=self.model.req_manager.req_sampling_params_manager.req_to_next_token_probs,
-                all_next_token_probs=all_next_token_probs,
-            )
-
-            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-                next_token_ids, next_token_logprobs
-            )
-
-            g_infer_context.req_sampling_manager.update_reqs_out_token_counter_gpu(
-                b_req_idx=model_input.b_req_idx,
+            spec_decode_state = spec_runtime.run_decode_speculative_forward(
+                model_input=model_input,
+                model_output=model_output,
+                run_reqs=run_reqs,
+                req_num=len(decode_reqs),
+                plan=spec_plan,
+                selected_run_reqs_cpu=selected_run_reqs_cpu,
                 next_token_ids=next_token_ids,
-                mask=accepted_index == 1,
+                next_token_logprobs=next_token_logprobs,
+                copy_next_token_infos=self._async_copy_next_token_infos_to_pin_mem,
             )
-
-            mtp_accept_len_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
-                key="mtp_accept_len",
-                gpu_tensor=mtp_accept_len,
-            )
-
-            sync_event = torch.cuda.Event()
-            sync_event.record()
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
-        if skip_verify_sync:
-            assert self.enable_dynamic_mtp, "skip_verify_sync should only be True when dynamic MTP is enabled"
-            # 上轮 draft_step==0 → 本轮 accept_len 恒为 1 (base position 恒被接受且被选中)，
-            # dynamic_batch_size == req_num, 每个请求恰好被选中 1 次，无需等待 GPU verify。
-            # _update_mtp_verify_token_num 必须在 notify_forward 之前更新，与 decode_normal 一致。
-            run_reqs = decode_reqs
-            verify_ok_reqs = decode_reqs
-            self._update_mtp_verify_token_num(decode_reqs=decode_reqs, dynamic_mtp_run_reqs=run_reqs)
-            update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
-        else:
-            verify_event.synchronize()
-            run_reqs, verify_ok_reqs = self.build_mtp_dynamic_reqs(
-                original_run_reqs, selected_run_reqs_cpu, accepted_index_cpu
-            )
-            self._update_mtp_verify_token_num(
-                decode_reqs=decode_reqs,
-                dynamic_mtp_run_reqs=run_reqs if self.enable_dynamic_mtp else None,
-            )
-            update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+        run_reqs, verify_ok_reqs = spec_runtime.resolve_decode_pre_post_reqs(
+            state=spec_decode_state,
+            decode_reqs=decode_reqs,
+        )
+        self._update_mtp_verify_token_num(
+            decode_reqs=decode_reqs,
+            dynamic_mtp_run_reqs=run_reqs if self.enable_dynamic_mtp else None,
+        )
+        update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
-        sync_event.synchronize()
+        spec_post_state = spec_runtime.finish_decode_post(
+            state=spec_decode_state,
+            req_num=len(decode_reqs),
+            run_reqs=run_reqs,
+        )
 
-        if self.enable_dynamic_mtp:
-            # 更新 动态verify token 数据到 planner 中去
-            self._update_dynamic_mtp_accept_ratio_statics(
-                req_num=len(decode_reqs),
-                run_reqs=run_reqs,
-                accepted_index_cpu=accepted_index_cpu,
-                dynamic_batch_size=dynamic_batch_size,
-            )
-
-        # 处理需要释放的内存索引
-        need_free_mem_indexes = model_input.mem_indexes_cpu[accepted_index_cpu == 0]
-        if additional_mem_indexes_cpu is not None:
-            need_free_mem_indexes = torch.cat([need_free_mem_indexes, additional_mem_indexes_cpu], dim=0)
-
-        self._update_mtp_accept_ratio(decode_reqs=decode_reqs, mtp_accept_len_cpu=mtp_accept_len_cpu)
-        select_mask = accepted_index_cpu.to(dtype=torch.bool)
+        self._update_mtp_accept_ratio(
+            decode_reqs=decode_reqs,
+            mtp_accept_len_cpu=spec_post_state.mtp_accept_len_cpu,
+        )
         self._post_handle(
             run_reqs=verify_ok_reqs,
-            next_token_ids=next_token_ids_cpu[select_mask],
-            next_token_logprobs=next_token_logprobs_cpu[select_mask],
+            next_token_ids=spec_post_state.next_token_ids,
+            next_token_logprobs=spec_post_state.next_token_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
 
-        if len(need_free_mem_indexes) > 0:
-            g_infer_context.req_manager.mem_manager.free(need_free_mem_indexes)
+        if len(spec_post_state.need_free_mem_indexes) > 0:
+            g_infer_context.req_manager.mem_manager.free(spec_post_state.need_free_mem_indexes)
 
         # 第四阶段
         event_pack.notify_pre_post_handle()
         return
-
-    def build_mtp_dynamic_reqs(
-        self,
-        original_run_reqs: List[InferReq],
-        selected_run_reqs_cpu: torch.Tensor,
-        accepted_index_cpu: torch.Tensor,
-    ) -> Tuple[List[InferReq], List[InferReq]]:
-        """从 GPU 同步后的结果构建过滤后的 run_reqs 和 verify_ok_reqs（纯过滤，不更新统计）。"""
-        if self.enable_dynamic_mtp:
-            selected_run_reqs_cpu_numpy = selected_run_reqs_cpu.numpy()
-            run_reqs = [
-                original_run_reqs[i] for i in range(len(original_run_reqs)) if selected_run_reqs_cpu_numpy[i] == 1
-            ]
-        else:
-            run_reqs = original_run_reqs
-
-        accepted_index_cpu_numpy = accepted_index_cpu.numpy()
-        verify_ok_reqs = [run_reqs[i] for i in range(len(run_reqs)) if accepted_index_cpu_numpy[i] == 1]
-        return run_reqs, verify_ok_reqs
-
-    def _update_dynamic_mtp_accept_ratio_statics(
-        self,
-        req_num: int,
-        run_reqs: List[InferReq],
-        accepted_index_cpu: torch.Tensor,
-        dynamic_batch_size: int,
-    ):
-        id_to_verify_len = collections.defaultdict(int)
-        id_to_accept_len = collections.defaultdict(int)
-        assert len(run_reqs) == accepted_index_cpu.shape[0]
-        _count = 0
-        _accept_count = 0
-        for req, accepted in zip(run_reqs, accepted_index_cpu.numpy()):
-            if int(accepted) == 1:
-                id_to_verify_len[req.req_idx] += 1
-                id_to_accept_len[req.req_idx] += 1
-                _accept_count += 1
-                _count += 1
-            else:
-                id_to_verify_len[req.req_idx] += 1
-                _count += 1
-
-        from lightllm.server.router.model_infer.mode_backend.dynamic_mtp_planner import DynamicMTPPlanner
-
-        mtp_planner: DynamicMTPPlanner = g_infer_context.dynamic_mtp_planner
-
-        # 整体的接受率统计
-        mtp_planner.update_req_num_to_dynamic_batch_size_to_accept_ratio(
-            req_num=req_num,
-            dynamic_batch_size=dynamic_batch_size,
-            accept_ratio=_accept_count / _count,
-        )
-
-        for req_idx, verify_len in id_to_verify_len.items():
-            accept_len = id_to_accept_len[req_idx]
-
-            if verify_len - 1 > 0:
-                for mtp_index in range(verify_len - 1):
-                    mtp_len = mtp_index + 1
-                    radio = (accept_len - 1) / mtp_len
-                    radio = max(0.0, min(1.0, radio))
-                    mtp_planner.update_mtp_len_to_accept_ratio(
-                        mtp_len=mtp_len,
-                        accept_ratio=radio,
-                    )
-        return
-
-    def _draft_prefill_forward(self, model_input: ModelInput, model_output: ModelOutput, next_token_ids: torch.Tensor):
-        # spec prefill: MTP, 这个地方只是为了填充draft model的 kv， 并不会使用生成的token_id。
-        draft_model_input = model_input
-        draft_model_output = model_output
-        draft_next_token_ids_gpu = next_token_ids
-        for draft_model_idx in range(self.num_mtp_models):
-            draft_model_input = prepare_mtp_prefill_inputs(
-                model_input=draft_model_input,
-                b_next_token_ids=draft_next_token_ids_gpu,
-                mtp_draft_input_hiddens=draft_model_output.mtp_main_output_hiddens,
-            )
-            draft_model_output = self.draft_models[draft_model_idx].forward(draft_model_input)
-            draft_next_token_ids_gpu = self._gen_argmax_token_ids(draft_model_output)
-        return
-
-    def _draft_decode_vanilla(
-        self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        draft_step: int,
-    ):
-        assert 0 <= draft_step <= self.mtp_step
-        # share some inference info with the main model
-        draft_model_input = main_model_input
-        draft_model_output = main_model_output
-        draft_next_token_ids = next_token_ids
-        all_next_token_ids = []
-        all_next_token_ids.append(next_token_ids)
-
-        # 用于收集每个 step 的 probs
-        draft_probs_list = [] if self.enable_dynamic_mtp else None
-
-        # process the draft model output
-        for draft_model_idx in range(draft_step):
-            draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
-            # spec decode: MTP
-            draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-            if self.enable_dynamic_mtp:
-                draft_next_token_ids, draft_probs = self._gen_argmax_token_ids_and_prob(draft_model_output)
-                draft_probs_list.append(draft_probs)
-            else:
-                draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-            all_next_token_ids.append(draft_next_token_ids)
-
-        all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, draft_step + 1]
-
-        if self.enable_dynamic_mtp:
-            return all_next_token_ids, None, draft_probs_list
-        else:
-            return all_next_token_ids, None
-
-    def _draft_decode_eagle(
-        self,
-        main_model_input: ModelInput,
-        main_model_output: ModelOutput,
-        next_token_ids: torch.Tensor,
-        b_req_mtp_start_loc: torch.Tensor,
-        draft_step: int,
-    ):
-        assert 0 <= draft_step <= self.mtp_step
-
-        num_reqs = b_req_mtp_start_loc.shape[0]
-
-        if draft_step == 0:
-            eagle_mem_indexes_cpu = None
-            eagle_mem_indexes = None
-        else:
-            if g_infer_context.radix_cache is not None:
-                g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(num_reqs * draft_step)
-            eagle_mem_indexes_cpu = g_infer_context.req_manager.mem_manager.alloc(num_reqs * draft_step)
-            eagle_mem_indexes = eagle_mem_indexes_cpu.cuda(non_blocking=True)
-
-        # share some inference info with the main model
-        draft_model_input = main_model_input
-        draft_model_output = main_model_output
-        draft_next_token_ids = next_token_ids
-        all_next_token_ids = []
-        all_next_token_ids.append(next_token_ids)
-
-        # 用于收集每个 step 的 probs
-        draft_probs_list = [] if self.enable_dynamic_mtp else None
-
-        # process the draft model output
-        for _step in range(draft_step):
-            draft_model_input.input_ids = draft_next_token_ids
-            draft_model_input.mtp_draft_input_hiddens = draft_model_output.mtp_main_output_hiddens
-            # spec decode: MTP
-            draft_model_idx = _step % self.num_mtp_models
-            draft_model_output: ModelOutput = self.draft_models[draft_model_idx].forward(draft_model_input)
-
-            # 收集 probs（如果需要）
-            if self.enable_dynamic_mtp:
-                draft_next_token_ids, draft_probs = self._gen_argmax_token_ids_and_prob(draft_model_output)
-                draft_probs_list.append(draft_probs)
-            else:
-                draft_next_token_ids = self._gen_argmax_token_ids(draft_model_output)
-            draft_model_input.b_seq_len += 1
-            draft_model_input.max_kv_seq_len += 1
-            eagle_mem_indexes_i = eagle_mem_indexes[_step * num_reqs : (_step + 1) * num_reqs]
-
-            if self.enable_dynamic_mtp:
-                draft_model_input.mem_indexes = update_eagle_mem_indexes_triton(
-                    old_mem_indexes=draft_model_input.mem_indexes,
-                    new_step_mem_indexes=eagle_mem_indexes_i,
-                    b_req_mtp_start_loc=b_req_mtp_start_loc,
-                )
-            else:
-                draft_model_input.mem_indexes = torch.cat(
-                    [draft_model_input.mem_indexes.view(-1, self.mtp_step + 1)[:, 1:], eagle_mem_indexes_i.view(-1, 1)],
-                    dim=1,
-                ).view(-1)
-            all_next_token_ids.append(draft_next_token_ids)
-
-        all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, draft_step + 1]
-
-        if self.enable_dynamic_mtp:
-            return all_next_token_ids, eagle_mem_indexes_cpu, draft_probs_list
-        else:
-            return all_next_token_ids, eagle_mem_indexes_cpu

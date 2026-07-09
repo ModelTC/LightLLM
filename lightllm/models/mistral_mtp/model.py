@@ -9,10 +9,6 @@ from lightllm.common.basemodel import TpPartBaseModel
 
 
 class MistralMTPModel(MistralTpPartModel):
-
-    # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
-    is_mtp_draft_model = True
-
     pre_and_post_weight_class = MistralMTPPreAndPostLayerWeight
     pre_layer_infer_class = MistralMTPPreLayerInfer
 
@@ -30,6 +26,9 @@ class MistralMTPModel(MistralTpPartModel):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         return
+
+    def _gen_special_model_input(self, token_num: int):
+        return self._gen_mtp_draft_special_model_input(token_num)
 
     def _init_some_value(self):
         super()._init_some_value()

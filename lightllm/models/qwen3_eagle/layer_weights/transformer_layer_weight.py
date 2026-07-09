@@ -1,6 +1,6 @@
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.colmm_weight import COLMMWeight
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.rowmm_weight import KVROWNMMWeight, ROWMMWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import RMSNormWeight
+from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import QKRMSNORMWeight, RMSNormWeight
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 
 """
@@ -18,24 +18,10 @@ midlayer.self_attn.v_proj.weight	[512, 4096]
 
 
 class Qwen3EagleTransformerLayerWeight(LlamaTransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, quant_cfg)
-        hidden_size = self.network_config_["hidden_size"]
-        self.fc_weight_ = ROWMMWeight(
-            in_dim=hidden_size * 3,
-            out_dims=[hidden_size],
-            weight_names="fc.weight",
-            quant_method=self.quant_cfg.get_quant_method(0, "fc"),
-            data_type=self.data_type_,
-            tp_rank=0,
-            tp_world_size=1,
-        )
-        return
-
     def _init_weight_names(self):
         super()._init_weight_names()
-        if self.network_config_["architectures"][0] == "Eagle3Speculator":
-            weight_prefix = f"layers.0"
+        if self.network_config_["architectures"][0] in ["Eagle3Speculator", "Qwen3Eagle3Model"]:
+            weight_prefix = f"layers.{self.layer_num_}"
         else:
             weight_prefix = f"midlayer"
         self._q_weight_name = f"{weight_prefix}.self_attn.q_proj.weight"
@@ -52,6 +38,8 @@ class Qwen3EagleTransformerLayerWeight(LlamaTransformerLayerWeight):
         self._att_norm_weight_name = f"{weight_prefix}.input_layernorm.weight"
         self._ffn_norm_weight_name = f"{weight_prefix}.post_attention_layernorm.weight"
         self._hidden_norm_weight_name = f"{weight_prefix}.hidden_norm.weight"
+        self._q_norm_name = f"{weight_prefix}.self_attn.q_norm.weight"
+        self._k_norm_name = f"{weight_prefix}.self_attn.k_norm.weight"
 
     def _init_qkv(self):
         in_dim = self.n_embed * 2
@@ -110,5 +98,11 @@ class Qwen3EagleTransformerLayerWeight(LlamaTransformerLayerWeight):
         self.hidden_norm_weight_ = RMSNormWeight(
             dim=hidden_size,
             weight_name=self._hidden_norm_weight_name,
+            data_type=self.data_type_,
+        )
+        self.qk_norm_weight_ = QKRMSNORMWeight(
+            dim=self.head_dim,
+            q_weight_name=self._q_norm_name,
+            k_weight_name=self._k_norm_name,
             data_type=self.data_type_,
         )

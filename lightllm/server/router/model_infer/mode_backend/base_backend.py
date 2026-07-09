@@ -5,6 +5,7 @@ import time
 import threading
 import torch.distributed as dist
 import collections
+from dataclasses import replace
 from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
@@ -18,7 +19,6 @@ from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
-from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs import ShmReqManager, StartArgs
@@ -35,6 +35,16 @@ from lightllm.utils.envs_utils import (
     get_radix_tree_merge_update_delta,
     enable_dynamic_mtp_verify,
 )
+from lightllm.common.speculative import (
+    SpeculativeConfig,
+    get_dspark_family_block_size,
+    is_dspark_draft_config,
+    is_eagle3_draft_config,
+    is_gemma4_dspark_draft_config,
+    is_qwen3_dflash_draft_config,
+    is_qwen3_dspark_draft_config,
+)
+from lightllm.server.router.model_infer.speculative import build_spec_runtime
 from lightllm.distributed.communication_op import (
     dist_group_manager,
     all_gather_into_tensor,
@@ -59,6 +69,7 @@ logger = init_logger(__name__)
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
+        start_args = get_env_start_args()
 
         self.overlap_event_manager = OverlapEventManager()
         # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
@@ -71,8 +82,11 @@ class ModeBackend:
         # extra_post_req_handle_func 用于添加请求InferReq的状态变化中添加额外的后处理信息，主要是状态机相关的调整等。
         self.extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None
 
-        self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
-        self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
+        self.enable_decode_microbatch_overlap = start_args.enable_decode_microbatch_overlap
+        self.enable_prefill_microbatch_overlap = start_args.enable_prefill_microbatch_overlap
+        self.spec_config = SpeculativeConfig.from_args(start_args, dynamic_verify=enable_dynamic_mtp_verify())
+        self.spec_config.validate()
+        self.spec_adapter = None
 
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
@@ -111,10 +125,20 @@ class ModeBackend:
         self.is_multinode_tp = self.args.nnodes > 1 and self.args.dp == 1
         self.is_pd_mode = self.run_mode in ["prefill", "decode"]
         self.is_pd_decode_mode = self.run_mode == "decode"
+        self.spec_config = SpeculativeConfig.from_args(self.args, dynamic_verify=enable_dynamic_mtp_verify())
+        self.spec_config.validate()
+        if self.spec_config.needs_target_layer_hidden:
+            assert (
+                not self.args.enable_decode_microbatch_overlap
+            ), f"{self.spec_config.mode} mode does not support decode microbatch overlap"
+            assert (
+                not self.args.enable_prefill_microbatch_overlap
+            ), f"{self.spec_config.mode} mode does not support prefill microbatch overlap"
 
         self.logger = init_logger(__name__)
 
         self.weight_dir = kvargs["weight_dir"]
+        self._normalize_block_mtp_step_from_first_draft_config()
         # p d 分离模式，decode节点才会使用的参数
         self.pd_rpyc_ports = kvargs.get("pd_rpyc_ports", None)
         max_total_token_num = kvargs["max_total_token_num"]
@@ -130,9 +154,6 @@ class ModeBackend:
 
         if self.args.enable_multimodal:
             g_infer_context.init_cpu_embed_cache_client()
-
-        if self.args.mtp_mode and enable_dynamic_mtp_verify():
-            g_infer_context.init_dynamic_mtp_planner(mtp_step=self.args.mtp_step)
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
@@ -242,8 +263,12 @@ class ModeBackend:
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
         # 开启 mtp 模式，需要完成mtp model的初始化
-        if self.args.mtp_mode:
+        if self.spec_config.enabled:
             self.init_mtp_draft_model(kvargs)
+            if self.spec_config.dynamic_verify:
+                g_infer_context.init_dynamic_mtp_planner(mtp_step=self.mtp_step, mode=self.spec_config.mode)
+            self.spec_adapter = build_spec_runtime(self)
+            self._attach_spec_adapter()
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -299,21 +324,24 @@ class ModeBackend:
     def init_mtp_draft_model(self, main_kvargs: dict):
         self.mtp_step = self.args.mtp_step
         self.draft_models = []
+        spec_config = self.spec_config
 
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
-        if self.args.mtp_mode in ["vanilla_with_att", "vanilla_no_att"]:
-            num_mtp_modules = self.args.mtp_step
-        elif self.args.mtp_mode in ["eagle_with_att", "eagle_no_att", "eagle3"]:
-            num_mtp_modules = 1
-        else:
-            assert False, f"error mtp mode {self.args.mtp_mode}"
+        num_mtp_modules = spec_config.draft_model_count
+        mtp_draft_model_dirs = self.args.mtp_draft_model_dir
+        if isinstance(mtp_draft_model_dirs, str):
+            mtp_draft_model_dirs = [mtp_draft_model_dirs]
+        assert mtp_draft_model_dirs is not None
+        assert len(mtp_draft_model_dirs) >= num_mtp_modules
 
         for i in range(num_mtp_modules):
-            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(self.args.mtp_draft_model_dir[i])
+            mtp_model_cfg, _ = PretrainedConfig.get_config_dict(mtp_draft_model_dirs[i])
+            self._normalize_block_mtp_step_from_config(mtp_model_cfg)
+            spec_config = self.spec_config
             model_type = mtp_model_cfg.get("model_type", "")
             mtp_model_kvargs = {
-                "weight_dir": self.args.mtp_draft_model_dir[i],
+                "weight_dir": mtp_draft_model_dirs[i],
                 "max_total_token_num": self.model.mem_manager.size,
                 "load_way": main_kvargs["load_way"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
@@ -331,7 +359,6 @@ class ModeBackend:
                 "quant_cfg": main_kvargs.get("quant_cfg", None),
                 "expert_dtype": main_kvargs.get("expert_dtype", None),
                 "run_mode": "normal",
-                "is_mtp_draft_model": True,
                 "main_model": self.model,
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
@@ -339,26 +366,70 @@ class ModeBackend:
             # Select MTP model class based on model type
             model_type = mtp_model_cfg.get("model_type", "")
             if model_type == "deepseek_v3":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                assert spec_config.uses_attention_draft
                 self.draft_models.append(Deepseek3MTPModel(mtp_model_kvargs))
             elif model_type == "qwen3_moe":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                assert spec_config.uses_no_attention_draft and not spec_config.is_eagle3
                 self.draft_models.append(Qwen3MOEMTPModel(mtp_model_kvargs))
             elif model_type == "mistral":
-                assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
+                assert spec_config.uses_no_attention_draft and not spec_config.is_eagle3
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
-                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+            elif model_type == "glm4_moe_lite":
+                assert spec_config.uses_attention_draft
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "llama":
-                assert self.args.mtp_mode in ["eagle3"]
+            elif spec_config.is_eagle3 and is_eagle3_draft_config(mtp_model_cfg):
                 from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
 
                 self.draft_models.append(Qwen3EagleModel(mtp_model_kvargs))
+            elif spec_config.is_dflash and is_qwen3_dflash_draft_config(mtp_model_cfg):
+                from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
+
+                self.draft_models.append(Qwen3DFlashModel(mtp_model_kvargs))
+            elif spec_config.is_dspark and is_qwen3_dspark_draft_config(mtp_model_cfg):
+                from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+
+                self.draft_models.append(Qwen3DSparkModel(mtp_model_kvargs))
+            elif (spec_config.is_dflash or spec_config.is_dspark) and is_gemma4_dspark_draft_config(mtp_model_cfg):
+                raise NotImplementedError("Gemma4 DSpark draft checkpoints are not wired to LightLLM serving yet.")
+            elif (spec_config.is_dflash or spec_config.is_dspark) and is_dspark_draft_config(mtp_model_cfg):
+                raise ValueError(f"Unsupported DSpark-family draft architecture: {mtp_model_cfg.get('architectures')}")
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
+        return
+
+    def _normalize_block_mtp_step_from_config(self, mtp_model_cfg: dict) -> None:
+        if not self.spec_config.uses_block_draft_model:
+            return
+
+        block_size = get_dspark_family_block_size(
+            mtp_model_cfg,
+            require_confidence_head=self.spec_config.is_dspark,
+        )
+        configured_step = int(getattr(self.args, "mtp_step", 0))
+        if configured_step not in (0, block_size):
+            self.logger.warning(
+                "Overriding mtp_step=%s with block draft config block_size=%s for %s mode",
+                configured_step,
+                block_size,
+                self.spec_config.mode,
+            )
+        self.args.mtp_step = block_size
+        self.mtp_step = block_size
+        self.spec_config = replace(self.spec_config, step=block_size)
+        return
+
+    def _normalize_block_mtp_step_from_first_draft_config(self) -> None:
+        if not self.spec_config.uses_block_draft_model:
+            return
+
+        mtp_draft_model_dirs = self.args.mtp_draft_model_dir
+        if isinstance(mtp_draft_model_dirs, str):
+            mtp_draft_model_dirs = [mtp_draft_model_dirs]
+        assert mtp_draft_model_dirs is not None and len(mtp_draft_model_dirs) > 0
+        mtp_model_cfg, _ = PretrainedConfig.get_config_dict(mtp_draft_model_dirs[0])
+        self._normalize_block_mtp_step_from_config(mtp_model_cfg)
         return
 
     def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
@@ -375,6 +446,15 @@ class ModeBackend:
             gpu_tensor=next_token_logprobs,
         )
         return next_token_ids_cpu, next_token_logprobs_cpu
+
+    def _attach_spec_adapter(self) -> None:
+        if not self.spec_config.enabled:
+            return
+        assert self.spec_adapter is not None
+        self.model.set_spec_adapter(self.spec_adapter)
+        for draft_model in self.draft_models:
+            draft_model.set_spec_adapter(self.spec_adapter)
+        return
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
@@ -768,17 +848,6 @@ class ModeBackend:
     def _trans_req_ids_to_req_objs(self, req_ids: List[int]) -> List[InferReq]:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
-    def _verify_mtp_v2(
-        self, new_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b_req_mtp_start_loc: torch.Tensor
-    ):
-        mtp_accept_len, accepted_index = mtp_verify(
-            req_to_next_token_ids=self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            new_next_token_ids=new_next_token_ids,
-            b_req_idx=b_req_idx,
-        )
-        return mtp_accept_len, accepted_index
-
     def _update_mtp_accept_ratio(
         self,
         decode_reqs: List[InferReq],
@@ -810,7 +879,7 @@ class ModeBackend:
         draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
 
         # 如果self.d2t不为None，那么draft的token需要进行相应的转换
-        if self.args.mtp_mode == "eagle3":
+        if self.spec_config.needs_draft_vocab_mapping:
             draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
 
         return draft_next_token_ids_gpu
@@ -821,7 +890,7 @@ class ModeBackend:
         max_probs, draft_next_token_ids_gpu = torch.max(probs, dim=-1)
 
         # 如果self.d2t不为None，那么draft的token需要进行相应的转换
-        if self.args.mtp_mode == "eagle3":
+        if self.spec_config.needs_draft_vocab_mapping:
             draft_next_token_ids_gpu = self.draft_models[0].map_draft_vocab_to_main_vocab(draft_next_token_ids_gpu)
 
         return draft_next_token_ids_gpu, max_probs

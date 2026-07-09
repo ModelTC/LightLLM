@@ -105,7 +105,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=True,
+            causal=getattr(self.infer_state, "prefill_causal", True),
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
@@ -127,8 +127,13 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
     def init_state(self):
         self.backend: Fa3AttBackend = self.backend
-        args_mtp_step = get_env_start_args().mtp_step
-        is_dynamic_mtp = args_mtp_step > 0 and enable_dynamic_mtp_verify()
+        args_mtp_step = getattr(self.infer_state, "decode_mtp_step", None)
+        if args_mtp_step is None:
+            args_mtp_step = get_env_start_args().mtp_step
+        if self.infer_state.disable_mtp_decode_att:
+            args_mtp_step = 0
+        is_block_draft_decode = getattr(self.infer_state, "is_draft_model", False)
+        is_dynamic_mtp = args_mtp_step > 0 and enable_dynamic_mtp_verify() and not is_block_draft_decode
 
         if is_dynamic_mtp:
             att_batch_size = self.infer_state.batch_size
@@ -257,7 +262,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=True,
+            causal=getattr(self.infer_state, "decode_causal", True),
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
