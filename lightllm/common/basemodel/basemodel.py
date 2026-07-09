@@ -126,7 +126,7 @@ class TpPartBaseModel:
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
         self._autotune_warmup()
-        self._extra_autotune()
+        self._full_att_decode_autotune()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
@@ -290,9 +290,13 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     @post_empty_cache
-    def _extra_autotune(self):
+    def _full_att_decode_autotune(self):
         if self.disable_cudagraph:
             return
+        # Only tune on the main model; MTP draft models skip this path.
+        if getattr(self, "is_mtp_draft_model", False):
+            return
+
         from lightllm.utils.sgl_utils import fa3_decode_autotune
 
         cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
@@ -300,6 +304,7 @@ class TpPartBaseModel:
             tp_world_size=self.tp_world_size_,
         )
         fa3_decode_autotune(self, cuda_graph_batch_sizes)
+        return
 
     def _init_custom(self):
         pass
