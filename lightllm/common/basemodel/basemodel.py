@@ -28,9 +28,12 @@ from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import (
+    set_model_init_status,
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_full_att_decode_tune,
+)
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
@@ -291,10 +294,37 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _full_att_decode_autotune(self):
+        """
+        Warm up / autotune FA3 full-attention decode ``num_splits`` before CUDA Graph capture.
+
+        Runs only when all of the following hold:
+          - CUDA Graph is enabled (``disable_cudagraph`` is False)
+          - this is the main model (MTP draft models are skipped)
+          - ``ENABLE_FULL_ATT_DECODE_TUNE`` is set to 1/ON/TRUE (default off)
+          - decode attention backend is ``Fa3AttBackend``
+
+        Candidate batch sizes follow the same schedule as CUDA Graph capture.
+        Actual benchmarking is delegated to ``fa3_decode_autotune`` in ``sgl_utils``.
+        """
         if self.disable_cudagraph:
             return
         # Only tune on the main model; MTP draft models skip this path.
         if getattr(self, "is_mtp_draft_model", False):
+            return
+
+        # Opt-in switch for FA3 full-attention decode num_splits tuning.
+        # Set ENABLE_FULL_ATT_DECODE_TUNE=1/ON/TRUE to enable; default is off.
+        if not enable_full_att_decode_tune():
+            return
+
+        # Only Fa3AttBackend decode path needs this num_splits warmup.
+        decode_backends = [
+            self.decode_att_backend,
+            getattr(self, "decode_att_backend1", None),
+        ]
+        if not any(
+            backend is not None and backend.__class__.__name__ == "Fa3AttBackend" for backend in decode_backends
+        ):
             return
 
         from lightllm.utils.sgl_utils import fa3_decode_autotune

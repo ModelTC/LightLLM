@@ -123,23 +123,13 @@ def flash_attn_with_kvcache_autotune(
 
 
 def fa3_decode_autotune(model, cuda_graph_batch_sizes):
-    # 是否开启自动调优
     if get_triton_autotune_level() not in [
         AutotuneLevel.ADAPTIVE_AUTOTUNE,
         AutotuneLevel.FORCE_AUTOTUNE,
     ]:
         return
 
-    # 检查是否是 Fa3AttBackend
-    decode_backends = [
-        model.decode_att_backend,
-        getattr(model, "decode_att_backend1", None),
-    ]
-    if not any(backend is not None and backend.__class__.__name__ == "Fa3AttBackend" for backend in decode_backends):
-        return
-
     Autotuner.start_autotune_warmup()
-
     try:
         max_kv_len = int(model.graph_max_len_in_batch)
         if max_kv_len <= 0:
@@ -192,6 +182,5 @@ def fa3_decode_autotune(model, cuda_graph_batch_sizes):
                 sinks=None,
             )
     finally:
-
         Autotuner.end_autotune_warmup()
     return
