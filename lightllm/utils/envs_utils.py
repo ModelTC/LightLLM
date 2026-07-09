@@ -165,6 +165,18 @@ def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
+@lru_cache(maxsize=None)
+def enable_full_att_decode_tune() -> bool:
+    """
+    Whether to run FA3 full-attention decode num_splits warmup/autotune at model init.
+
+    Env: ENABLE_FULL_ATT_DECODE_TUNE
+      - ON / TRUE / 1: enable
+      - otherwise (default False): skip this operator-specific tuning
+    """
+    return enable_env_vars("ENABLE_FULL_ATT_DECODE_TUNE")
+
+
 g_model_init_done = False
 
 

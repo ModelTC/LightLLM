@@ -224,16 +224,38 @@ def test_moe_align2():
     experts_token_num[2] = 60
     experts_token_num[3] = 16
 
-    mblocks_to_tuple_info = moe_align2(100, experts_token_num, block_m=16)
+    token_num_mul_topk_num = 100
+    block_m = 16
+    mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, experts_token_num, block_m=block_m)
     expected_expert_ids = torch.tensor([0, 2, 2, 2, 2, 3, -1, -1, -1, -1], device="cuda", dtype=torch.int32)
     valid_blocks = expected_expert_ids != -1
 
-    assert mblocks_to_tuple_info.shape[0] == triton.cdiv(100 + 4 * (16 - 1), 16)
+    max_num_tokens_padded = token_num_mul_topk_num + experts_token_num.shape[0] * (block_m - 1)
+    expected_max_num_m_blocks = min(token_num_mul_topk_num, triton.cdiv(max_num_tokens_padded, block_m))
+    assert mblocks_to_tuple_info.shape[0] == expected_max_num_m_blocks
     assert torch.equal(mblocks_to_tuple_info[:, 0], expected_expert_ids)
     assert torch.equal(
         mblocks_to_tuple_info[valid_blocks, 1],
         torch.tensor([0, 0, 1, 2, 3, 0], device="cuda", dtype=torch.int32),
     )
+
+    # When expert_num is large relative to token_num, the padded cdiv upper bound
+    # exceeds token_num; allocation must be capped by token_num_mul_topk_num.
+    token_num_mul_topk_num = 8
+    block_m = 16
+    experts_token_num = torch.zeros((10,), dtype=torch.int32, device="cuda")
+    experts_token_num[0] = 8
+    max_num_tokens_padded = token_num_mul_topk_num + experts_token_num.shape[0] * (block_m - 1)
+    padded_cdiv = triton.cdiv(max_num_tokens_padded, block_m)
+    assert padded_cdiv > token_num_mul_topk_num
+
+    mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, experts_token_num, block_m=block_m)
+    assert mblocks_to_tuple_info.shape[0] == token_num_mul_topk_num
+    assert torch.equal(
+        mblocks_to_tuple_info[:1, 0],
+        torch.tensor([0], device="cuda", dtype=torch.int32),
+    )
+    assert torch.all(mblocks_to_tuple_info[1:, 0] == -1)
 
 
 def test_grouped_matmul():

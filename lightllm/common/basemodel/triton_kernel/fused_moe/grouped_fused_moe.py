@@ -455,7 +455,7 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
     out tensor is a tensor that contain block schduel infos tensor.
     """
     max_num_tokens_padded = token_num_mul_topk_num + exports_token_num.shape[0] * (block_m - 1)
-    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_m)
+    max_num_m_blocks = min(token_num_mul_topk_num, triton.cdiv(max_num_tokens_padded, block_m))
     # first is expert, second is m_index, third is token_start_index
     mblocks_to_tuple_info = torch.empty((max_num_m_blocks, 3), dtype=torch.int32, device="cuda")
 
