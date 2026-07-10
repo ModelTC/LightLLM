@@ -30,6 +30,7 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models import get_model
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.glm5_2_mtp.model import Glm5_2MTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.server.api_cli import make_argument_parser
@@ -127,6 +128,18 @@ def cpu_i32_zeros(size: int) -> torch.Tensor:
 
 def empty_multimodal_params(batch_size: int) -> List[Dict]:
     return [{"images": [], "audios": []} for _ in range(batch_size)]
+
+
+def mtp_prefill_chunk_size(batch_size: int, prompt_len: int, batch_max_tokens: int) -> int:
+    """Bound each MTP setup prefill step by the production token budget."""
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if batch_max_tokens < batch_size:
+        raise ValueError(
+            "MTP prefill requires at least one token per request in a step: "
+            f"batch_size={batch_size}, batch_max_tokens={batch_max_tokens}"
+        )
+    return max(1, min(int(prompt_len), int(batch_max_tokens) // int(batch_size)))
 
 
 class StaticBenchmarkExecutor:
@@ -242,23 +255,30 @@ class StaticBenchmarkExecutor:
 
     def _prefill_for_decode(self, case: BenchmarkCase, token_rows: np.ndarray, mtp_enabled: bool):
         req_idx = self._alloc_req_indexes(case.batch_size)
+        chunk_size = (
+            mtp_prefill_chunk_size(case.batch_size, case.context_len, self.args.batch_max_tokens)
+            if mtp_enabled
+            else None
+        )
         inputs = self._build_prefill_inputs(
             token_rows=token_rows,
             req_idx=req_idx,
             prompt_len=case.context_len,
-            chunk_size=None,
+            chunk_size=chunk_size,
         )
         output = None
+        next_ids = None
         for model_input in inputs:
             output = self._forward_prefill_input(model_input, allow_overlap=not mtp_enabled)
+            self._touch_output(output)
+            next_ids = self._argmax_ids(output.logits)
+            if mtp_enabled:
+                # Main and draft KV must advance together for every chunk.
+                next_ids = self._fill_mtp_prefill_kv(case, model_input, output, next_ids)
         assert output is not None
-        self._touch_output(output)
-
-        next_ids = self._argmax_ids(output.logits)
+        assert next_ids is not None
 
         seq_len = cpu_i32_full((case.batch_size,), case.context_len)
-        if mtp_enabled:
-            next_ids = self._fill_mtp_prefill_kv(case, inputs[-1], output, next_ids)
         return req_idx, seq_len, next_ids
 
     def _fill_mtp_prefill_kv(
@@ -807,6 +827,18 @@ def apply_max_batch_size(batch_size: int, max_batch_size: int) -> int:
     return max(1, batch_size)
 
 
+def max_decode_batch_size(cases: Sequence[BenchmarkCase]) -> int:
+    return max((int(case.batch_size) for case in cases if case.stage == "decode"), default=0)
+
+
+def cap_graph_batch_size(configured_size: int, cases: Sequence[BenchmarkCase]) -> int:
+    """Avoid capturing decode graphs larger than every benchmark case."""
+    decode_batch_size = max_decode_batch_size(cases)
+    if decode_batch_size <= 0:
+        return max(1, int(configured_size))
+    return max(1, min(int(configured_size), decode_batch_size))
+
+
 def prefill_batch_size_from_batch_max_tokens(
     batch_max_tokens: int,
     step_tokens_per_req: int,
@@ -1041,15 +1073,11 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
 
     if decode_batch_size_needs_profile and args.max_batch_size > 0:
         args.running_max_req_size = max(args.running_max_req_size, int(args.max_batch_size))
-        # Profile decode BS is resolved after model load. Use the cap as the
-        # pre-load upper bound so request slots and optional decode graphs agree.
-        if not args.disable_cudagraph:
-            args.graph_max_batch_size = max(args.graph_max_batch_size, int(args.max_batch_size))
     if prefill_batch_size_needs_profile:
         args.running_max_req_size = max(args.running_max_req_size, max_batch)
 
-    if args.graph_max_batch_size < max_batch:
-        args.graph_max_batch_size = max_batch
+    if not args.disable_cudagraph and args.decode_batch_size_mode != "profile":
+        args.graph_max_batch_size = cap_graph_batch_size(args.graph_max_batch_size, cases)
 
     if args.nccl_port is None:
         args.nccl_port = 28765
@@ -1166,9 +1194,34 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
                 "eagle_with_att",
             }, f"{model_type} MTP requires *_with_att mode"
             draft_models.append(Glm4MoeLiteMTPModel(mtp_kvargs))
+        elif model_type == "glm_moe_dsa":
+            assert args.mtp_mode in {
+                "vanilla_with_att",
+                "eagle_with_att",
+            }, f"{model_type} MTP requires *_with_att mode"
+            draft_models.append(Glm5_2MTPModel(mtp_kvargs))
         else:
             raise ValueError(f"unsupported MTP draft model_type={model_type} from {draft_dir}")
     return draft_models
+
+
+def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase], model_kvargs: Dict, model) -> None:
+    """Capture profile-mode graphs after the real decode batch is known."""
+    graph_batch_size = cap_graph_batch_size(args.graph_max_batch_size, cases)
+    args.graph_max_batch_size = graph_batch_size
+    model_kvargs["graph_max_batch_size"] = graph_batch_size
+    model_kvargs["disable_cudagraph"] = False
+
+    if args.enable_decode_microbatch_overlap:
+        graph_batch_size //= 2
+    model.graph_max_batch_size = graph_batch_size * (int(args.mtp_step) + 1)
+    model.disable_cudagraph = False
+    # Attention backends may size persistent graph buffers during construction.
+    # Rebuild them after replacing the temporary profile-time batch limit.
+    model._init_att_backend()
+    model._init_att_backend1()
+    torch.cuda.empty_cache()
+    model._init_cudagraph()
 
 
 def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue):
@@ -1181,6 +1234,14 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         import torch.distributed as dist
 
         model_kvargs = build_model_kvargs(args, rank_id)
+        defer_cudagraph = (
+            not args.disable_cudagraph
+            and args.decode_batch_size_mode == "profile"
+            and any(case.stage == "decode" for case in cases)
+        )
+        if defer_cudagraph:
+            model_kvargs["disable_cudagraph"] = True
+            model_kvargs["graph_max_batch_size"] = 2 if args.enable_decode_microbatch_overlap else 1
         group_size = 2 if (args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap) else 1
         if group_size == 2:
             for case in cases:
@@ -1195,6 +1256,8 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         model, _ = get_model(model_cfg, model_kvargs)
         cases = resolve_batch_max_prefill_cases(args, cases, model.mem_manager.size)
         cases = resolve_profile_decode_cases(args, cases, model.mem_manager.size)
+        if defer_cudagraph:
+            init_deferred_cudagraph(args, cases, model_kvargs, model)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
@@ -1207,7 +1270,12 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
             results.append(asdict(result))
             dist.barrier()
 
-        ans_queue.put({"ok": True, "rank": rank_id, "results": results})
+        message = {"ok": True, "rank": rank_id, "results": results}
+        all_rank_messages = [None] * int(args.tp) if rank_id == 0 else None
+        dist.gather_object(message, all_rank_messages, dst=0)
+        if rank_id == 0:
+            message["all_rank_messages"] = all_rank_messages
+        ans_queue.put(message)
     except Exception:
         ans_queue.put({"ok": False, "rank": rank_id, "traceback": traceback.format_exc()})
     finally:
@@ -1354,9 +1422,7 @@ def aggregate_rank_results(args: SimpleNamespace, messages: Sequence[Dict]) -> L
             first["inter_token_latency_ms"] = elapsed_ms / decode_step_count
 
         ttft_values = [
-            float(item["result"]["ttft_ms"])
-            for item in rank_items
-            if item["result"].get("ttft_ms") is not None
+            float(item["result"]["ttft_ms"]) for item in rank_items if item["result"].get("ttft_ms") is not None
         ]
         if ttft_values:
             first["ttft_ms"] = max(ttft_values)
@@ -1367,11 +1433,17 @@ def aggregate_rank_results(args: SimpleNamespace, messages: Sequence[Dict]) -> L
 
 
 def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List[Dict]:
+    if args.nnodes <= 0 or args.tp % args.nnodes != 0:
+        raise ValueError(f"--tp must be divisible by --nnodes, got tp={args.tp} nnodes={args.nnodes}")
+    if args.node_rank < 0 or args.node_rank >= args.nnodes:
+        raise ValueError(f"--node_rank must be in [0, {args.nnodes}), got {args.node_rank}")
+
     ctx = mp.get_context("spawn")
     ans_queue = ctx.Queue()
     workers = []
-    rank_start = args.node_rank * args.tp
-    rank_end = (args.node_rank + 1) * args.tp
+    node_world_size = args.tp // args.nnodes
+    rank_start = args.node_rank * node_world_size
+    rank_end = rank_start + node_world_size
     case_dicts = [asdict(case) for case in cases]
     args_dict = vars(args)
 
@@ -1420,7 +1492,17 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
             )
         raise RuntimeError(f"{len(failed)} worker(s) failed")
 
-    results = aggregate_rank_results(args, messages)
+    if args.node_rank != 0:
+        return []
+
+    all_rank_messages = next(
+        (message["all_rank_messages"] for message in messages if "all_rank_messages" in message),
+        None,
+    )
+    if all_rank_messages is None:
+        raise RuntimeError("global rank 0 did not report aggregated rank results")
+
+    results = aggregate_rank_results(args, all_rank_messages)
     result_objs = [BenchmarkResult(**result) for result in results]
     print_results_table(result_objs)
     return results
