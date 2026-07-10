@@ -496,9 +496,9 @@ PD 分离模式参数
     * ``triton``: 使用 torch 和 triton kernel（默认）
     * ``sglang_kernel``: 使用 sglang_kernel 实现
 
-.. option:: --return_all_prompt_logprobs
+.. option:: --enable_prompt_logprobs
 
-    返回所有提示 token 的 logprobs
+    启用 prompt top-k logprobs 捕获
 
 .. option:: --use_reward_model
 

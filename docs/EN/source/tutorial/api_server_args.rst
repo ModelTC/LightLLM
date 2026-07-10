@@ -497,9 +497,9 @@ Sampling and Generation Parameters
     * ``triton``: Use torch and triton kernel (default)
     * ``sglang_kernel``: Use sglang_kernel implementation
 
-.. option:: --return_all_prompt_logprobs
+.. option:: --enable_prompt_logprobs
 
-    Return logprobs for all prompt tokens
+    Enable prompt top-k logprobs capture
 
 .. option:: --use_reward_model
 
