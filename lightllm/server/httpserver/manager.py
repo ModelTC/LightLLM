@@ -700,96 +700,97 @@ class HttpServerManager:
                 event.clear()
                 if len(req_status.out_token_info_list) == 0:
                     continue
-
-                for sub_req_id, out_str, metadata, finish_status in req_status.out_token_info_list:
-                    # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
-                    metadata["prompt_tokens"] = prompt_tokens
-                    # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
-                    if self.pd_mode.is_P() and is_first_token:
-                        metadata["prompt_ids"] = prompt_ids
-
-                    gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
-                    cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
-                    disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
-                    metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
-                    sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
-
-                    if is_first_token:
-                        first_token_cost_ms = (time.time() - start_time) * 1000
-                        is_first_token = False
-                        self.first_time_costs.add(first_token_cost_ms)
-
-                    out_token_counter += 1
-
-                    # update inference timemark
-                    self.latest_success_infer_time_mark.set_value(int(time.time()))
-
-                    yield sub_req_id, out_str, metadata, finish_status
-                    # 如果有子请求完成，就更新计数
-                    if finish_status.is_finished():
-                        unfinished_count -= 1
-
-                    if unfinished_count == 0:
-                        total_cost_time_ms = (time.time() - start_time) * 1000
-                        mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
-                        self.per_token_costs.add(mean_per_token_cost_time_ms)
-                        x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
-                        x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
-                        gpu_prompt_cache_ratio = gpu_prompt_cache_len / prompt_tokens
-                        cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
-                        disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
-                        prompt_cache_len = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
-                        prompt_cache_ratio = prompt_cache_len / prompt_tokens
-                        generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
-
-                        # 首 token 由 prefill 产生, 不属于 verify step; 分母只数 decode verify 步数,
-                        # 与 sglang 的 accept length 口径对齐。
-                        mtp_avg_token_per_step = out_token_counter / max(
-                            (out_token_counter - 1 - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
-                        )
-                        format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.debug(
-                            f"X-Request-Id:{x_request_id} "
-                            f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
-                            f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
-                            f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
-                            f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
-                            f"prompt_token_num:{prompt_tokens} "
-                            f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
-                            f"gpu_prompt_cache_len:{gpu_prompt_cache_len} "
-                            f"gpu_prompt_cache_ratio:{gpu_prompt_cache_ratio} "
-                            f"cpu cache hit: {cpu_prompt_cache_len > 0} "
-                            f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
-                            f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
-                            f"disk cache hit: {disk_prompt_cache_len > 0} "
-                            f"disk_prompt_cache_len:{disk_prompt_cache_len} "
-                            f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
-                            f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
-                        )
-
-                        self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
-                        self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
-                        self.metric_client.counter_inc_by("lightllm_prompt_tokens_total", prompt_tokens)
-                        self.metric_client.counter_inc_by("lightllm_generation_tokens_total", out_token_counter)
-                        self.metric_client.gauge_set("lightllm_cache_hit_rate", prompt_cache_ratio)
-                        self.metric_client.gauge_set("lightllm_gen_throughput", generation_throughput)
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
-                        )
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
-                        )
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
-                        )
-                        self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
-                        self.metric_client.counter_inc("lightllm_request_success")
-                        self.metric_client.histogram_observe(
-                            "lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step
-                        )
-
-                        return
+                tmp_out_token_info_list = [item for item in req_status.out_token_info_list]
                 req_status.out_token_info_list.clear()
+
+            for sub_req_id, out_str, metadata, finish_status in tmp_out_token_info_list:
+                # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
+                metadata["prompt_tokens"] = prompt_tokens
+                # p 节点返回 prompt_ids 信息，防止 d 节点重新 encode
+                if self.pd_mode.is_P() and is_first_token:
+                    metadata["prompt_ids"] = prompt_ids
+
+                gpu_prompt_cache_len = metadata.pop("prompt_cache_len", 0)
+                cpu_prompt_cache_len = metadata.pop("cpu_prompt_cache_len", 0)
+                disk_prompt_cache_len = metadata.pop("disk_prompt_cache_len", 0)
+                metadata["prompt_cache_len"] = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
+
+                if is_first_token:
+                    first_token_cost_ms = (time.time() - start_time) * 1000
+                    is_first_token = False
+                    self.first_time_costs.add(first_token_cost_ms)
+
+                out_token_counter += 1
+
+                # update inference timemark
+                self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+                yield sub_req_id, out_str, metadata, finish_status
+                # 如果有子请求完成，就更新计数
+                if finish_status.is_finished():
+                    unfinished_count -= 1
+
+                if unfinished_count == 0:
+                    total_cost_time_ms = (time.time() - start_time) * 1000
+                    mean_per_token_cost_time_ms = (total_cost_time_ms - first_token_cost_ms) / out_token_counter
+                    self.per_token_costs.add(mean_per_token_cost_time_ms)
+                    x_request_id = request.headers.get("X-Request-Id", "") if request is not None else ""
+                    x_session_id = request.headers.get("X-Session-Id", "") if request is not None else ""
+                    gpu_prompt_cache_ratio = gpu_prompt_cache_len / prompt_tokens
+                    cpu_prompt_cache_ratio = cpu_prompt_cache_len / prompt_tokens
+                    disk_prompt_cache_ratio = disk_prompt_cache_len / prompt_tokens
+                    prompt_cache_len = gpu_prompt_cache_len + cpu_prompt_cache_len + disk_prompt_cache_len
+                    prompt_cache_ratio = prompt_cache_len / prompt_tokens
+                    generation_throughput = out_token_counter / max(total_cost_time_ms / 1000.0, 1e-6)
+
+                    # 首 token 由 prefill 产生, 不属于 verify step; 分母只数 decode verify 步数,
+                    # 与 sglang 的 accept length 口径对齐。
+                    mtp_avg_token_per_step = out_token_counter / max(
+                        (out_token_counter - 1 - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
+                    )
+                    format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+                    logger.debug(
+                        f"X-Request-Id:{x_request_id} "
+                        f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
+                        f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
+                        f"total_cost_time:{total_cost_time_ms}ms,out_token_counter:{out_token_counter} "
+                        f"mean_per_token_cost_time: {mean_per_token_cost_time_ms}ms "
+                        f"prompt_token_num:{prompt_tokens} "
+                        f"gpu cache hit: {gpu_prompt_cache_ratio > 0} "
+                        f"gpu_prompt_cache_len:{gpu_prompt_cache_len} "
+                        f"gpu_prompt_cache_ratio:{gpu_prompt_cache_ratio} "
+                        f"cpu cache hit: {cpu_prompt_cache_len > 0} "
+                        f"cpu_prompt_cache_len:{cpu_prompt_cache_len} "
+                        f"cpu_prompt_cache_ratio:{cpu_prompt_cache_ratio} "
+                        f"disk cache hit: {disk_prompt_cache_len > 0} "
+                        f"disk_prompt_cache_len:{disk_prompt_cache_len} "
+                        f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
+                        f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
+                    )
+
+                    self.metric_client.histogram_observe("lightllm_cache_length", prompt_cache_len)
+                    self.metric_client.histogram_observe("lightllm_cache_ratio", prompt_cache_ratio)
+                    self.metric_client.counter_inc_by("lightllm_prompt_tokens_total", prompt_tokens)
+                    self.metric_client.counter_inc_by("lightllm_generation_tokens_total", out_token_counter)
+                    self.metric_client.gauge_set("lightllm_cache_hit_rate", prompt_cache_ratio)
+                    self.metric_client.gauge_set("lightllm_gen_throughput", generation_throughput)
+                    self.metric_client.histogram_observe(
+                        "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
+                    )
+                    self.metric_client.histogram_observe(
+                        "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
+                    )
+                    self.metric_client.histogram_observe(
+                        "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
+                    )
+                    self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
+                    self.metric_client.counter_inc("lightllm_request_success")
+                    self.metric_client.histogram_observe(
+                        "lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step
+                    )
+
+                    return
         return
 
     async def abort(self, group_req_id: int) -> bool:
