@@ -356,7 +356,7 @@ class TpPartBaseModel:
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
         mgr = _routing_mgr.g_routing_capture_manager
-        if mgr is not None:
+        if mgr is not None and not getattr(self, "is_mtp_draft_model", False):
             # Build a callback that records each MoE layer's top-k experts into
             # the routing buffer at this forward's KV-cache positions.
             infer_state.make_routing_capture_callback = mgr.make_capture_callback_factory(infer_state.mem_index)

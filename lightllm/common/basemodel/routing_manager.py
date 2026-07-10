@@ -146,7 +146,6 @@ class RoutingCaptureManager:
         )
 
     def extract_routing_data(self, mem_indexes: torch.Tensor) -> np.ndarray:
-        torch.cuda.current_stream().synchronize()
         cpu_indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
         return self.routing_buffer[cpu_indexes, :, :].numpy()
 

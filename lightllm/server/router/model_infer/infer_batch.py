@@ -24,6 +24,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel import routing_manager as _routing_mgr
+from lightllm.common.basemodel import logprobs_manager as _prompt_logprobs_mgr
 
 logger = init_logger(__name__)
 
@@ -125,12 +126,31 @@ class InferenceContext:
     def _extract_routing_data(self, req: "InferReq"):
         if not (req.shm_req.finish_status.is_finished() or req.shm_req.stop_str_matched):
             return
-        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len]
+        visible_total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
+        capture_len = min(req.cur_kv_len, visible_total_len - 1)
+        if capture_len <= 0:
+            return
+
+        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0:capture_len]
         mgr = _routing_mgr.g_routing_capture_manager
         routing_data = mgr.extract_routing_data(mem_indexes)
-        req.shm_req.create_routing_data_shm_array(mgr.num_moe_layers, req.cur_kv_len, mgr.topk, np_dtype=mgr.np_dtype)
+        req.shm_req.create_routing_data_shm_array(mgr.num_moe_layers, capture_len, mgr.topk, np_dtype=mgr.np_dtype)
         req.shm_req.shm_routing_data.arr[:] = routing_data
         req.shm_req.shm_routing_data.detach_shm()
+
+    def _export_prompt_logprobs(self, req: "InferReq"):
+        topk = req.sampling_param.shm_param.prompt_logprobs
+        if topk <= 0 or req.shm_req.input_len <= 1:
+            return
+
+        mgr = _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager
+        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][: req.shm_req.input_len - 1]
+        top_token_ids, top_logprobs = mgr.extract(mem_indexes, topk)
+        output = req.shm_req.create_prompt_logprobs_shm_array()
+        output["top_token_ids"][:] = top_token_ids
+        output["top_logprobs"][:] = top_logprobs
+        req.shm_req.shm_prompt_logprobs.detach_shm()
+        return
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
@@ -275,9 +295,11 @@ class InferenceContext:
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
 
     @torch.no_grad()
-    def _filter(self, finished_request_ids: List[int]):
+    def _filter(self, finished_request_ids: List[int], is_owner_dp: bool = True):
         if len(finished_request_ids) == 0:
             return
+
+        owns_shared_req = is_owner_dp and self.backend.is_master_in_dp
 
         free_req_index = []
         free_token_index = []
@@ -285,13 +307,18 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-            if _routing_mgr.g_routing_capture_manager is not None:
-                g_infer_context._extract_routing_data(req)
+            if owns_shared_req:
+                if _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager is not None:
+                    self._export_prompt_logprobs(req)
+                if _routing_mgr.g_routing_capture_manager is not None:
+                    self._extract_routing_data(req)
+            req.shm_req.detach_output_ranks_shm_array()
             self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
-            req.shm_req.shm_infer_released = True
+            if owns_shared_req:
+                req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         free_token_index = custom_cat(free_token_index)
@@ -594,6 +621,7 @@ class InferReq:
         self.shm_req = g_infer_context.shm_req_manager.get_req_obj_by_index(self.shm_index)
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
+        self.shm_req.link_output_ranks_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
 
         # 更新 pd 分离模式下， prefill 节点需要开始传输的起始位置
@@ -720,6 +748,14 @@ class InferReq:
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
                                 value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
                             )
+                            prompt_logprobs_mgr = _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager
+                            prompt_topk = self.sampling_param.shm_param.prompt_logprobs
+                            if prompt_logprobs_mgr is not None and prompt_topk > 0:
+                                prompt_logprobs_mgr.copy_slots(
+                                    source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
+                                    destination_indexes=tail_mems,
+                                    topk=prompt_topk,
+                                )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
                             g_infer_context.req_manager.copy_small_page_buffer_to_linear_att_state(
@@ -838,10 +874,12 @@ class InferReq:
             end = self.linear_att_cache_len
         return end
 
-    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
+    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank=None):
         index = self.shm_req.input_len + output_len
         self.shm_req.shm_prompt_ids.arr[index - 1] = next_token_id
         self.shm_req.shm_logprobs.arr[index - 1] = logprob
+        if rank is not None:
+            self.shm_req.shm_output_ranks.arr[index - 1] = rank
         return
 
     def update_mtp_accepted_token_num(self, accept_token_num: int):
@@ -915,6 +953,7 @@ class InferReqUpdatePack:
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
+        next_token_rank=None,
     ):
         # pd_prefill_chunked_handle_func 主要是为了处理 pd prefill 模式下
         # 分块 prefill 后，形成对应的pd 分块传输处理。
@@ -927,7 +966,12 @@ class InferReqUpdatePack:
         req_obj = self.req_obj
         shm_req = req_obj.shm_req
         finish_status = req_obj.finish_status
-        req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, self.output_len)
+        req_obj.set_next_gen_token_id(
+            next_token_id,
+            next_token_logprob,
+            self.output_len,
+            rank=next_token_rank,
+        )
 
         # 这里提前判定的主要作用是：
         # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，

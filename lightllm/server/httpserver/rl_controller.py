@@ -126,15 +126,6 @@ class HttpRlController:
     async def unregister_generation_admission(self, request_id: int) -> None:
         await self._generation_gate.unregister_pending_request(request_id)
 
-    async def wait_until_can_released_mark(self, req, timeout: float = 60.0) -> bool:
-        start_time = time.time()
-        while not req.can_released_mark:
-            if time.time() - start_time > timeout:
-                logger.warning(f"wait req can_released_mark timeout, req_id={req.request_id}, timeout={timeout}s")
-                return False
-            await asyncio.sleep(0.005)
-        return True
-
     async def _wait_for_abort_released(
         self,
         request_ids,

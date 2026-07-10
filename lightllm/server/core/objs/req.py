@@ -15,7 +15,8 @@ from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.shm_utils import create_or_link_shm
+from .prompt_logprobs import build_prompt_logprobs_metadata, get_prompt_logprobs_dtype
+from .logprob_utils import logprob_info
 
 logger = init_logger(__name__)
 
@@ -189,6 +190,7 @@ class Req(ctypes.Structure):
         self.stop_str_matched_token_index = -1
 
         self.post_init()
+        self.create_output_ranks_shm_array()
 
         args = get_env_start_args()
         if is_linear_att_mixed_model(args.model_dir):
@@ -282,6 +284,71 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
+    def get_prompt_logprobs_shm_name(self):
+        service_uni_name = get_unique_server_name()
+        return f"{service_uni_name}_shm_prompt_logprobs_{self.index_in_shm_mem}"
+
+    def create_prompt_logprobs_shm_array(self):
+        shape = (self.input_len - 1,)
+        dtype = get_prompt_logprobs_dtype(self.sample_params.prompt_logprobs)
+        self.shm_prompt_logprobs = ShmArray(self.get_prompt_logprobs_shm_name(), shape, dtype=dtype)
+        self.shm_prompt_logprobs.create_shm()
+        return self.shm_prompt_logprobs.arr
+
+    def link_prompt_logprobs_shm_array(self):
+        shape = (self.input_len - 1,)
+        dtype = get_prompt_logprobs_dtype(self.sample_params.prompt_logprobs)
+        self.shm_prompt_logprobs = ShmArray(self.get_prompt_logprobs_shm_name(), shape, dtype=dtype)
+        self.shm_prompt_logprobs.link_shm()
+        return self.shm_prompt_logprobs.arr
+
+    def _close_on_demand_shm_array(self, attr_name: str, shm_name: str):
+        shm_array = getattr(self, attr_name, None)
+        if shm_array is not None:
+            shm_array.close_shm()
+            setattr(self, attr_name, None)
+            return
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name)
+            shm.close()
+            shm.unlink()
+        except FileNotFoundError:
+            pass
+
+    def close_prompt_logprobs_shm_array(self):
+        self._close_on_demand_shm_array("shm_prompt_logprobs", self.get_prompt_logprobs_shm_name())
+        return
+
+    def get_output_ranks_shm_name(self):
+        service_uni_name = get_unique_server_name()
+        return f"{service_uni_name}_shm_output_ranks_{self.index_in_shm_mem}"
+
+    def create_output_ranks_shm_array(self):
+        shape = (self.alloc_shm_numpy_len,)
+        self.shm_output_ranks = ShmArray(self.get_output_ranks_shm_name(), shape, dtype=np.int32)
+        self.shm_output_ranks.create_shm()
+        return self.shm_output_ranks.arr
+
+    def link_output_ranks_shm_array(self):
+        shm_array = getattr(self, "shm_output_ranks", None)
+        if shm_array is not None and shm_array.arr is not None:
+            return shm_array.arr
+        shape = (self.alloc_shm_numpy_len,)
+        self.shm_output_ranks = ShmArray(self.get_output_ranks_shm_name(), shape, dtype=np.int32)
+        self.shm_output_ranks.link_shm()
+        return self.shm_output_ranks.arr
+
+    def detach_output_ranks_shm_array(self):
+        shm_array = getattr(self, "shm_output_ranks", None)
+        if shm_array is not None:
+            self.shm_output_ranks.detach_shm()
+            self.shm_output_ranks = None
+        return
+
+    def close_output_ranks_shm_array(self):
+        self._close_on_demand_shm_array("shm_output_ranks", self.get_output_ranks_shm_name())
+        return
+
     def get_routing_data_shm_name(self):
         service_uni_name = get_unique_server_name()
         return f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
@@ -307,47 +374,7 @@ class Req(ctypes.Structure):
 
     def close_routing_data_shm_array(self):
         """Close and unlink routing SHM (on-demand, no longer pooled)."""
-        if hasattr(self, "shm_routing_data") and self.shm_routing_data is not None:
-            self.shm_routing_data.close_shm()
-            self.shm_routing_data = None
-        else:
-            try:
-                shm = shared_memory.SharedMemory(name=self.get_routing_data_shm_name())
-                shm.close()
-                shm.unlink()
-            except FileNotFoundError:
-                pass
-        return
-
-    def get_prompt_topk_shm_name(self):
-        service_uni_name = get_unique_server_name()
-        return f"{service_uni_name}_shm_prompt_topk_{self.index_in_shm_mem}"
-
-    def create_prompt_topk_shm_array(self, num_rows: int, k: int):
-        self.shm_prompt_topk = ShmArray(self.get_prompt_topk_shm_name(), (num_rows, 2 * k + 1), dtype=np.float32)
-        self.shm_prompt_topk.create_shm()
-        return
-
-    def link_prompt_topk_shm_array(self, num_rows: int, k: int):
-        if num_rows <= 0 or k <= 0:
-            return None
-        shm_prompt_topk = ShmArray(self.get_prompt_topk_shm_name(), (num_rows, 2 * k + 1), dtype=np.float32)
-        shm_prompt_topk.link_shm()
-        self.shm_prompt_topk = shm_prompt_topk
-        return self.shm_prompt_topk.arr
-
-    def close_prompt_topk_shm_array(self):
-        """Close and unlink prompt top-k SHM (on-demand, same lifecycle as routing SHM)."""
-        if getattr(self, "shm_prompt_topk", None) is not None:
-            self.shm_prompt_topk.close_shm()
-            self.shm_prompt_topk = None
-        else:
-            try:
-                shm = shared_memory.SharedMemory(name=self.get_prompt_topk_shm_name())
-                shm.close()
-                shm.unlink()
-            except FileNotFoundError:
-                pass
+        self._close_on_demand_shm_array("shm_routing_data", self.get_routing_data_shm_name())
         return
 
     def get_prompt_ids(self):
@@ -391,56 +418,20 @@ class Req(ctypes.Structure):
     def get_first_router_need_tokens(self):
         raise NotImplementedError("Subclasses should implement this method")
 
-    def get_all_prompt_metadata(self):
-        """
-        return_all_prompt_logprobs mode use to return all logprobs cacul ppl
-        """
-        if hasattr(self, "_cache_prompt_metadata"):
-            return self._cache_prompt_metadata
-        metadata = {}
-        cur_ids = self.shm_prompt_ids.arr[0 : self.input_len]
-        all_prompts = []
-        for index in range(len(cur_ids) - 1):
-            tmp_dict = {int(cur_ids[index + 1]): float(self.shm_logprobs.arr[index + 1])}
-            all_prompts.append([int(cur_ids[index]), tmp_dict])
+    def get_prompt_logprobs_metadata(self, tokenizer=None):
+        return build_prompt_logprobs_metadata(self, tokenizer)
 
-        metadata["prompt_logprobs"] = all_prompts
-        metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
-        self._cache_prompt_metadata = metadata
-        return metadata
-
-    def get_prompt_logprobs_metadata(self):
-        if hasattr(self, "_cache_prompt_logprobs_metadata"):
-            return self._cache_prompt_logprobs_metadata
-        k = self.sample_params.prompt_logprobs
-        cur_ids = self.shm_prompt_ids.arr[0 : self.input_len]
-        topk_arr = None
-        if k > 0 and self.input_len > 1:
-            try:
-                topk_arr = self.link_prompt_topk_shm_array(self.input_len - 1, k)
-            except Exception as e:
-                logger.warning(f"Failed to link prompt topk shm for req {self.request_id}: {e}")
-        prompt_logprobs = [None]
-        for pos in range(1, self.input_len):
-            token_id = int(cur_ids[pos])
-            token_logprob = float(self.shm_logprobs.arr[pos])
-            if topk_arr is None:
-                pos_dict = {token_id: {"logprob": token_logprob, "rank": None, "decoded_token": None}}
-            else:
-                row = topk_arr[pos - 1]
-                pos_dict = {
-                    int(row[j]): {"logprob": float(row[k + j]), "rank": j + 1, "decoded_token": None}
-                    for j in range(k)
-                }
-                if token_id not in pos_dict:
-                    pos_dict[token_id] = {"logprob": token_logprob, "rank": int(row[2 * k]), "decoded_token": None}
-            prompt_logprobs.append(pos_dict)
-        metadata = {
-            "prompt_logprobs": prompt_logprobs,
-            "prompt_token_ids": [int(e) for e in cur_ids],
+    def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
+        token_id = int(self.shm_prompt_ids.arr[src_index])
+        rank = int(self.link_output_ranks_shm_array()[src_index])
+        return {
+            token_id: logprob_info(
+                tokenizer,
+                token_id,
+                self.shm_logprobs.arr[src_index],
+                rank,
+            )
         }
-        self._cache_prompt_logprobs_metadata = metadata
-        return metadata
 
     def is_infer_decode(self) -> bool:
         """

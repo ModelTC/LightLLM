@@ -120,7 +120,7 @@ class StartArgs:
     data_type: Optional[str] = field(
         default=None, metadata={"choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]}
     )
-    return_all_prompt_logprobs: bool = field(default=False)
+    enable_prompt_logprobs: bool = field(default=False)
     use_reward_model: bool = field(default=False)
     use_tgi_api: bool = field(default=False)
     health_monitor: bool = field(default=False)

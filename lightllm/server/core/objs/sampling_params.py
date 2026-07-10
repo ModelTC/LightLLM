@@ -306,9 +306,7 @@ class SamplingParams(ctypes.Structure):
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
         ("seed", ctypes.c_int64),  # random seed
-        # logprobs: -1 disable, 0 only the actual prompt token,
-        # K > 0 top-K tokens plus the actual token at every prompt position.
-        # only usable on a server started with --return_all_prompt_logprobs.
+        # -1 disables prompt logprobs; K >= 0 returns only the top-K prompt tokens.
         ("prompt_logprobs", ctypes.c_int),
     ]
 

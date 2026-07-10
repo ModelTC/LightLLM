@@ -16,7 +16,6 @@ from lightllm.server.router.model_infer.mode_backend import (
     ChunkedPrefillBackend,
     FirstTokenConstraintBackend,
     OutlinesConstraintBackend,
-    ReturnPromptLogProbBackend,
     RewardModelBackend,
     TokenHealingBackend,
     XgrammarBackend,
@@ -59,7 +58,6 @@ class ModelRpcServer(rpyc.Service):
         kvargs = obtain(kvargs)
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
-        return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
         is_token_healing = self.args.token_healing_mode
@@ -87,8 +85,6 @@ class ModelRpcServer(rpyc.Service):
             self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
-        elif return_all_prompt_logprobs:
-            self.backend = ReturnPromptLogProbBackend()
         elif diverse_mode:
             self.backend = DiversehBackend()
         elif is_token_healing:

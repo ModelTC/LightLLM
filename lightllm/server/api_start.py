@@ -197,10 +197,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.use_reward_model:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-    if args.return_all_prompt_logprobs:
-        assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
-        assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-
     # FP8 KV cache mode checks
     if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
         assert (

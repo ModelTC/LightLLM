@@ -50,6 +50,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     final_output_dict = collections.defaultdict(list)
     count_output_tokens_dict = collections.defaultdict(lambda: 0)
     tokens_dict = collections.defaultdict(list)
+    logprobs_dict = collections.defaultdict(list)
     finish_reason_dict = {}
     prompt_logprobs = None
     prompt_tokens = 0
@@ -58,24 +59,21 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     input_usage = None
     routed_experts_data = None
     async for sub_req_id, request_output, metadata, finish_status in results_generator:
-        # when set "--return_all_prompt_logprobs", the first token metadata will contains
-        # prompt_logprobs and prompt_token_ids
         if is_first_metadata:
-            prompt_logprobs = metadata.get("prompt_logprobs", None)
-            prompt_token_ids = metadata.get("prompt_token_ids", None)
             prompt_tokens = metadata.get("prompt_tokens", 0)
             input_usage = metadata.get("input_usage", None)
-            if prompt_logprobs is not None:
-                del metadata["prompt_logprobs"]
-            if prompt_token_ids is not None:
-                del metadata["prompt_token_ids"]
             if input_usage is not None:
                 del metadata["input_usage"]
 
             is_first_metadata = False
 
+        if "prompt_logprobs" in metadata:
+            prompt_logprobs = metadata.pop("prompt_logprobs")
+            prompt_token_ids = metadata.pop("prompt_token_ids", None)
+
         count_output_tokens_dict[sub_req_id] += 1
         final_output_dict[sub_req_id].append(request_output)
+        logprobs_dict[sub_req_id].append(metadata.pop("logprobs"))
         if return_details:
             metadata["text"] = request_output
             tokens_dict[sub_req_id].append(metadata)
@@ -90,6 +88,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     count_output_tokens_list = [count_output_tokens_dict[sub_id] for sub_id in sub_ids]
     finish_reson_list = [finish_reason_dict[sub_id].get_finish_reason() for sub_id in sub_ids]
     tokens_list = [tokens_dict[sub_id] for sub_id in sub_ids]
+    logprobs_list = [logprobs_dict[sub_id] for sub_id in sub_ids]
     only_one = len(sub_ids) == 1
 
     ret_data_format = lambda data_list: data_list[0] if only_one else data_list
@@ -102,6 +101,7 @@ async def lightllm_generate(request: Request, httpserver_manager: HttpServerMana
     }
     if return_details:
         ret["tokens"] = ret_data_format(tokens_list)
+    ret["logprobs"] = ret_data_format(logprobs_list)
     if prompt_token_ids is not None:
         ret["prompt_token_ids"] = prompt_token_ids
     if prompt_logprobs is not None:
@@ -154,6 +154,10 @@ async def lightllm_generate_stream(request: Request, httpserver_manager: HttpSer
                 "details": None,
                 "input_usage": input_usage,
             }
+            ret["token"]["logprobs"] = metadata["logprobs"]
+            if "prompt_logprobs" in metadata:
+                ret["prompt_logprobs"] = metadata["prompt_logprobs"]
+                ret["prompt_token_ids"] = metadata.get("prompt_token_ids")
 
             yield ("data:" + json.dumps(ret, ensure_ascii=False) + "\n\n").encode("utf-8")
 

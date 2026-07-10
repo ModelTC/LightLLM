@@ -339,8 +339,8 @@ class HttpServerManager:
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
         start_time = time.time()
-        if sampling_params.prompt_logprobs >= 0 and not self.args.return_all_prompt_logprobs:
-            raise ValueError("prompt_logprobs requires a server started with --return_all_prompt_logprobs")
+        if sampling_params.prompt_logprobs > 0 and not self.args.enable_prompt_logprobs:
+            raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -546,7 +546,7 @@ class HttpServerManager:
         if self._routing_config is None:
             return None
         num_moe_layers, topk, dtype_id = self._routing_config
-        num_tokens = req.input_len + req.shm_cur_output_len
+        num_tokens = req.input_len + req.shm_cur_output_len - 1
         if num_tokens <= 0:
             return None
 
@@ -561,23 +561,20 @@ class HttpServerManager:
                 "dtype": str(routing_data.dtype),
                 "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
             }
+        except FileNotFoundError:
+            return None
         except Exception as e:
             logger.warning(f"Failed to read routing data for req {req.request_id}: {e}")
             return None
 
-    async def _wait_and_read_routed_experts_metadata(self, req: Req, timeout: float = 60.0):
-        if not await self.rl_controller.wait_until_can_released_mark(req, timeout=timeout):
-            return None
-
+    async def _wait_until_infer_released(self, req: Req, timeout: float = 60.0):
         start_time = time.time()
-        while True:
-            routing_meta = self._read_routed_experts_metadata(req)
-            if routing_meta is not None:
-                return routing_meta
+        while not req.shm_infer_released:
             if time.time() - start_time > timeout:
-                logger.warning(f"wait routing data shm timeout, req_id={req.request_id}, timeout={timeout}s")
-                return None
+                logger.warning(f"wait infer release timeout, req_id={req.request_id}, timeout={timeout}s")
+                return False
             await asyncio.sleep(0.005)
+        return True
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
@@ -929,13 +926,17 @@ class HttpServerManager:
                 _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
                     try:
+                        req.close_prompt_logprobs_shm_array()
+                    except Exception as e:
+                        logger.debug(f"Failed to close prompt logprobs shm for req {req.request_id}: {e}")
+                    try:
+                        req.close_output_ranks_shm_array()
+                    except Exception as e:
+                        logger.debug(f"Failed to close output ranks shm for req {req.request_id}: {e}")
+                    try:
                         req.close_routing_data_shm_array()
                     except Exception as e:
                         logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
-                    try:
-                        req.close_prompt_topk_shm_array()
-                    except Exception as e:
-                        logger.debug(f"Failed to close prompt topk shm for req {req.request_id}: {e}")
                     _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
@@ -1008,35 +1009,34 @@ class HttpServerManager:
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
-                                if self.args.return_all_prompt_logprobs:
-                                    if req.sample_params.prompt_logprobs >= 0:
-                                        if count_output_tokens == 1:
-                                            metadata.update(req.get_prompt_logprobs_metadata())
-                                    else:
-                                        metadata.update(req.get_all_prompt_metadata())
+                                metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
-
-                                req.out_tokens_queue.pop_no_ret()
 
                                 finished_token_index = (
                                     req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
                                 )
 
                                 if finished_token_index != src_index:
-                                    token_list.append((req_id, text, metadata, FinishStatus()))
+                                    finish_status = FinishStatus()
                                 else:
                                     if req.stop_str_matched:
                                         finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
 
-                                    if self._routing_config is not None:
-                                        routing_meta = await self._wait_and_read_routed_experts_metadata(req)
-                                        if routing_meta is not None:
-                                            metadata["routed_experts"] = routing_meta
+                                    if (
+                                        req.sample_params.prompt_logprobs >= 0 or self._routing_config is not None
+                                    ) and await self._wait_until_infer_released(req):
+                                        if req.sample_params.prompt_logprobs >= 0:
+                                            metadata.update(req.get_prompt_logprobs_metadata(self.tokenizer))
+                                        if self._routing_config is not None:
+                                            routing_meta = self._read_routed_experts_metadata(req)
+                                            if routing_meta is not None:
+                                                metadata["routed_experts"] = routing_meta
 
-                                    token_list.append((req_id, text, metadata, finish_status))
+                                req.out_tokens_queue.pop_no_ret()
+                                token_list.append((req_id, text, metadata, finish_status))
                             else:
                                 break
 

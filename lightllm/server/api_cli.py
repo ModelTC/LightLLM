@@ -477,7 +477,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=None,
         help="the data type of the model weight",
     )
-    parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
+    parser.add_argument(
+        "--enable_prompt_logprobs",
+        action="store_true",
+        help="enable prompt top-k logprobs capture",
+    )
 
     parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
 
