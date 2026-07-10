@@ -477,7 +477,7 @@ class HttpServerManager:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
             raise e
-        except (ClientDisconnected, Exception) as e:
+        except (ClientDisconnected, BaseException) as e:
             logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
 
             if isinstance(e, ClientDisconnected):
