@@ -2,8 +2,16 @@ import dataclasses
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
+from lightllm.utils.log_utils import init_logger
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
+
+logger = init_logger(__name__)
+
+# _fast_plan_tensor_core_decode reaches into flashinfer's private wrapper internals to skip the
+# host sync the public plan() does on every graph-replay step. If a flashinfer version renames/reorders
+# those internals we fall back to the public planner (slower, but correct) instead of crashing.
+_flashinfer_fast_plan_ok = True
 
 
 def _fast_plan_tensor_core_decode(
@@ -279,8 +287,35 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
 
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
-        _fast_plan_tensor_core_decode(
-            self.decode_wrapper,
+        global _flashinfer_fast_plan_ok
+        if _flashinfer_fast_plan_ok:
+            try:
+                # AttributeError/TypeError => flashinfer internals changed; ValueError (batch-size guard)
+                # is intentional and must propagate.
+                _fast_plan_tensor_core_decode(
+                    self.decode_wrapper,
+                    new_state.kv_starts,
+                    new_state.kv_indices,
+                    new_state.kv_last_page_len_buffer,
+                    new_state.backend.tp_q_head_num,
+                    new_state.backend.tp_kv_head_num,
+                    new_state.backend.head_dim,
+                    1,
+                    new_state.kv_starts_host,
+                    new_state.kv_seq_lens_host,
+                    new_state.infer_state.max_kv_seq_len,
+                )
+                return
+            except (AttributeError, TypeError, ImportError) as e:
+                # AttributeError/TypeError => renamed/reordered private fields or plan() args;
+                # ImportError => a private helper (_get_range_buf / get_seq_lens) was renamed/removed.
+                # Both mean flashinfer internals drifted; ValueError (batch-size guard) still propagates.
+                _flashinfer_fast_plan_ok = False
+                logger.warning(
+                    f"flashinfer fast decode plan unavailable ({e}); falling back to the public "
+                    "planner (adds a per-step host sync)."
+                )
+        self.decode_wrapper.plan(
             new_state.kv_starts,
             new_state.kv_indices,
             new_state.kv_last_page_len_buffer,
@@ -288,9 +323,9 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             new_state.backend.tp_kv_head_num,
             new_state.backend.head_dim,
             1,
-            new_state.kv_starts_host,
-            new_state.kv_seq_lens_host,
-            new_state.infer_state.max_kv_seq_len,
+            q_data_type=new_state.backend.q_data_type,
+            kv_data_type=new_state.backend.kv_data_type,
+            non_blocking=True,
         )
 
     def decode_att(

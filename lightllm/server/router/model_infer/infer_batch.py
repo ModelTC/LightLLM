@@ -390,15 +390,6 @@ class InferenceContext:
 
             from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-            # MTP 模式从 GPU 常驻 req_to_accept_len gather；非 MTP 没有该表，accept 固定为 1。
-            req_idxs = torch.tensor(
-                [req.req_idx for req in reqs], dtype=torch.int32, requires_grad=False, device="cpu"
-            ).cuda(non_blocking=True)
-            if self.req_manager.req_to_accept_len is None:
-                b_num_accepted_tokens = torch.ones_like(req_idxs)
-            else:
-                b_num_accepted_tokens = self.req_manager.req_to_accept_len[req_idxs]
-
             copy_linear_att_state_to_kv_buffer(
                 b_req_idx=b_req_idx,
                 big_page_buffer_ids=big_page_buffer_ids,
@@ -407,7 +398,6 @@ class InferenceContext:
                 cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
                 cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
                 mtp_step=self.args.mtp_step,
-                b_num_accepted_tokens=b_num_accepted_tokens,
             )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"

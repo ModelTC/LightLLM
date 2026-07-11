@@ -32,7 +32,6 @@ def test_copy_linear_att_state_to_cpu_cache_buffer():
 
     b_req_idx = torch.tensor([1, 3, 0], dtype=torch.int32, device="cuda")
     big_page_buffer_ids = torch.tensor([4, -1, 2], dtype=torch.int32, device="cuda")
-    b_num_accepted_tokens = torch.ones_like(b_req_idx)
 
     copy_linear_att_state_to_kv_buffer(
         b_req_idx=b_req_idx,
@@ -42,7 +41,6 @@ def test_copy_linear_att_state_to_cpu_cache_buffer():
         cpu_kv_conv_state=cpu_kv_conv_state,
         cpu_kv_ssm_state=cpu_kv_ssm_state,
         mtp_step=0,
-        b_num_accepted_tokens=b_num_accepted_tokens,
     )
 
     expected_conv = torch.empty_like(cpu_kv_conv_state).fill_(-1)

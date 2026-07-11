@@ -106,11 +106,16 @@ class CacheAwareSelector(PDSelector):
                 continue
             self.prefix_to_node.move_to_end(chain_hashes[depth - 1])
             node = id_to_node.get(node_id)
-            if node is not None and depth * self.CHUNK_SIZE / len(prompt) >= self.MATCH_RATIO:
-                min_usage = min(e.run_status.total_token_usage_rate for e in self.prefill_nodes)
-                if node.run_status.total_token_usage_rate - min_usage < self.LOAD_MARGIN:
-                    return node
-            break
+            if node is None:
+                # recorded node is no longer available; a shorter prefix may map to a live node
+                continue
+            if depth * self.CHUNK_SIZE / len(prompt) < self.MATCH_RATIO:
+                # shorter prefixes match strictly less, so none will clear MATCH_RATIO either
+                break
+            min_usage = min(e.run_status.total_token_usage_rate for e in self.prefill_nodes)
+            if node.run_status.total_token_usage_rate - min_usage < self.LOAD_MARGIN:
+                return node
+            # affinity node is overloaded; fall through to a shorter prefix that may map to a lighter node
         return self._sample_by_load(self.prefill_nodes)
 
     def _record(self, chain_hashes: List[int], node_id: int):

@@ -14,7 +14,6 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
         return
 
     def return_all_prompt_logprobs_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
-
         # 在 return all_prompt_logprobs 的模式下，不能启用 dynamic prompt cache
         assert self.radix_cache is None
         assert self.disable_chunked_prefill is True
@@ -49,9 +48,11 @@ class ReturnPromptLogProbBackend(ChunkedPrefillBackend):
         if self.prefill_mask_func is not None:
             self.prefill_mask_func(run_reqs, logits)
 
-        next_token_ids, next_token_probs = sample(logits, run_reqs, self.eos_id)
+        # force_logprobs=True: 该 backend 必须为每个请求返回下一 token 的 logprob, 让 sample() 按其
+        # 实际采样所用的 logits (已按 temperature 缩放) 直接算出 logprob, 不再由本函数二次 log。
+        next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id, force_logprobs=True)
         next_token_ids = next_token_ids.detach().cpu().numpy()
-        next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
+        next_token_logprobs = next_token_logprobs.detach().cpu().numpy()
 
         update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         self._post_handle(

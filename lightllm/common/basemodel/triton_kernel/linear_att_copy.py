@@ -11,7 +11,6 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_ssm_ptr,  # [size, linear_layer_num, xxdim]
     b_req_idx,  # [batch_size,]
     big_page_buffer_ids,  # [batch_size,]
-    num_accepted_tokens_ptr,  # [batch_size,]
     gpu_conv_stride_l,
     gpu_conv_stride_s,
     gpu_ssm_stride_l,
@@ -75,10 +74,8 @@ def copy_linear_att_state_to_kv_buffer(
     cpu_kv_conv_state: torch.Tensor,  # [size, linear_layer_num, conv_dim, width_narrow]
     cpu_kv_ssm_state: torch.Tensor,  # [size, linear_layer_num, ...]
     mtp_step: int,
-    b_num_accepted_tokens: torch.Tensor,  # [batch_size,] per-req post-accept count (>=1)
 ):
     assert len(b_req_idx) == big_page_buffer_ids.shape[0]
-    assert len(b_req_idx) == b_num_accepted_tokens.shape[0]
     BLOCK = 4096
 
     assert gpu_conv_state.dim() >= 4, "gpu_conv_state must be [layer, s, conv_dim, widened_width]"
@@ -144,7 +141,6 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_ssm_ptr=cpu_kv_ssm_state,
         b_req_idx=b_req_idx,
         big_page_buffer_ids=big_page_buffer_ids,
-        num_accepted_tokens_ptr=b_num_accepted_tokens,
         gpu_conv_stride_l=gpu_conv_state.stride(0),
         gpu_conv_stride_s=gpu_conv_state.stride(1),
         gpu_ssm_stride_l=gpu_ssm_state.stride(0),

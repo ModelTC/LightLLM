@@ -1123,9 +1123,7 @@ def fused_experts_impl(
             out_hidden_states[begin_chunk_idx:end_chunk_idx],
             shared=None if not has_shared_gate else shared_expert_out[begin_chunk_idx:end_chunk_idx],
             gate=None if not has_shared_gate else shared_expert_gate[begin_chunk_idx:end_chunk_idx],
-            run_config=(
-                None if not has_shared_gate else {"BLOCK_M": 1, "BLOCK_DIM": 128, "NUM_STAGE": 1, "num_warps": 2}
-            ),
+            run_config=None,
         )
     return out_hidden_states
 

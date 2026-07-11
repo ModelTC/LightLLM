@@ -503,7 +503,6 @@ class ChunkedPrefillBackend(ModeBackend):
         # chain step>=1 只写静态 scratch 槽位, 不覆盖 verify 槽位 (那里保存着 step0 写入的
         # (采样 token, 主模型 hidden) 正确 kv, 是下一轮 draft 的前缀上下文)。
         verify_mem_indexes = main_model_input.mem_indexes
-        verify_b_seq_len = main_model_input.b_seq_len.clone()
 
         # share some inference info with the main model
         draft_model_input = main_model_input
@@ -525,16 +524,18 @@ class ChunkedPrefillBackend(ModeBackend):
                 draft_model_input.mem_indexes = self.mtp_chain_scratch[_step * batch_size : (_step + 1) * batch_size]
             all_next_token_ids.append(draft_next_token_ids)
 
+        # 循环内对 b_seq_len 原地累加了 mtp_step 次, 原地减回来即可 (无需 clone 保存)。
+        draft_model_input.b_seq_len -= self.mtp_step
+
         if self.mtp_step > 1:
             # 恢复 verify 位置 -> verify 槽位的映射 (step0 的正确 kv), 消除 chain 写入的污染。
             copy_kv_index_to_req(
                 self.model.req_manager.req_to_token_indexs,
                 main_model_input.b_req_idx,
-                verify_b_seq_len,
+                draft_model_input.b_seq_len,
                 verify_mem_indexes,
             )
         draft_model_input.mem_indexes = verify_mem_indexes
-        draft_model_input.b_seq_len.copy_(verify_b_seq_len)
 
         all_next_token_ids = torch.stack(all_next_token_ids, dim=1)  # [batch_size, mtp_step + 1]
 

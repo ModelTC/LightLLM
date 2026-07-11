@@ -66,7 +66,7 @@ def _moe_sum_reduce_kernel(
                     mask=offs_dim < dim_end,
                     other=0.0,
                 ).to(tl.float32)
-            gate = 1.0 / (1.0 + tl.exp(-gate))
+            gate = tl.sigmoid(gate)
             accumulator += shared * gate
         store_t_ptr = output_ptr + token_index * output_stride_0 + offs_dim
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)

@@ -16,14 +16,18 @@ _flashinfer_top_p_sampling_from_probs_checked = False
 _flashinfer_top_k_sampling_from_probs = None
 _flashinfer_top_k_sampling_from_probs_checked = False
 _uniform_tensor_cache = {}
+_UNIFORM_CACHE_MAX = 4096
 _softmax_out_cache = {}
 _is_flashinfer_sampling_backend = None
 
 
-def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
-    fast_next_token_ids = _try_flashinfer_sample_without_penalty(logits, reqs)
-    if fast_next_token_ids is not None:
-        return fast_next_token_ids.view(-1), None
+def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2], force_logprobs: bool = False):
+    # force_logprobs: 调用方 (return_all_prompt_logprobs) 需要每个请求都返回 logprobs, 即使请求本身未申请;
+    # 此时跳过 "不带 logprobs" 的 flashinfer 快路径, 走标准路径按实际采样用的 logits 计算 logprobs。
+    if not force_logprobs:
+        fast_next_token_ids = _try_flashinfer_sample_without_penalty(logits, reqs)
+        if fast_next_token_ids is not None:
+            return fast_next_token_ids.view(-1), None
 
     (
         b_req_idx,
@@ -41,6 +45,7 @@ def sample(logits: torch.Tensor, reqs: List[InferReq], eos_id: List[int] = [2]):
         exist_req_use_random_seed,
         need_logprobs,
     ) = _get_post_sample_tensors(reqs)
+    need_logprobs = need_logprobs or force_logprobs
     eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
 
     sampling_params_manager = g_infer_context.req_manager.req_sampling_params_manager
@@ -158,6 +163,12 @@ def _try_flashinfer_sample_without_penalty(logits: torch.Tensor, reqs: List[Infe
             return None
         if not shm_param.ignore_eos:
             return None
+        if shm_param.exponential_decay_length_penalty.to_tuple()[1] != 1.0:
+            return None
+        if shm_param.min_new_tokens > 1:
+            out_len = req.get_cur_total_len() - req.shm_req.input_len
+            if out_len < shm_param.min_new_tokens - 1:
+                return None
         if shm_param.presence_penalty != 0.0:
             return None
         if shm_param.frequency_penalty != 0.0:
@@ -240,6 +251,10 @@ def _get_uniform_tensor(value: Union[float, int], size: int, dtype: torch.dtype,
     key = (str(device), dtype, size, value)
     tensor = _uniform_tensor_cache.get(key)
     if tensor is None:
+        # ponytail: key includes the user-supplied top_p/top_k float, so the key space is unbounded.
+        # FIFO-evict to cap growth; bump the ceiling if churn ever makes the eviction rate matter.
+        if len(_uniform_tensor_cache) >= _UNIFORM_CACHE_MAX:
+            _uniform_tensor_cache.pop(next(iter(_uniform_tensor_cache)))
         tensor = torch.full((size,), value, dtype=dtype, device=device)
         _uniform_tensor_cache[key] = tensor
     return tensor

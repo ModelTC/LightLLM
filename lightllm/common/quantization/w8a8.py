@@ -98,6 +98,7 @@ class BaseQuantizationMethod(QuantizationMethod):
 class w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
+        assert HAS_VLLM, "vllm is not installed, it is required for the w8a8 quant method."
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
@@ -160,6 +161,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
 class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
+        assert HAS_VLLM, "vllm is not installed, it is required for the fp8w8a8 quant method (scaled_fp8_quant)."
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
