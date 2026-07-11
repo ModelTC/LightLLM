@@ -19,6 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.start_utils import notify_parent_release_ports
 from rpyc.utils.classic import obtain
 
 
@@ -29,8 +30,10 @@ class AudioManager:
     def __init__(
         self,
         args: StartArgs,
+        port_release_pipe_writer=None,
     ):
         self.args = args
+        self.port_release_pipe_writer = port_release_pipe_writer
         context = zmq.Context(2)
 
         if args.enable_cpu_cache:
@@ -59,6 +62,7 @@ class AudioManager:
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
+        notify_parent_release_ports(self.port_release_pipe_writer, self.args.audio_nccl_ports[: self.audio_dp])
         for dp_rank_id in range(self.audio_dp):
             for tp_rank_id in range(self.audio_tp):
                 device_id = self.args.audio_gpu_ids[dp_rank_id * self.audio_tp + tp_rank_id]
@@ -176,7 +180,8 @@ def start_audio_process(args, pipe_writer):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
     start_parent_check_thread()
     try:
-        audioserver = AudioManager(args=args)
+        notify_parent_release_ports(pipe_writer, [args.audio_port])
+        audioserver = AudioManager(args=args, port_release_pipe_writer=pipe_writer)
         asyncio.run(audioserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

@@ -6,7 +6,7 @@ import uuid
 import subprocess
 import signal
 import math
-from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
+from lightllm.utils.net_utils import PortManager
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
@@ -99,7 +99,6 @@ def _set_envs_and_config(args: StartArgs):
 
 
 def _launch_subprocesses(args: StartArgs):
-
     _set_envs_and_config(args)
 
     auto_set_max_req_total_len(args)
@@ -356,31 +355,8 @@ def _launch_subprocesses(args: StartArgs):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = [args.port]
-    # nccl_port 只在 rank 0 上 bind（TCPStore listener），其他 rank 是 connect，
-    # 不应该把它加入端口锁定列表，否则单机多节点 tp 测试会冲突。
-    if args.nccl_port is not None and args.node_rank == 0:
-        already_uesd_ports.append(args.nccl_port)
-    if args.rl_rpyc_port is not None:
-        already_uesd_ports.append(args.rl_rpyc_port)
-    if args.visual_nccl_ports is not None:
-        already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
-    if not args.disable_audio and args.audio_nccl_ports is not None:
-        already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
-
-    # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
-    # 捕获到端口设置冲突的问题
-    ports_locker = PortLocker(already_uesd_ports)
-    ports_locker.lock_port()
-
-    node_world_size = args.tp // args.nnodes
-    can_use_ports = alloc_can_use_network_port(
-        num=11 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
-        instance_id=args.lightllm_instance_id,
-        used_ports=already_uesd_ports,
-    )
-    auto_ports_locker = PortLocker(can_use_ports)
-    auto_ports_locker.lock_port()
+    port_manager = PortManager.for_model_server(args)
+    can_use_ports = port_manager.allocate_ports(11 + args.visual_dp + args.audio_dp)
     logger.info(f"alloced ports: {can_use_ports}")
     (
         nccl_port,
@@ -433,8 +409,7 @@ def _launch_subprocesses(args: StartArgs):
     args.cache_port = cache_port
     args.metric_port = metric_port
     args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    # 申请在 p d 分离模式下，会用的端口
-    args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
+    args.pd_node_infer_rpyc_ports = []
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
     # p d 分离模式下，decode节点的调度间隙是0
@@ -454,9 +429,8 @@ def _launch_subprocesses(args: StartArgs):
 
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
-
-    ports_locker.release_port()
-    auto_ports_locker.release_port()
+    port_manager.release_unused_ports()
+    process_manager.port_manager = port_manager
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -467,7 +441,6 @@ def _launch_subprocesses(args: StartArgs):
         )
 
     if not args.disable_vision:
-
         if not args.visual_use_proxy_mode:
             from .visualserver.manager import start_visual_process
 
@@ -532,7 +505,6 @@ def _launch_subprocesses(args: StartArgs):
 
 
 def normal_or_p_d_start(args: StartArgs):
-
     process_manager = _launch_subprocesses(args)
 
     # 启动 Hypercorn
@@ -553,6 +525,7 @@ def normal_or_p_d_start(args: StartArgs):
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
+    process_manager.port_manager.release_ports([args.port])
     # 启动子进程
     http_server_process = subprocess.Popen(command)
 
@@ -571,6 +544,7 @@ def normal_or_p_d_start(args: StartArgs):
 
 
 def pd_master_start(args: StartArgs):
+    _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
@@ -588,17 +562,14 @@ def pd_master_start(args: StartArgs):
     logger.info(f"use tgi api: {args.use_tgi_api}")
     logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(
-        num=1, used_ports=[args.nccl_port, args.port], instance_id=args.lightllm_instance_id
-    )
-    auto_ports_locker = PortLocker(can_use_ports)
-    auto_ports_locker.lock_port()
+    port_manager = PortManager(args, [args.port])
+    can_use_ports = port_manager.allocate_ports(1, excluded_ports=[args.nccl_port])
     metric_port = can_use_ports[0]
 
     args.metric_port = metric_port
 
     set_env_start_args(args)
-    auto_ports_locker.release_port()
+    process_manager.port_manager = port_manager
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -624,6 +595,7 @@ def pd_master_start(args: StartArgs):
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
+    port_manager.release_ports([args.port])
     http_server_process = subprocess.Popen(command)
 
     if args.health_monitor:
@@ -639,19 +611,14 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+    _set_envs_and_config(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
 
-    already_uesd_ports = []
-    already_uesd_ports.append(args.visual_rpyc_port)
-    can_use_ports = alloc_can_use_network_port(
-        num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
-        used_ports=already_uesd_ports,
-        instance_id=args.lightllm_instance_id,
-    )
-    auto_ports_locker = PortLocker(can_use_ports)
-    auto_ports_locker.lock_port()
+    port_manager = PortManager(args, [args.visual_rpyc_port])
+    can_use_ports = port_manager.allocate_ports(args.visual_dp)
+    process_manager.port_manager = port_manager
 
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -672,7 +639,6 @@ def visual_only_start(args):
     logger.info(f"all start args:{args}")
 
     set_env_start_args(args)
-    auto_ports_locker.release_port()
 
     from .visualserver.visual_only_manager import start_visual_process
 

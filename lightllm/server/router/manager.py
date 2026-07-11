@@ -37,6 +37,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.start_utils import notify_parent_release_ports
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
@@ -46,8 +47,9 @@ logger = init_logger(__name__)
 
 
 class RouterManager:
-    def __init__(self, args: StartArgs):
+    def __init__(self, args: StartArgs, port_release_pipe_writer=None):
         self.args = args
+        self.port_release_pipe_writer = port_release_pipe_writer
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
         self.node_world_size = self.world_size // args.nnodes
@@ -178,6 +180,8 @@ class RouterManager:
         }
 
         # Call init_model on all model processes
+        if self.args.node_rank == 0:
+            notify_parent_release_ports(self.port_release_pipe_writer, [self.args.nccl_port])
         init_tasks = []
         for model_rpc_client in self.model_rpc_clients:
             init_tasks.append(model_rpc_client.init_model(kvargs=kvargs))
@@ -661,15 +665,19 @@ def start_router_process(args, pipe_writer):
     asyncio.set_event_loop(loop)
 
     try:
+        notify_parent_release_ports(pipe_writer, [args.router_port])
         router = RouterManager(
             args=args,
+            port_release_pipe_writer=pipe_writer,
         )
 
         loop.run_until_complete(router.wait_to_model_ready())
+        notify_parent_release_ports(pipe_writer, [args.router_profiler_port])
         router.profiler_rpyc_server, router.profiler_rpyc_thread = start_router_profiler_server(
             args,
             router.profiler_cmd_queue,
         )
+        notify_parent_release_ports(pipe_writer, [args.rl_rpyc_port])
         router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(
             args,
             router.rl_op_queue,

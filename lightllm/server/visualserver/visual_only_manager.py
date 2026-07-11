@@ -25,6 +25,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.start_utils import notify_parent_release_ports
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
 from .manager import VisualManager
@@ -37,8 +38,10 @@ class VisualOnlyManager(rpyc.Service):
     def __init__(
         self,
         args: StartArgs,
+        port_release_pipe_writer=None,
     ):
         self.args = args
+        self.port_release_pipe_writer = port_release_pipe_writer
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         assert self.vit_dp == 1
@@ -102,6 +105,7 @@ class VisualOnlyManager(rpyc.Service):
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
+        notify_parent_release_ports(self.port_release_pipe_writer, self.args.visual_nccl_ports[: self.vit_dp])
         for dp_rank_id in range(self.vit_dp):  # async init model process
             for tp_rank_id in range(self.vit_tp):
                 device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
@@ -181,7 +185,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
     start_parent_check_thread()
 
     try:
-        visualserver = VisualOnlyManager(args=args)
+        visualserver = VisualOnlyManager(args=args, port_release_pipe_writer=pipe_writer)
 
         def handle_exception(loop, context):
             logger.exception(f"VisualServer Caught exception: {str(context)}")
@@ -197,6 +201,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
 
         from .objs import rpyc_config
 
+        notify_parent_release_ports(pipe_writer, [args.visual_rpyc_port])
         t = rpyc.ThreadedServer(visualserver, port=args.visual_rpyc_port, protocol_config=rpyc_config)
     except Exception as e:
         logger.exception(str(e))

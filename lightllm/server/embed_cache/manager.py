@@ -8,6 +8,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.embed_cache.impl.naive_memory_cache import InMemoryCache
 from rpyc.utils.classic import obtain
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.start_utils import notify_parent_release_ports
 
 
 class CacheServer(rpyc.Service):
@@ -62,6 +63,7 @@ def start_cache_manager(args: StartArgs, pipe_writer):
     from rpyc.utils.server import ThreadedServer
     import lightllm.utils.rpyc_fix_utils as _
 
+    notify_parent_release_ports(pipe_writer, [args.cache_port])
     t = ThreadedServer(service, port=args.cache_port, protocol_config={"allow_pickle": True})
     pipe_writer.send("init ok")
     t.start()

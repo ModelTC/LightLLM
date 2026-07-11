@@ -23,6 +23,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.start_utils import notify_parent_release_ports
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from .manager import VisualManager
@@ -214,6 +215,7 @@ def start_visual_process(args, pipe_writer):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_proxy_server")
     start_parent_check_thread()
     try:
+        notify_parent_release_ports(pipe_writer, [args.visual_port])
         visualserver = ProxyVisualManager(args=args)
     except Exception as e:
         logger.exception(str(e))

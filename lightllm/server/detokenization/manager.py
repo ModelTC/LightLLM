@@ -17,6 +17,7 @@ import pickle
 import time
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.start_utils import notify_parent_release_ports
 
 logger = init_logger(__name__)
 
@@ -172,6 +173,7 @@ def start_detokenization_process(args, pipe_writer):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::detokenization_server")
 
     try:
+        notify_parent_release_ports(pipe_writer, [args.detokenization_port, args.http_server_port])
         manager = DeTokenizationManager(
             args=args,
         )
