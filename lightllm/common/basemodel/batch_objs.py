@@ -38,6 +38,9 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
+    # 只会在继承 Qwen2VLInferStateInfo 的 MRoPE 模型 decode 阶段使用，如
+    # Qwen2/2.5-VL、Qwen3-VL/MOE/Omni、Qwen3.5；普通模型不会使用。
+    b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
     # cpu 变量
@@ -68,6 +71,12 @@ class ModelInput:
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+        if self.b_position_delta is not None:
+            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
+            assert self.is_prefill is False, "b_position_delta should only be used in decode phase."
+        else:
+            assert self.is_prefill is True, "decode ModelInput should provide b_position_delta."
+
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
         if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():

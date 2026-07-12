@@ -43,6 +43,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         num_expert_group: int,
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -64,26 +65,17 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         routed_topk_ids = topk_ids
         if self.num_fused_shared_experts > 0:
-            pad_topk_ids = (
-                torch.arange(
-                    start=self.n_routed_experts,
-                    end=self.n_routed_experts + self.num_fused_shared_experts,
-                    step=1,
-                    dtype=topk_ids.dtype,
-                    device="cuda",
-                )
-                .view(1, self.num_fused_shared_experts)
-                .repeat(topk_ids.shape[0], 1)
-            )
-            pad_topk_weights = torch.full(
-                (topk_weights.shape[0], self.num_fused_shared_experts),
-                fill_value=1.0,
-                device="cuda",
-                dtype=topk_weights.dtype,
+            from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
+                append_fused_shared_experts,
             )
 
-            topk_ids = torch.cat([topk_ids, pad_topk_ids], dim=1)
-            topk_weights = torch.cat([topk_weights, pad_topk_weights], dim=1)
+            topk_weights, topk_ids = append_fused_shared_experts(
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_expert_start_id=self.n_routed_experts,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                shared_expert_gate=shared_expert_gate,
+            )
         return topk_weights, topk_ids, routed_topk_ids
 
     def _fused_experts(
@@ -131,6 +123,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         is_prefill: Optional[bool] = None,
         routing_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         selected_experts = self._select_experts(
             input_tensor=input_tensor,
@@ -143,6 +136,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             num_expert_group=num_expert_group,
             scoring_func=scoring_func,
             per_expert_scale=per_expert_scale,
+            shared_expert_gate=shared_expert_gate,
         )
         if len(selected_experts) == 2:
             topk_weights, topk_ids = selected_experts

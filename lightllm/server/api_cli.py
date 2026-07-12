@@ -461,7 +461,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_image_pixels",
         type=int,
-        default=8294400,
+        default=3686400,  # 8294400 is 4k, 3686400 is 2k
         help="maximum allowed pixel count for one image before resize preprocessing",
     )
     parser.add_argument(
@@ -698,7 +698,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model. only work when tensor parallelism""",
+        help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",
     )
     parser.add_argument(
         "--mtp_mode",

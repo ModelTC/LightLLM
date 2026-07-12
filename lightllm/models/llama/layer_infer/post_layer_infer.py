@@ -34,8 +34,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 start_index += cur_len
                 select_token_num += 1
 
-            last_index = torch.tensor(select_index, dtype=torch.long, device=input_embdings.device)
-            last_input = self.alloc_tensor((select_token_num, embed_dim_), dtype=input_embdings.dtype)
+            last_index = torch.tensor(select_index, dtype=torch.long, device="cpu").cuda(non_blocking=True)
+            last_input = self.alloc_tensor((select_token_num, embed_dim_), dtype=input_embdings.dtype, device="cuda")
             last_input[:, :] = input_embdings[last_index, :]
             return last_input, select_token_num
 

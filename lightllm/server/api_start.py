@@ -25,6 +25,7 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    auto_set_fused_shared_experts,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -102,6 +103,7 @@ def _launch_subprocesses(args: StartArgs):
     _set_envs_and_config(args)
 
     auto_set_max_req_total_len(args)
+    auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -296,18 +298,20 @@ def _launch_subprocesses(args: StartArgs):
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len
         else:
-            assert args.batch_max_tokens >= args.max_req_total_len, f"batch_max_tokens must >= max_req_total_len"
-            f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
+            assert args.batch_max_tokens >= args.max_req_total_len, (
+                f"batch_max_tokens must >= max_req_total_len, "
+                f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
+            )
     else:
         # chunked 模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = 16384 // args.dp
         if args.chunked_prefill_size is None:
             args.chunked_prefill_size = args.batch_max_tokens // 2
-        assert (
-            args.batch_max_tokens >= args.chunked_prefill_size
-        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
-        f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        assert args.batch_max_tokens >= args.chunked_prefill_size, (
+            "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
+            f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        )
 
     # linear att cache 参数自动设置
     if args.linear_att_cache_size is None:

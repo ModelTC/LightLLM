@@ -21,6 +21,34 @@ logger = init_logger(__name__)
 class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
+    @staticmethod
+    def gen_cuda_graph_batch_sizes(max_batch_size=8, tp_world_size: int = 1):
+        args = get_env_start_args()
+        mtp_size = args.mtp_step + 1
+
+        # gen cuda graph batch_sizes
+        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
+        # and [graph_split_batch_size + graph_grow_step_size,
+        # if the mtp_step is not 0, then the batch_sizes will be multiply of (mtp_step + 1)
+
+        graph_split_batch_size = args.graph_split_batch_size * mtp_size
+        graph_grow_step_size = args.graph_grow_step_size * mtp_size
+
+        batch_sizes = [i * mtp_size for i in range(1, args.graph_split_batch_size + 1)]
+        for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
+            batch_sizes.append(_batch_size)
+
+        batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
+        batch_sizes.append(max_batch_size)
+        batch_sizes.sort()
+        if args.enable_tpsp_mix_mode:
+            batch_sizes = [triton.cdiv(e, tp_world_size) * tp_world_size for e in batch_sizes]
+            batch_sizes = list(set(batch_sizes))
+            batch_sizes.sort()
+
+        assert batch_sizes[-1] == max_batch_size
+        return batch_sizes
+
     def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
         self.graph = {}
         self.tp_world_size = tp_world_size
@@ -32,28 +60,11 @@ class CudaGraph:
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
 
-        # gen cuda graph batch_sizes
-        # cuda graph gen for batch size = [1, 2, 3, ..., graph_split_batch_size]
-        # and [graph_split_batch_size + graph_grow_step_size,
-        # if the mtp_step is not 0, then the batch_sizes will be multiply of (mtp_step + 1)
-
-        graph_split_batch_size = self.args.graph_split_batch_size * (self.mtp_step + 1)
-        graph_grow_step_size = self.args.graph_grow_step_size * (self.mtp_step + 1)
-
-        batch_sizes = [i * (self.mtp_step + 1) for i in range(1, self.args.graph_split_batch_size + 1)]
-        for _batch_size in range(graph_split_batch_size + graph_grow_step_size, max_batch_size, graph_grow_step_size):
-            batch_sizes.append(_batch_size)
-
-        batch_sizes = list(set([e for e in batch_sizes if e < max_batch_size]))
-        batch_sizes.append(max_batch_size)
-        batch_sizes.sort()
-        if self.args.enable_tpsp_mix_mode:
-            batch_sizes = [triton.cdiv(e, self.tp_world_size) * self.tp_world_size for e in batch_sizes]
-            batch_sizes = list(set(batch_sizes))
-            batch_sizes.sort()
-
-        self.cuda_graph_batch_sizes = batch_sizes
-        assert batch_sizes[-1] == self.max_batch_size
+        self.cuda_graph_batch_sizes = self.gen_cuda_graph_batch_sizes(
+            max_batch_size=max_batch_size,
+            tp_world_size=tp_world_size,
+        )
+        assert self.cuda_graph_batch_sizes[-1] == self.max_batch_size
         logger.info(f"cuda graph batch_sizes: {self.cuda_graph_batch_sizes}")
 
     def can_run(self, batch_size, max_len_in_batch):
@@ -225,6 +236,7 @@ class CudaGraph:
                 b_req_idx=b_req_idx,
                 b_seq_len=b_seq_len,
                 b_mtp_index=b_mtp_index,
+                b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                 **model._gen_special_model_input(batch_size),
@@ -284,6 +296,7 @@ class CudaGraph:
                     mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_seq_len=b_seq_len,
+                    b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                     **model._gen_special_model_input(batch_size),
                 )

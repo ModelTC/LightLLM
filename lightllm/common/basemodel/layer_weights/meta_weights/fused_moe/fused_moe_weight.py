@@ -141,6 +141,7 @@ class FusedMoeWeight(BaseWeightTpl):
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
         infer_state=None,
+        shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         routing_capture_callback = self._make_routing_capture_callback(infer_state)
         return self.fuse_moe_impl(
@@ -158,6 +159,7 @@ class FusedMoeWeight(BaseWeightTpl):
             is_prefill=is_prefill,
             routing_capture_callback=routing_capture_callback,
             per_expert_scale=self.per_expert_scale,
+            shared_expert_gate=shared_expert_gate,
         )
 
     def low_latency_dispatch(

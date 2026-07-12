@@ -214,20 +214,26 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
 
 def _ensure_qkv_token_strided(x: torch.Tensor, inner_numel: int):
-    """Return q/k/v and token stride, copying only when needed."""
+    """Return q/k/v and per-token stride, copying only when needed.
+
+    Supports the decode layout [tokens, 1, head, dim] and the MTP verify /
+    varlen layout [1, tokens, head, dim]; the token dimension is the non-unit
+    leading dim. Both are column views of a packed projection output, so the
+    tail [head, dim] is contiguous and no copy is needed.
+    """
     if x is None:
         return None, 0
 
-    # Decode layout must be [tokens, 1, head, dim].
-    assert x.shape[1] == 1, "q/k/v must use decode layout [tokens, 1, head, dim]"
+    assert x.shape[0] == 1 or x.shape[1] == 1, "q/k/v must use layout [tokens, 1, head, dim] or [1, tokens, head, dim]"
 
     # Packed tail [head, dim] means the last two strides are [dim, 1].
     tail_contiguous = x.stride()[-2:] == (x.shape[-1], 1)
     if not tail_contiguous:
         x = x.contiguous()
         return x, inner_numel
-    else:
-        return x, x.stride(0)
+    # Token dim is the non-unit leading dim (dim 0 for decode, dim 1 for verify).
+    tok_dim = 0 if x.shape[1] == 1 else 1
+    return x, x.stride(tok_dim)
 
 
 def _ensure_gate_token_strided(x: torch.Tensor, inner_numel: int):
@@ -264,11 +270,10 @@ def fused_recurrent_gated_delta_rule_fwd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
-    # In LightLLM's Qwen3Next inference path this fused recurrent kernel is
-    # used only for decode. Prefill/varlen requests are handled by
-    # chunk_gated_delta_rule, so keep cu_seqlens out of this strided-view path.
-    assert cu_seqlens is None, "cu_seqlens is not supported by the decode-only fused recurrent kernel"
-    N = B
+    # Decode passes cu_seqlens=None (equal-length one-token sequences); the
+    # Qwen3Next MTP verify path passes cu_seqlens for variable-length verify
+    # chunks. Both flow through the per-token strided-view path below.
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     q, stride_q_tok = _ensure_qkv_token_strided(q, H * K)
     k, stride_k_tok = _ensure_qkv_token_strided(k, H * K)
     v, stride_v_tok = _ensure_qkv_token_strided(v, HV * V)
@@ -468,10 +473,10 @@ def fused_recurrent_gated_delta_rule(
         inplace_final_state: bool:
             Whether to store the final state in-place to save memory.
             Default: `True`.
-        cu_seqlens (torch.LongTensor):
-            Must be `None`. In LightLLM this fused recurrent kernel is used only
-            by the Qwen3Next decode path; prefill/varlen requests use
-            `chunk_gated_delta_rule`.
+        cu_seqlens (Optional[torch.LongTensor]):
+            Cumulative sequence lengths of shape `[N+1]` for variable-length
+            inputs (the Qwen3Next MTP verify path). `None` for plain decode,
+            where sequences are treated as equal-length (one token each).
         ssm_state_indices (Optional[torch.Tensor]):
             Indices to map the input sequences to the initial/final states.
         num_accepted_tokens (Optional[torch.Tensor]):
@@ -500,9 +505,6 @@ def fused_recurrent_gated_delta_rule(
             initial_state=h0,
         )
     """
-    # This wrapper is only used for Qwen3Next decode inference in LightLLM.
-    # Keep varlen/prefill inputs on chunk_gated_delta_rule instead.
-    assert cu_seqlens is None, "cu_seqlens is not supported by the decode-only fused recurrent kernel"
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:

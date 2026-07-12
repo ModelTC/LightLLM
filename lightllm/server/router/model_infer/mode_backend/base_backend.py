@@ -330,7 +330,6 @@ class ModeBackend:
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
-            # Select MTP model class based on model type
             model_type = mtp_model_cfg.get("model_type", "")
             if model_type == "deepseek_v3":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
@@ -341,9 +340,19 @@ class ModeBackend:
             elif model_type == "mistral":
                 assert self.args.mtp_mode in ["vanilla_no_att", "eagle_no_att"]
                 self.draft_models.append(MistralMTPModel(mtp_model_kvargs))
-            elif mtp_model_cfg["model_type"] == "glm4_moe_lite":
+            elif model_type == "glm4_moe_lite":
                 assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
                 self.draft_models.append(Glm4MoeLiteMTPModel(mtp_model_kvargs))
+            elif model_type in ("qwen3_5", "qwen3_5_text"):
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+
+                self.draft_models.append(Qwen3_5MTPModel(mtp_model_kvargs))
+            elif model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+                assert self.args.mtp_mode in ["vanilla_with_att", "eagle_with_att"]
+                from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
+
+                self.draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 
@@ -847,8 +856,7 @@ class ModeBackend:
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
         logits = model_output.logits
-        probs = torch.softmax(logits, dim=-1)
-        draft_next_token_ids_gpu = torch.argmax(probs, dim=-1)
+        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
         return draft_next_token_ids_gpu
 
     def _sample_and_scatter_token(
