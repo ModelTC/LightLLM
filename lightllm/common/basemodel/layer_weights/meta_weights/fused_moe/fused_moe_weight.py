@@ -292,6 +292,16 @@ class FusedMoeWeight(BaseWeightTpl):
         )
         return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
 
+    def finalize_load(self):
+        if self.enable_ep_moe:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+                transform_mega_moe_weights_in_place,
+                use_sm100_mega_moe,
+            )
+
+            if use_sm100_mega_moe(self.quant_method):
+                transform_mega_moe_weights_in_place(self.w13, self.w2)
+
     def _create_weight(self):
         intermediate_size = self.split_inter_size
         self.e_score_correction_bias = None
