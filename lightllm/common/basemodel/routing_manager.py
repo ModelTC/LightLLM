@@ -115,21 +115,17 @@ class RoutingCaptureManager:
     def dtype_id(self) -> int:
         return 1 if self.dtype == torch.uint8 else 2
 
-    def make_capture_callback_factory(self, mem_indexes: torch.Tensor):
+    def make_capture_callback(self, layer_num: int, mem_indexes: torch.Tensor):
+        routing_layer_index = self.layer_num_to_moe_index.get(layer_num)
+        if routing_layer_index is None:
+            return None
         if not mem_indexes.is_cuda:
             mem_indexes = mem_indexes.cuda(non_blocking=True)
 
-        def make_capture_callback(layer_num: int):
-            routing_layer_index = self.layer_num_to_moe_index.get(layer_num)
-            if routing_layer_index is None:
-                return None
+        def capture_callback(topk_ids: torch.Tensor) -> None:
+            self.capture(routing_layer_index=routing_layer_index, topk_ids=topk_ids, mem_indexes=mem_indexes)
 
-            def capture_callback(topk_ids: torch.Tensor) -> None:
-                self.capture(routing_layer_index=routing_layer_index, topk_ids=topk_ids, mem_indexes=mem_indexes)
-
-            return capture_callback
-
-        return make_capture_callback
+        return capture_callback
 
     def capture(self, routing_layer_index: int, topk_ids: torch.Tensor, mem_indexes: torch.Tensor) -> None:
         assert topk_ids.dim() == 2
@@ -151,6 +147,12 @@ class RoutingCaptureManager:
 
 
 g_routing_capture_manager: Optional[RoutingCaptureManager] = None
+
+
+def make_routing_capture_callback(infer_state, layer_num: int):
+    if g_routing_capture_manager is None:
+        return None
+    return g_routing_capture_manager.make_capture_callback(layer_num=layer_num, mem_indexes=infer_state.mem_index)
 
 
 def create_routing_capture_manager(

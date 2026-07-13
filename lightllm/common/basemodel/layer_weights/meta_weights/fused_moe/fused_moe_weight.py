@@ -9,6 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
+from lightllm.common.basemodel import routing_manager as _routing_mgr
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
@@ -124,12 +125,6 @@ class FusedMoeWeight(BaseWeightTpl):
             self.expert_idx_to_local_idx = {expert_idx: i for (i, expert_idx) in enumerate(self.local_expert_ids)}
             self.rexpert_idx_to_local_idx = {}
 
-    def _make_routing_capture_callback(self, infer_state):
-        make_routing_capture_callback = getattr(infer_state, "make_routing_capture_callback", None)
-        if make_routing_capture_callback is None:
-            return None
-        return make_routing_capture_callback(self.layer_num_)
-
     def experts(
         self,
         input_tensor: torch.Tensor,
@@ -143,7 +138,7 @@ class FusedMoeWeight(BaseWeightTpl):
         infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        routing_capture_callback = self._make_routing_capture_callback(infer_state)
+        routing_capture_callback = _routing_mgr.make_routing_capture_callback(infer_state, self.layer_num_)
         return self.fuse_moe_impl(
             input_tensor=input_tensor,
             router_logits=router_logits,
