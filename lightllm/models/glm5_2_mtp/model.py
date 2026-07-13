@@ -27,6 +27,21 @@ class Glm5_2MTPModel(Glm5_2TpPartModel):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
 
+    def _init_quant(self):
+        super()._init_quant()
+        expert_dtype = self.expert_dtype or self.config.get("expert_dtype", None)
+        if expert_dtype is None:
+            return
+
+        target = self.quant_cfg._get_expert_quant_type(expert_dtype)
+        mtp_layer_start = self.config["num_hidden_layers"]
+        num_mtp_layers = self.config.get("num_nextn_predict_layers", 1)
+        for layer_num in range(mtp_layer_start, mtp_layer_start + num_mtp_layers):
+            if self.expert_dtype is not None:
+                self.quant_cfg.quant_cfg[layer_num]["fused_moe"] = target
+            else:
+                self.quant_cfg.quant_cfg[layer_num].setdefault("fused_moe", target)
+
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager
 
