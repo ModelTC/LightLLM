@@ -155,8 +155,6 @@ class ModeBackend:
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
         self.is_deepseek_v4 = isinstance(self.model.req_manager, DeepseekV4ReqManager)
-        if self.is_deepseek_v4:
-            self.support_overlap = False
 
         if self.is_linear_att_mixed_model:
             self.linear_att_cache_manager = LinearAttCacheManager(
