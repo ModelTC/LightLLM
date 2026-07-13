@@ -348,7 +348,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
-        return layer_weight.experts_.experts_with_preselected(
+        return layer_weight.experts_.experts_with_topk(
             input_tensor=x,
             topk_weights=weights,
             topk_ids=indices,

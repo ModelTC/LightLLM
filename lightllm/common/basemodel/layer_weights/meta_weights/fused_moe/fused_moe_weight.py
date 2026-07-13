@@ -137,7 +137,6 @@ class FusedMoeWeight(BaseWeightTpl):
         is_prefill: Optional[bool] = None,
     ) -> torch.Tensor:
         """Backward compatible method that routes to platform-specific implementation."""
-        self._finalize_moe_weight()
         return self.fuse_moe_impl(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -154,7 +153,7 @@ class FusedMoeWeight(BaseWeightTpl):
             per_expert_scale=self.per_expert_scale,
         )
 
-    def experts_with_preselected(
+    def experts_with_topk(
         self,
         input_tensor: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -162,7 +161,6 @@ class FusedMoeWeight(BaseWeightTpl):
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
     ) -> torch.Tensor:
-        self._finalize_moe_weight()
         return self.fuse_moe_impl.fused_experts_with_topk(
             input_tensor=input_tensor,
             w13=self.w13,
@@ -302,17 +300,12 @@ class FusedMoeWeight(BaseWeightTpl):
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
         load_ok = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
-        if load_ok:
-            self._finalize_moe_weight()
+        if load_ok and not self._moe_weight_finalized:
+            finalize = getattr(self.quant_method, "finalize_moe_weight", None)
+            if finalize is not None:
+                finalize(self)
+            self._moe_weight_finalized = True
         return load_ok
-
-    def _finalize_moe_weight(self):
-        if self._moe_weight_finalized:
-            return
-        finalize = getattr(self.quant_method, "finalize_moe_weight", None)
-        if finalize is not None:
-            finalize(self)
-        self._moe_weight_finalized = True
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size
