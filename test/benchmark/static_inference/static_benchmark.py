@@ -1207,7 +1207,10 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
 
 def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase], model_kvargs: Dict, model) -> None:
     """Capture profile-mode graphs after the real decode batch is known."""
-    graph_batch_size = cap_graph_batch_size(args.graph_max_batch_size, cases)
+    profile_batch_size = max_decode_batch_size(cases)
+    graph_batch_size = profile_batch_size
+    if args.mtp_mode in MTP_MODES:
+        graph_batch_size = min(graph_batch_size, args.graph_max_batch_size)
     args.graph_max_batch_size = graph_batch_size
     model_kvargs["graph_max_batch_size"] = graph_batch_size
     model_kvargs["disable_cudagraph"] = False
@@ -1215,6 +1218,13 @@ def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase
     if args.enable_decode_microbatch_overlap:
         graph_batch_size //= 2
     model.graph_max_batch_size = graph_batch_size * (int(args.mtp_step) + 1)
+    if torch.distributed.get_rank() == 0:
+        print(
+            f"Profile decode batch size: {profile_batch_size}; "
+            f"CUDA Graph request batch size: {args.graph_max_batch_size}; "
+            f"expanded graph batch size: {model.graph_max_batch_size}",
+            flush=True,
+        )
     model.disable_cudagraph = False
     # Attention backends may size persistent graph buffers during construction.
     # Rebuild them after replacing the temporary profile-time batch limit.
