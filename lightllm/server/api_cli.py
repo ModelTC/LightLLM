@@ -593,6 +593,34 @@ def make_argument_parser() -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument(
+        "--mtp_draft_graph_max_batch_size",
+        type=int,
+        default=None,
+        help="""
+        Optional logical CUDA graph batch-size limit for MTP draft models.
+        Defaults to graph_max_batch_size. The value is expanded by the draft
+        model's decode graph group size in the same way as the main setting.
+        """,
+    )
+    parser.add_argument(
+        "--mtp_draft_graph_split_batch_size",
+        type=int,
+        default=None,
+        help="""
+        Optional dense-prefix CUDA graph limit for MTP draft models.
+        Defaults to graph_split_batch_size.
+        """,
+    )
+    parser.add_argument(
+        "--mtp_draft_graph_grow_step_size",
+        type=int,
+        default=None,
+        help="""
+        Optional CUDA graph batch-size growth step for MTP draft models.
+        Defaults to graph_grow_step_size.
+        """,
+    )
+    parser.add_argument(
         "--graph_max_len_in_batch",
         type=int,
         default=0,

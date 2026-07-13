@@ -528,7 +528,10 @@ def prepare_dynamic_mtp_model_input(
     # consumed.  Decode only needs b_position_delta on device, so placeholder
     # multimodal metadata keeps padded ModelInput checks shape-consistent.
     if model_input.multimodal_params is not None:
-        model_input.multimodal_params = [{"images": [], "audios": []} for _ in range(dynamic_batch_size)]
+        # Read-only placeholders: avoid rebuilding hundreds of nested Python
+        # objects on every compacted decode iteration.
+        empty_multimodal_params = {"images": [], "audios": []}
+        model_input.multimodal_params = [empty_multimodal_params] * dynamic_batch_size
 
     # ! 现在这些值没有实际作用，同时修改这些值还会导致阻塞操作，因此暂时不修改这些值了
     # model_input.total_token_num = int(model_input.b_seq_len.sum().item())
@@ -541,8 +544,7 @@ def prepare_dynamic_mtp_model_input(
 def _fwd_kernel_gen_b_req_mtp_start_loc(
     b_mtp_index,
     b_req_mtp_start_loc,
-    num_reqs: tl.constexpr,
-    batch_size: tl.constexpr,
+    batch_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     offset = tl.arange(0, BLOCK_SIZE)
@@ -561,7 +563,6 @@ def gen_b_req_mtp_start_loc(b_mtp_index: torch.Tensor, num_reqs: int):
     _fwd_kernel_gen_b_req_mtp_start_loc[grid](
         b_mtp_index=b_mtp_index,
         b_req_mtp_start_loc=b_req_mtp_start_loc,
-        num_reqs=num_reqs,
         batch_size=batch_size,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,

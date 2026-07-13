@@ -99,7 +99,231 @@ class ModeBackend:
         self._radix_tree_merge_counter: int = 0
         self._enable_radix_tree_timer_merge: bool = enable_radix_tree_timer_merge()
         self._radix_tree_merge_update_delta: int = get_radix_tree_merge_update_delta()
+
+        # Optional low-overhead target verify timing for MTP benchmarks. CUDA
+        # events are harvested asynchronously during decode and synchronized
+        # only after the server becomes idle, so normal serving is unchanged.
+        self._mtp_verify_time_enabled = os.getenv("LIGHTLLM_MTP_VERIFY_TIME_STATS", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._mtp_verify_time_pending = collections.deque()
+        self._mtp_verify_time_event_pool = []
+        self._mtp_verify_time_dirty = False
+        self._mtp_verify_time_totals = {
+            "calls": 0,
+            "input_rows": 0,
+            "graph_rows": 0,
+            "graph_calls": 0,
+            "eager_calls": 0,
+            "gpu_ms": 0.0,
+        }
+        self._mtp_verify_time_reported = self._mtp_verify_time_totals.copy()
+
+        # Optional end-to-end MTP phase diagnostics.  CUDA events are queued
+        # on the active overlap stream and harvested only after serving goes
+        # idle, so enabling this does not insert a decode-time synchronize.
+        self._mtp_phase_time_enabled = os.getenv("LIGHTLLM_MTP_PHASE_TIME_STATS", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._mtp_phase_gpu_pending = collections.deque()
+        self._mtp_phase_gpu_event_pool = []
+        self._mtp_phase_gpu_dirty = False
+        self._mtp_phase_gpu_totals = {}
+        self._mtp_phase_gpu_reported = {}
+        self._mtp_phase_cpu_totals = collections.defaultdict(lambda: {"calls": 0, "wall_ms": 0.0})
+        self._mtp_phase_cpu_reported = {}
+        self._mtp_phase_time_lock = threading.Lock()
         pass
+
+    def start_mtp_phase_gpu(self):
+        if not self._mtp_phase_time_enabled:
+            return None
+        self._drain_mtp_phase_gpu_times(synchronize=False)
+        if self._mtp_phase_gpu_event_pool:
+            start_event, end_event = self._mtp_phase_gpu_event_pool.pop()
+        else:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        return start_event, end_event
+
+    def finish_mtp_phase_gpu(
+        self,
+        timer,
+        *,
+        phase: str,
+        input_rows: int = 0,
+        work_units: int = 0,
+    ) -> None:
+        if timer is None:
+            return
+        start_event, end_event = timer
+        end_event.record()
+        self._mtp_phase_gpu_pending.append((start_event, end_event, str(phase), int(input_rows), int(work_units)))
+        self._mtp_phase_gpu_dirty = True
+
+    def record_mtp_phase_cpu(self, *, phase: str, wall_seconds: float) -> None:
+        if not self._mtp_phase_time_enabled:
+            return
+        with self._mtp_phase_time_lock:
+            totals = self._mtp_phase_cpu_totals[str(phase)]
+            totals["calls"] += 1
+            totals["wall_ms"] += max(0.0, float(wall_seconds) * 1000.0)
+
+    def _drain_mtp_phase_gpu_times(self, *, synchronize: bool) -> None:
+        while self._mtp_phase_gpu_pending:
+            start_event, end_event, phase, input_rows, work_units = self._mtp_phase_gpu_pending[0]
+            if synchronize:
+                end_event.synchronize()
+            elif not end_event.query():
+                break
+
+            self._mtp_phase_gpu_pending.popleft()
+            totals = self._mtp_phase_gpu_totals.setdefault(
+                phase,
+                {"calls": 0, "input_rows": 0, "work_units": 0, "gpu_ms": 0.0},
+            )
+            totals["calls"] += 1
+            totals["input_rows"] += input_rows
+            totals["work_units"] += work_units
+            totals["gpu_ms"] += float(start_event.elapsed_time(end_event))
+            self._mtp_phase_gpu_event_pool.append((start_event, end_event))
+
+    def flush_mtp_phase_time_stats(self) -> None:
+        if not self._mtp_phase_time_enabled:
+            return
+        if self._mtp_phase_gpu_dirty:
+            self._drain_mtp_phase_gpu_times(synchronize=True)
+            for phase, totals in sorted(self._mtp_phase_gpu_totals.items()):
+                reported = self._mtp_phase_gpu_reported.get(
+                    phase,
+                    {"calls": 0, "input_rows": 0, "work_units": 0, "gpu_ms": 0.0},
+                )
+                interval = {key: totals[key] - reported[key] for key in totals}
+                if interval["calls"] > 0:
+                    logger.info(
+                        "mtp_phase_gpu_time phase:%s interval_calls:%d interval_input_rows:%d "
+                        "interval_work_units:%d interval_gpu_ms:%.6f total_calls:%d "
+                        "total_input_rows:%d total_work_units:%d total_gpu_ms:%.6f",
+                        phase,
+                        interval["calls"],
+                        interval["input_rows"],
+                        interval["work_units"],
+                        interval["gpu_ms"],
+                        totals["calls"],
+                        totals["input_rows"],
+                        totals["work_units"],
+                        totals["gpu_ms"],
+                    )
+                self._mtp_phase_gpu_reported[phase] = totals.copy()
+            self._mtp_phase_gpu_dirty = False
+
+        with self._mtp_phase_time_lock:
+            for phase, totals in sorted(self._mtp_phase_cpu_totals.items()):
+                reported = self._mtp_phase_cpu_reported.get(phase, {"calls": 0, "wall_ms": 0.0})
+                interval_calls = totals["calls"] - reported["calls"]
+                interval_wall_ms = totals["wall_ms"] - reported["wall_ms"]
+                if interval_calls > 0:
+                    logger.info(
+                        "mtp_phase_cpu_time phase:%s interval_calls:%d interval_wall_ms:%.6f "
+                        "total_calls:%d total_wall_ms:%.6f",
+                        phase,
+                        interval_calls,
+                        interval_wall_ms,
+                        totals["calls"],
+                        totals["wall_ms"],
+                    )
+                self._mtp_phase_cpu_reported[phase] = totals.copy()
+
+    def _get_mtp_target_verify_graph_shape(self, model_input: ModelInput) -> Tuple[int, bool]:
+        input_rows = int(model_input.batch_size)
+        graph = getattr(getattr(self, "model", None), "graph", None)
+        if graph is None or not graph.can_run(input_rows, model_input.max_kv_seq_len):
+            return input_rows, False
+        graph_rows = graph.find_closest_graph_batch_size(input_rows)
+        if graph_rows is None:
+            return input_rows, False
+        return int(graph_rows), True
+
+    def _drain_mtp_target_verify_times(self, *, synchronize: bool) -> None:
+        while self._mtp_verify_time_pending:
+            start_event, end_event, input_rows, graph_rows, used_graph = self._mtp_verify_time_pending[0]
+            if synchronize:
+                end_event.synchronize()
+            elif not end_event.query():
+                break
+
+            self._mtp_verify_time_pending.popleft()
+            totals = self._mtp_verify_time_totals
+            totals["calls"] += 1
+            totals["input_rows"] += input_rows
+            totals["graph_rows"] += graph_rows
+            totals["graph_calls" if used_graph else "eager_calls"] += 1
+            totals["gpu_ms"] += float(start_event.elapsed_time(end_event))
+            self._mtp_verify_time_event_pool.append((start_event, end_event))
+        return
+
+    def _forward_mtp_target_with_time(self, model_input: ModelInput) -> ModelOutput:
+        if not self._mtp_verify_time_enabled:
+            return self.model.forward(model_input)
+
+        self._drain_mtp_target_verify_times(synchronize=False)
+        if self._mtp_verify_time_event_pool:
+            start_event, end_event = self._mtp_verify_time_event_pool.pop()
+        else:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+
+        graph_rows, used_graph = self._get_mtp_target_verify_graph_shape(model_input)
+        input_rows = int(model_input.batch_size)
+        start_event.record()
+        model_output = self.model.forward(model_input)
+        end_event.record()
+        self._mtp_verify_time_pending.append((start_event, end_event, input_rows, graph_rows, used_graph))
+        self._mtp_verify_time_dirty = True
+        return model_output
+
+    def flush_mtp_target_verify_time_stats(self) -> None:
+        if self._mtp_verify_time_enabled and self._mtp_verify_time_dirty:
+            self._drain_mtp_target_verify_times(synchronize=True)
+            totals = self._mtp_verify_time_totals
+            reported = self._mtp_verify_time_reported
+            interval = {
+                key: totals[key] - reported[key]
+                for key in ("calls", "input_rows", "graph_rows", "graph_calls", "eager_calls", "gpu_ms")
+            }
+            if interval["calls"] > 0:
+                logger.info(
+                    "mtp_target_verify_gpu_time "
+                    "interval_calls:%d interval_input_rows:%d interval_graph_rows:%d "
+                    "interval_graph_calls:%d interval_eager_calls:%d interval_gpu_ms:%.6f "
+                    "total_calls:%d total_input_rows:%d total_graph_rows:%d "
+                    "total_graph_calls:%d total_eager_calls:%d total_gpu_ms:%.6f "
+                    "total_avg_gpu_ms:%.6f",
+                    interval["calls"],
+                    interval["input_rows"],
+                    interval["graph_rows"],
+                    interval["graph_calls"],
+                    interval["eager_calls"],
+                    interval["gpu_ms"],
+                    totals["calls"],
+                    totals["input_rows"],
+                    totals["graph_rows"],
+                    totals["graph_calls"],
+                    totals["eager_calls"],
+                    totals["gpu_ms"],
+                    totals["gpu_ms"] / totals["calls"],
+                )
+            self._mtp_verify_time_reported = totals.copy()
+            self._mtp_verify_time_dirty = False
+        self.flush_mtp_phase_time_stats()
+        return
 
     def init_model(self, kvargs):
         self.args: StartArgs = kvargs.get("args", None)
@@ -168,6 +392,8 @@ class ModeBackend:
             "disable_chunked_prefill": self.disable_chunked_prefill,
             "data_type": kvargs.get("data_type", "float16"),
             "graph_max_batch_size": kvargs.get("graph_max_batch_size", 16),
+            "graph_split_batch_size": kvargs.get("graph_split_batch_size", self.args.graph_split_batch_size),
+            "graph_grow_step_size": kvargs.get("graph_grow_step_size", self.args.graph_grow_step_size),
             "graph_max_len_in_batch": kvargs.get("graph_max_len_in_batch", 8196),
             "disable_cudagraph": kvargs.get("disable_cudagraph", False),
             "mem_fraction": kvargs.get("mem_fraction", 0.9),
@@ -335,6 +561,25 @@ class ModeBackend:
         assert mtp_draft_model_dirs is not None
         assert len(mtp_draft_model_dirs) >= num_mtp_modules
 
+        draft_graph_max_override = getattr(self.args, "mtp_draft_graph_max_batch_size", None)
+        draft_graph_split_override = getattr(self.args, "mtp_draft_graph_split_batch_size", None)
+        draft_graph_grow_override = getattr(self.args, "mtp_draft_graph_grow_step_size", None)
+        draft_graph_max_batch_size = (
+            draft_graph_max_override
+            if draft_graph_max_override is not None
+            else main_kvargs.get("graph_max_batch_size", 16)
+        )
+        draft_graph_split_batch_size = (
+            draft_graph_split_override
+            if draft_graph_split_override is not None
+            else main_kvargs.get("graph_split_batch_size", self.args.graph_split_batch_size)
+        )
+        draft_graph_grow_step_size = (
+            draft_graph_grow_override
+            if draft_graph_grow_override is not None
+            else main_kvargs.get("graph_grow_step_size", self.args.graph_grow_step_size)
+        )
+
         for i in range(num_mtp_modules):
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(mtp_draft_model_dirs[i])
             self._normalize_block_mtp_step_from_config(mtp_model_cfg)
@@ -350,7 +595,9 @@ class ModeBackend:
                 "return_all_prompt_logics": False,
                 "disable_chunked_prefill": self.disable_chunked_prefill,
                 "data_type": main_kvargs.get("data_type", "float16"),
-                "graph_max_batch_size": main_kvargs.get("graph_max_batch_size", 16),
+                "graph_max_batch_size": draft_graph_max_batch_size,
+                "graph_split_batch_size": draft_graph_split_batch_size,
+                "graph_grow_step_size": draft_graph_grow_step_size,
                 "graph_max_len_in_batch": main_kvargs.get("graph_max_len_in_batch", 8196),
                 "disable_cudagraph": main_kvargs.get("disable_cudagraph", False),
                 "mem_fraction": main_kvargs["mem_fraction"],

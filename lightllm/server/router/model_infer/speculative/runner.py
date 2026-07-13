@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
 import torch
@@ -61,6 +62,8 @@ class SpecDecodeRunner:
         ],
     ) -> SpecDecodeForwardState:
         runtime = self.runtime
+        phase_timer = self.backend.start_mtp_phase_gpu()
+        host_start = time.perf_counter()
         b_req_mtp_start_loc = gen_b_req_mtp_start_loc(model_input.b_mtp_index, num_reqs=req_num)
         verify_result = runtime.verify_target_tokens(
             new_next_token_ids=next_token_ids,
@@ -72,10 +75,22 @@ class SpecDecodeRunner:
             key="accepted_index",
             gpu_tensor=accepted_index,
         )
+        self.backend.record_mtp_phase_cpu(
+            phase="verify_post_host",
+            wall_seconds=time.perf_counter() - host_start,
+        )
+        self.backend.finish_mtp_phase_gpu(
+            phase_timer,
+            phase="verify_post",
+            input_rows=int(next_token_ids.shape[0]),
+            work_units=req_num,
+        )
 
         verify_event = torch.cuda.Event(enable_timing=True)
         verify_event.record()
 
+        phase_timer = self.backend.start_mtp_phase_gpu()
+        host_start = time.perf_counter()
         proposal = runtime.propose_next(
             main_model_input=model_input,
             main_model_output=model_output,
@@ -84,6 +99,23 @@ class SpecDecodeRunner:
             draft_step=plan.draft_step,
             verify_result=verify_result,
         )
+        self.backend.record_mtp_phase_cpu(
+            phase="draft_proposal_host",
+            wall_seconds=time.perf_counter() - host_start,
+        )
+        self.backend.finish_mtp_phase_gpu(
+            phase_timer,
+            phase="draft_proposal",
+            input_rows=int(next_token_ids.shape[0]),
+            work_units=(
+                int(proposal.draft_forward_rows)
+                if proposal.draft_forward_rows is not None
+                else req_num * int(plan.draft_step)
+            ),
+        )
+
+        phase_timer = self.backend.start_mtp_phase_gpu()
+        host_start = time.perf_counter()
         all_next_token_ids = runtime.pad_all_next_token_ids(
             token_ids=proposal.token_ids,
             draft_step=plan.draft_step,
@@ -98,7 +130,7 @@ class SpecDecodeRunner:
                 key="mtp_schedule_probs",
                 gpu_tensor=all_next_token_probs,
             )
-            if all_next_token_probs is not None
+            if all_next_token_probs is not None and runtime.needs_schedule_probs_cpu()
             else None
         )
 
@@ -125,6 +157,16 @@ class SpecDecodeRunner:
 
         sync_event = torch.cuda.Event()
         sync_event.record()
+        self.backend.record_mtp_phase_cpu(
+            phase="proposal_finalize_host",
+            wall_seconds=time.perf_counter() - host_start,
+        )
+        self.backend.finish_mtp_phase_gpu(
+            phase_timer,
+            phase="proposal_finalize",
+            input_rows=int(next_token_ids.shape[0]),
+            work_units=req_num,
+        )
 
         return SpecDecodeForwardState(
             model_input=model_input,
@@ -146,7 +188,12 @@ class SpecDecodeRunner:
             assert self.runtime.enable_dynamic_mtp, "skip_verify_sync should only be True when dynamic MTP is enabled"
             return decode_reqs, decode_reqs
 
+        wait_start = time.perf_counter()
         state.verify_event.synchronize()
+        self.backend.record_mtp_phase_cpu(
+            phase="verify_sync_wait",
+            wall_seconds=time.perf_counter() - wait_start,
+        )
         return self.runtime.build_decode_req_lists(
             original_run_reqs=state.original_run_reqs,
             selected_run_reqs_cpu=state.selected_run_reqs_cpu,
@@ -154,20 +201,28 @@ class SpecDecodeRunner:
         )
 
     def finish_post(self, *, state: SpecDecodeForwardState, req_num: int, run_reqs: List) -> SpecDecodePostState:
+        wait_start = time.perf_counter()
         state.sync_event.synchronize()
+        self.backend.record_mtp_phase_cpu(
+            phase="proposal_sync_wait",
+            wall_seconds=time.perf_counter() - wait_start,
+        )
 
         runtime = self.runtime
+        host_start = time.perf_counter()
         if runtime.enable_dynamic_mtp:
             runtime.update_dynamic_accept_stats(
                 req_num=req_num,
                 run_reqs=run_reqs,
                 accepted_index_cpu=state.accepted_index_cpu,
                 dynamic_batch_size=state.plan.dynamic_batch_size,
+                verify_step=state.plan.pre_draft_step,
             )
-            runtime.update_dynamic_schedule_stats(
-                req_num=req_num,
-                schedule_probs_cpu=state.schedule_probs_cpu,
-            )
+            if state.schedule_probs_cpu is not None:
+                runtime.update_dynamic_schedule_stats(
+                    req_num=req_num,
+                    schedule_probs_cpu=state.schedule_probs_cpu,
+                )
 
         need_free_mem_indexes = runtime.build_decode_free_mem_indexes_cpu(
             model_input=state.model_input,
@@ -178,6 +233,10 @@ class SpecDecodeRunner:
             need_free_mem_indexes = torch.cat([need_free_mem_indexes, state.additional_mem_indexes_cpu], dim=0)
 
         select_mask = state.accepted_index_cpu.to(dtype=torch.bool)
+        self.backend.record_mtp_phase_cpu(
+            phase="finish_post_compute_host",
+            wall_seconds=time.perf_counter() - host_start,
+        )
         return SpecDecodePostState(
             next_token_ids=state.next_token_ids_cpu[select_mask],
             next_token_logprobs=state.next_token_logprobs_cpu[select_mask],

@@ -442,6 +442,7 @@ class SpecRuntime:
         run_reqs,
         accepted_index_cpu: torch.Tensor,
         dynamic_batch_size: Optional[int],
+        verify_step: Optional[int] = None,
     ) -> None:
         if not self.enable_dynamic_mtp:
             return
@@ -466,15 +467,64 @@ class SpecRuntime:
             req_num=req_num,
             dynamic_batch_size=dynamic_batch_size,
             accept_ratio=accept_count / total_count,
+            **({"verify_step": verify_step} if self.planner.planner_mode == "eagle3" else {}),
         )
 
-        for req_idx, verify_len in id_to_verify_len.items():
-            accept_len = id_to_accept_len[req_idx]
-            self.planner.update_verified_prefix_stats(
-                verify_len=verify_len,
-                accept_len=accept_len,
+        update_full_verify_tokens_per_req = getattr(
+            self.planner,
+            "update_full_verify_tokens_per_req",
+            None,
+        )
+        is_full_verify = dynamic_batch_size == req_num * (self.backend.mtp_step + 1)
+        if update_full_verify_tokens_per_req is not None and is_full_verify:
+            update_full_verify_tokens_per_req(
+                accept_count / req_num,
+                req_num=req_num,
             )
+
+        update_observed_iteration_stats = getattr(
+            self.planner,
+            "update_observed_iteration_stats",
+            None,
+        )
+        if update_observed_iteration_stats is not None:
+            update_observed_iteration_stats(
+                tokens_per_req=accept_count / req_num,
+                verify_rows_per_req=dynamic_batch_size / req_num,
+                is_full_verify=is_full_verify,
+                req_num=req_num,
+            )
+
+        # Eagle3 uses these values as an unbiased survival curve.  Updating it
+        # from confidence-selected dynamic rows would bias every depth upward;
+        # full-width warmup/probe iterations are the valid samples.
+        update_verified_batch_prefix_stats = getattr(
+            self.planner,
+            "update_verified_batch_prefix_stats",
+            None,
+        )
+        if is_full_verify and update_verified_batch_prefix_stats is not None:
+            update_verified_batch_prefix_stats(
+                verify_and_accept_lengths=[
+                    (verify_len, id_to_accept_len[req_idx]) for req_idx, verify_len in id_to_verify_len.items()
+                ],
+            )
+        elif self.planner.planner_mode != "eagle3":
+            for req_idx, verify_len in id_to_verify_len.items():
+                accept_len = id_to_accept_len[req_idx]
+                self.planner.update_verified_prefix_stats(
+                    verify_len=verify_len,
+                    accept_len=accept_len,
+                )
         return
+
+    def needs_schedule_probs_cpu(self) -> bool:
+        """Whether this planner consumes proposal confidence on the CPU."""
+
+        planner_needs_schedule_probs_cpu = getattr(self.planner, "needs_schedule_probs_cpu", None)
+        if planner_needs_schedule_probs_cpu is not None:
+            return bool(planner_needs_schedule_probs_cpu())
+        return callable(getattr(self.planner, "update_predicted_schedule_probs", None))
 
     def update_dynamic_schedule_stats(
         self,

@@ -107,7 +107,11 @@ class RecurrentEagleMTPProposer(VanillaMTPProposer):
         new_input.max_q_seq_len = 1
         new_input.max_kv_seq_len = max_kv_seq_len
         new_input.total_token_num = new_input.batch_size * max_kv_seq_len
-        new_input.multimodal_params = [{"images": [], "audios": []} for _ in range(new_input.batch_size)]
+        # Recurrent Eagle decode only needs a correctly sized placeholder
+        # list.  Nested per-row allocations otherwise sit between graph
+        # replays and extend the draft proposal critical path.
+        empty_multimodal_params = {"images": [], "audios": []}
+        new_input.multimodal_params = [empty_multimodal_params] * new_input.batch_size
         return new_input
 
 

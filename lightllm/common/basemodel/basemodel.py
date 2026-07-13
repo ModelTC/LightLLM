@@ -88,6 +88,10 @@ class TpPartBaseModel:
         )
         # mtp 模式下需要修缮对应的最大batch size，为 （mtp_step + 1) 的倍数
         self.graph_max_batch_size = self.graph_max_batch_size * (mtp_step + 1)
+        self.graph_split_batch_size = int(kvargs.get("graph_split_batch_size", self.args.graph_split_batch_size))
+        self.graph_grow_step_size = int(kvargs.get("graph_grow_step_size", self.args.graph_grow_step_size))
+        assert self.graph_split_batch_size > 0
+        assert self.graph_grow_step_size > 0
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
@@ -288,6 +292,8 @@ class TpPartBaseModel:
                 max_batch_size=self.graph_max_batch_size,
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
+                graph_split_batch_size=self.graph_split_batch_size,
+                graph_grow_step_size=self.graph_grow_step_size,
             )
         )
         if self.graph is not None:

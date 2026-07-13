@@ -49,6 +49,9 @@ class SpecProposal:
     extra_mem_indexes_cpu: Optional[torch.Tensor]
     draft_probs: Optional[List[torch.Tensor]] = None
     schedule_probs: Optional[Union[List[torch.Tensor], torch.Tensor]] = None
+    # Actual rows processed by draft-model forwards.  Recurrent Eagle can
+    # prune low-confidence deep chains, so this need not equal B * draft_step.
+    draft_forward_rows: Optional[int] = None
 
 
 class BaseSpecProposer:

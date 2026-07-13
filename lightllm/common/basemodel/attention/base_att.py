@@ -10,23 +10,23 @@ if TYPE_CHECKING:
 
 class BaseAttBackend:
     """
-    用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等，
-    这个是单列模式, 每种backend只有一个实例
+    用于创建支持各种不同的AttBackend, 如 fa3, flashinfer, triton 实现等。
+    每个 model 复用一个 backend 实例。
     """
 
     _instances = {}
 
     def __new__(cls, *args, **kwargs):
         """
-        重写__new__方法实现单例模式
+        Main 和 speculative draft model 可能使用不同的 CUDA graph 上限
+        和缓存布局，不能只按 backend class 共享实例。
         """
-        # 检查是否已经有该类的实例
-        if cls not in cls._instances:
-            # 创建新实例并存储
+        model = kwargs.get("model", args[0] if args else None)
+        instance_key = (cls, id(model))
+        if instance_key not in cls._instances:
             instance = super().__new__(cls)
-            cls._instances[cls] = instance
-        # 返回已有的实例
-        return cls._instances[cls]
+            cls._instances[instance_key] = instance
+        return cls._instances[instance_key]
 
     def __init__(self, model: "TpPartBaseModel"):
         self.model = model

@@ -775,6 +775,8 @@ class HttpServerManager:
                             f"disk cache hit: {disk_prompt_cache_len > 0} "
                             f"disk_prompt_cache_len:{disk_prompt_cache_len} "
                             f"disk_prompt_cache_ratio:{disk_prompt_cache_ratio} "
+                            f"mtp_total_step:{mtp_total_step} "
+                            f"mtp_total_verify_tokens:{mtp_verify_token_num} "
                             f"mtp_avg_token_per_step:{mtp_avg_token_per_step} "
                             f"mtp_avg_verify_tokens_per_step:{mtp_avg_verify_tokens_per_step} "
                         )

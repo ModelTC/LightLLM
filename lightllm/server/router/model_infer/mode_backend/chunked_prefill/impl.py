@@ -89,6 +89,7 @@ class ChunkedPrefillBackend(ModeBackend):
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
+                    self.flush_mtp_target_verify_time_stats()
                     time.sleep(0.02)
                     continue
 
@@ -237,25 +238,63 @@ class ChunkedPrefillBackend(ModeBackend):
         """
         MTP解码的通用流程，整合eagle和vanilla的共同逻辑
         """
+        host_start = time.perf_counter()
         model_input, run_reqs = prepare_decode_inputs(decode_reqs)
+        self.record_mtp_phase_cpu(
+            phase="prepare_decode_inputs_host",
+            wall_seconds=time.perf_counter() - host_start,
+        )
         spec_runtime = self.spec_adapter
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            host_start = time.perf_counter()
             spec_plan = spec_runtime.plan_decode(model_input=model_input, req_num=len(decode_reqs))
+            self.record_mtp_phase_cpu(
+                phase="planner_host",
+                wall_seconds=time.perf_counter() - host_start,
+            )
+
+            full_verify_rows = int(model_input.batch_size)
+            phase_timer = self.start_mtp_phase_gpu()
+            host_start = time.perf_counter()
             model_input, selected_run_reqs = spec_runtime.prepare_decode_model_input(
                 model_input=model_input,
                 req_num=len(decode_reqs),
                 plan=spec_plan,
             )
             selected_run_reqs_cpu = spec_runtime.async_copy_selected_run_reqs(selected_run_reqs)
+            self.record_mtp_phase_cpu(
+                phase="dynamic_prepare_host",
+                wall_seconds=time.perf_counter() - host_start,
+            )
+            self.finish_mtp_phase_gpu(
+                phase_timer,
+                phase="dynamic_prepare",
+                input_rows=full_verify_rows,
+                work_units=int(model_input.batch_size),
+            )
 
-            model_output = self.model.forward(model_input)
+            phase_timer = self.start_mtp_phase_gpu()
+            model_output = self._forward_mtp_target_with_time(model_input)
+            self.finish_mtp_phase_gpu(
+                phase_timer,
+                phase="target_forward",
+                input_rows=int(model_input.batch_size),
+                work_units=int(spec_plan.draft_step),
+            )
+
+            phase_timer = self.start_mtp_phase_gpu()
             next_token_ids, next_token_logprobs = sample(
                 model_output.logits,
                 run_reqs,
                 self.eos_id,
                 dynamic_batch_size=spec_plan.dynamic_batch_size,
                 selected_run_reqs=selected_run_reqs,
+            )
+            self.finish_mtp_phase_gpu(
+                phase_timer,
+                phase="target_sample",
+                input_rows=int(model_input.batch_size),
             )
 
             spec_decode_state = spec_runtime.run_decode_speculative_forward(
@@ -273,34 +312,54 @@ class ChunkedPrefillBackend(ModeBackend):
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
+        host_start = time.perf_counter()
         run_reqs, verify_ok_reqs = spec_runtime.resolve_decode_pre_post_reqs(
             state=spec_decode_state,
             decode_reqs=decode_reqs,
+        )
+        self.record_mtp_phase_cpu(
+            phase="resolve_pre_post_host",
+            wall_seconds=time.perf_counter() - host_start,
         )
         self._update_mtp_verify_token_num(
             decode_reqs=decode_reqs,
             dynamic_mtp_run_reqs=run_reqs if self.enable_dynamic_mtp else None,
         )
+        host_start = time.perf_counter()
         update_packs = self._pre_post_handle(verify_ok_reqs, is_chuncked_mode=False)
+        self.record_mtp_phase_cpu(
+            phase="pre_post_handle_host",
+            wall_seconds=time.perf_counter() - host_start,
+        )
 
         # 第三阶段
         event_pack.notify_forward_and_wait_post_handle()
+        host_start = time.perf_counter()
         spec_post_state = spec_runtime.finish_decode_post(
             state=spec_decode_state,
             req_num=len(decode_reqs),
             run_reqs=run_reqs,
+        )
+        self.record_mtp_phase_cpu(
+            phase="finish_decode_post_host",
+            wall_seconds=time.perf_counter() - host_start,
         )
 
         self._update_mtp_accept_ratio(
             decode_reqs=decode_reqs,
             mtp_accept_len_cpu=spec_post_state.mtp_accept_len_cpu,
         )
+        host_start = time.perf_counter()
         self._post_handle(
             run_reqs=verify_ok_reqs,
             next_token_ids=spec_post_state.next_token_ids,
             next_token_logprobs=spec_post_state.next_token_logprobs,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
+        )
+        self.record_mtp_phase_cpu(
+            phase="post_handle_host",
+            wall_seconds=time.perf_counter() - host_start,
         )
 
         if len(spec_post_state.need_free_mem_indexes) > 0:

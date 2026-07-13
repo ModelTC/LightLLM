@@ -41,7 +41,14 @@ def _build_mtp_mark_shared_group_values(
 class CudaGraph:
     # CudaGraph forward pass for the decoding stage.
 
-    def __init__(self, max_batch_size=8, max_len_in_batch=8192, tp_world_size: int = 1):
+    def __init__(
+        self,
+        max_batch_size=8,
+        max_len_in_batch=8192,
+        tp_world_size: int = 1,
+        graph_split_batch_size: Optional[int] = None,
+        graph_grow_step_size: Optional[int] = None,
+    ):
         self.graph = {}
         self.tp_world_size = tp_world_size
         self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
@@ -49,6 +56,14 @@ class CudaGraph:
         self.raw_max_batch_size = max_batch_size
         self.max_batch_size = None
         self.graph_max_len_in_batch = max_len_in_batch
+        self.graph_split_batch_size = int(
+            self.args.graph_split_batch_size if graph_split_batch_size is None else graph_split_batch_size
+        )
+        self.graph_grow_step_size = int(
+            self.args.graph_grow_step_size if graph_grow_step_size is None else graph_grow_step_size
+        )
+        assert self.graph_split_batch_size > 0
+        assert self.graph_grow_step_size > 0
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
         self.spec_adapter = None
         self.model = None
@@ -73,10 +88,10 @@ class CudaGraph:
         self.max_batch_size = (self.raw_max_batch_size // group_size) * group_size
         assert self.max_batch_size > 0, "cuda graph max_batch_size must cover at least one decode group"
 
-        graph_split_batch_size = self.args.graph_split_batch_size * group_size
-        graph_grow_step_size = self.args.graph_grow_step_size * group_size
+        graph_split_batch_size = self.graph_split_batch_size * group_size
+        graph_grow_step_size = self.graph_grow_step_size * group_size
 
-        batch_sizes = [i * group_size for i in range(1, self.args.graph_split_batch_size + 1)]
+        batch_sizes = [i * group_size for i in range(1, self.graph_split_batch_size + 1)]
         for _batch_size in range(
             graph_split_batch_size + graph_grow_step_size,
             self.max_batch_size,
