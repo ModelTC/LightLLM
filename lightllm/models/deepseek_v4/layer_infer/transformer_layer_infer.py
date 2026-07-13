@@ -16,7 +16,7 @@ from .compressor import prepare_compress_states
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
 import deep_gemm
-from lightllm.third_party.sglang_jit.dsv4 import topk_transform_512
+from lightllm.models.deepseek_v4.triton_kernel.topk_transform import topk_transform_512
 
 
 _C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
@@ -151,21 +151,21 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         infer_state: DeepseekV4InferStateInfo,
         layer_weight: DeepseekV4TransformerLayerWeight,
     ):
-        from lightllm.third_party.sglang_jit.dsv4 import fused_q_norm_rope
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import fused_q_norm_rope
 
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
         T = input.shape[0]
         # wq_a and wkv share `input` -> one fused fp8 GEMM, split [q_lora_rank | head_dim]. qa is a
-        # row-strided view (rmsnorm honors stride(0)); kv feeds a sglang jit kernel -> contiguous.
+        # row-strided view (rmsnorm honors stride(0)); kv feeds the fused cache writer -> contiguous.
         qkv = layer_weight.wq_a_wkv_.mm(input)
         qa = layer_weight.q_norm_(qkv[:, : -self.head_dim_], eps=self.eps_)
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
         # per-(token, head) weightless self-RMSNorm + interleaved rope on the last rope_dim dims,
-        # fused in one sglang dsv4 jit kernel (fp32 norm/rotation, bf16 in between -- same as eager).
+        # fused in one DSV4 CUDA kernel (fp32 norm/rotation, bf16 in between -- same as eager).
         q = self.alloc_tensor(q_in.shape, dtype=q_in.dtype, device=q_in.device)
         fused_q_norm_rope(q_in, q, self.eps_, self.freqs_cis, infer_state.position_ids)
-        # kv: rmsnorm + rope + fp8 pack + scatter 进 swa 池,一个 sglang jit kernel 完成
-        # (同 sglang _compute_kv_to_cache),替代 eager norm/rope/cat + _post_cache_kv。
+        # kv: rmsnorm + rope + fp8 pack + scatter 进 swa 池,一个 DSV4 CUDA kernel 完成，
+        # 替代 eager norm/rope/cat + _post_cache_kv。
         # bf16 kv 中间量没有其他消费者: flashmla 路径注意力读 cache,压缩器/indexer 取 x。
         infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
@@ -395,11 +395,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
     def _select_experts(
         self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        return self._select_experts_vllm(logits, infer_state, layer_weight)
-
-    def _select_experts_vllm(
-        self, logits, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
-    ):
         M = logits.shape[0]
         bias = None
         input_tokens = None
@@ -624,7 +619,9 @@ class DeepseekV4IndexInfer:
         # per-token q scale + indexer_weight_scale folded into weights, all in ONE kernel (was 4 kernels:
         # rotary_emb_fwd + hadamard_transform + act_quant + weights mul). freqs_cis is the compress rope
         # table (same one the main compress-layer Q path uses); positions indexed inside the kernel.
-        from lightllm.third_party.sglang_jit.dsv4.elementwise import fused_q_indexer_rope_hadamard_quant
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import (
+            fused_q_indexer_rope_hadamard_quant,
+        )
 
         token_num = q_lora.shape[0]
         if x.shape[0] != token_num:
@@ -638,7 +635,11 @@ class DeepseekV4IndexInfer:
             token_num, self.index_n_heads
         )  # [T, H] raw
         idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
-            idx_q, raw_w, self.indexer_weight_scale, self.freqs_cis, infer_state.position_ids
+            idx_q,
+            raw_w,
+            self.indexer_weight_scale,
+            self.freqs_cis,
+            infer_state.position_ids,
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1).contiguous()
 

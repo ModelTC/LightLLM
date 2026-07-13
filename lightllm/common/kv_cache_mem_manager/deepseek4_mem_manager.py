@@ -684,11 +684,12 @@ class DeepseekV4MemoryManager(MemoryManager):
         positions: torch.Tensor,
     ):
         """同 pack_mla_kv_to_cache，但 rmsnorm + 尾部交错 rope 融合进写入 kernel
-        (sglang fused_k_norm_rope_flashmla，即 sglang _compute_kv_to_cache 的池侧)，
-        省掉 bf16 kv 中间量。kv 为 wkv 投影原始输出 [T, head_dim+rope_dim]。"""
+        并省掉 bf16 kv 中间量。kv 为 wkv 投影原始输出 [T, head_dim+rope_dim]。"""
         if kv.shape[0] == 0:
             return
-        from lightllm.third_party.sglang_jit.dsv4 import fused_k_norm_rope_flashmla
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import (
+            fused_k_norm_rope_flashmla,
+        )
 
         swa_slots = self.full_to_swa_indexs[mem_index.cuda().long().reshape(-1)]
         swa_slots = torch.where(swa_slots < 0, torch.full_like(swa_slots, self.swa_pool.HOLD_TOKEN_MEMINDEX), swa_slots)

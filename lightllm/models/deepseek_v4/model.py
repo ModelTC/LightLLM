@@ -177,9 +177,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_to_get_rotary(self):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
-        # gemma4 two-variant convention; the fused sglang q kernel consumes them directly, while
-        # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the kv rope,
-        # inverse rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
+        # gemma4 two-variant convention; the fused CUDA Q/K kernels consume them directly, while
+        # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the inverse
+        # rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
         # Sliding-window and compressed layers both use DeepSeek YaRN correction; only the
         # RoPE base differs (rope_theta vs compress_rope_theta), matching SGLang/vLLM.
         # Kept fp32 for accuracy (the apply upcasts anyway).
