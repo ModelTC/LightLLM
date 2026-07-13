@@ -120,6 +120,7 @@ def mega_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_method: Any,
+    clamp_limit: Optional[float] = None,
 ):
     if not (HAS_DEEPGEMM and hasattr(deep_gemm, "fp8_fp4_mega_moe")):
         raise RuntimeError("deep_gemm does not provide fp8-fp4 Mega MoE kernel")
@@ -157,6 +158,7 @@ def mega_moe_impl(
         l2_weights,
         buffer,
         cumulative_local_expert_recv_stats=stats,
+        activation_clamp=clamp_limit,
     )
     return output
 
@@ -198,9 +200,7 @@ def fused_experts(
 ):
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
-        if clamp_limit is not None:
-            raise RuntimeError("SM100 Mega MoE does not support clamped SwiGLU yet.")
-        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
+        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method, clamp_limit=clamp_limit)
 
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
