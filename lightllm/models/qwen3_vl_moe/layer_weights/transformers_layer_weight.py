@@ -1,42 +1,27 @@
-import os
 from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwen3MOETransformerLayerWeight
 
 
 class Qwen3VLMOETransformerLayerWeight(Qwen3MOETransformerLayerWeight):
-    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, quant_cfg)
-
     def load_hf_weights(self, weights):
+        moe_intermediate_size = self.network_config_["moe_intermediate_size"]
         moe_prefix = f"model.layers.{self.layer_num_}.mlp.experts"
         gate_up_name = f"{moe_prefix}.gate_up_proj"
         down_name = f"{moe_prefix}.down_proj"
 
         if gate_up_name in weights:
-            gate_up = weights[gate_up_name]  # [E, H, 2I]
-            E, H, twoI = gate_up.shape
-            assert twoI % 2 == 0, f"gate_up_proj last dim must be even, but got {twoI}"
-            I_dim = twoI // 2
+            gate_up = weights.pop(gate_up_name)
+            gate_weight = gate_up[:, :, :moe_intermediate_size].transpose(1, 2).contiguous()
+            up_weight = gate_up[:, :, moe_intermediate_size:].transpose(1, 2).contiguous()
 
-            if down_name in weights:
-                down = weights[down_name]  # [E, I, H]
-            else:
-                down = None
+            for expert_idx in range(gate_up.shape[0]):
+                weights[f"{moe_prefix}.{expert_idx}.gate_proj.weight"] = gate_weight[expert_idx]
+                weights[f"{moe_prefix}.{expert_idx}.up_proj.weight"] = up_weight[expert_idx]
 
-            for e in range(E):
-                gate_up_e = gate_up[e]
-                gate_e = gate_up_e[:, :I_dim].transpose(0, 1).contiguous()
-                up_e = gate_up_e[:, I_dim:].transpose(0, 1).contiguous()
+        if down_name in weights:
+            down_weight = weights.pop(down_name)
+            for expert_idx in range(down_weight.shape[0]):
+                weights[f"{moe_prefix}.{expert_idx}.down_proj.weight"] = (
+                    down_weight[expert_idx].transpose(0, 1).contiguous()
+                )
 
-                gate_key = f"{moe_prefix}.{e}.gate_proj.weight"
-                up_key = f"{moe_prefix}.{e}.up_proj.weight"
-                weights[gate_key] = gate_e
-                weights[up_key] = up_e
-
-                if down is not None:
-                    down_key = f"{moe_prefix}.{e}.down_proj.weight"
-                    weights[down_key] = down[e].transpose(0, 1).contiguous()
-
-            del weights[gate_up_name]
-            if down_name in weights:
-                del weights[down_name]
-        super().load_hf_weights(weights)
+        return super().load_hf_weights(weights)

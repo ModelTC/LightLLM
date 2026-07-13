@@ -350,9 +350,6 @@ class FusedMoeWeight(BaseWeightTpl):
         return weight_list
 
     def _load_weight(self, expert_idx_to_local_idx: Dict[int, int], weights: Dict[str, torch.Tensor]):
-        # for merged weights
-        self._load_merge_weight(weights)
-        # Load each expert with TP slicing
         for expert_idx, local_expert_idx in expert_idx_to_local_idx.items():
             with self.lock:
                 self._load_expert(expert_idx, local_expert_idx, weights)
@@ -385,19 +382,6 @@ class FusedMoeWeight(BaseWeightTpl):
             self.quant_method.load_weight(row_slice_func(weights[w3_weight]), self.w3_list[local_expert_idx])
         if w2_weight in weights:
             self.quant_method.load_weight(col_slice_func(weights[w2_weight]), self.w2_list[local_expert_idx])
-
-    def _load_merge_weight(self, weights: Dict[str, torch.Tensor]):
-        w1_merge_weight = f"{self.weight_prefix}.{self.w1_weight_name}"
-        w2_merge_weight = f"{self.weight_prefix}.{self.w2_weight_name}"
-        w3_merge_weight = f"{self.weight_prefix}.{self.w3_weight_name}"
-        row_slice_func = self.row_slicer._slice_weight
-        col_slice_func = self.col_slicer._slice_weight
-        if w1_merge_weight in weights:
-            self.quant_method.load_weight(row_slice_func(weights[w1_merge_weight]), self.w1)
-        if w2_merge_weight in weights:
-            self.quant_method.load_weight(col_slice_func(weights[w2_merge_weight]), self.w2)
-        if w3_merge_weight in weights:
-            self.quant_method.load_weight(row_slice_func(weights[w3_merge_weight]), self.w3)
 
     def _load_expert_scale(
         self,
