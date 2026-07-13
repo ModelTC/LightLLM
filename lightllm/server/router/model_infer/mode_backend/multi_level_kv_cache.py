@@ -63,7 +63,7 @@ class MultiLevelKvCacheModule(object):
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
-            if req.sampling_param.shm_param.prompt_logprobs > 0:
+            if req.sampling_param.shm_param.prompt_logprobs >= 0:
                 continue
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()

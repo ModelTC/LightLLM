@@ -416,15 +416,28 @@ class ModeBackend:
         prompt_logits: torch.Tensor,
     ) -> None:
         mgr = _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager
-        if mgr is None:
-            return
 
         start_loc = 0
         for req_obj in run_reqs:
             q_len = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
             topk = req_obj.sampling_param.shm_param.prompt_logprobs
             capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
-            if capture_count > 0 and topk > 0:
+            if capture_count > 0 and topk == 0 and self.is_master_in_dp:
+                # prompt_logprobs=0 返回真实命中的 prompt token，
+                # rank 必须基于全 vocab 计算，不能用 top-k 列表位置替代。
+                logit_rows = prompt_logits[start_loc : start_loc + capture_count]
+                target_start = req_obj.cur_kv_len + 1
+                target_end = target_start + capture_count
+                target_token_ids = torch.tensor(
+                    req_obj.shm_req.shm_prompt_ids.arr[target_start:target_end].copy(),
+                    dtype=torch.long,
+                    device=logit_rows.device,
+                )
+                target_logits = logit_rows.gather(1, target_token_ids.long().view(-1, 1)).view(-1)
+                logprobs = target_logits.float() - torch.logsumexp(logit_rows.float(), dim=-1)
+                ranks = (logit_rows > target_logits.view(-1, 1)).sum(dim=-1, dtype=torch.int32) + 1
+                req_obj.add_prompt_selected_logprobs_chunk(target_start, target_end, logprobs, ranks)
+            elif capture_count > 0 and topk > 0 and mgr is not None:
                 logit_rows = prompt_logits[start_loc : start_loc + capture_count]
                 log_normalizer = torch.logsumexp(logit_rows.float(), dim=-1)
                 valid_topk = min(topk, logit_rows.shape[-1])

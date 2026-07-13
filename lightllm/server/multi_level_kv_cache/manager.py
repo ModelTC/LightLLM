@@ -163,7 +163,7 @@ class MultiLevelKVCacheManager:
                 continue
 
             req: Req = req
-            if req.sample_params.prompt_logprobs > 0:
+            if req.sample_params.prompt_logprobs >= 0:
                 continue
 
             token_hash_list = req.token_hash_list.get_all()

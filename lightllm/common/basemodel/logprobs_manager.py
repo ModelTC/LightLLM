@@ -10,7 +10,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
-_MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
+_MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 128))
 
 
 class PromptLogprobsCaptureManager:

@@ -49,8 +49,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             return last_input, batch_size
 
         if infer_state.is_prefill and infer_state.return_all_prompt_logics:
-            total_tokens = infer_state.total_token_num
-            return input_embdings, total_tokens
+            # chunked prefill 下 input_embdings 只包含当前 chunk，
+            # total_token_num 还包含已缓存前缀，需要扣掉 prefix_total_token_num。
+            return input_embdings, infer_state.total_token_num - infer_state.prefix_total_token_num
 
         if not infer_state.is_prefill:
             batch_size = infer_state.batch_size

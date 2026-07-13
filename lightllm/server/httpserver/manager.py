@@ -10,7 +10,6 @@ import copy
 import hashlib
 import datetime
 import pickle
-import base64
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -339,7 +338,7 @@ class HttpServerManager:
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
         start_time = time.time()
-        if sampling_params.prompt_logprobs > 0 and not self.args.enable_prompt_logprobs:
+        if sampling_params.prompt_logprobs >= 0 and not self.args.enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
@@ -551,16 +550,11 @@ class HttpServerManager:
             return None
 
         try:
-            routing_data = req.link_routing_data_shm_array(
-                num_moe_layers, num_tokens, topk, np_dtype=routing_dtype_id_to_np(dtype_id)
+            # prompt top-k 和 routed experts 共用 final metadata shm，
+            # routing offset 由请求里的 prompt 配置推导出来。
+            return req.get_final_token_metadata().routed_experts_response(
+                num_tokens, num_moe_layers, topk, routing_dtype_id_to_np(dtype_id)
             )
-            if routing_data is None:
-                return None
-            return {
-                "shape": list(routing_data.shape),
-                "dtype": str(routing_data.dtype),
-                "data": base64.b64encode(routing_data.tobytes()).decode("ascii"),
-            }
         except FileNotFoundError:
             return None
         except Exception as e:
@@ -926,17 +920,9 @@ class HttpServerManager:
                 _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
                     try:
-                        req.close_prompt_logprobs_shm_array()
+                        req.close_final_token_metadata_shm()
                     except Exception as e:
-                        logger.debug(f"Failed to close prompt logprobs shm for req {req.request_id}: {e}")
-                    try:
-                        req.close_output_ranks_shm_array()
-                    except Exception as e:
-                        logger.debug(f"Failed to close output ranks shm for req {req.request_id}: {e}")
-                    try:
-                        req.close_routing_data_shm_array()
-                    except Exception as e:
-                        logger.debug(f"Failed to close routing data shm for req {req.request_id}: {e}")
+                        logger.debug(f"Failed to close final token metadata shm for req {req.request_id}: {e}")
                     _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
@@ -997,10 +983,11 @@ class HttpServerManager:
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                                req.cumlogprob += float(req.shm_logprobs.arr[src_index])
+                                token_logprob = float(req.shm_logprobs.arr["logprob"][src_index])
+                                req.cumlogprob += token_logprob
                                 metadata = {
                                     "id": int(req.shm_prompt_ids.arr[src_index]),
-                                    "logprob": float(req.shm_logprobs.arr[src_index]),
+                                    "logprob": token_logprob,
                                     "cumlogprob": float(req.cumlogprob) / count_output_tokens,
                                     "special": special,
                                     "count_output_tokens": count_output_tokens,

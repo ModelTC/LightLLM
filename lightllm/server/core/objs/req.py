@@ -15,8 +15,8 @@ from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
 from typing import List, Any, Union
 from lightllm.utils.log_utils import init_logger
-from .prompt_logprobs import build_prompt_logprobs_metadata, get_prompt_logprobs_dtype
 from .logprob_utils import logprob_info
+from .token_metadata import ReqFinalTokenMetadata
 
 logger = init_logger(__name__)
 
@@ -76,6 +76,7 @@ class PrefixTokenIdsStruct(ctypes.Structure):
 
 class Req(ctypes.Structure):
     _pack_ = 4
+
     _fields_ = [
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
@@ -190,7 +191,6 @@ class Req(ctypes.Structure):
         self.stop_str_matched_token_index = -1
 
         self.post_init()
-        self.create_output_ranks_shm_array()
 
         args = get_env_start_args()
         if is_linear_att_mixed_model(args.model_dir):
@@ -273,34 +273,34 @@ class Req(ctypes.Structure):
     def create_logprobs_shm_array(self):
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
-        self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
+        self.shm_logprobs = ShmArray(
+            name,
+            (self.alloc_shm_numpy_len,),
+            dtype=[("logprob", np.float32), ("rank", np.int32)],
+        )
         self.shm_logprobs.create_shm()
+        # rank=-1 表示该位置没有请求或没有计算 rank 元信息。
+        self.shm_logprobs.arr["logprob"][:] = 0.0
+        self.shm_logprobs.arr["rank"][:] = -1
         return
 
     def link_logprobs_shm_array(self):
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
-        self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
+        self.shm_logprobs = ShmArray(
+            name,
+            (self.alloc_shm_numpy_len,),
+            dtype=[("logprob", np.float32), ("rank", np.int32)],
+        )
         self.shm_logprobs.link_shm()
         return
 
-    def get_prompt_logprobs_shm_name(self):
-        service_uni_name = get_unique_server_name()
-        return f"{service_uni_name}_shm_prompt_logprobs_{self.index_in_shm_mem}"
+    def get_final_token_metadata(self):
+        return ReqFinalTokenMetadata(self)
 
-    def create_prompt_logprobs_shm_array(self):
-        shape = (self.input_len - 1,)
-        dtype = get_prompt_logprobs_dtype(self.sample_params.prompt_logprobs)
-        self.shm_prompt_logprobs = ShmArray(self.get_prompt_logprobs_shm_name(), shape, dtype=dtype)
-        self.shm_prompt_logprobs.create_shm()
-        return self.shm_prompt_logprobs.arr
-
-    def link_prompt_logprobs_shm_array(self):
-        shape = (self.input_len - 1,)
-        dtype = get_prompt_logprobs_dtype(self.sample_params.prompt_logprobs)
-        self.shm_prompt_logprobs = ShmArray(self.get_prompt_logprobs_shm_name(), shape, dtype=dtype)
-        self.shm_prompt_logprobs.link_shm()
-        return self.shm_prompt_logprobs.arr
+    def close_final_token_metadata_shm(self):
+        self.get_final_token_metadata().close_and_unlink()
+        return
 
     def _close_on_demand_shm_array(self, attr_name: str, shm_name: str):
         shm_array = getattr(self, attr_name, None)
@@ -314,68 +314,6 @@ class Req(ctypes.Structure):
             shm.unlink()
         except FileNotFoundError:
             pass
-
-    def close_prompt_logprobs_shm_array(self):
-        self._close_on_demand_shm_array("shm_prompt_logprobs", self.get_prompt_logprobs_shm_name())
-        return
-
-    def get_output_ranks_shm_name(self):
-        service_uni_name = get_unique_server_name()
-        return f"{service_uni_name}_shm_output_ranks_{self.index_in_shm_mem}"
-
-    def create_output_ranks_shm_array(self):
-        shape = (self.alloc_shm_numpy_len,)
-        self.shm_output_ranks = ShmArray(self.get_output_ranks_shm_name(), shape, dtype=np.int32)
-        self.shm_output_ranks.create_shm()
-        return self.shm_output_ranks.arr
-
-    def link_output_ranks_shm_array(self):
-        shm_array = getattr(self, "shm_output_ranks", None)
-        if shm_array is not None and shm_array.arr is not None:
-            return shm_array.arr
-        shape = (self.alloc_shm_numpy_len,)
-        self.shm_output_ranks = ShmArray(self.get_output_ranks_shm_name(), shape, dtype=np.int32)
-        self.shm_output_ranks.link_shm()
-        return self.shm_output_ranks.arr
-
-    def detach_output_ranks_shm_array(self):
-        shm_array = getattr(self, "shm_output_ranks", None)
-        if shm_array is not None:
-            self.shm_output_ranks.detach_shm()
-            self.shm_output_ranks = None
-        return
-
-    def close_output_ranks_shm_array(self):
-        self._close_on_demand_shm_array("shm_output_ranks", self.get_output_ranks_shm_name())
-        return
-
-    def get_routing_data_shm_name(self):
-        service_uni_name = get_unique_server_name()
-        return f"{service_uni_name}_shm_routing_{self.index_in_shm_mem}"
-
-    def create_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.uint8):
-        """Create routing SHM at actual size."""
-        self.shm_routing_data = ShmArray(
-            self.get_routing_data_shm_name(), (num_tokens, num_moe_layers, topk), dtype=np_dtype
-        )
-        self.shm_routing_data.create_shm()
-        return
-
-    def link_routing_data_shm_array(self, num_moe_layers: int, num_tokens: int, topk: int, np_dtype=np.uint8):
-        """Link routing SHM at actual size."""
-        if num_moe_layers <= 0 or num_tokens <= 0 or topk <= 0:
-            return None
-        shm_routing_data = ShmArray(
-            self.get_routing_data_shm_name(), (num_tokens, num_moe_layers, topk), dtype=np_dtype
-        )
-        shm_routing_data.link_shm()
-        self.shm_routing_data = shm_routing_data
-        return self.shm_routing_data.arr
-
-    def close_routing_data_shm_array(self):
-        """Close and unlink routing SHM (on-demand, no longer pooled)."""
-        self._close_on_demand_shm_array("shm_routing_data", self.get_routing_data_shm_name())
-        return
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
@@ -419,16 +357,17 @@ class Req(ctypes.Structure):
         raise NotImplementedError("Subclasses should implement this method")
 
     def get_prompt_logprobs_metadata(self, tokenizer=None):
-        return build_prompt_logprobs_metadata(self, tokenizer)
+        return self.get_final_token_metadata().prompt_logprobs_response(tokenizer)
 
     def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
         token_id = int(self.shm_prompt_ids.arr[src_index])
-        rank = int(self.link_output_ranks_shm_array()[src_index])
+        rank = int(self.shm_logprobs.arr["rank"][src_index])
+        rank = None if rank < 0 else rank
         return {
             token_id: logprob_info(
                 tokenizer,
                 token_id,
-                self.shm_logprobs.arr[src_index],
+                self.shm_logprobs.arr["logprob"][src_index],
                 rank,
             )
         }
