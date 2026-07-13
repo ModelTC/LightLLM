@@ -25,7 +25,7 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
-_MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
+_MEGA_MOE_STATS: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
 SUPPORTED_EP_EXPERT_DTYPES = ("deepgemm-fp8w8a8-b128", "deepgemm-fp4fp8-b32")
 
 try:
@@ -138,9 +138,7 @@ def _mega_moe_quant_topk_to_buffer_kernel(
             topk_idx.to(topk_idx_out_ptr.dtype.element_ty),
         )
         tl.store(
-            topk_weights_out_ptr
-            + token_id * stride_topk_weights_out_m
-            + topk_offsets * stride_topk_weights_out_k,
+            topk_weights_out_ptr + token_id * stride_topk_weights_out_m + topk_offsets * stride_topk_weights_out_k,
             topk_weights.to(topk_weights_out_ptr.dtype.element_ty),
         )
 
@@ -236,31 +234,29 @@ def masked_group_gemm(
     return gemm_out_b
 
 
-def _get_mega_moe_cache_state(w13: Any, w2: Any):
+def _get_mega_moe_cumulative_stats(w13: Any, w2: Any):
     state_key = (
         w13.weight.data_ptr(),
         w13.weight_scale.data_ptr(),
         w2.weight.data_ptr(),
         w2.weight_scale.data_ptr(),
     )
-    return _MEGA_MOE_STATES.setdefault(state_key, {})
-
-
-def _get_mega_moe_weights(w13: Any, w2: Any, state: Dict[str, Any]):
-    if "weight_cache" not in state:
-        state["weight_cache"] = deep_gemm.transform_weights_for_mega_moe(
-            (w13.weight, w13.weight_scale),
-            (w2.weight, w2.weight_scale),
-        )
-    return state["weight_cache"]
-
-
-def _get_mega_moe_cumulative_stats(num_local_experts: int, device: torch.device, state: Dict[str, Any]):
-    stats = state.get("stats")
-    if stats is None or stats.numel() != num_local_experts or stats.device != device:
-        stats = torch.zeros((num_local_experts,), device=device, dtype=torch.int32)
-        state["stats"] = stats
+    stats = _MEGA_MOE_STATS.get(state_key)
+    if stats is None:
+        stats = torch.zeros((w13.weight.shape[0],), device=w13.weight.device, dtype=torch.int32)
+        _MEGA_MOE_STATS[state_key] = stats
     return stats
+
+
+def transform_mega_moe_weights_in_place(w13: Any, w2: Any):
+    """Convert to Mega MoE layout without retaining a second weight copy."""
+    transformed_l1, transformed_l2 = deep_gemm.transform_weights_for_mega_moe(
+        (w13.weight, w13.weight_scale),
+        (w2.weight, w2.weight_scale),
+    )
+    w13.weight.copy_(transformed_l1[0])
+    w13.weight_scale.copy_(transformed_l1[1])
+    w2.weight_scale.copy_(transformed_l2[1])
 
 
 def mega_moe_impl(
@@ -284,9 +280,9 @@ def mega_moe_impl(
             f"Mega MoE got {num_tokens} tokens, exceeding num_max_tokens_per_rank={buffer.num_max_tokens_per_rank}"
         )
 
-    state = _get_mega_moe_cache_state(w13, w2)
-    l1_weights, l2_weights = _get_mega_moe_weights(w13, w2, state)
-    stats = _get_mega_moe_cumulative_stats(w13.weight.shape[0], hidden_states.device, state)
+    l1_weights = (w13.weight, w13.weight_scale)
+    l2_weights = (w2.weight, w2.weight_scale)
+    stats = _get_mega_moe_cumulative_stats(w13, w2)
     _prepare_mega_moe_buffer(hidden_states, topk_ids, topk_weights, buffer, quant_method.block_size)
 
     output = torch.empty_like(hidden_states)
