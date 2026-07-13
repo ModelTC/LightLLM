@@ -43,16 +43,18 @@ def test_get_used_tokens(req):
 
 def test_get_prompt_logprobs_metadata_returns_actual_prompt_tokens(req):
     req.sample_params.prompt_logprobs = 0
-    req.shm_logprobs.arr[1] = -0.5
-    req.shm_logprobs.arr[2] = -1.25
+    req.shm_logprobs.arr["logprob"][1] = -0.5
+    req.shm_logprobs.arr["logprob"][2] = -1.25
+    req.shm_logprobs.arr["rank"][1] = 315
+    req.shm_logprobs.arr["rank"][2] = 4
 
     metadata = req.get_prompt_logprobs_metadata()
 
     assert metadata["prompt_token_ids"] == [1, 2, 3]
     assert metadata["prompt_logprobs"] == [
         None,
-        {2: {"logprob": -0.5, "rank": None, "decoded_token": None}},
-        {3: {"logprob": -1.25, "rank": None, "decoded_token": None}},
+        {2: {"logprob": -0.5, "rank": 315, "decoded_token": None}},
+        {3: {"logprob": -1.25, "rank": 4, "decoded_token": None}},
     ]
 
 

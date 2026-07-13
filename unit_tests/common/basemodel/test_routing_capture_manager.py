@@ -1,14 +1,33 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.basemodel import routing_manager as _routing_mgr
 from lightllm.common.basemodel.routing_manager import RoutingCaptureManager
 
 
 def _skip_without_cuda():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for routing capture.")
+
+
+def test_make_routing_capture_callback_uses_global_manager(monkeypatch):
+    calls = []
+
+    class _Manager:
+        def make_capture_callback(self, layer_num, mem_indexes):
+            calls.append((layer_num, mem_indexes))
+            return "callback"
+
+    mem_indexes = object()
+    infer_state = SimpleNamespace(mem_index=mem_indexes)
+    monkeypatch.setattr(_routing_mgr, "g_routing_capture_manager", _Manager())
+
+    assert _routing_mgr.make_routing_capture_callback(infer_state, 7) == "callback"
+    assert calls == [(7, mem_indexes)]
 
 
 class TestRoutingCaptureManager:
@@ -25,10 +44,9 @@ class TestRoutingCaptureManager:
         mem_indexes = torch.arange(100, 110, device="cuda")
         expected = np.zeros((10, 4, 8), dtype=np.uint8)
 
-        make_capture_callback = manager.make_capture_callback_factory(mem_indexes)
         for layer_idx in range(4):
             topk_ids = torch.randint(0, 64, (10, 8), device="cuda")
-            make_capture_callback(layer_idx)(topk_ids)
+            manager.make_capture_callback(layer_idx, mem_indexes)(topk_ids)
             expected[:, layer_idx, :] = topk_ids.cpu().numpy().astype(np.uint8)
 
         result = manager.extract_routing_data(mem_indexes)
@@ -50,9 +68,8 @@ class TestRoutingCaptureManager:
         topk_ids = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]], device="cuda")
         topk_ids_layer1 = topk_ids + 20
 
-        make_capture_callback = manager.make_capture_callback_factory(mem_indexes)
-        make_capture_callback(0)(topk_ids)
-        make_capture_callback(1)(topk_ids_layer1)
+        manager.make_capture_callback(0, mem_indexes)(topk_ids)
+        manager.make_capture_callback(1, mem_indexes)(topk_ids_layer1)
 
         result = manager.extract_routing_data(mem_indexes)
         np.testing.assert_array_equal(result[:, 0, :], topk_ids.cpu().numpy().astype(np.uint8))
@@ -73,10 +90,9 @@ class TestRoutingCaptureManager:
         ids_layer3 = torch.tensor([[1, 2], [3, 4]], device="cuda")
         ids_layer7 = torch.tensor([[5, 6], [7, 8]], device="cuda")
 
-        make_capture_callback = manager.make_capture_callback_factory(mem_indexes)
-        make_capture_callback(3)(ids_layer3)
-        make_capture_callback(7)(ids_layer7)
-        assert make_capture_callback(4) is None
+        manager.make_capture_callback(3, mem_indexes)(ids_layer3)
+        manager.make_capture_callback(7, mem_indexes)(ids_layer7)
+        assert manager.make_capture_callback(4, mem_indexes) is None
 
         result = manager.extract_routing_data(mem_indexes)
         np.testing.assert_array_equal(result[:, 0, :], ids_layer3.cpu().numpy().astype(np.uint8))
@@ -96,7 +112,7 @@ class TestRoutingCaptureManager:
         topk_ids_with_shared_expert = torch.tensor([[1, 2, 32], [3, 4, 32]], device="cuda")
 
         with pytest.raises(AssertionError):
-            manager.make_capture_callback_factory(mem_indexes)(0)(topk_ids_with_shared_expert)
+            manager.make_capture_callback(0, mem_indexes)(topk_ids_with_shared_expert)
 
     def test_cuda_graph_replay_uses_copied_mem_indexes(self):
         _skip_without_cuda()
@@ -115,10 +131,7 @@ class TestRoutingCaptureManager:
         graph_infer_state = InferStateInfo()
         graph_infer_state.decode_att_state = _NoopDecodeState()
         graph_infer_state.mem_index = torch.tensor([10, 11], device="cuda")
-        graph_infer_state.make_routing_capture_callback = manager.make_capture_callback_factory(
-            graph_infer_state.mem_index
-        )
-        capture_callback = graph_infer_state.make_routing_capture_callback(0)
+        capture_callback = manager.make_capture_callback(0, graph_infer_state.mem_index)
         topk_ids = torch.tensor([[1, 2], [3, 4]], device="cuda")
 
         graph = torch.cuda.CUDAGraph()
@@ -157,8 +170,8 @@ class TestRoutingCaptureManager:
         ids_0 = torch.ones((2, 4), dtype=torch.int64, device="cuda")
         ids_1 = torch.ones((2, 4), dtype=torch.int64, device="cuda") * 2
 
-        capture0 = manager.make_capture_callback_factory(mem0)(0)
-        capture1 = manager.make_capture_callback_factory(mem1)(0)
+        capture0 = manager.make_capture_callback(0, mem0)
+        capture1 = manager.make_capture_callback(0, mem1)
         capture0(ids_0)
         capture1(ids_1)
 
@@ -208,7 +221,7 @@ class TestRoutingCaptureManager:
         mem_indexes = torch.tensor([0, 1, 2], device="cuda")
         topk_ids = torch.tensor([[10, 20, 30, 40], [50, 60, 63, 1], [0, 5, 255, 3]], device="cuda")
 
-        manager.make_capture_callback_factory(mem_indexes)(0)(topk_ids)
+        manager.make_capture_callback(0, mem_indexes)(topk_ids)
 
         result = manager.extract_routing_data(mem_indexes)
         np.testing.assert_array_equal(result[:, 0, :], topk_ids.cpu().numpy().astype(np.uint8))
@@ -244,7 +257,7 @@ class TestRoutingCaptureManager:
         mem_indexes = torch.tensor([10, 11, 12, 13, 14], device="cuda")
         topk_ids = torch.tensor([[1, 2], [3, 4], [5, 6]], device="cuda")
 
-        manager.make_capture_callback_factory(mem_indexes[:3])(0)(topk_ids)
+        manager.make_capture_callback(0, mem_indexes[:3])(topk_ids)
 
         result_written = manager.extract_routing_data(mem_indexes[:3])
         np.testing.assert_array_equal(result_written[:, 0, :], topk_ids.cpu().numpy().astype(np.uint8))

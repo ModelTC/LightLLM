@@ -13,31 +13,45 @@ def _check_prompt_logprobs(res, topk: int) -> bool:
     if len(prompt_token_ids) != len(prompt_logprobs) or not prompt_logprobs or prompt_logprobs[0] is not None:
         return False
 
-    for position_logprobs in prompt_logprobs[1:]:
-        if len(position_logprobs) != topk:
+    expected_items = 1 if topk == 0 else topk
+    for position, position_logprobs in enumerate(prompt_logprobs[1:], start=1):
+        if len(position_logprobs) != expected_items:
             return False
-        if any(not np.isfinite(item["logprob"]) for item in position_logprobs.values()):
+        if topk == 0 and list(position_logprobs.keys()) != [str(prompt_token_ids[position])]:
+            return False
+        for item in position_logprobs.values():
+            if not np.isfinite(item["logprob"]):
+                return False
+            if topk == 0 and (not isinstance(item.get("rank"), int) or item["rank"] <= 0):
+                return False
+        if topk > 0 and any(item.get("rank") != index + 1 for index, item in enumerate(position_logprobs.values())):
             return False
     return True
 
 
-def test_routing_export(url: str = "http://localhost:8000", prompt_logprobs: int = 32):
+def test_routing_export(
+    url: str = "http://127.0.0.1:8000",
+    prompt_logprobs: int = 0,
+    timeout: int = 180,
+    max_new_tokens: int = 1,
+):
     print(f"Testing routing export at {url}")
+    print(f"Requested prompt_logprobs: {prompt_logprobs}")
     print("-" * 50)
 
     try:
         response = requests.post(
             f"{url}/generate",
             json={
-                "inputs": "What is the capital of France? What is the capital of France?",
+                "inputs": "你好，早上好！啊啊啊" * 5,
                 "parameters": {
-                    "max_new_tokens": 50,
+                    "max_new_tokens": max_new_tokens,
                     "prompt_logprobs": prompt_logprobs,
                     "return_routed_experts": True,
                     # "repetition_penalty": 1.0,
                 },
             },
-            timeout=60,
+            timeout=timeout,
         )
     except requests.exceptions.ConnectionError:
         print(f"ERROR: Cannot connect to server at {url}")
@@ -57,8 +71,9 @@ def test_routing_export(url: str = "http://localhost:8000", prompt_logprobs: int
         return False
 
     res = response.json()
-    print(res["prompt_logprobs"])
-    print(res["prompt_token_ids"])
+    print(f"Prompt tokens: {(res['prompt_token_ids'])}")
+    print(f"Prompt logprobs entries: {(res['prompt_logprobs'])}")
+    print(res["count_output_tokens"])
     prompt_logprobs_ok = _check_prompt_logprobs(res, prompt_logprobs)
 
     if "routed_experts" not in res or not res["routed_experts"]:
@@ -108,9 +123,16 @@ def test_routing_export(url: str = "http://localhost:8000", prompt_logprobs: int
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test R3 routing export feature")
-    parser.add_argument("--url", default="http://localhost:8000", help="Server URL")
-    parser.add_argument("--prompt-logprobs", type=int, default=32, help="prompt_logprobs value to request")
+    parser.add_argument("--url", default="http://127.0.0.1:8000", help="Server URL")
+    parser.add_argument("--prompt-logprobs", type=int, default=0, help="prompt_logprobs value to request")
+    parser.add_argument("--timeout", type=int, default=180, help="request timeout in seconds")
+    parser.add_argument("--max-new-tokens", type=int, default=1, help="max_new_tokens value to request")
     args = parser.parse_args()
 
-    success = test_routing_export(args.url, prompt_logprobs=args.prompt_logprobs)
+    success = test_routing_export(
+        args.url,
+        prompt_logprobs=args.prompt_logprobs,
+        timeout=args.timeout,
+        max_new_tokens=args.max_new_tokens,
+    )
     sys.exit(0 if success else 1)

@@ -19,6 +19,8 @@ logger = init_logger(__name__)
 
 
 class MemoryTag(Enum):
+    # torch_memory_saver 通过 tag 区分不同类型的显存区域，后续 pause/resume
+    # 可以只针对某一类内存做释放和恢复。
     KV_CACHE = "kv_cache"
     WEIGHT = "weights"
     GRAPH = "graph"
@@ -37,6 +39,8 @@ class MemoryTag(Enum):
 
 
 class TorchMemorySaverWrapper:
+    # 统一返回真实实现或空实现，调用方不需要到处判断
+    # enable_torch_memory_saver 是否开启。
     def __new__(cls, enable_torch_memory_saver: bool = False):
         if enable_torch_memory_saver:
             assert (
@@ -50,13 +54,19 @@ class TorchMemorySaverWrapper:
 class _TorchMemorySaver:
     @contextmanager
     def configure_subprocess(self):
+        # 子进程启动需要放在该上下文里，让 torch_memory_saver 在 worker
+        # 进程中完成必要的初始化。
         with tms_configure_subprocess():
             yield
 
     def region(self, tag: MemoryTag, enable_cpu_backup: bool = False):
+        # 记录这个上下文内产生的显存分配；enable_cpu_backup 用于需要
+        # pause 后还能恢复内容的区域，比如权重。
         return torch_memory_saver.region(tag=tag.value, enable_cpu_backup=enable_cpu_backup)
 
     def cuda_graph(self, graph_obj: torch.cuda.CUDAGraph, **kwargs):
+        # CUDA graph 的 private pool 也单独打 tag，避免和普通权重/KV cache
+        # 的显存管理混在一起。
         return torch_memory_saver.cuda_graph(cuda_graph=graph_obj, **kwargs, tag=MemoryTag.GRAPH.value)
 
     def disable(self):
@@ -70,6 +80,7 @@ class _TorchMemorySaver:
 
 
 class _TorchMemorySaverFake:
+    # 未开启 torch_memory_saver 时保持相同接口，保证调用方逻辑完全一致。
     @contextmanager
     def configure_subprocess(self):
         yield
