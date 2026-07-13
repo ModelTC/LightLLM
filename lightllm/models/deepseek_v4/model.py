@@ -6,6 +6,7 @@ import os
 import torch
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
@@ -126,6 +127,53 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
         )
         return
+
+    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
+        """Commit DSV4 derived slots before BaseModel pads or scatters the generic input."""
+        if model_input.is_prefill and self.is_mtp_draft_model:
+            return
+        if model_input.mem_indexes_cpu is None:
+            return
+        if model_input.mem_indexes is None:
+            model_input.mem_indexes = model_input.mem_indexes_cpu.cuda(non_blocking=True)
+
+        if model_input.is_prefill:
+            self.req_manager.prepare_prefill(
+                b_req_idx_cpu=model_input.b_req_idx_cpu,
+                b_ready_cache_len_cpu=model_input.b_ready_cache_len,
+                b_seq_len_cpu=model_input.b_seq_len_cpu,
+                mem_indexes=model_input.mem_indexes,
+            )
+            return
+
+        if model_input.mtp_decode_slot_prepare_indices == ():
+            return
+        self.req_manager.prepare_decode(
+            model_input.b_req_idx_cpu,
+            model_input.b_seq_len_cpu,
+            model_input.b_mtp_index_cpu,
+            model_input.mem_indexes,
+            model_input.mtp_decode_slot_prepare_indices,
+            prepare_compress_slots=not self.is_mtp_draft_model,
+        )
+        return
+
+    @torch.no_grad()
+    def forward(self, model_input: ModelInput):
+        self._prepare_dsv4_slots(model_input)
+        return super().forward(model_input)
+
+    @torch.no_grad()
+    def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
+        self._prepare_dsv4_slots(model_input0)
+        self._prepare_dsv4_slots(model_input1)
+        return super().microbatch_overlap_prefill(model_input0, model_input1)
+
+    @torch.no_grad()
+    def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
+        self._prepare_dsv4_slots(model_input0)
+        self._prepare_dsv4_slots(model_input1)
+        return super().microbatch_overlap_decode(model_input0, model_input1)
 
     def _init_to_get_rotary(self):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the

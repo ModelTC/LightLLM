@@ -46,7 +46,6 @@ class ModelInput:
     b_req_idx_cpu: torch.Tensor = None
     b_mtp_index_cpu: torch.Tensor = None
     b_seq_len_cpu: torch.Tensor = None
-    b_ready_cache_len_cpu: torch.Tensor = None
     # prefill 阶段使用的参数，但是不是推理过程使用的参数，是推理外部进行资源管理
     # 的一些变量
     b_prefill_has_output_cpu: List[bool] = None  # 标记进行prefill的请求是否具有输出
@@ -70,7 +69,6 @@ class ModelInput:
         self._capture_cpu_mirror("b_req_idx", "b_req_idx_cpu")
         self._capture_cpu_mirror("b_mtp_index", "b_mtp_index_cpu")
         self._capture_cpu_mirror("b_seq_len", "b_seq_len_cpu")
-        self._capture_cpu_mirror("b_ready_cache_len", "b_ready_cache_len_cpu")
         return
 
     def make_mtp_draft_input(self):

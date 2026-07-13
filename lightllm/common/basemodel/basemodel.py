@@ -301,21 +301,6 @@ class TpPartBaseModel:
         else:
             return self._decode(model_input)
 
-    def _prepare_decode_slots(self, model_input: ModelInput, mem_indexes: torch.Tensor):
-        if model_input.mem_indexes_cpu is None:
-            return
-        if model_input.mtp_decode_slot_prepare_indices == ():
-            return
-        self.req_manager.prepare_decode(
-            model_input.b_req_idx_cpu,
-            model_input.b_seq_len_cpu,
-            model_input.b_mtp_index_cpu,
-            mem_indexes,
-            model_input.mtp_decode_slot_prepare_indices,
-            prepare_compress_slots=not self.is_mtp_draft_model,
-        )
-        return
-
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
         infer_state.input_ids = model_input.input_ids
@@ -387,19 +372,7 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
-        new_model_input.b_mtp_index_cpu = F.pad(
-            new_model_input.b_mtp_index_cpu, (0, padded_batch_size), mode="constant", value=0
-        )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
-        new_model_input.b_req_idx_cpu = F.pad(
-            new_model_input.b_req_idx_cpu,
-            (0, padded_batch_size),
-            mode="constant",
-            value=self.req_manager.HOLD_REQUEST_ID,
-        )
-        new_model_input.b_seq_len_cpu = F.pad(
-            new_model_input.b_seq_len_cpu, (0, padded_batch_size), mode="constant", value=2
-        )
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_batch_size),
@@ -455,18 +428,8 @@ class TpPartBaseModel:
             new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
         )
         new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
-        new_model_input.b_mtp_index_cpu = F.pad(new_model_input.b_mtp_index_cpu, (0, 1), mode="constant", value=0)
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
         new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
-        new_model_input.b_req_idx_cpu = F.pad(
-            new_model_input.b_req_idx_cpu, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
-        )
-        new_model_input.b_seq_len_cpu = F.pad(
-            new_model_input.b_seq_len_cpu, (0, 1), mode="constant", value=padded_token_num
-        )
-        new_model_input.b_ready_cache_len_cpu = F.pad(
-            new_model_input.b_ready_cache_len_cpu, (0, 1), mode="constant", value=0
-        )
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
@@ -560,15 +523,6 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state.mem_index,
             max_q_seq_len=infer_state.max_q_seq_len,
         )
-        if model_input.b_req_idx_cpu is not None and not self.is_mtp_draft_model:
-            self.req_manager.prepare_prefill(
-                b_req_idx=infer_state.b_req_idx,
-                b_ready_cache_len=infer_state.b_ready_cache_len,
-                b_seq_len=infer_state.b_seq_len,
-                b_req_idx_cpu=model_input.b_req_idx_cpu,
-                b_ready_cache_len_cpu=model_input.b_ready_cache_len_cpu,
-                b_seq_len_cpu=model_input.b_seq_len_cpu,
-            )
         prefill_mem_indexes_ready_event = torch.cuda.Event()
         prefill_mem_indexes_ready_event.record()
 
@@ -596,7 +550,6 @@ class TpPartBaseModel:
                 model_input.b_mtp_index,
             )
 
-        origin_model_input = model_input
         origin_batch_size = model_input.batch_size
         if self.args.enable_tpsp_mix_mode:
             infer_batch_size = triton.cdiv(model_input.batch_size, self.tp_world_size_) * self.tp_world_size_
@@ -619,7 +572,6 @@ class TpPartBaseModel:
                 infer_state.b_seq_len,
                 infer_state.mem_index,
             )
-            self._prepare_decode_slots(origin_model_input, infer_state.mem_index[:origin_batch_size])
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
@@ -641,7 +593,6 @@ class TpPartBaseModel:
                 infer_state.b_seq_len,
                 infer_state.mem_index,
             )
-            self._prepare_decode_slots(origin_model_input, infer_state.mem_index[:origin_batch_size])
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
             model_output = self._token_forward(infer_state)
@@ -808,15 +759,6 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state0.mem_index,
             max_q_seq_len=infer_state0.max_q_seq_len,
         )
-        if model_input0.b_req_idx_cpu is not None and not self.is_mtp_draft_model:
-            self.req_manager.prepare_prefill(
-                b_req_idx=infer_state0.b_req_idx,
-                b_ready_cache_len=infer_state0.b_ready_cache_len,
-                b_seq_len=infer_state0.b_seq_len,
-                b_req_idx_cpu=model_input0.b_req_idx_cpu,
-                b_ready_cache_len_cpu=model_input0.b_ready_cache_len_cpu,
-                b_seq_len_cpu=model_input0.b_seq_len_cpu,
-            )
         infer_state0.init_some_extra_state(self)
         infer_state0.init_att_state()
 
@@ -830,15 +772,6 @@ class TpPartBaseModel:
             alloc_mem_index=infer_state1.mem_index,
             max_q_seq_len=infer_state1.max_q_seq_len,
         )
-        if model_input1.b_req_idx_cpu is not None and not self.is_mtp_draft_model:
-            self.req_manager.prepare_prefill(
-                b_req_idx=infer_state1.b_req_idx,
-                b_ready_cache_len=infer_state1.b_ready_cache_len,
-                b_seq_len=infer_state1.b_seq_len,
-                b_req_idx_cpu=model_input1.b_req_idx_cpu,
-                b_ready_cache_len_cpu=model_input1.b_ready_cache_len_cpu,
-                b_seq_len_cpu=model_input1.b_seq_len_cpu,
-            )
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
 
@@ -888,8 +821,6 @@ class TpPartBaseModel:
         assert model_input1.mem_indexes.is_cuda
 
         origin_batch_size = model_input0.batch_size
-        origin_model_input0 = model_input0
-        origin_model_input1 = model_input1
         max_len_in_batch = max(model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
         infer_batch_size = triton.cdiv(origin_batch_size, self.tp_world_size_) * self.tp_world_size_
 
@@ -906,7 +837,6 @@ class TpPartBaseModel:
                 infer_state0.b_seq_len,
                 infer_state0.mem_index,
             )
-            self._prepare_decode_slots(origin_model_input0, infer_state0.mem_index[:origin_batch_size])
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
@@ -917,7 +847,6 @@ class TpPartBaseModel:
                 infer_state1.b_seq_len,
                 infer_state1.mem_index,
             )
-            self._prepare_decode_slots(origin_model_input1, infer_state1.mem_index[:origin_batch_size])
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -949,7 +878,6 @@ class TpPartBaseModel:
                 infer_state0.b_seq_len,
                 infer_state0.mem_index,
             )
-            self._prepare_decode_slots(origin_model_input0, infer_state0.mem_index[:origin_batch_size])
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
@@ -960,7 +888,6 @@ class TpPartBaseModel:
                 infer_state1.b_seq_len,
                 infer_state1.mem_index,
             )
-            self._prepare_decode_slots(origin_model_input1, infer_state1.mem_index[:origin_batch_size])
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 

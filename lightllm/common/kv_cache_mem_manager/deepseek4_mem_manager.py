@@ -372,22 +372,20 @@ class DeepseekV4MemoryManager(MemoryManager):
             self._free_radix_unreferenced_swa_fn(need_pages - self.swa_page_allocator.can_use_mem_size)
         return self.swa_page_allocator.alloc(need_pages)
 
-    def _count_swa_pages(self, swa_slots: torch.Tensor, delta: int) -> torch.Tensor:
-        """按 slot 所在页更新存活计数,返回触达的页(去重)。"""
-        pages = torch.div(swa_slots.long(), DSV4_SWA_PAGE_SIZE, rounding_mode="floor")
+    def _update_swa_page_counts(self, swa_slots: torch.Tensor, delta: int) -> torch.Tensor:
+        """按 slot 所在页更新存活计数，返回逐 slot 的页号。"""
+        pages = torch.div(swa_slots, DSV4_SWA_PAGE_SIZE, rounding_mode="floor")
         ones = torch.full(pages.shape, delta, dtype=torch.int32, device=pages.device)
         self.swa_page_live_count.index_add_(0, pages, ones)
-        return torch.unique(pages)
+        return pages
 
     def alloc_swa_prefill(
         self,
-        b_req_idx: torch.Tensor,
-        b_ready_cache_len: torch.Tensor,
-        b_seq_len: torch.Tensor,
+        mem_indexes: torch.Tensor,
         req_to_token_indexs: torch.Tensor,
-        b_req_idx_cpu: torch.Tensor,
-        b_ready_cache_len_cpu: torch.Tensor,
-        b_seq_len_cpu: torch.Tensor,
+        req_list: List[int],
+        ready_list: List[int],
+        seq_list: List[int],
     ) -> None:
         """prefill prep: 为各请求位置 [ready, seq) 的新 token 分配位置对齐的 swa 槽。
 
@@ -395,88 +393,81 @@ class DeepseekV4MemoryManager(MemoryManager):
         续页(start 非整页,只可能是首页)的 base 从上一 token 的映射派生
         (full_to_swa[req_to_token[req, start-1]],该 token 必在保留窗内);其余页全新分配。
         radix 命中(ready 必 128 对齐)的借用方从全新页开始,与节点持有页天然不相交。
-        必须在 init_req_to_token_indexes 之后调用(scatter 目标经 req_to_token 行)。
+        当前 chunk 的 full 槽直接来自 generic preprocess 分配的 mem_indexes，因此不依赖
+        req_to_token_indexs 已完成当前 chunk 的 scatter；只有续页的上一 token 查询旧 req 行。
         """
         page = DSV4_SWA_PAGE_SIZE
         hold_req_id = self.max_request_num  # padding 行的请求 id(req_manager.HOLD_REQUEST_ID)
 
-        req_list = b_req_idx_cpu.tolist()
-        ready_list = b_ready_cache_len_cpu.tolist()
-        seq_list = b_seq_len_cpu.tolist()
-
-        segs = []  # (req_idx, start, end, n_new_pages, has_cont_page)
+        segs = []  # (req_idx, start, end, mem_offset, n_new_pages, has_cont_page)
         total_new_pages = 0
+        mem_offset = 0
         for req_idx, start, end in zip(req_list, ready_list, seq_list):
-            req_idx, start, end = int(req_idx), int(start), int(end)
+            q_len = end - start
             if req_idx == hold_req_id or end <= start:
+                mem_offset += q_len
                 continue
             first_new_page = _ceil_div(start, page)
             n_new = max(0, (end - 1) // page - first_new_page + 1)
-            segs.append((req_idx, start, end, n_new, start % page != 0))
+            segs.append((req_idx, start, end, mem_offset, n_new, start % page != 0))
             total_new_pages += n_new
+            mem_offset += q_len
         if not segs:
             return
 
-        new_pages = self._alloc_swa_pages(total_new_pages).cuda(non_blocking=True).long() if total_new_pages else None
+        device = self.full_to_swa_indexs.device
+        mem_indexes = mem_indexes.reshape(-1)
+        new_pages = self._alloc_swa_pages(total_new_pages).to(device, non_blocking=True) if total_new_pages else None
         page_cursor = 0
-        for req_idx, start, end, n_new, has_cont in segs:
-            positions = torch.arange(start, end, dtype=torch.long, device="cuda")
+        for req_idx, start, end, mem_start, n_new, has_cont in segs:
+            positions = torch.arange(start, end, dtype=torch.int32, device=device)
             page_local = torch.div(positions, page, rounding_mode="floor") - start // page
-            bases = torch.empty(((end - 1) // page - start // page + 1,), dtype=torch.long, device="cuda")
+            bases = torch.empty(((end - 1) // page - start // page + 1,), dtype=torch.int32, device=device)
             if has_cont:
-                prev_slot = int(self.full_to_swa_indexs[req_to_token_indexs[req_idx, start - 1].long()].item())
-                # 续页不变式: 上一 token 必驻留(retain >= 2)且位置对齐(未来 resume/MTP 改动的哨兵)。
-                assert prev_slot >= 0 and prev_slot % page == (start - 1) % page
+                prev_slot = self.full_to_swa_indexs[req_to_token_indexs[req_idx, start - 1]]
                 bases[0] = prev_slot - (start - 1) % page
             if n_new:
                 bases[1 if has_cont else 0 :] = new_pages[page_cursor : page_cursor + n_new] * page
                 page_cursor += n_new
-            slots = (bases[page_local] + positions % page).to(torch.int32)
-            self.full_to_swa_indexs[req_to_token_indexs[req_idx, start:end].long()] = slots
-            self._count_swa_pages(slots, 1)
+            slots = bases[page_local] + positions % page
+            full_slots = mem_indexes[mem_start : mem_start + end - start]
+            self.full_to_swa_indexs[full_slots] = slots
+            self._update_swa_page_counts(slots, 1)
         return
 
     def alloc_swa_decode(
         self,
-        b_req_idx_cpu: torch.Tensor,
-        b_seq_len_cpu: torch.Tensor,
+        req_list: List[int],
+        seq_list: List[int],
         mem_indexes: torch.Tensor,
-        req_to_token_indexs: torch.Tensor,
+        prev_full_indexes: torch.Tensor,
     ) -> None:
         """decode prep: 本步 token(位置 seq-1)的 swa 槽。整页起点开新页,否则上一 token 槽 +1
         (位置对齐不变式保证同页连续)。scatter 目标用当前步 mem_indexes。
 
-        注意: 续槽从上一位置的映射派生,故同一请求的多行(MTP 多 token/步)需要调用方按
-        b_mtp_index 分段准备。"""
+        调用方传入每行前一 token 的 full 槽；MTP step>0 可直接使用同批前一列。"""
         page = DSV4_SWA_PAGE_SIZE
         hold_req_id = self.max_request_num
-        req_list = b_req_idx_cpu.tolist()
-        seq_list = b_seq_len_cpu.tolist()
-        cont_rows, cont_prev_pos, new_rows = [], [], []
+        cont_rows, new_rows = [], []
         for i, (req_idx, seq_len) in enumerate(zip(req_list, seq_list)):
-            req_idx, seq_len = int(req_idx), int(seq_len)
             if req_idx == hold_req_id or seq_len <= 0:
                 continue
             if (seq_len - 1) % page == 0:
                 new_rows.append(i)
             else:
                 cont_rows.append(i)
-                cont_prev_pos.append(seq_len - 2)
-        mem_indexes = mem_indexes.cuda().long().reshape(-1)
+        mem_indexes = mem_indexes.reshape(-1)
         if cont_rows:
-            req_rows = torch.tensor([req_list[i] for i in cont_rows], dtype=torch.long, device="cuda")
-            prev_full = req_to_token_indexs[req_rows, torch.tensor(cont_prev_pos, device="cuda")].long()
+            prev_full = prev_full_indexes.reshape(-1)[cont_rows]
             prev_slots = self.full_to_swa_indexs[prev_full]
-            # 续槽不变式哨兵: 上一位置必驻留(retain 覆盖)。prep 阶段本就有同步,代价可忽略。
-            assert bool((prev_slots >= 0).all())
             slots = prev_slots + 1
             self.full_to_swa_indexs[mem_indexes[cont_rows]] = slots
-            self._count_swa_pages(slots, 1)
+            self._update_swa_page_counts(slots, 1)
         if new_rows:
-            pages = self._alloc_swa_pages(len(new_rows)).cuda(non_blocking=True).long()
-            slots = (pages * page).to(torch.int32)
+            pages = self._alloc_swa_pages(len(new_rows)).to(self.full_to_swa_indexs.device, non_blocking=True)
+            slots = pages * page
             self.full_to_swa_indexs[mem_indexes[new_rows]] = slots
-            self._count_swa_pages(slots, 1)
+            self._update_swa_page_counts(slots, 1)
         return
 
     def evict_swa(self, full_slots: torch.Tensor) -> None:
@@ -484,7 +475,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         未映射(-1)的槽位跳过;页计数减到 0 时整页归还 allocator。"""
         if full_slots.numel() == 0:
             return
-        full_slots = full_slots.cuda().long().reshape(-1)
+        full_slots = full_slots.to(self.full_to_swa_indexs.device, non_blocking=True).reshape(-1)
         full_slots = torch.unique(full_slots[full_slots != self.HOLD_TOKEN_MEMINDEX])
         if full_slots.numel() == 0:
             return
@@ -494,14 +485,14 @@ class DeepseekV4MemoryManager(MemoryManager):
         if valid_slots.numel() == 0:
             return
         self.full_to_swa_indexs[full_slots[valid]] = -1
-        touched = self._count_swa_pages(valid_slots, -1)
+        touched = torch.unique(self._update_swa_page_counts(valid_slots, -1))
         empty = touched[self.swa_page_live_count[touched] == 0]
         if empty.numel() > 0:
             self.swa_page_allocator.free(empty.to(torch.int32))
         return
 
     def _evict_compress(self, full_slots: torch.Tensor, mapping: torch.Tensor, allocator: KvCacheAllocator) -> None:
-        full_slots = full_slots.cuda().long().reshape(-1)
+        full_slots = full_slots.to(mapping.device, non_blocking=True).reshape(-1)
         # 去重: 同批重复槽会 gather 出重复的压缩槽 -> allocator 双重释放(free 已去重,直呼叫方防御)。
         full_slots = torch.unique(full_slots[full_slots != self.HOLD_TOKEN_MEMINDEX])
         if full_slots.numel() == 0:
@@ -520,18 +511,18 @@ class DeepseekV4MemoryManager(MemoryManager):
         return self.c4_page_allocator.alloc(need_pages)
 
     def count_c4_slots(self, c4_slots: torch.Tensor, delta: int) -> torch.Tensor:
-        """按 c4 slot 所在页更新存活计数,返回触达的页(去重)。"""
+        """按 c4 slot 所在页更新存活计数，返回逐 slot 的页号。"""
         assert self.c4_page_live_count is not None, "DeepSeek-V4 c4 page live count is not initialized"
-        pages = torch.div(c4_slots.long(), DSV4_C4_PAGE_SIZE, rounding_mode="floor")
+        pages = torch.div(c4_slots, DSV4_C4_PAGE_SIZE, rounding_mode="floor")
         ones = torch.full(pages.shape, delta, dtype=torch.int32, device=pages.device)
         self.c4_page_live_count.index_add_(0, pages, ones)
-        return torch.unique(pages)
+        return pages
 
     def evict_c4(self, full_slots: torch.Tensor) -> None:
         """回收 full 槽位(组末 token)映射的 c4 槽。非组末/未映射(-1)的槽位跳过。"""
         if self.c4_page_allocator is None or full_slots.numel() == 0:
             return
-        full_slots = full_slots.cuda().long().reshape(-1)
+        full_slots = full_slots.to(self.full_to_c4_indexs.device, non_blocking=True).reshape(-1)
         full_slots = torch.unique(full_slots[full_slots != self.HOLD_TOKEN_MEMINDEX])
         if full_slots.numel() == 0:
             return
@@ -541,7 +532,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         if valid_slots.numel() == 0:
             return
         self.full_to_c4_indexs[full_slots[valid]] = -1
-        touched = self.count_c4_slots(valid_slots, -1)
+        touched = torch.unique(self.count_c4_slots(valid_slots, -1))
         empty = touched[self.c4_page_live_count[touched] == 0]
         if empty.numel() > 0:
             self.c4_page_allocator.free(empty.to(torch.int32))

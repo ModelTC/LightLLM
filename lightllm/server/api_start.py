@@ -27,8 +27,6 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
-    get_model_type,
-    get_config_json,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
