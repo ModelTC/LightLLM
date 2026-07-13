@@ -203,7 +203,7 @@ class StaticBenchmarkExecutor:
         measured_tokens = case.batch_size * case.output_len
         elapsed = 0.0
         ttft_elapsed = 0.0
-        decode_step_count = 0
+        decode_token_count = 0
         iters = self._case_iters(warmup)
 
         for _ in range(iters):
@@ -214,14 +214,14 @@ class StaticBenchmarkExecutor:
                 req_idx, seq_len, next_ids = self._prefill_for_decode(case, token_rows, mtp_enabled)
                 torch.cuda.synchronize()
                 ttft_elapsed += time.perf_counter() - ttft_start
-                step_elapsed, step_count = self._run_mtp_decode_steps(
+                step_elapsed, accepted_token_count = self._run_mtp_decode_steps(
                     case=case,
                     req_idx=req_idx,
                     seq_len=seq_len,
                     next_ids=next_ids,
                 )
                 elapsed += step_elapsed
-                decode_step_count += step_count
+                decode_token_count += accepted_token_count
             else:
                 req_idx, seq_len, next_ids = self._materialize_context_for_decode(case)
                 elapsed += self._run_plain_decode_steps(
@@ -230,10 +230,10 @@ class StaticBenchmarkExecutor:
                     seq_len=seq_len,
                     next_ids=next_ids,
                 )
-                decode_step_count += case.output_len
+                decode_token_count += case.output_len
 
         self._reset_model_cache()
-        inter_token_latency_ms = elapsed * 1000.0 / max(1, decode_step_count) if iters > 0 else None
+        inter_token_latency_ms = elapsed * 1000.0 / max(1, decode_token_count) if iters > 0 else None
         return self._make_result(
             case,
             elapsed,
@@ -345,7 +345,7 @@ class StaticBenchmarkExecutor:
         next_ids: torch.Tensor,
     ) -> tuple:
         elapsed = 0.0
-        step_count = 0
+        accepted_token_count = 0
         generated_len = 0
         step_width = self._mtp_step_width()
         base_req_idx, b_mtp_index = self._build_mtp_decode_index_tensors(req_idx, step_width)
@@ -400,9 +400,10 @@ class StaticBenchmarkExecutor:
             )
             seq_len += accepted_width
             generated_len += accepted_width
-            step_count += 1
+            # One MTP packet can advance by multiple accepted tokens; ITL is per accepted token.
+            accepted_token_count += accepted_width
 
-        return elapsed, step_count
+        return elapsed, accepted_token_count
 
     def _run_mtp_draft_decode(
         self,
