@@ -1572,11 +1572,12 @@ class DeepSeekV32Detector(BaseFormatDetector):
             if partial_len:
                 return StreamingParseResult()
 
+            normal_text = current_text
             self._buffer = ""
             for e_token in [self.eot_token, self.invoke_end_token]:
-                if e_token in new_text:
-                    new_text = new_text.replace(e_token, "")
-            return StreamingParseResult(normal_text=new_text)
+                if e_token in normal_text:
+                    normal_text = normal_text.replace(e_token, "")
+            return StreamingParseResult(normal_text=normal_text)
 
         # Mark that we're inside a function_calls block
         if self.has_tool_call(current_text):
