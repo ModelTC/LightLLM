@@ -174,18 +174,17 @@ class DistributeGroupManager:
         )
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
-        if not is_sm100_gpu():
-            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
-            )
-            self.ep_low_latency_buffer = deep_ep.Buffer(
-                deepep_group,
-                int(1e9),
-                num_rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=(self.ll_num_experts // global_world_size),
-            )
-        else:
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+        )
+        self.ep_low_latency_buffer = deep_ep.Buffer(
+            deepep_group,
+            int(1e9),
+            num_rdma_bytes,
+            low_latency_mode=True,
+            num_qps_per_rank=(self.ll_num_experts // global_world_size),
+        )
+        if is_sm100_gpu():
             if moe_intermediate_size is None:
                 raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
 

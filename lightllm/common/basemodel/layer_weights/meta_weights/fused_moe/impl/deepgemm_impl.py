@@ -22,6 +22,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.utils.device_utils import is_sm100_gpu
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -125,6 +126,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
+            round_scale=is_sm100_gpu(),
+            use_ue8m0=is_sm100_gpu(),
             async_finish=False,
             return_recv_hook=True,
         )
@@ -271,7 +274,12 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out, block_size, dtype=w13_weight.dtype, column_major_scales=True, scale_tma_aligned=True
+                silu_out,
+                block_size,
+                dtype=w13_weight.dtype,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                use_ue8m0_scales=is_sm100_gpu(),
             )
 
             # groupgemm (contiguous layout)

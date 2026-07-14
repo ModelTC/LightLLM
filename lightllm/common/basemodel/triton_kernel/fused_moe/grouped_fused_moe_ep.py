@@ -239,7 +239,14 @@ def masked_group_gemm(
 
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
+    silu_and_mul_masked_post_quant_fwd(
+        gemm_out_a,
+        qsilu_out,
+        qsilu_out_scale,
+        block_size,
+        masked_m,
+        use_ue8m0_scales=is_sm100_gpu(),
+    )
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
@@ -303,7 +310,9 @@ def quantize_fused_experts_input(
     if w13.weight.ndim == 3:
         block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
     assert block_size_k == 128, "block_size_k must be 128"
-    return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
+    return per_token_group_quant_fp8(
+        hidden_states, block_size_k, dtype=w13.weight.dtype, use_ue8m0_scales=is_sm100_gpu()
+    )
 
 
 def fused_experts(
@@ -379,7 +388,9 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(
+            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=is_sm100_gpu()
+        )
         allocate_on_comm_stream = previous_event is not None
         # normal dispatch
         # recv_x [recive_num_tokens, hidden] recv_x_scale [recive_num_tokens, hidden // block_size]
@@ -446,7 +457,12 @@ def fused_experts_impl(
 
             silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
+                silu_out,
+                block_size_k,
+                dtype=w1.dtype,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                use_ue8m0_scales=is_sm100_gpu(),
             )
 
             # groupgemm (contiguous layout)
@@ -484,6 +500,8 @@ def fused_experts_impl(
             num_max_dispatch_tokens_per_rank,
             num_experts,
             use_fp8=use_fp8_w8a8,
+            round_scale=is_sm100_gpu(),
+            use_ue8m0=is_sm100_gpu(),
             async_finish=False,
             return_recv_hook=False,
         )
