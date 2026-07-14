@@ -387,8 +387,6 @@ def _launch_subprocesses(args: StartArgs):
 
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
     ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
-    if args.rl_rpyc_port is not None:
-        ports_to_check.append(args.rl_rpyc_port)
     if args.node_rank == 0 and args.nccl_port is not None:
         ports_to_check.append(args.nccl_port)
     if not args.disable_vision and not args.visual_use_proxy_mode and args.visual_nccl_ports is not None:

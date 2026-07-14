@@ -140,11 +140,6 @@ class ShmPortArgs:
     def nccl_port(self) -> int:
         return self._get_from_args_or_alloc("nccl_port")
 
-    # [dynamic] router RL RPyC port
-    @property
-    def rl_rpyc_port(self) -> int:
-        return self._get_from_args_or_alloc("rl_rpyc_port")
-
     # [dynamic] visual-only RPyC port
     @property
     def visual_rpyc_port(self) -> int:
@@ -204,6 +199,11 @@ class ShmPortArgs:
     @property
     def multi_level_kv_cache_port(self) -> int:
         return self._get_from_args_or_alloc("multi_level_kv_cache_port")
+
+    # [dynamic] router RL RPyC port
+    @property
+    def rl_rpyc_port(self) -> int:
+        return self._get_from_args_or_alloc("rl_rpyc_port")
 
     def close(self) -> None:
         if self.shm is not None:
