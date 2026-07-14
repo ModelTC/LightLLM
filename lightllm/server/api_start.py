@@ -13,6 +13,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -384,6 +385,18 @@ def _launch_subprocesses(args: StartArgs):
 
     auto_configure_allreduce_flags_from_args(args)
 
+    # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
+    ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
+    if args.rl_rpyc_port is not None:
+        ports_to_check.append(args.rl_rpyc_port)
+    if args.node_rank == 0 and args.nccl_port is not None:
+        ports_to_check.append(args.nccl_port)
+    if not args.disable_vision and not args.visual_use_proxy_mode and args.visual_nccl_ports is not None:
+        ports_to_check.extend(args.visual_nccl_ports[: args.visual_dp])
+    if not args.disable_audio and args.audio_nccl_ports is not None:
+        ports_to_check.extend(args.audio_nccl_ports[: args.audio_dp])
+    validate_ports(ports_to_check)
+
     set_env_start_args(args)
     get_shm_port_args(create=True)
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
@@ -519,6 +532,7 @@ def pd_master_start(args: StartArgs):
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
+    validate_ports([args.port])
     set_env_start_args(args)
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
@@ -581,6 +595,12 @@ def visual_only_start(args):
 
     args.visual_node_id = uuid.uuid4().int
 
+    ports_to_check = []
+    if args.visual_rpyc_port is not None:
+        ports_to_check.append(args.visual_rpyc_port)
+    if args.visual_nccl_ports is not None:
+        ports_to_check.extend(args.visual_nccl_ports[: args.visual_dp])
+    validate_ports(ports_to_check)
     set_env_start_args(args)
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
@@ -611,6 +631,10 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    ports_to_check = [args.config_server_port]
+    if args.config_server_visual_redis_port is not None:
+        ports_to_check.append(args.config_server_visual_redis_port)
+    validate_ports(ports_to_check)
     set_env_start_args(args)
     get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
