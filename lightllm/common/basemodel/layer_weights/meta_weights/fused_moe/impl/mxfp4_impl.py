@@ -19,6 +19,7 @@ class FuseMoeMXFP4(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         try:
             from vllm.model_executor.layers.fused_moe.activation import MoEActivation

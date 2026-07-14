@@ -358,6 +358,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             topk_ids=indices,
             is_prefill=infer_state.is_prefill,
             clamp_limit=float(self.swiglu_limit),
+            alloc_tensor_func=self.alloc_tensor,
         )
 
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
