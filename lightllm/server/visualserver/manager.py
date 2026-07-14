@@ -21,7 +21,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.start_utils import notify_parent_release_ports
+from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 
 
@@ -32,26 +32,25 @@ class VisualManager:
     def __init__(
         self,
         args: StartArgs,
-        port_release_pipe_writer=None,
     ):
         self.args = args
-        self.port_release_pipe_writer = port_release_pipe_writer
+        ports = get_shm_port_args()
         context = zmq.Context(2)
         enable_audio = not args.disable_audio
         if enable_audio:
             self.send_to_next_module = context.socket(zmq.PUSH)
-            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{ports.audio_port}")
         else:
             if args.enable_cpu_cache:
                 self.send_to_next_module = context.socket(zmq.PUSH)
-                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
             else:
                 self.send_to_next_module = context.socket(zmq.PUSH)
-                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+                self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
 
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
-        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.visual_port}")
+        self.cache_client = rpyc.connect("localhost", ports.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
@@ -73,7 +72,8 @@ class VisualManager:
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
-        notify_parent_release_ports(self.port_release_pipe_writer, self.args.visual_nccl_ports[: self.vit_dp])
+        ports = get_shm_port_args()
+        visual_nccl_ports = ports.visual_nccl_ports
         for dp_rank_id in range(self.vit_dp):  # async init model process
             for tp_rank_id in range(self.vit_tp):
                 device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
@@ -81,11 +81,11 @@ class VisualManager:
                     "weight_dir": self.model_weightdir,
                     "device_id": device_id,
                     "vit_tp": self.vit_tp,
-                    "cache_port": self.args.cache_port,
+                    "cache_port": ports.cache_port,
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,
                     "data_type": self.args.data_type,
-                    "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
+                    "visual_nccl_port": visual_nccl_ports[dp_rank_id],
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": max(self.infer_batch_size // self.vit_dp, 1),
@@ -202,8 +202,7 @@ def start_visual_process(args, pipe_writer):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::visual_server")
     start_parent_check_thread()
     try:
-        notify_parent_release_ports(pipe_writer, [args.visual_port])
-        visualserver = VisualManager(args=args, port_release_pipe_writer=pipe_writer)
+        visualserver = VisualManager(args=args)
         asyncio.run(visualserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

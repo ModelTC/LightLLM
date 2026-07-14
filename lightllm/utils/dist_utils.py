@@ -292,6 +292,7 @@ def create_dp_special_inter_group(backend):
 
 def _init_nccl_env():
     from lightllm.utils.envs_utils import get_env_start_args
+    from lightllm.utils.shm_port_args import get_shm_port_args
 
     args = get_env_start_args()
 
@@ -300,8 +301,9 @@ def _init_nccl_env():
         os.environ["TORCHELASTIC_USE_AGENT_STORE"] = "True"
         rank_id = get_global_rank()
         world_size = get_global_world_size()
-        ip_port = f"{args.config_server_host}:{args.config_server_port}"
-        params = f"tcp_store_port={args.nccl_port}&&rank_id={rank_id}&&world_size={world_size}"
+        ports = get_shm_port_args()
+        ip_port = f"{args.config_server_host}:{ports.config_server_port}"
+        params = f"tcp_store_port={ports.nccl_port}&&rank_id={rank_id}&&world_size={world_size}"
 
         if rank_id == 0:
             # 当使用外部config server 启动的tcpStore来初始化nccl时，需要保证配置了config_server_host.

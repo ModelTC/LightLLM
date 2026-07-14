@@ -50,6 +50,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.io_struct import ReleaseMemoryReq, ResumeMemoryReq
 from dataclasses import dataclass
 
@@ -105,7 +106,7 @@ class G_Objs:
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
         if args.run_mode == "pd_master":
-            self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
                 args=args,
             )
@@ -114,7 +115,7 @@ class G_Objs:
             SamplingParams.load_generation_cfg(args.model_dir)
             CompletionRequest.load_generation_cfg(args.model_dir)
             ChatCompletionRequest.load_generation_cfg(args.model_dir)
-            self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
             self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)

@@ -13,7 +13,7 @@ from rpyc import SocketStream
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.start_utils import notify_parent_release_ports
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -159,7 +159,6 @@ def start_metric_manager(args: StartArgs, pipe_writer):
 
     from rpyc.utils.server import ThreadedServer
 
-    notify_parent_release_ports(pipe_writer, [args.metric_port])
-    t = ThreadedServer(service, port=args.metric_port)
+    t = ThreadedServer(service, port=get_shm_port_args().metric_port)
     pipe_writer.send("init ok")
     t.start()
