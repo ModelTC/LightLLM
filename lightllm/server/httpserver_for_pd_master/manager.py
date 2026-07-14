@@ -21,6 +21,7 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.utils.envs_utils import get_pd_split_max_new_tokens
+from lightllm.utils.shm_port_args import get_shm_port_args
 from .pd_selector import create_selector
 
 logger = init_logger(__name__)
@@ -34,7 +35,7 @@ class HttpServerManagerForPDMaster:
         self.args = args
         self.max_req_total_len = args.max_req_total_len
         assert self.max_req_total_len is not None
-        self.metric_client = MetricClient(args.metric_port)
+        self.metric_client = MetricClient(get_shm_port_args().metric_port)
         self.id_gen = ReqIDGenerator()
 
         self.pd_manager = PDManager(args)

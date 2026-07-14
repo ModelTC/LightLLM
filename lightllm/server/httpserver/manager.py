@@ -48,6 +48,7 @@ from .rl_controller import HttpRlController
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
@@ -60,9 +61,10 @@ class HttpServerManager:
         args: StartArgs,
     ):
         self.args: StartArgs = args
+        ports = get_shm_port_args()
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
@@ -79,41 +81,41 @@ class HttpServerManager:
                 for child_ip in args.child_ips:
                     context = zmq.asyncio.Context(2)
                     self.multinode_req_manager.append(context.socket(zmq.PUSH))
-                    self.multinode_req_manager[-1].connect(f"tcp://{child_ip}:{args.multinode_httpmanager_port}")
+                    self.multinode_req_manager[-1].connect(f"tcp://{child_ip}:{ports.multinode_httpmanager_port}")
                     logger.info(
-                        f"HttpServerManager connected to child node at {child_ip}:{args.multinode_httpmanager_port}"
+                        f"HttpServerManager connected to child node at {child_ip}:{ports.multinode_httpmanager_port}"
                     )
             else:
                 context = zmq.asyncio.Context(2)
                 self.multinode_req_manager = context.socket(zmq.PULL)
-                self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
+                self.multinode_req_manager.bind(f"tcp://*:{ports.multinode_httpmanager_port}")
                 logger.info(
-                    f"HttpServerManager listening for master node requests on *:{args.multinode_httpmanager_port}"
+                    f"HttpServerManager listening for master node requests on *:{ports.multinode_httpmanager_port}"
                 )
 
         self.enable_multimodal = args.enable_multimodal
 
         if self.enable_multimodal:
-            self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+            self.cache_client = rpyc.connect("localhost", ports.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         if not self.args.disable_vision:
             self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{ports.visual_port}")
 
         if not self.args.disable_audio:
             self.send_to_audio = context.socket(zmq.PUSH)
-            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{ports.audio_port}")
 
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
-            self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+            self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
 
         self.shm_req_manager = ShmReqManager()
 
         # recv from detokenization
         self.zmq_recv_socket = context.socket(zmq.SUB)
-        self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port}")
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
@@ -122,7 +124,7 @@ class HttpServerManager:
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
-        self.metric_client = MetricClient(args.metric_port)
+        self.metric_client = MetricClient(ports.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
@@ -885,7 +887,7 @@ class HttpServerManager:
 
             self.router_profiler_client = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
                 "localhost",
-                self.args.router_profiler_port,
+                get_shm_port_args().router_profiler_port,
                 config={"allow_pickle": True},
             )
             self.router_profiler_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

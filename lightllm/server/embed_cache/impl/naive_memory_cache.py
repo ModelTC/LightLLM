@@ -59,7 +59,11 @@ class InMemoryCache:
             else:
                 while True:
                     try:
-                        config_server_ip_port = f"{self.args.config_server_host}:{self.args.config_server_port}"
+                        from lightllm.utils.shm_port_args import get_shm_port_args
+
+                        config_server_ip_port = (
+                            f"{self.args.config_server_host}:{get_shm_port_args().config_server_port}"
+                        )
                         url = f"http://{config_server_ip_port}/allocate_global_unique_multimodal_id_range"
                         response = requests.get(url)
                         if response.status_code == 200:

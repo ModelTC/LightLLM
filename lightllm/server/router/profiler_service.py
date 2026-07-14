@@ -40,13 +40,15 @@ def start_router_profiler_server(args, profiler_cmd_queue: RouterProfilerCmdQueu
 
     from rpyc.utils.server import ThreadedServer
     import lightllm.utils.rpyc_fix_utils as _
+    from lightllm.utils.shm_port_args import get_shm_port_args
 
+    router_profiler_port = get_shm_port_args().router_profiler_port
     server = ThreadedServer(
         RouterProfilerService(profiler_cmd_queue),
-        port=args.router_profiler_port,
+        port=router_profiler_port,
         protocol_config={"allow_pickle": True},
     )
     thread = threading.Thread(target=server.start, daemon=True)
     thread.start()
-    logger.info(f"router profiler rpyc server started on port {args.router_profiler_port}")
+    logger.info(f"router profiler rpyc server started on port {router_profiler_port}")
     return server, thread

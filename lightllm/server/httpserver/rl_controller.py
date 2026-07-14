@@ -21,6 +21,7 @@ from lightllm.server.io_struct import (
     UpdateWeightsFromTensorReq,
 )
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -210,7 +211,7 @@ class HttpRlController:
 
         conn = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
             "localhost",
-            self.args.rl_rpyc_port,
+            get_shm_port_args().rl_rpyc_port,
             config={"allow_pickle": True, "sync_request_timeout": 600},
         )
         try:

@@ -48,19 +48,21 @@ class RouterRlRpcService(rpyc.Service):
 
 
 def start_router_rl_rpyc_server(args, rl_op_queue: RouterRlOpQueue):
-    if args.node_rank != 0 or args.rl_rpyc_port is None:
+    if args.node_rank != 0:
         return None, None
 
     from rpyc.utils.server import ThreadedServer
     import lightllm.utils.rpyc_fix_utils as _
+    from lightllm.utils.shm_port_args import get_shm_port_args
 
+    rl_rpyc_port = get_shm_port_args().rl_rpyc_port
     server = ThreadedServer(
         RouterRlRpcService(rl_op_queue),
         hostname="127.0.0.1",
-        port=args.rl_rpyc_port,
+        port=rl_rpyc_port,
         protocol_config={"allow_pickle": True, "sync_request_timeout": 600},
     )
     thread = threading.Thread(target=server.start, name="rl_rpyc_server", daemon=True)
     thread.start()
-    logger.info(f"router rl rpyc server started on port {args.rl_rpyc_port}")
+    logger.info(f"router rl rpyc server started on port {rl_rpyc_port}")
     return server, thread

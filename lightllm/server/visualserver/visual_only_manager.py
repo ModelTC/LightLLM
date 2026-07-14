@@ -25,7 +25,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.start_utils import notify_parent_release_ports
+from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
 from .manager import VisualManager
@@ -38,10 +38,8 @@ class VisualOnlyManager(rpyc.Service):
     def __init__(
         self,
         args: StartArgs,
-        port_release_pipe_writer=None,
     ):
         self.args = args
-        self.port_release_pipe_writer = port_release_pipe_writer
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         assert self.vit_dp == 1
@@ -71,15 +69,16 @@ class VisualOnlyManager(rpyc.Service):
         else:
             host_ip = args.host
 
+        ports = get_shm_port_args()
         while True:
             try:
-                uri = f"ws://{args.config_server_host}:{args.config_server_port}/visual_register"
+                uri = f"ws://{args.config_server_host}:{ports.config_server_port}/visual_register"
                 async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
 
                     sock = websocket.transport.get_extra_info("socket")
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                    vit_obj = VIT_Obj(node_id=args.visual_node_id, host_ip=host_ip, port=args.visual_rpyc_port)
+                    vit_obj = VIT_Obj(node_id=args.visual_node_id, host_ip=host_ip, port=ports.visual_rpyc_port)
 
                     await websocket.send(pickle.dumps(vit_obj))
                     logger.info(f"Sent registration vit_obj: {vit_obj}")
@@ -105,7 +104,7 @@ class VisualOnlyManager(rpyc.Service):
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
-        notify_parent_release_ports(self.port_release_pipe_writer, self.args.visual_nccl_ports[: self.vit_dp])
+        visual_nccl_ports = get_shm_port_args().visual_nccl_ports
         for dp_rank_id in range(self.vit_dp):  # async init model process
             for tp_rank_id in range(self.vit_tp):
                 device_id = self.args.visual_gpu_ids[dp_rank_id * self.vit_tp + tp_rank_id]
@@ -117,7 +116,7 @@ class VisualOnlyManager(rpyc.Service):
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,
                     "data_type": self.args.data_type,
-                    "visual_nccl_port": self.args.visual_nccl_ports[dp_rank_id],
+                    "visual_nccl_port": visual_nccl_ports[dp_rank_id],
                     "quant_type": self.args.vit_quant_type,
                     "quant_cfg": self.args.vit_quant_cfg,
                     "max_batch_size": max(self.infer_batch_size // self.vit_dp, 1),
@@ -185,7 +184,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
     start_parent_check_thread()
 
     try:
-        visualserver = VisualOnlyManager(args=args, port_release_pipe_writer=pipe_writer)
+        visualserver = VisualOnlyManager(args=args)
 
         def handle_exception(loop, context):
             logger.exception(f"VisualServer Caught exception: {str(context)}")
@@ -201,8 +200,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
 
         from .objs import rpyc_config
 
-        notify_parent_release_ports(pipe_writer, [args.visual_rpyc_port])
-        t = rpyc.ThreadedServer(visualserver, port=args.visual_rpyc_port, protocol_config=rpyc_config)
+        t = rpyc.ThreadedServer(visualserver, port=get_shm_port_args().visual_rpyc_port, protocol_config=rpyc_config)
     except Exception as e:
         logger.exception(str(e))
         visualserver.clean_up()

@@ -19,7 +19,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.start_utils import notify_parent_release_ports
+from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 
 
@@ -30,22 +30,21 @@ class AudioManager:
     def __init__(
         self,
         args: StartArgs,
-        port_release_pipe_writer=None,
     ):
         self.args = args
-        self.port_release_pipe_writer = port_release_pipe_writer
+        ports = get_shm_port_args()
         context = zmq.Context(2)
 
         if args.enable_cpu_cache:
             self.send_to_next_module = context.socket(zmq.PUSH)
-            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
         else:
             self.send_to_next_module = context.socket(zmq.PUSH)
-            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+            self.send_to_next_module.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
 
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
-        self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.audio_port}")
+        self.cache_client = rpyc.connect("localhost", ports.cache_port, config={"allow_pickle": True})
         self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.model_weightdir = args.model_dir
         self.audio_dp = args.audio_dp
@@ -62,7 +61,8 @@ class AudioManager:
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 
         init_model_ret = []
-        notify_parent_release_ports(self.port_release_pipe_writer, self.args.audio_nccl_ports[: self.audio_dp])
+        ports = get_shm_port_args()
+        audio_nccl_ports = ports.audio_nccl_ports
         for dp_rank_id in range(self.audio_dp):
             for tp_rank_id in range(self.audio_tp):
                 device_id = self.args.audio_gpu_ids[dp_rank_id * self.audio_tp + tp_rank_id]
@@ -70,11 +70,11 @@ class AudioManager:
                     "weight_dir": self.model_weightdir,
                     "device_id": device_id,
                     "audio_tp": self.audio_tp,
-                    "cache_port": self.args.cache_port,
+                    "cache_port": ports.cache_port,
                     "tp_rank_id": tp_rank_id,
                     "dp_rank_id": dp_rank_id,
                     "data_type": self.args.data_type,
-                    "audio_nccl_port": self.args.audio_nccl_ports[dp_rank_id],
+                    "audio_nccl_port": audio_nccl_ports[dp_rank_id],
                     "max_batch_size": max(self.infer_batch_size // self.audio_dp, 1),
                 }
                 init_model_ret.append(self.model_rpcs[dp_rank_id][tp_rank_id].init_model(kvargs))
@@ -180,8 +180,7 @@ def start_audio_process(args, pipe_writer):
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::audio_server")
     start_parent_check_thread()
     try:
-        notify_parent_release_ports(pipe_writer, [args.audio_port])
-        audioserver = AudioManager(args=args, port_release_pipe_writer=pipe_writer)
+        audioserver = AudioManager(args=args)
         asyncio.run(audioserver.wait_to_model_ready())
     except Exception as e:
         logger.exception(str(e))

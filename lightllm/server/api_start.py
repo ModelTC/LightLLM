@@ -6,13 +6,14 @@ import uuid
 import subprocess
 import signal
 import math
-from lightllm.utils.net_utils import PortManager
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
+from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
@@ -359,42 +360,6 @@ def _launch_subprocesses(args: StartArgs):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    port_manager = PortManager.for_model_server(args)
-    can_use_ports = port_manager.allocate_ports(11 + args.visual_dp + args.audio_dp)
-    logger.info(f"alloced ports: {can_use_ports}")
-    (
-        nccl_port,
-        router_port,
-        router_profiler_port,
-        detokenization_port,
-        http_server_port,
-        visual_port,
-        audio_port,
-        cache_port,
-        metric_port,
-        multi_level_kv_cache_port,
-        rl_rpyc_port,
-    ) = can_use_ports[0:11]
-    can_use_ports = can_use_ports[11:]
-
-    if args.visual_nccl_ports is None:
-        args.visual_nccl_ports = can_use_ports[: args.visual_dp]
-        can_use_ports = can_use_ports[args.visual_dp :]
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
-
-    if args.audio_nccl_ports is None:
-        args.audio_nccl_ports = can_use_ports[: args.audio_dp]
-        can_use_ports = can_use_ports[args.audio_dp :]
-    else:
-        args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
-
-    # 将申请好的端口放入args参数中
-    if args.nccl_port is None:
-        args.nccl_port = nccl_port
-    if args.rl_rpyc_port is None:
-        args.rl_rpyc_port = rl_rpyc_port
-
     set_unique_server_name(args)
 
     # 确保单机上多实列不冲突
@@ -404,23 +369,12 @@ def _launch_subprocesses(args: StartArgs):
         args.zmq_mode = zmq_mode
         logger.info(f"zmq mode head: {args.zmq_mode}")
 
-    args.router_port = router_port
-    args.router_profiler_port = router_profiler_port
-    args.detokenization_port = detokenization_port
-    args.http_server_port = http_server_port
-    args.visual_port = visual_port
-    args.audio_port = audio_port
-    args.cache_port = cache_port
-    args.metric_port = metric_port
-    args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    args.pd_node_infer_rpyc_ports = []
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
 
-    send_and_receive_node_ip(args)  # 多机用于收发node ip
     # dp 必须 > 1
     if args.enable_dp_prompt_cache_fetch and args.dp <= 1:
         args.enable_dp_prompt_cache_fetch = False
@@ -431,10 +385,22 @@ def _launch_subprocesses(args: StartArgs):
 
     auto_configure_allreduce_flags_from_args(args)
 
+    # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
+    ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
+    if args.node_rank == 0 and args.nccl_port is not None:
+        ports_to_check.append(args.nccl_port)
+    if not args.disable_vision and not args.visual_use_proxy_mode and args.visual_nccl_ports is not None:
+        ports_to_check.extend(args.visual_nccl_ports[: args.visual_dp])
+    if not args.disable_audio and args.audio_nccl_ports is not None:
+        ports_to_check.extend(args.audio_nccl_ports[: args.audio_dp])
+    validate_ports(ports_to_check)
+
+    set_env_start_args(args)
+    get_shm_port_args(create=True)
+    # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
+    send_and_receive_node_ip(args)
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
-    port_manager.release_unused_ports()
-    process_manager.port_manager = port_manager
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -517,7 +483,7 @@ def normal_or_p_d_start(args: StartArgs):
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
-        f"{args.host}:{args.port}",
+        f"{args.host}:{get_shm_port_args().port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -529,7 +495,6 @@ def normal_or_p_d_start(args: StartArgs):
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
-    process_manager.port_manager.release_ports([args.port])
     # 启动子进程
     http_server_process = subprocess.Popen(command)
 
@@ -564,16 +529,11 @@ def pd_master_start(args: StartArgs):
         args.pd_node_id = 0
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
-    logger.info(f"all start args:{args}")
 
-    port_manager = PortManager(args, [args.port])
-    can_use_ports = port_manager.allocate_ports(1, excluded_ports=[args.nccl_port])
-    metric_port = can_use_ports[0]
-
-    args.metric_port = metric_port
-
+    validate_ports([args.port])
     set_env_start_args(args)
-    process_manager.port_manager = port_manager
+    get_shm_port_args(create=True)
+    logger.info(f"all start args:{args}")
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -587,7 +547,7 @@ def pd_master_start(args: StartArgs):
         "--workers",
         "1",
         "--bind",
-        f"{args.host}:{args.port}",
+        f"{args.host}:{get_shm_port_args().port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -599,7 +559,6 @@ def pd_master_start(args: StartArgs):
         f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
-    port_manager.release_ports([args.port])
     http_server_process = subprocess.Popen(command)
 
     if args.health_monitor:
@@ -620,9 +579,7 @@ def visual_only_start(args):
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
 
-    port_manager = PortManager(args, [args.visual_rpyc_port])
-    can_use_ports = port_manager.allocate_ports(args.visual_dp)
-    process_manager.port_manager = port_manager
+    set_unique_server_name(args)
 
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -634,15 +591,17 @@ def visual_only_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    logger.info(f"alloced ports: {can_use_ports}")
-
-    args.visual_nccl_ports = can_use_ports[: args.visual_dp]
-    can_use_ports = can_use_ports[args.visual_dp :]
     args.visual_node_id = uuid.uuid4().int
 
-    logger.info(f"all start args:{args}")
-
+    ports_to_check = []
+    if args.visual_rpyc_port is not None:
+        ports_to_check.append(args.visual_rpyc_port)
+    if args.visual_nccl_ports is not None:
+        ports_to_check.extend(args.visual_nccl_ports[: args.visual_dp])
+    validate_ports(ports_to_check)
     set_env_start_args(args)
+    get_shm_port_args(create=True)
+    logger.info(f"all start args:{args}")
 
     from .visualserver.visual_only_manager import start_visual_process
 
@@ -670,19 +629,23 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    ports_to_check = [args.config_server_port]
+    if args.config_server_visual_redis_port is not None:
+        ports_to_check.append(args.config_server_visual_redis_port)
+    validate_ports(ports_to_check)
+    set_env_start_args(args)
+    get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
     if args.config_server_visual_redis_port is not None:
         start_redis_service(args)
-
-    set_env_start_args(args)
 
     command = [
         "hypercorn",
         "--workers",
         "1",
         "--bind",
-        f"{args.config_server_host}:{args.config_server_port}",
+        f"{args.config_server_host}:{get_shm_port_args().config_server_port}",
         "--log-level",
         "info",
         "--access-logfile",

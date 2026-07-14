@@ -37,7 +37,7 @@ from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
-from lightllm.utils.start_utils import notify_parent_release_ports
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
@@ -47,9 +47,8 @@ logger = init_logger(__name__)
 
 
 class RouterManager:
-    def __init__(self, args: StartArgs, port_release_pipe_writer=None):
+    def __init__(self, args: StartArgs):
         self.args = args
-        self.port_release_pipe_writer = port_release_pipe_writer
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
         self.node_world_size = self.world_size // args.nnodes
@@ -85,22 +84,23 @@ class RouterManager:
             self.shared_token_load.set_dynamic_max_load(0.0, dp_index)
 
         self.running_batch: Batch = None
+        ports = get_shm_port_args()
         context = zmq.Context(2)
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
 
         self.send_to_detokenization = context.socket(zmq.PUSH)
-        self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{args.detokenization_port}")
+        self.send_to_detokenization.connect(f"{args.zmq_mode}127.0.0.1:{ports.detokenization_port}")
 
         if self.is_multinode_tp:
             self.mulitnode_group = dist.init_process_group(
                 backend="gloo",
-                init_method=f"tcp://{args.nccl_host}:{args.multinode_router_gloo_port}",
+                init_method=f"tcp://{args.nccl_host}:{ports.multinode_router_gloo_port}",
                 world_size=args.nnodes,
                 rank=args.node_rank,
             )
 
-        self.metric_client = MetricClient(args.metric_port)
+        self.metric_client = MetricClient(ports.metric_port)
         self.is_pd_run_mode = self.args.run_mode in ["prefill", "decode"]
         self.is_pd_decode_mode = self.args.run_mode == "decode"
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
@@ -158,7 +158,7 @@ class RouterManager:
             "max_req_num": self.args.running_max_req_size,
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
             "nccl_host": self.args.nccl_host,
-            "nccl_port": self.args.nccl_port,
+            "nccl_port": get_shm_port_args().nccl_port,
             "is_first_token_constraint_mode": self.args.first_token_constraint_mode,
             "disable_chunked_prefill": self.args.disable_chunked_prefill,
             "chunked_prefill_size": self.args.chunked_prefill_size,
@@ -176,12 +176,9 @@ class RouterManager:
             "quant_type": self.args.quant_type,
             "quant_cfg": self.args.quant_cfg,
             "expert_dtype": self.args.expert_dtype,
-            "pd_rpyc_ports": self.args.pd_node_infer_rpyc_ports,  # 非 pd 模式可以不设置
         }
 
         # Call init_model on all model processes
-        if self.args.node_rank == 0:
-            notify_parent_release_ports(self.port_release_pipe_writer, [self.args.nccl_port])
         init_tasks = []
         for model_rpc_client in self.model_rpc_clients:
             init_tasks.append(model_rpc_client.init_model(kvargs=kvargs))
@@ -665,19 +662,13 @@ def start_router_process(args, pipe_writer):
     asyncio.set_event_loop(loop)
 
     try:
-        notify_parent_release_ports(pipe_writer, [args.router_port])
-        router = RouterManager(
-            args=args,
-            port_release_pipe_writer=pipe_writer,
-        )
+        router = RouterManager(args=args)
 
         loop.run_until_complete(router.wait_to_model_ready())
-        notify_parent_release_ports(pipe_writer, [args.router_profiler_port])
         router.profiler_rpyc_server, router.profiler_rpyc_thread = start_router_profiler_server(
             args,
             router.profiler_cmd_queue,
         )
-        notify_parent_release_ports(pipe_writer, [args.rl_rpyc_port])
         router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(
             args,
             router.rl_op_queue,

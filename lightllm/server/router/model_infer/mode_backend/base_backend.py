@@ -111,8 +111,6 @@ class ModeBackend:
         self.logger = init_logger(__name__)
 
         self.weight_dir = kvargs["weight_dir"]
-        # p d 分离模式，decode节点才会使用的参数
-        self.pd_rpyc_ports = kvargs.get("pd_rpyc_ports", None)
         max_total_token_num = kvargs["max_total_token_num"]
 
         init_distributed_env(kvargs)
