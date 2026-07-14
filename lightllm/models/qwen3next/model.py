@@ -104,3 +104,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
         return
+
+    def _init_att_backend1(self):
+        from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
+        self.prefill_att_backend1 = LinearAttBackend(model=self)
+        self.decode_att_backend1 = LinearAttBackend(model=self)
+        return
