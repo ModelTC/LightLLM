@@ -53,9 +53,7 @@ def mm_weight_quant(
     s_scales = torch.empty((num_blocks_m, num_blocks_n), dtype=torch.float32, device=x.device)
 
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_SIZE"]), triton.cdiv(N, meta["BLOCK_SIZE"]))
-    weight_quant_kernel[grid](
-        x, s_scales, y_quant, M, N, BLOCK_SIZE=block_size, USE_UE8M0_SCALE=use_ue8m0_scales
-    )
+    weight_quant_kernel[grid](x, s_scales, y_quant, M, N, BLOCK_SIZE=block_size, USE_UE8M0_SCALE=use_ue8m0_scales)
     return y_quant, s_scales
 
 

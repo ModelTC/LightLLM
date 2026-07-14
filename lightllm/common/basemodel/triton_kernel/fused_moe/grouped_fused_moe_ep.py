@@ -2,7 +2,7 @@
 import torch
 import triton
 import triton.language as tl
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
@@ -25,7 +25,6 @@ from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
-_MEGA_MOE_STATS: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
 SUPPORTED_EP_EXPERT_DTYPES = ("deepgemm-fp8w8a8-b128", "deepgemm-fp4fp8-b32")
 
 try:
@@ -94,6 +93,7 @@ def _mega_moe_quant_topk_to_buffer_kernel(
     FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
     TOPK: tl.constexpr,
+    TOPK_BLOCK: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -128,18 +128,25 @@ def _mega_moe_quant_topk_to_buffer_kernel(
     tl.store(x_sf_out_ptr + token_id * stride_x_sf_out_m + pack_id * stride_x_sf_out_k, packed_scale)
 
     if pack_id == 0:
-        topk_offsets = tl.arange(0, TOPK)
-        topk_idx = tl.load(topk_idx_ptr + token_id * stride_topk_idx_m + topk_offsets * stride_topk_idx_k)
+        topk_offsets = tl.arange(0, TOPK_BLOCK)
+        topk_mask = topk_offsets < TOPK
+        topk_idx = tl.load(
+            topk_idx_ptr + token_id * stride_topk_idx_m + topk_offsets * stride_topk_idx_k,
+            mask=topk_mask,
+        )
         topk_weights = tl.load(
-            topk_weights_ptr + token_id * stride_topk_weights_m + topk_offsets * stride_topk_weights_k
+            topk_weights_ptr + token_id * stride_topk_weights_m + topk_offsets * stride_topk_weights_k,
+            mask=topk_mask,
         )
         tl.store(
             topk_idx_out_ptr + token_id * stride_topk_idx_out_m + topk_offsets * stride_topk_idx_out_k,
             topk_idx.to(topk_idx_out_ptr.dtype.element_ty),
+            mask=topk_mask,
         )
         tl.store(
             topk_weights_out_ptr + token_id * stride_topk_weights_out_m + topk_offsets * stride_topk_weights_out_k,
             topk_weights.to(topk_weights_out_ptr.dtype.element_ty),
+            mask=topk_mask,
         )
 
 
@@ -155,8 +162,12 @@ def _prepare_mega_moe_buffer(
         return
     assert hidden_size % (group_size * 4) == 0, "packed UE8M0 scale requires four FP8 groups per int32"
     assert hidden_states.is_contiguous(), "hidden_states must be contiguous"
+    assert topk_ids.shape == topk_weights.shape and topk_ids.shape[0] == num_tokens
+    assert topk_ids.shape[1] > 0
     assert buffer.x.shape[0] >= num_tokens and buffer.x.shape[1] == hidden_size
     assert buffer.x_sf.shape[0] >= num_tokens and buffer.x_sf.shape[1] == hidden_size // group_size // 4
+    assert buffer.topk_idx.shape[0] >= num_tokens and buffer.topk_idx.shape[1] == topk_ids.shape[1]
+    assert buffer.topk_weights.shape[0] >= num_tokens and buffer.topk_weights.shape[1] == topk_ids.shape[1]
 
     block = group_size * 4
     finfo = torch.finfo(buffer.x.dtype)
@@ -185,6 +196,7 @@ def _prepare_mega_moe_buffer(
         FP8_MIN=finfo.min,
         FP8_MAX=finfo.max,
         TOPK=topk_ids.shape[1],
+        TOPK_BLOCK=triton.next_power_of_2(topk_ids.shape[1]),
         GROUP_SIZE=group_size,
         BLOCK=block,
         num_warps=4,
@@ -234,20 +246,6 @@ def masked_group_gemm(
     return gemm_out_b
 
 
-def _get_mega_moe_cumulative_stats(w13: Any, w2: Any):
-    state_key = (
-        w13.weight.data_ptr(),
-        w13.weight_scale.data_ptr(),
-        w2.weight.data_ptr(),
-        w2.weight_scale.data_ptr(),
-    )
-    stats = _MEGA_MOE_STATS.get(state_key)
-    if stats is None:
-        stats = torch.zeros((w13.weight.shape[0],), device=w13.weight.device, dtype=torch.int32)
-        _MEGA_MOE_STATS[state_key] = stats
-    return stats
-
-
 def transform_mega_moe_weights_in_place(w13: Any, w2: Any):
     """Convert to Mega MoE layout without retaining a second weight copy."""
     transformed_l1, transformed_l2 = deep_gemm.transform_weights_for_mega_moe(
@@ -282,7 +280,6 @@ def mega_moe_impl(
 
     l1_weights = (w13.weight, w13.weight_scale)
     l2_weights = (w2.weight, w2.weight_scale)
-    stats = _get_mega_moe_cumulative_stats(w13, w2)
     _prepare_mega_moe_buffer(hidden_states, topk_ids, topk_weights, buffer, quant_method.block_size)
 
     output = torch.empty_like(hidden_states)
@@ -291,7 +288,6 @@ def mega_moe_impl(
         l1_weights,
         l2_weights,
         buffer,
-        cumulative_local_expert_recv_stats=stats,
     )
     return output
 
