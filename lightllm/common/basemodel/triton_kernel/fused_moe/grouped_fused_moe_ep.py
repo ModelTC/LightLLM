@@ -240,7 +240,14 @@ def masked_group_gemm(
     qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
-    silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
+    silu_and_mul_masked_post_quant_fwd(
+        gemm_out_a,
+        qsilu_out,
+        qsilu_out_scale,
+        block_size,
+        masked_m,
+        use_ue8m0_scales=is_sm100_gpu(),
+    )
     del gemm_out_a
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
@@ -306,7 +313,9 @@ def quantize_fused_experts_input(
     if w13.weight.ndim == 3:
         block_size_k = w13.weight.shape[2] // w13.weight_scale.shape[2]
     assert block_size_k == 128, "block_size_k must be 128"
-    return per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w13.weight.dtype)
+    return per_token_group_quant_fp8(
+        hidden_states, block_size_k, dtype=w13.weight.dtype, use_ue8m0_scales=is_sm100_gpu()
+    )
 
 
 def fused_experts(
@@ -379,7 +388,9 @@ def fused_experts_impl(
 
     combined_x = None
     if is_prefill:
-        qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
+        qinput_tensor, input_scale = per_token_group_quant_fp8(
+            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=is_sm100_gpu()
+        )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
         #   recv_x[0]: [num_expanded_tokens, hidden]
@@ -446,6 +457,8 @@ def fused_experts_impl(
             num_max_dispatch_tokens_per_rank,
             num_experts,
             use_fp8=use_fp8_w8a8,
+            round_scale=is_sm100_gpu(),
+            use_ue8m0=is_sm100_gpu(),
             async_finish=False,
             return_recv_hook=False,
         )
@@ -597,6 +610,7 @@ def chunked_expanded_moe_forward(
             column_major_scales=True,
             scale_tma_aligned=True,
             alloc_func=workspace_quant_alloc,
+            use_ue8m0_scales=is_sm100_gpu(),
         )
         gemm_out_b = (
             workspace[temp_offset : temp_offset + gemm_b_bytes].view(hidden_dtype).view(chunk_rows, hidden_size)
