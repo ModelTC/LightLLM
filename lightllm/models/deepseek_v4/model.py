@@ -67,15 +67,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self._dsv4_req_manager_seq_len = create_max_seq_len
-        layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        self._dsv4_compress_rates = self._get_compress_rates(layer_num)
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
             create_max_seq_len,
-            compress_rates=self._dsv4_compress_rates,
-            head_dim=self.config["head_dim"],
-            indexer_head_dim=self.config["index_head_dim"],
             sliding_window=self.config["sliding_window"],
         )
         return
@@ -86,18 +80,15 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        compress_rates = getattr(self, "_dsv4_compress_rates", self._get_compress_rates(layer_num))
-        sliding_window = int(self.config["sliding_window"])
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
             head_dim=self.config["head_dim"],
             layer_num=layer_num,
-            compress_rates=compress_rates,
+            compress_rates=self._get_compress_rates(layer_num),
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
-            sliding_window=sliding_window,
             mem_fraction=self.mem_fraction,
         )
         self.req_manager.mem_manager = self.mem_manager

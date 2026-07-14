@@ -368,20 +368,8 @@ class ReqManagerForMamba(ReqManager):
 class DeepseekV4ReqManager(ReqManager):
     """DeepSeek-V4 的请求级管理。
 
-    在基类 ReqManager 之上补 V4 专有的 per-request 结构。该对象在 mem manager profile 前创建，
-    所以初始化只依赖 config 派生出的 compress_rates/head_dim/indexer_head_dim/sliding_window；
-    真实 mem_manager 会在 `_init_mem_manager()` 后通过 `bind_mem_manager()` 接入。
-
-      * 压缩槽位不在本类: ``full_to_c4/c128_indexs``(mem manager)以组末 token 的 full 槽位为键。
-        本类只负责 prep 阶段的分配与 scatter(``prepare_prefill`` /
-        ``prepare_decode_compress_slots``)——必须先于 attention metadata 构建/图捕获;
-        条目内容由 layer-infer 的 compressor 前向写入。
-      * compressor 在途状态不在本类: c4/c128 都在 mem manager 的 swa 页派生池,
-        随页生灭,命中零拷贝续算。
-      * SWA 槽位分配/出窗回收(``prepare_prefill_swa`` / ``prepare_decode_swa``): 每步 prep 阶段
-        为新 token 调 mem_manager.alloc_swa，并按 per-req 水位线(``_swa_evict_marks``)惰性回收
-        已出窗位置的 swa 槽。水位线首次置为该请求首个 chunk 的 ready_cache_len(radix 共享前缀
-        的边界)，因此共享前缀的 swa 槽永远不会被本请求回收(归 radix 经 mem_manager.free 级联释放)。
+    负责 req/seq/MTP 布局、SWA 回收水位线和派生槽位准备；具体池结构、映射和分配器
+    由 ``DeepseekV4MemoryManager`` 持有。对象先于 mem manager 创建，模型初始化后再接入。
     """
 
     def __init__(
@@ -389,9 +377,6 @@ class DeepseekV4ReqManager(ReqManager):
         max_request_num,
         max_sequence_length,
         mem_manager: Optional[DeepseekV4MemoryManager] = None,
-        compress_rates: Optional[List[int]] = None,
-        head_dim: Optional[int] = None,
-        indexer_head_dim: Optional[int] = None,
         sliding_window: Optional[int] = None,
     ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
@@ -400,23 +385,6 @@ class DeepseekV4ReqManager(ReqManager):
         # 出窗回收水位线: -1 表示该 req 尚未见过 prefill chunk(首个 chunk 的 ready_cache_len
         # 即共享前缀边界，作为永不下探的回收下界)。
         self._swa_evict_marks = [-1 for _ in range(max_request_num + 1)]
-        self.compress_rates = list(compress_rates)
-        self.n_c4 = sum(1 for r in self.compress_rates if r == 4)
-        self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
-        self.head_dim = head_dim
-        self.indexer_head_dim = indexer_head_dim
-        self.layer_to_c4_idx = {}
-        self.layer_to_c128_idx = {}
-        self.mem_manager = mem_manager
-        c4 = c128 = 0
-        for lid, r in enumerate(self.compress_rates):
-            if r == 4:
-                self.layer_to_c4_idx[lid] = c4
-                c4 += 1
-            elif r == 128:
-                self.layer_to_c128_idx[lid] = c128
-                c128 += 1
-
         return
 
     # ------------------------------------------------------------------ swa slot prep (per step)
@@ -741,7 +709,7 @@ class DeepseekV4ReqManager(ReqManager):
         base_backend admission 已按"空闲+可回收"放行本步请求,这里在真分配前(scatter 已算好 need)
         把可回收的无引用 radix 节点驱逐出来腾出 c4 页,避免 alloc_c4_pages 触底 assert。
         可回收仍不足时由 admission 的 wait_pause 兜底。"""
-        if self.n_c4 == 0 or need_pages <= 0:
+        if self.mem_manager.n_c4 == 0 or need_pages <= 0:
             return
         # 延迟 import: infer_batch 在模块顶 import 了 req_manager,顶层 import 会循环引用
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
@@ -751,7 +719,7 @@ class DeepseekV4ReqManager(ReqManager):
         return
 
     def _realize_c128_slots(self, need_slots: int) -> None:
-        if self.n_c128 == 0 or need_slots <= 0:
+        if self.mem_manager.n_c128 == 0 or need_slots <= 0:
             return
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
@@ -768,12 +736,12 @@ class DeepseekV4ReqManager(ReqManager):
     ) -> None:
         """prefill prep: 为本 chunk 内的组末 token(位置 (g+1)*ratio-1 ∈ [ready, seq))分配压缩槽，
         组末 full 槽直接从 generic preprocess 的 mem_indexes 取。"""
-        if self.n_c4 == 0 and self.n_c128 == 0:
+        if self.mem_manager.n_c4 == 0 and self.mem_manager.n_c128 == 0:
             return
-        if self.n_c4 > 0:
+        if self.mem_manager.n_c4 > 0:
             self._scatter_c4_prefill_slots_batched(req_list, ready_list, seq_list, mem_indexes)
 
-        if self.n_c128 > 0:
+        if self.mem_manager.n_c128 > 0:
             ratio = 128
             full_offsets = []
             mem_offset = 0
@@ -805,9 +773,9 @@ class DeepseekV4ReqManager(ReqManager):
         """decode prep: 本步 token 关闭一个组(seq_len % ratio == 0)时为其分配压缩槽并 scatter。
         组末 full 槽即本步的 mem_index。
         从 CPU 镜像读 seq_len/req_idx(host 算术,无 D2H);非关组步 rows 为空 => 不调 _scatter,零同步。"""
-        if self.n_c4 == 0 and self.n_c128 == 0:
+        if self.mem_manager.n_c4 == 0 and self.mem_manager.n_c128 == 0:
             return
-        if self.n_c4 > 0:
+        if self.mem_manager.n_c4 > 0:
             self._scatter_c4_decode_slots(
                 req_list,
                 seq_list,
@@ -815,7 +783,7 @@ class DeepseekV4ReqManager(ReqManager):
                 prev_group_end_mem_indexes=prev_group_end_mem_indexes,
             )
 
-        if self.n_c128 > 0:
+        if self.mem_manager.n_c128 > 0:
             ratio = 128
             rows = [
                 i

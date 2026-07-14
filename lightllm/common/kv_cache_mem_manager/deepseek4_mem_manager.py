@@ -150,7 +150,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         compress_rates: List[int],
         indexer_head_dim: int = 128,
         max_request_num: Optional[int] = None,
-        sliding_window: Optional[int] = None,
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
@@ -168,7 +167,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
         self.indexer_head_dim = indexer_head_dim
         self.max_request_num = max_request_num
-        self.sliding_window = sliding_window
         self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
 
         # 全局层号 -> 各压缩池内的压实层号(同 qwen3next 的层号压实手法)
@@ -252,7 +250,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.c128_size = _ceil_div(size, 128)
         self.c4_pool: Optional[PackedPagePool] = None
         self.c4_indexer_pool: Optional[PackedPagePool] = None
-        self.c4_allocator: Optional[KvCacheAllocator] = None
         self.c4_page_allocator: Optional[KvCacheAllocator] = None
         self.c4_page_live_count: Optional[torch.Tensor] = None
         self.c128_pool: Optional[PackedPagePool] = None
@@ -577,14 +574,8 @@ class DeepseekV4MemoryManager(MemoryManager):
             self.full_to_c128_indexs[self.HOLD_TOKEN_MEMINDEX] = self.c128_pool.HOLD_TOKEN_MEMINDEX
         return
 
-    def alloc_c4(self, need_size) -> torch.Tensor:
-        raise AssertionError("DeepSeek-V4 c4 uses page-safe allocation; call alloc_c4_pages instead")
-
     def alloc_c128(self, need_size) -> torch.Tensor:
         return self.c128_allocator.alloc(need_size)
-
-    def free_c4(self, free_index) -> None:
-        raise AssertionError("DeepSeek-V4 c4 uses page live-count release; call evict_c4 instead")
 
     def free_c128(self, free_index) -> None:
         self.c128_allocator.free(free_index)
@@ -735,19 +726,6 @@ class DeepseekV4MemoryManager(MemoryManager):
             self.c4_indexer_pool.page_size,
         )
 
-    def gather_indexer_k(self, layer_index: int, slots: torch.Tensor) -> torch.Tensor:
-        """反量化 gather c4 indexer-K: slots [N](c4 槽位,HOLD 合法) -> [N, indexer_head_dim] bf16。
-        indexer top-k 打分用(纯张量操作,cuda-graph 安全)。"""
-        assert self.compress_rates[layer_index] == 4, "只有 c4(CSA) 层有 indexer-K"
-        pool = self.c4_indexer_pool
-        flat = pool.get_layer_buffer(self.layer_to_c4_idx[layer_index]).view(-1)
-        data_offsets, scale_offsets = pool._loc_offsets(slots.reshape(-1))
-        data_range = torch.arange(pool.data_bytes_per_token, device=flat.device)
-        scale_range = torch.arange(pool.scale_bytes_per_token, device=flat.device)
-        k_fp8 = flat[data_offsets.unsqueeze(1) + data_range.unsqueeze(0)].view(torch.float8_e4m3fn)
-        scale = flat[scale_offsets.unsqueeze(1) + scale_range.unsqueeze(0)].contiguous().view(torch.float32)
-        return (k_fp8.float() * scale).to(torch.bfloat16)
-
     # ------------------------------------------------------------------ fenced inherited APIs
     # kv_buffer 是 page 索引的 uint8 slab，基类按 token 索引读写的接口会静默写坏数据，显式拦截。
     def get_index_kv_buffer(self, index):
@@ -756,9 +734,6 @@ class DeepseekV4MemoryManager(MemoryManager):
     def load_index_kv_buffer(self, index, load_tensor_dict):
         raise NotImplementedError("DeepSeek-V4 packed page-slab cache does not support token-indexed kv_buffer io")
 
-    def alloc_kv_move_buffer(self, max_req_total_len):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
-
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
 
@@ -766,16 +741,4 @@ class DeepseekV4MemoryManager(MemoryManager):
         raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
 
     def read_page_kv_move_buffer_to_mem(self, *args, **kwargs):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
-
-    def send_to_decode_node(self, *args, **kwargs):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
-
-    def receive_from_prefill_node(self, *args, **kwargs):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
-
-    def send_to_decode_node_p2p(self, *args, **kwargs):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
-
-    def receive_from_prefill_node_p2p(self, *args, **kwargs):
         raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
