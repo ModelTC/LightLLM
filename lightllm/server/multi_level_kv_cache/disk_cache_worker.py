@@ -21,6 +21,8 @@ except ImportError as e:
     )
     raise ImportError("LightMem library is required for disk cache functionality") from e
 
+TASK_WAIT_TIMEOUT_S = 60.0
+
 
 @dataclass
 class _PagePayload:
@@ -43,11 +45,11 @@ class DiskCacheWorker:
         assert disk_cache_storage_size > 0
         storage_size = int(disk_cache_storage_size * (1024 ** 3))
         # num_shard与KVCACHE_MAX_BLOCK_SIZE相关，KVCACHE_MAX_BLOCK_SIZE默认64MB前提下，
-        # num_shard设置32, 能使disk cache的容量利用率达到90%，继续增大num_shard会导致容量利用率下降
-        num_shard = 32
-        num_worker = 48
-        # 读写同时进行时，分配16线程用来写，32线程用来读
-        max_concurrent_write_tasks = 16
+        # num_shard设置8, 能使disk cache的容量利用率达到90%，继续增大num_shard会导致容量利用率下降
+        num_shard = 8
+        num_worker = 24
+        # 读写同时进行时，分配8线程用来写，16线程用来读
+        max_concurrent_write_tasks = 8
 
         cache_dir = disk_cache_dir
         if not cache_dir:
@@ -77,6 +79,24 @@ class DiskCacheWorker:
 
     def _prepare_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor.flatten(1).view(dtype=torch.uint8)
+
+    def _wait_task(self, task, cond_name: str) -> bool:
+        cond = getattr(task, cond_name)
+        deadline = time.monotonic() + TASK_WAIT_TIMEOUT_S
+        while not cond():
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "disk cache task '%s' wait timeout after %.1fs, aborting task to avoid hang",
+                    cond_name,
+                    TASK_WAIT_TIMEOUT_S,
+                )
+                try:
+                    self.service.abort(task)
+                except Exception as e:
+                    logger.error("disk cache abort task failed: %s", e)
+                return False
+            time.sleep(0.001)
+        return True
 
     def run(self) -> None:
         while True:
@@ -121,9 +141,16 @@ class DiskCacheWorker:
         query_result = self.service.query(hashs)
         if not all(query_result):
             # 限制写入并发量，给读取操作留资源
+            throttle_deadline = time.monotonic() + TASK_WAIT_TIMEOUT_S
             while (
                 self.service.active_threads("r") and self.service.active_threads("w") >= self.max_concurrent_write_tasks
             ):
+                if time.monotonic() >= throttle_deadline:
+                    logger.error(
+                        "disk cache write throttle wait timeout after %.1fs, proceeding to submit",
+                        TASK_WAIT_TIMEOUT_S,
+                    )
+                    break
                 time.sleep(0.001)
 
             task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="w")
@@ -133,9 +160,7 @@ class DiskCacheWorker:
                 self.cpu_cache_client.deref_pages(page_list=task.page_already_list)
                 self.cpu_cache_client.lock.release()
 
-            # 数据安全即可结束等待，无需写入完成
-            while not task.data_safe():
-                time.sleep(0.001)
+            self._wait_task(task, "data_safe")
 
             # 释放剩余需要写入的页面
             remining_indexes = list(set(page_indexes) - set(task.page_already_list))
@@ -181,6 +206,6 @@ class DiskCacheWorker:
 
         kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
         task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
-        while not task.ready():
-            time.sleep(0.001)
+        if not self._wait_task(task, "ready"):
+            return False
         return all(state == PyState.Finished for state in task.state())
