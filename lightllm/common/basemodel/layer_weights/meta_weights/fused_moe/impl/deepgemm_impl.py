@@ -16,6 +16,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.utils.device_utils import is_sm100_gpu
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -119,6 +120,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
+            round_scale=is_sm100_gpu(),
+            use_ue8m0=is_sm100_gpu(),
             async_finish=False,
             return_recv_hook=True,
         )
