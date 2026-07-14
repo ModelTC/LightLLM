@@ -7,6 +7,7 @@ chunked prefill, decode, and MTP decode cases.
 import argparse
 import math
 import os
+import queue
 import sys
 import time
 import traceback
@@ -29,13 +30,14 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models import get_model
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.glm4_moe_lite_mtp.model import Glm4MoeLiteMTPModel
+from lightllm.models.glm5_2_mtp.model import Glm5_2MTPModel
 from lightllm.models.mistral_mtp.model import MistralMTPModel
 from lightllm.models.qwen3_moe_mtp.model import Qwen3MOEMTPModel
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.router.model_infer.mode_backend.mtp_pre_process import (
     prepare_mtp_prefill_inputs,
 )
-from lightllm.utils.config_utils import get_dtype, get_vocab_size
+from lightllm.utils.config_utils import auto_set_fused_shared_experts, get_dtype, get_vocab_size
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import set_env_start_args
 
@@ -128,6 +130,18 @@ def empty_multimodal_params(batch_size: int) -> List[Dict]:
     return [{"images": [], "audios": []} for _ in range(batch_size)]
 
 
+def mtp_prefill_chunk_size(batch_size: int, prompt_len: int, batch_max_tokens: int) -> int:
+    """Bound each MTP setup prefill step by the production token budget."""
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if batch_max_tokens < batch_size:
+        raise ValueError(
+            "MTP prefill requires at least one token per request in a step: "
+            f"batch_size={batch_size}, batch_max_tokens={batch_max_tokens}"
+        )
+    return max(1, min(int(prompt_len), int(batch_max_tokens) // int(batch_size)))
+
+
 class StaticBenchmarkExecutor:
     def __init__(
         self,
@@ -140,7 +154,6 @@ class StaticBenchmarkExecutor:
         self.model = model
         self.draft_models = draft_models
         self.token_source = token_source
-        self.dp = int(args.dp or 1)
 
     def _case_iters(self, warmup: bool) -> int:
         return self.args.warmup_iters if warmup else self.args.bench_iters
@@ -190,7 +203,7 @@ class StaticBenchmarkExecutor:
         measured_tokens = case.batch_size * case.output_len
         elapsed = 0.0
         ttft_elapsed = 0.0
-        decode_step_count = 0
+        decode_token_count = 0
         iters = self._case_iters(warmup)
 
         for _ in range(iters):
@@ -201,14 +214,14 @@ class StaticBenchmarkExecutor:
                 req_idx, seq_len, next_ids = self._prefill_for_decode(case, token_rows, mtp_enabled)
                 torch.cuda.synchronize()
                 ttft_elapsed += time.perf_counter() - ttft_start
-                step_elapsed, step_count = self._run_mtp_decode_steps(
+                step_elapsed, accepted_token_count = self._run_mtp_decode_steps(
                     case=case,
                     req_idx=req_idx,
                     seq_len=seq_len,
                     next_ids=next_ids,
                 )
                 elapsed += step_elapsed
-                decode_step_count += step_count
+                decode_token_count += accepted_token_count
             else:
                 req_idx, seq_len, next_ids = self._materialize_context_for_decode(case)
                 elapsed += self._run_plain_decode_steps(
@@ -217,10 +230,10 @@ class StaticBenchmarkExecutor:
                     seq_len=seq_len,
                     next_ids=next_ids,
                 )
-                decode_step_count += case.output_len
+                decode_token_count += case.output_len
 
         self._reset_model_cache()
-        inter_token_latency_ms = elapsed * 1000.0 / max(1, decode_step_count) if iters > 0 else None
+        inter_token_latency_ms = elapsed * 1000.0 / max(1, decode_token_count) if iters > 0 else None
         return self._make_result(
             case,
             elapsed,
@@ -242,23 +255,30 @@ class StaticBenchmarkExecutor:
 
     def _prefill_for_decode(self, case: BenchmarkCase, token_rows: np.ndarray, mtp_enabled: bool):
         req_idx = self._alloc_req_indexes(case.batch_size)
+        chunk_size = (
+            mtp_prefill_chunk_size(case.batch_size, case.context_len, self.args.batch_max_tokens)
+            if mtp_enabled
+            else None
+        )
         inputs = self._build_prefill_inputs(
             token_rows=token_rows,
             req_idx=req_idx,
             prompt_len=case.context_len,
-            chunk_size=None,
+            chunk_size=chunk_size,
         )
         output = None
+        next_ids = None
         for model_input in inputs:
             output = self._forward_prefill_input(model_input, allow_overlap=not mtp_enabled)
+            self._touch_output(output)
+            next_ids = self._argmax_ids(output.logits)
+            if mtp_enabled:
+                # Main and draft KV must advance together for every chunk.
+                next_ids = self._fill_mtp_prefill_kv(case, model_input, output, next_ids)
         assert output is not None
-        self._touch_output(output)
-
-        next_ids = self._argmax_ids(output.logits)
+        assert next_ids is not None
 
         seq_len = cpu_i32_full((case.batch_size,), case.context_len)
-        if mtp_enabled:
-            next_ids = self._fill_mtp_prefill_kv(case, inputs[-1], output, next_ids)
         return req_idx, seq_len, next_ids
 
     def _fill_mtp_prefill_kv(
@@ -325,7 +345,7 @@ class StaticBenchmarkExecutor:
         next_ids: torch.Tensor,
     ) -> tuple:
         elapsed = 0.0
-        step_count = 0
+        accepted_token_count = 0
         generated_len = 0
         step_width = self._mtp_step_width()
         base_req_idx, b_mtp_index = self._build_mtp_decode_index_tensors(req_idx, step_width)
@@ -380,9 +400,10 @@ class StaticBenchmarkExecutor:
             )
             seq_len += accepted_width
             generated_len += accepted_width
-            step_count += 1
+            # One MTP packet can advance by multiple accepted tokens; ITL is per accepted token.
+            accepted_token_count += accepted_width
 
-        return elapsed, step_count
+        return elapsed, accepted_token_count
 
     def _run_mtp_draft_decode(
         self,
@@ -551,6 +572,7 @@ class StaticBenchmarkExecutor:
             b_req_idx=req_idx,
             b_mtp_index=mtp_index,
             b_seq_len=seq_len,
+            b_position_delta=cpu_i32_zeros(batch_size),
             mem_indexes_cpu=mem_indexes,
             is_prefill=False,
             multimodal_params=empty_multimodal_params(batch_size),
@@ -638,6 +660,7 @@ class StaticBenchmarkExecutor:
             b_req_idx=model_input.b_req_idx[batch_start:batch_end].clone(),
             b_mtp_index=model_input.b_mtp_index[batch_start:batch_end].clone(),
             b_seq_len=b_seq_len,
+            b_position_delta=model_input.b_position_delta[batch_start:batch_end].clone(),
             mem_indexes_cpu=model_input.mem_indexes_cpu[batch_start:batch_end].contiguous(),
             is_prefill=False,
             multimodal_params=model_input.multimodal_params[batch_start:batch_end],
@@ -697,8 +720,8 @@ class StaticBenchmarkExecutor:
     ) -> BenchmarkResult:
         """Convert raw timings into reported TPS and latency metrics."""
         iters = self._case_iters(warmup)
-        scaled_tokens = measured_tokens * self.dp * iters
-        qps = case.batch_size * self.dp * iters / elapsed_s if elapsed_s > 0 else 0.0
+        scaled_tokens = measured_tokens * iters
+        qps = case.batch_size * iters / elapsed_s if elapsed_s > 0 else 0.0
         tps = scaled_tokens / elapsed_s if elapsed_s > 0 else 0.0
         ttft_ms = ttft_elapsed_s * 1000.0 / max(1, iters) if ttft_elapsed_s is not None else None
         logical_tps = None
@@ -708,7 +731,7 @@ class StaticBenchmarkExecutor:
             uncached_len = int(case.prefill_uncached_len or case.context_len)
             prefill_uncached_len = uncached_len
             prefill_cached_len = max(0, case.context_len - uncached_len)
-            token_count = case.batch_size * case.context_len * self.dp * iters
+            token_count = case.batch_size * case.context_len * iters
             logical_tps = token_count / elapsed_s if elapsed_s > 0 else 0.0
         return BenchmarkResult(
             case=case.name,
@@ -803,6 +826,18 @@ def apply_max_batch_size(batch_size: int, max_batch_size: int) -> int:
     if max_batch_size > 0:
         batch_size = min(batch_size, int(max_batch_size))
     return max(1, batch_size)
+
+
+def max_decode_batch_size(cases: Sequence[BenchmarkCase]) -> int:
+    return max((int(case.batch_size) for case in cases if case.stage == "decode"), default=0)
+
+
+def cap_graph_batch_size(configured_size: int, cases: Sequence[BenchmarkCase]) -> int:
+    """Avoid capturing decode graphs larger than every benchmark case."""
+    decode_batch_size = max_decode_batch_size(cases)
+    if decode_batch_size <= 0:
+        return max(1, int(configured_size))
+    return max(1, min(int(configured_size), decode_batch_size))
 
 
 def prefill_batch_size_from_batch_max_tokens(
@@ -1039,15 +1074,11 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
 
     if decode_batch_size_needs_profile and args.max_batch_size > 0:
         args.running_max_req_size = max(args.running_max_req_size, int(args.max_batch_size))
-        # Profile decode BS is resolved after model load. Use the cap as the
-        # pre-load upper bound so request slots and optional decode graphs agree.
-        if not args.disable_cudagraph:
-            args.graph_max_batch_size = max(args.graph_max_batch_size, int(args.max_batch_size))
     if prefill_batch_size_needs_profile:
         args.running_max_req_size = max(args.running_max_req_size, max_batch)
 
-    if args.graph_max_batch_size < max_batch:
-        args.graph_max_batch_size = max_batch
+    if not args.disable_cudagraph and args.decode_batch_size_mode != "profile":
+        args.graph_max_batch_size = cap_graph_batch_size(args.graph_max_batch_size, cases)
 
     if args.nccl_port is None:
         args.nccl_port = 28765
@@ -1164,9 +1195,44 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
                 "eagle_with_att",
             }, f"{model_type} MTP requires *_with_att mode"
             draft_models.append(Glm4MoeLiteMTPModel(mtp_kvargs))
+        elif model_type == "glm_moe_dsa":
+            assert args.mtp_mode in {
+                "vanilla_with_att",
+                "eagle_with_att",
+            }, f"{model_type} MTP requires *_with_att mode"
+            draft_models.append(Glm5_2MTPModel(mtp_kvargs))
         else:
             raise ValueError(f"unsupported MTP draft model_type={model_type} from {draft_dir}")
     return draft_models
+
+
+def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase], model_kvargs: Dict, model) -> None:
+    """Capture profile-mode graphs after the real decode batch is known."""
+    profile_batch_size = max_decode_batch_size(cases)
+    graph_batch_size = profile_batch_size
+    if args.mtp_mode in MTP_MODES:
+        graph_batch_size = min(graph_batch_size, args.graph_max_batch_size)
+    args.graph_max_batch_size = graph_batch_size
+    model_kvargs["graph_max_batch_size"] = graph_batch_size
+    model_kvargs["disable_cudagraph"] = False
+
+    if args.enable_decode_microbatch_overlap:
+        graph_batch_size //= 2
+    model.graph_max_batch_size = graph_batch_size * (int(args.mtp_step) + 1)
+    if torch.distributed.get_rank() == 0:
+        print(
+            f"Profile decode batch size: {profile_batch_size}; "
+            f"CUDA Graph request batch size: {args.graph_max_batch_size}; "
+            f"expanded graph batch size: {model.graph_max_batch_size}",
+            flush=True,
+        )
+    model.disable_cudagraph = False
+    # Attention backends may size persistent graph buffers during construction.
+    # Rebuild them after replacing the temporary profile-time batch limit.
+    model._init_att_backend()
+    model._init_att_backend1()
+    torch.cuda.empty_cache()
+    model._init_cudagraph()
 
 
 def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue):
@@ -1179,6 +1245,14 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         import torch.distributed as dist
 
         model_kvargs = build_model_kvargs(args, rank_id)
+        defer_cudagraph = (
+            not args.disable_cudagraph
+            and args.decode_batch_size_mode == "profile"
+            and any(case.stage == "decode" for case in cases)
+        )
+        if defer_cudagraph:
+            model_kvargs["disable_cudagraph"] = True
+            model_kvargs["graph_max_batch_size"] = 2 if args.enable_decode_microbatch_overlap else 1
         group_size = 2 if (args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap) else 1
         if group_size == 2:
             for case in cases:
@@ -1193,6 +1267,8 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         model, _ = get_model(model_cfg, model_kvargs)
         cases = resolve_batch_max_prefill_cases(args, cases, model.mem_manager.size)
         cases = resolve_profile_decode_cases(args, cases, model.mem_manager.size)
+        if defer_cudagraph:
+            init_deferred_cudagraph(args, cases, model_kvargs, model)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
@@ -1202,11 +1278,15 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
             if args.warmup_iters > 0:
                 executor.run_case(case, warmup=True)
             result = executor.run_case(case, warmup=False)
-            if rank_id == 0:
-                results.append(asdict(result))
+            results.append(asdict(result))
             dist.barrier()
 
-        ans_queue.put({"ok": True, "rank": rank_id, "results": results})
+        message = {"ok": True, "rank": rank_id, "results": results}
+        all_rank_messages = [None] * int(args.tp) if rank_id == 0 else None
+        dist.gather_object(message, all_rank_messages, dst=0)
+        if rank_id == 0:
+            message["all_rank_messages"] = all_rank_messages
+        ans_queue.put(message)
     except Exception:
         ans_queue.put({"ok": False, "rank": rank_id, "traceback": traceback.format_exc()})
     finally:
@@ -1288,12 +1368,93 @@ def print_results_table(results: Sequence[BenchmarkResult]):
         print_aligned_table(DECODE_TABLE_HEADERS, decode_rows)
 
 
+def _dp_size(args: SimpleNamespace) -> int:
+    return max(1, int(args.dp or 1))
+
+
+def _dp_world_size(args: SimpleNamespace) -> int:
+    return max(1, int(args.tp) // _dp_size(args))
+
+
+def _is_dp_group_leader(args: SimpleNamespace, rank_id: int) -> bool:
+    return rank_id % _dp_world_size(args) == 0
+
+
+def _raw_decode_step_count(result: Dict) -> int:
+    inter_token_latency_ms = result.get("inter_token_latency_ms")
+    if inter_token_latency_ms is None or inter_token_latency_ms <= 0:
+        return 0
+    return max(1, int(round(float(result["elapsed_ms"]) / float(inter_token_latency_ms))))
+
+
+def aggregate_rank_results(args: SimpleNamespace, messages: Sequence[Dict]) -> List[Dict]:
+    """Aggregate rank-local measurements into one global result per case."""
+    by_case: Dict[int, List[Dict]] = {}
+    for message in messages:
+        rank_id = int(message["rank"])
+        for case_index, result in enumerate(message.get("results") or []):
+            by_case.setdefault(case_index, []).append({"rank": rank_id, "result": result})
+
+    aggregated_results: List[Dict] = []
+    iters = int(args.bench_iters)
+    for case_index in sorted(by_case):
+        rank_items = sorted(by_case[case_index], key=lambda item: int(item["rank"]))
+        leader_items = [item for item in rank_items if _is_dp_group_leader(args, int(item["rank"]))]
+        if not leader_items:
+            leader_items = rank_items
+
+        first = dict(leader_items[0]["result"])
+        elapsed_ms = max(float(item["result"]["elapsed_ms"]) for item in rank_items)
+        elapsed_s = elapsed_ms / 1000.0
+        batch_size = sum(int(item["result"]["batch_size"]) for item in leader_items)
+        measured_tokens = sum(int(item["result"]["measured_tokens"]) for item in leader_items)
+
+        first["batch_size"] = batch_size
+        first["elapsed_ms"] = elapsed_ms
+        first["measured_tokens"] = measured_tokens
+        first["qps"] = batch_size * iters / elapsed_s if elapsed_s > 0 else 0.0
+        first["tps"] = measured_tokens / elapsed_s if elapsed_s > 0 else 0.0
+
+        profiled_values = [
+            int(item["result"]["profiled_max_total_token_num"])
+            for item in leader_items
+            if item["result"].get("profiled_max_total_token_num") is not None
+        ]
+        if profiled_values:
+            first["profiled_max_total_token_num"] = sum(profiled_values)
+
+        if first["stage"] == "prefill":
+            logical_tokens = batch_size * int(first["context_len"]) * iters
+            first["logical_tps"] = logical_tokens / elapsed_s if elapsed_s > 0 else 0.0
+
+        slowest_item = max(rank_items, key=lambda item: float(item["result"]["elapsed_ms"]))
+        decode_step_count = _raw_decode_step_count(slowest_item["result"])
+        if decode_step_count > 0:
+            first["inter_token_latency_ms"] = elapsed_ms / decode_step_count
+
+        ttft_values = [
+            float(item["result"]["ttft_ms"]) for item in rank_items if item["result"].get("ttft_ms") is not None
+        ]
+        if ttft_values:
+            first["ttft_ms"] = max(ttft_values)
+
+        aggregated_results.append(first)
+
+    return aggregated_results
+
+
 def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List[Dict]:
+    if args.nnodes <= 0 or args.tp % args.nnodes != 0:
+        raise ValueError(f"--tp must be divisible by --nnodes, got tp={args.tp} nnodes={args.nnodes}")
+    if args.node_rank < 0 or args.node_rank >= args.nnodes:
+        raise ValueError(f"--node_rank must be in [0, {args.nnodes}), got {args.node_rank}")
+
     ctx = mp.get_context("spawn")
     ans_queue = ctx.Queue()
     workers = []
-    rank_start = args.node_rank * args.tp
-    rank_end = (args.node_rank + 1) * args.tp
+    node_world_size = args.tp // args.nnodes
+    rank_start = args.node_rank * node_world_size
+    rank_end = rank_start + node_world_size
     case_dicts = [asdict(case) for case in cases]
     args_dict = vars(args)
 
@@ -1302,22 +1463,37 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
         proc.start()
         workers.append(proc)
 
+    messages = []
+    while len(messages) < len(workers):
+        try:
+            messages.append(ans_queue.get(timeout=5))
+            continue
+        except queue.Empty:
+            if all(not proc.is_alive() for proc in workers):
+                break
+
     for proc in workers:
         proc.join()
 
-    messages = []
-    while not ans_queue.empty():
-        messages.append(ans_queue.get())
-
     failed = [message for message in messages if not message.get("ok")]
+    reported_ranks = {int(message["rank"]) for message in messages if "rank" in message}
     failed.extend(
         {
             "ok": False,
-            "rank": index,
+            "rank": rank_start + index,
             "traceback": f"worker exited with code {proc.exitcode}",
         }
         for index, proc in enumerate(workers)
         if proc.exitcode not in (0, None)
+    )
+    failed.extend(
+        {
+            "ok": False,
+            "rank": rank_start + index,
+            "traceback": "worker did not report a result",
+        }
+        for index, proc in enumerate(workers)
+        if rank_start + index not in reported_ranks and proc.exitcode in (0, None)
     )
     if failed:
         for item in failed:
@@ -1327,9 +1503,17 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
             )
         raise RuntimeError(f"{len(failed)} worker(s) failed")
 
-    results = []
-    for message in messages:
-        results.extend(message.get("results") or [])
+    if args.node_rank != 0:
+        return []
+
+    all_rank_messages = next(
+        (message["all_rank_messages"] for message in messages if "all_rank_messages" in message),
+        None,
+    )
+    if all_rank_messages is None:
+        raise RuntimeError("global rank 0 did not report aggregated rank results")
+
+    results = aggregate_rank_results(args, all_rank_messages)
     result_objs = [BenchmarkResult(**result) for result in results]
     print_results_table(result_objs)
     return results
@@ -1409,6 +1593,7 @@ def main(argv: Optional[Sequence[str]] = None):
     parser = make_argument_parser()
     add_static_benchmark_args(parser)
     args = parser.parse_args(argv)
+    auto_set_fused_shared_experts(args)
     if args.benchmark in {"all", "prefill"} and args.batch_max_tokens is None:
         args.batch_max_tokens = 8192
     cases = build_cases(args)
