@@ -281,7 +281,12 @@ class InferenceContext:
             req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
-        free_token_index = custom_cat(free_token_index)
+        # 线性注意力混合模型下，请求可能在未产生任何 kv (cur_kv_len == 0) 时被 abort，
+        # 此时 free_token_index 为空列表，custom_cat 无法处理空输入。
+        if len(free_token_index) != 0:
+            free_token_index = custom_cat(free_token_index)
+        else:
+            free_token_index = []
         self.req_manager.free(free_req_index, free_token_index)
 
         finished_req_ids_set = set(finished_request_ids)
