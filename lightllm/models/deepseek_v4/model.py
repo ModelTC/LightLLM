@@ -25,6 +25,7 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
+from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
@@ -109,8 +110,32 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # TODO: 支持其他 kv type
         if args.llm_kv_type != "fp8kv_dsa":
             raise RuntimeError("DeepSeek-V4 requires llm_kv_type=fp8kv_dsa for packed FlashMLA sparse attention")
-        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
-        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)
+        self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
+        self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
+
+        real_q_head_num = self.prefill_att_backend.real_q_head_num
+        padded_q_head_num = self.prefill_att_backend.padded_q_head_num
+        self.dsv4_workspace.init_flashmla_prefill_q(
+            real_q_head_num=real_q_head_num,
+            padded_q_head_num=padded_q_head_num,
+            head_dim=self.config["head_dim"],
+            dtype=self.data_type,
+        )
+        self.dsv4_workspace.init_flashmla_prefill_full_out(
+            q_head_num=padded_q_head_num,
+            head_dim_v=self.config["head_dim"],
+            dtype=self.data_type,
+        )
+        for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
+            layer_infer.flashmla_q_head_num_ = padded_q_head_num
+            if padded_q_head_num == real_q_head_num:
+                continue
+            attn_sink = layer_weight.attn_sink_.weight
+            assert attn_sink.shape == (real_q_head_num,)
+            padded_attn_sink = torch.zeros((padded_q_head_num,), dtype=attn_sink.dtype, device=attn_sink.device)
+            padded_attn_sink[: attn_sink.shape[0]].copy_(attn_sink)
+            padded_attn_sink.load_ok = attn_sink.load_ok
+            layer_weight.attn_sink_.weight = padded_attn_sink
         return
 
     def _init_custom(self):

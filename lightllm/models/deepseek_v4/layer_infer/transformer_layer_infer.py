@@ -51,6 +51,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         self.swiglu_limit = float(network_config["swiglu_limit"])
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
         self.tp_q_head_num_ = self.num_heads // self.tp_world_size_
+        self.flashmla_q_head_num_ = self.tp_q_head_num_
         self.tp_groups = self.o_groups // self.tp_world_size_
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
         self.compressor = CompressorInfer(
@@ -162,8 +163,15 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
         # per-(token, head) weightless self-RMSNorm + interleaved rope on the last rope_dim dims,
         # fused in one DSV4 CUDA kernel (fp32 norm/rotation, bf16 in between -- same as eager).
-        q = self.alloc_tensor(q_in.shape, dtype=q_in.dtype, device=q_in.device)
-        fused_q_norm_rope(q_in, q, self.eps_, self.freqs_cis, infer_state.position_ids)
+        # The selected FlashMLA MODEL1 binary only instantiates H=64/128. Produce that ABI layout
+        # directly. Prefill uses one max-token workspace so changing T only changes the prefix view;
+        # decode keeps its graph-owned tensor. The workspace's padded tail is zeroed once at init.
+        if infer_state.is_prefill:
+            q = infer_state.dsv4_workspace.flashmla_prefill_q[:T]
+        else:
+            q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
+            q[:, self.tp_q_head_num_ :, :].zero_()
+        fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
         # kv: rmsnorm + rope + fp8 pack + scatter 进 swa 池,一个 DSV4 CUDA kernel 完成，
         # 替代 eager norm/rope/cat + _post_cache_kv。
         # bf16 kv 中间量没有其他消费者: flashmla 路径注意力读 cache,压缩器/indexer 取 x。
@@ -225,10 +233,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             _o = tensor_to_no_ref_tensor(o)
 
             def att_func(new_infer_state: DeepseekV4InferStateInfo):
-                tmp_o = self._context_attention_kernel(_q, _q_lora, _x, new_infer_state, layer_weight, out=_o)
-                assert tmp_o.shape == _o.shape
-                if tmp_o.data_ptr() != _o.data_ptr():
-                    _o.copy_(tmp_o)
+                self._context_attention_kernel(_q, _q_lora, _x, new_infer_state, layer_weight, out=_o)
                 return
 
             infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
@@ -283,7 +288,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         att_control = AttControl(
             nsa_prefill=True,
             nsa_prefill_dict={
-                "flashmla_kvcache": True,
                 "layer_index": self.layer_num_,
                 "compress_ratio": self.compress_ratio,
                 "head_dim_v": self.v_head_dim,
@@ -292,18 +296,19 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
                 **meta,
             },
         )
-        out = infer_state.prefill_att_state.prefill_att(
+        attn_out = infer_state.prefill_att_state.prefill_att(
             q=q,
             k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
             v=None,
             att_control=att_control,
+            alloc_func=self.alloc_tensor,
             out=out,
         )
         pad_q_len = getattr(infer_state, "_dsv4_prefill_pad_q_len", 0)
         if pad_q_len:
             # pad 行读 HOLD 槽位(参见 infer_struct._dsv4_prefill_pad_q_len),清零以保持确定性
-            out[-pad_q_len:] = 0
-        return out
+            attn_out[-pad_q_len:] = 0
+        return attn_out
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -323,7 +328,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         att_control = AttControl(
             nsa_decode=True,
             nsa_decode_dict={
-                "flashmla_kvcache": True,
                 "layer_index": self.layer_num_,
                 "compress_ratio": self.compress_ratio,
                 "head_dim_v": self.v_head_dim,

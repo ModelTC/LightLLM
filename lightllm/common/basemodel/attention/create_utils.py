@@ -130,21 +130,25 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["flashinfer
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 
-def get_nsa_prefill_att_backend_class(index=0, priority_list: list = ["flashmla_sparse"]) -> BaseAttBackend:
+def get_nsa_prefill_att_backend_class(
+    index=0, priority_list: list = ["flashmla_sparse"], backend_map=nsa_data_type_to_backend
+) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return nsa_data_type_to_backend[llm_dtype][backend_str]
+        return backend_map[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=backend_map, priority_list=priority_list)
 
 
-def get_nsa_decode_att_backend_class(index=0, priority_list: list = ["flashmla_sparse"]) -> BaseAttBackend:
+def get_nsa_decode_att_backend_class(
+    index=0, priority_list: list = ["flashmla_sparse"], backend_map=nsa_data_type_to_backend
+) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return nsa_data_type_to_backend[llm_dtype][backend_str]
+        return backend_map[llm_dtype][backend_str]
     else:
-        return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=backend_map, priority_list=priority_list)

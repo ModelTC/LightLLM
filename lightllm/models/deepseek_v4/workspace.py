@@ -18,6 +18,21 @@ class DeepseekV4Workspace:
         self.c4_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
         self.c128_indices = self._alloc(self.c128_cap)
         self.c128_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
+        self.flashmla_prefill_q = None
+        self.flashmla_prefill_full_out = None
+
+    def init_flashmla_prefill_q(self, real_q_head_num: int, padded_q_head_num: int, head_dim: int, dtype: torch.dtype):
+        if self.flashmla_prefill_q is None:
+            self.flashmla_prefill_q = torch.empty(
+                (self.token_capacity, padded_q_head_num, head_dim), dtype=dtype, device="cuda"
+            )
+            self.flashmla_prefill_q[:, real_q_head_num:, :].zero_()
+
+    def init_flashmla_prefill_full_out(self, q_head_num: int, head_dim_v: int, dtype: torch.dtype):
+        if self.flashmla_prefill_full_out is None:
+            self.flashmla_prefill_full_out = torch.empty(
+                (self.token_capacity, 1, q_head_num, head_dim_v), dtype=dtype, device="cuda"
+            )
 
     @staticmethod
     def compress_cap(max_kv_seq_len: int, ratio: int) -> int:

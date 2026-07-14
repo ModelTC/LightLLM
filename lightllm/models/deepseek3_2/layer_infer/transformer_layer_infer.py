@@ -206,7 +206,6 @@ class NsaInfer:
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
         weights = weights.unsqueeze(-1) * q_scale
 
-        att_state.ensure_nsa_ks_ke()
         ks = att_state.ks
         ke = att_state.ke
         lengths = att_state.lengths
