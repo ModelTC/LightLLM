@@ -389,10 +389,6 @@ def _launch_subprocesses(args: StartArgs):
     ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
     if args.node_rank == 0 and args.nccl_port is not None:
         ports_to_check.append(args.nccl_port)
-    if not args.disable_vision and not args.visual_use_proxy_mode and args.visual_nccl_ports is not None:
-        ports_to_check.extend(args.visual_nccl_ports[: args.visual_dp])
-    if not args.disable_audio and args.audio_nccl_ports is not None:
-        ports_to_check.extend(args.audio_nccl_ports[: args.audio_dp])
     validate_ports(ports_to_check)
 
     set_env_start_args(args)
@@ -596,8 +592,6 @@ def visual_only_start(args):
     ports_to_check = []
     if args.visual_rpyc_port is not None:
         ports_to_check.append(args.visual_rpyc_port)
-    if args.visual_nccl_ports is not None:
-        ports_to_check.extend(args.visual_nccl_ports[: args.visual_dp])
     validate_ports(ports_to_check)
     set_env_start_args(args)
     get_shm_port_args(create=True)

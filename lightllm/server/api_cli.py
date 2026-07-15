@@ -507,13 +507,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
     parser.add_argument(
-        "--visual_nccl_ports",
-        nargs="+",
-        type=int,
-        default=None,
-        help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
-    )
-    parser.add_argument(
         "--visual_rpyc_port",
         type=int,
         default=None,
@@ -532,13 +525,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Tensor parallel size for audio encoder (only 1 is supported; use audio_dp to scale)",
     )
     parser.add_argument("--audio_dp", type=int, default=1, help="Data parallel replicas for audio encoder")
-    parser.add_argument(
-        "--audio_nccl_ports",
-        nargs="+",
-        type=int,
-        default=None,
-        help="NCCL ports per audio DP group; if omitted, auto-allocated in api_start (reserved until audio_tp>1)",
-    )
     parser.add_argument(
         "--audio_infer_batch_size",
         type=int,
