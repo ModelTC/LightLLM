@@ -281,7 +281,8 @@ class InferenceContext:
             req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
-        free_token_index = custom_cat(free_token_index)
+        if len(free_token_index) != 0:
+            free_token_index = custom_cat(free_token_index)
         self.req_manager.free(free_req_index, free_token_index)
 
         finished_req_ids_set = set(finished_request_ids)
