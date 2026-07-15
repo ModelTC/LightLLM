@@ -46,11 +46,13 @@ class BaseQueue:
         input_len = req.input_len
         req.link_prompt_ids_shm_array()
         req.link_logprobs_shm_array()
-        req.candetoken_out_len = 1
         req.finish_token_index = input_len
         req.shm_prompt_ids.arr[input_len] = self.args.eos_id[0]
         req.shm_logprobs.arr[input_len] = (0.0, -1)
         req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+
+        # 所有数据准备完后再通知 detokenizer
+        req.candetoken_out_len = 1
 
     def release_aborted_req(self, req: Req):
         logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
