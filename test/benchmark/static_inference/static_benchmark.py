@@ -28,6 +28,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4MemoryManager
+from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.models import get_model
 from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
 from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
@@ -437,49 +439,38 @@ class StaticBenchmarkExecutor:
         req_idx_gpu = req_idx.cuda(non_blocking=True)
         mem_indexes_gpu = mem_indexes.reshape(batch_size, cached_len).cuda(non_blocking=True)
         self.model.req_manager.req_to_token_indexs[req_idx_gpu, :cached_len] = mem_indexes_gpu
-        self._materialize_cached_prefix_extra_slots(req_idx, cached_len)
+        self._materialize_cached_prefix_extra_slots(req_idx, cached_len, mem_indexes_gpu)
 
-    def _materialize_cached_prefix_extra_slots(self, req_idx: torch.Tensor, cached_len: int):
+    def _materialize_cached_prefix_extra_slots(
+        self, req_idx: torch.Tensor, cached_len: int, mem_indexes_gpu: torch.Tensor
+    ):
         req_manager = self.model.req_manager
+        if not isinstance(req_manager, DeepseekV4ReqManager):
+            return
         batch_size = int(req_idx.shape[0])
-        b_req_idx = req_idx.cuda(non_blocking=True)
-        b_seq_len_cpu = cpu_i32_full((batch_size,), cached_len)
-        b_seq_len = b_seq_len_cpu.cuda(non_blocking=True)
+        req_list = req_idx.tolist()
+        seq_list = [cached_len] * batch_size
 
-        if hasattr(req_manager, "prepare_prefill_compress_slots"):
-            b_ready_cache_len_cpu = cpu_i32_zeros(batch_size)
-            req_manager.prepare_prefill_compress_slots(
-                b_req_idx=b_req_idx,
-                b_ready_cache_len=b_ready_cache_len_cpu.cuda(non_blocking=True),
-                b_seq_len=b_seq_len,
-                b_req_idx_cpu=req_idx,
-                b_ready_cache_len_cpu=b_ready_cache_len_cpu,
-                b_seq_len_cpu=b_seq_len_cpu,
-            )
-
-        if hasattr(req_manager, "prepare_prefill_swa"):
-            swa_ready_len = self._cached_prefix_swa_ready_len(cached_len)
-            b_ready_cache_len_cpu = cpu_i32_full((batch_size,), swa_ready_len)
-            req_manager.prepare_prefill_swa(
-                b_req_idx=b_req_idx,
-                b_ready_cache_len=b_ready_cache_len_cpu.cuda(non_blocking=True),
-                b_seq_len=b_seq_len,
-                b_req_idx_cpu=req_idx,
-                b_ready_cache_len_cpu=b_ready_cache_len_cpu,
-                b_seq_len_cpu=b_seq_len_cpu,
-            )
+        swa_ready_len = self._cached_prefix_swa_ready_len(cached_len)
+        req_manager.prepare_prefill_swa(
+            req_list=req_list,
+            ready_list=[swa_ready_len] * batch_size,
+            seq_list=seq_list,
+            mem_indexes=mem_indexes_gpu[:, swa_ready_len:].contiguous(),
+        )
+        req_manager.prepare_prefill_compress_slots(
+            req_list=req_list,
+            ready_list=[0] * batch_size,
+            seq_list=seq_list,
+            mem_indexes=mem_indexes_gpu,
+        )
 
     def _cached_prefix_swa_ready_len(self, cached_len: int) -> int:
-        req_manager = self.model.req_manager
-        retain_fn = getattr(req_manager, "_swa_retain_len", None)
-        if retain_fn is not None:
-            retain_len = int(retain_fn())
-        else:
-            retain_len = int(getattr(req_manager, "sliding_window", cached_len) or cached_len)
-        ready_len = max(0, int(cached_len) - max(1, retain_len))
-        page_fn = getattr(req_manager, "get_prompt_cache_page_size", None)
-        page_size = int(page_fn()) if page_fn is not None else 1
-        return ready_len // max(1, page_size) * max(1, page_size)
+        req_manager: DeepseekV4ReqManager = self.model.req_manager
+        retain_len = int(req_manager._swa_retain_len())
+        ready_len = max(0, int(cached_len) - retain_len)
+        page_size = int(req_manager.get_prompt_cache_page_size())
+        return ready_len // page_size * page_size
 
     def _make_prefill_input(self, token_chunk: np.ndarray, req_idx: torch.Tensor, ready_cache_len: int) -> ModelInput:
         batch_size, q_len = token_chunk.shape
@@ -785,11 +776,11 @@ def apply_max_batch_size(batch_size: int, max_batch_size: int) -> int:
 
 def prefill_batch_size_from_batch_max_tokens(
     batch_max_tokens: int,
-    step_tokens_per_req: int,
+    uncached_tokens_per_req: int,
     max_batch_size: int,
 ) -> int:
-    """Compute prefill BS from batch_max_tokens before KV-capacity capping."""
-    batch_size = max(1, int(batch_max_tokens) // max(1, step_tokens_per_req))
+    """Compute prefill BS from the full uncached suffix before KV-capacity capping."""
+    batch_size = max(1, int(batch_max_tokens) // max(1, uncached_tokens_per_req))
     return apply_max_batch_size(batch_size, max_batch_size)
 
 
@@ -799,7 +790,7 @@ def build_prefill_cases(
     chunk_sizes: Sequence[Optional[int]],
     cache_hit_rates: Sequence[float],
 ) -> List[BenchmarkCase]:
-    """Build full-prefill cases using batch_max_tokens per chunk step."""
+    """Build full-prefill cases using batch_max_tokens per uncached suffix."""
     if args.batch_max_tokens is None:
         raise ValueError("prefill benchmark requires --batch_max_tokens")
     cases: List[BenchmarkCase] = []
@@ -810,7 +801,7 @@ def build_prefill_cases(
                 step_tokens = prefill_step_tokens_per_req(uncached_len, chunk_size)
                 bs = prefill_batch_size_from_batch_max_tokens(
                     args.batch_max_tokens,
-                    step_tokens,
+                    uncached_len,
                     args.max_batch_size,
                 )
                 chunk_name = chunk_size if chunk_size else "none"
@@ -867,7 +858,8 @@ def build_cases(args: SimpleNamespace) -> List[BenchmarkCase]:
     input_lens = parse_int_list(args.input_lens, [args.input_len])
     context_lens = parse_int_list(args.context_lens, input_lens)
     output_lens = parse_int_list(args.output_lens, [args.output_len])
-    chunk_sizes = parse_chunk_sizes(args.chunked_prefill_sizes, args.chunked_prefill_size)
+    fallback_chunk_size = args.chunked_prefill_size if args.chunked_prefill_size is not None else 4096
+    chunk_sizes = parse_chunk_sizes(args.chunked_prefill_sizes, fallback_chunk_size)
     cache_hit_rates = parse_float_list(args.prefill_cache_hit_rates, [0.0])
 
     cases: List[BenchmarkCase] = []
@@ -887,19 +879,25 @@ def decode_profile_batch_divisor(args: SimpleNamespace, case: BenchmarkCase) -> 
 def filter_capacity_decode_cases(
     args: SimpleNamespace,
     cases: Sequence[BenchmarkCase],
-    profiled_max_total_token_num: int,
+    mem_manager,
 ) -> List[BenchmarkCase]:
     if not getattr(args, "decode_filter_capacity", False):
         return list(cases)
 
     resolved: List[BenchmarkCase] = []
-    capacity_tokens = int(profiled_max_total_token_num)
+    capacity_tokens = int(mem_manager.size)
     for case in cases:
         if case.stage != "decode":
             resolved.append(case)
             continue
         divisor = decode_profile_batch_divisor(args, case)
-        if case.batch_size * divisor <= capacity_tokens:
+        fits_capacity = case.batch_size * divisor <= capacity_tokens
+        if fits_capacity and isinstance(mem_manager, DeepseekV4MemoryManager) and mem_manager.n_c4 > 0:
+            c4_page_size = int(mem_manager.c4_pool.page_size)
+            c4_entries_per_req = divisor // 4
+            c4_pages_per_req = (c4_entries_per_req + c4_page_size - 1) // c4_page_size
+            fits_capacity = case.batch_size * c4_pages_per_req <= mem_manager.c4_num_pages
+        if fits_capacity:
             resolved.append(
                 replace(
                     case,
@@ -993,6 +991,13 @@ def resolve_batch_max_prefill_cases(
 
 def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> SimpleNamespace:
     """Fill LightLLM startup args needed before model construction."""
+    if args.nnodes <= 0:
+        raise ValueError(f"--nnodes must be positive, got {args.nnodes}")
+    if not 0 <= args.node_rank < args.nnodes:
+        raise ValueError(f"--node_rank must be in [0, {args.nnodes}), got {args.node_rank}")
+    if args.tp % args.nnodes != 0:
+        raise ValueError(f"--tp must be divisible by --nnodes, got tp={args.tp} nnodes={args.nnodes}")
+
     if args.data_type is None:
         args.data_type = get_dtype(args.model_dir)
 
@@ -1034,7 +1039,12 @@ def normalize_args(args: argparse.Namespace, cases: Sequence[BenchmarkCase]) -> 
         and args.max_total_token_num is None
     )
     prefill_batch_size_needs_profile = args.benchmark in {"all", "prefill"} and args.max_total_token_num is None
-    needs_profiled_batch_size = decode_batch_size_needs_profile or prefill_batch_size_needs_profile
+    decode_capacity_needs_profile = (
+        args.benchmark in {"all", "decode"} and args.decode_filter_capacity and args.max_total_token_num is None
+    )
+    needs_profiled_batch_size = (
+        decode_batch_size_needs_profile or prefill_batch_size_needs_profile or decode_capacity_needs_profile
+    )
 
     if args.max_total_token_num is None and not needs_profiled_batch_size:
         args.max_total_token_num = max_batch * (args.max_req_total_len + mtp_width + 8)
@@ -1200,7 +1210,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         model, _ = get_model(model_cfg, model_kvargs)
         cases = resolve_batch_max_prefill_cases(args, cases, model.mem_manager.size)
         cases = resolve_profile_decode_cases(args, cases, model.mem_manager.size)
-        cases = filter_capacity_decode_cases(args, cases, model.mem_manager.size)
+        cases = filter_capacity_decode_cases(args, cases, model.mem_manager)
         if not cases:
             raise ValueError("no benchmark cases remain after capacity filtering")
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
@@ -1208,7 +1218,8 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
 
         results = []
-        log_progress = rank_id == args.node_rank * args.tp
+        local_world_size = args.tp // args.nnodes
+        log_progress = rank_id == args.node_rank * local_world_size
         for case_index, case in enumerate(cases, start=1):
             if log_progress:
                 print(f"[rank {rank_id}] case {case_index}/{len(cases)} start {case.name}", flush=True)
@@ -1224,7 +1235,13 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
                 )
             dist.barrier()
 
-        ans_queue.put({"ok": True, "rank": rank_id, "results": results})
+        message = {"ok": True, "rank": rank_id, "results": results}
+        if args.nnodes > 1:
+            global_messages = [None] * args.tp
+            dist.all_gather_object(global_messages, message)
+            if rank_id == 0:
+                message["global_messages"] = global_messages
+        ans_queue.put(message)
     except Exception:
         ans_queue.put({"ok": False, "rank": rank_id, "traceback": traceback.format_exc()})
     finally:
@@ -1385,8 +1402,9 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
     ctx = mp.get_context("spawn")
     ans_queue = ctx.Queue()
     workers = []
-    rank_start = args.node_rank * args.tp
-    rank_end = (args.node_rank + 1) * args.tp
+    local_world_size = args.tp // args.nnodes
+    rank_start = args.node_rank * local_world_size
+    rank_end = rank_start + local_world_size
     case_dicts = [asdict(case) for case in cases]
     args_dict = vars(args)
 
@@ -1435,6 +1453,14 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
             )
         raise RuntimeError(f"{len(failed)} worker(s) failed")
 
+    if args.nnodes > 1:
+        if args.node_rank != 0:
+            return []
+        gathered = [message.get("global_messages") for message in messages if message.get("global_messages")]
+        if len(gathered) != 1 or len(gathered[0]) != args.tp:
+            raise RuntimeError("rank 0 did not receive one result payload from every global rank")
+        messages = gathered[0]
+
     results = aggregate_rank_results(args, messages)
     result_objs = [BenchmarkResult(**result) for result in results]
     print_results_table(result_objs)
@@ -1473,8 +1499,11 @@ def add_static_benchmark_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--chunked_prefill_sizes",
         type=str,
-        default=4096,
-        help=("comma/space separated prefill chunk sizes; default is 4096 " "(full/none/0 select unchunked prefill)"),
+        default=None,
+        help=(
+            "comma/space separated prefill chunk sizes; overrides --chunked_prefill_size; "
+            "both omitted defaults to 4096 (full/none/0 select unchunked prefill)"
+        ),
     )
     parser.add_argument(
         "--prefill_cache_hit_rates",
@@ -1530,7 +1559,7 @@ def main(argv: Optional[Sequence[str]] = None):
     set_env_start_args(args)
 
     results = run_benchmark(args, cases)
-    if args.dump_file:
+    if args.dump_file and args.node_rank == 0:
         dump_path = Path(args.dump_file)
         dump_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"args": vars(args), "results": results}
