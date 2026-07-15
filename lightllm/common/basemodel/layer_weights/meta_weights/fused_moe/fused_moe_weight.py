@@ -368,7 +368,6 @@ class FusedMoeWeight(BaseWeightTpl):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.quant_method.weight_suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.quant_method.weight_suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.quant_method.weight_suffix}"
-
         row_slice_func = self.row_slicer._slice_weight
         col_slice_func = self.col_slicer._slice_weight
         if w1_weight in weights:
