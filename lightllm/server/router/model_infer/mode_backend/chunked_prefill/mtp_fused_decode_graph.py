@@ -89,7 +89,9 @@ class MTPFusedDecodeGraph:
         self.chain_scratch = backend.mtp_chain_scratch
         self.input_ids = torch.zeros(B, dtype=torch.int64, device="cuda")
         self.b_position_delta = torch.zeros(B, dtype=torch.int64, device="cuda")
-        self._position_delta_dirty = False
+        # b_position_delta 前多少行可能残留非零值; bool 不够用: 小 batch 的清零只覆盖前缀,
+        # 之后更大的 batch 会读到尾部旧 delta。
+        self._position_delta_rows = 0
 
         self.temperature = torch.ones(B, dtype=torch.float32, device="cuda")
         self.top_k = torch.ones(B, dtype=torch.int32, device="cuda")
@@ -336,6 +338,17 @@ class MTPFusedDecodeGraph:
 
     # ---------------- replay ----------------
 
+    def _flush_position_delta(self, has_delta: bool, batch_size: int):
+        # 上传范围取 max(本次 batch, 历史脏行数), 并把 pin 中超出本次 staging 的尾部清零,
+        # 保证残留的旧 delta 一并被冲掉。
+        prev_rows = self._position_delta_rows
+        if has_delta or prev_rows > 0:
+            n = max(batch_size, prev_rows)
+            self.b_position_delta_pin[batch_size:n].zero_()
+            self.b_position_delta[:n].copy_(self.b_position_delta_pin[:n], non_blocking=True)
+        self._position_delta_rows = batch_size if has_delta else 0
+        return
+
     def replay_verify(self, model_input: ModelInput, run_reqs: List[InferReq]) -> FusedStepOutput:
         """
         以 prepare_decode_inputs 的产物为输入, 完成 padding + staging + verify graph replay。
@@ -383,9 +396,7 @@ class MTPFusedDecodeGraph:
         self.temperature[:batch_size].copy_(self.temperature_pin[:batch_size], non_blocking=True)
         self.top_k[:batch_size].copy_(self.top_k_pin[:batch_size], non_blocking=True)
         self.top_p[:batch_size].copy_(self.top_p_pin[:batch_size], non_blocking=True)
-        if has_delta or self._position_delta_dirty:
-            self.b_position_delta[:batch_size].copy_(self.b_position_delta_pin[:batch_size], non_blocking=True)
-        self._position_delta_dirty = has_delta
+        self._flush_position_delta(has_delta, batch_size)
 
         bundle: _GraphBundle = self.graphs[batch_size]
         bundle.verify_graph.replay()
