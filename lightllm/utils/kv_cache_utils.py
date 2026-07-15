@@ -167,6 +167,83 @@ class CpuKVCacheMeta:
         ) // self.data_type.itemsize
 
 
+def _get_default_hugepage_size() -> int:
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("Hugepagesize:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        kb = int(parts[1])
+                        return kb * 1024
+    except Exception:
+        pass
+    return 2 * 1024 * 1024
+
+
+def _get_online_numa_nodes() -> List[int]:
+    for path in ("/sys/devices/system/node/has_memory", "/sys/devices/system/node/online"):
+        try:
+            with open(path, "r") as f:
+                online = f.read().strip()
+            nodes: List[int] = []
+            for part in online.split(","):
+                if "-" in part:
+                    start, end = part.split("-")
+                    nodes.extend(range(int(start), int(end) + 1))
+                else:
+                    nodes.append(int(part))
+            return nodes
+        except Exception:
+            continue
+    return [0]
+
+
+def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
+    MPOL_INTERLEAVE = 3
+    SYS_MBIND = 237
+
+    if enable_huge_page():
+        huge_sz = _get_default_hugepage_size()
+        size = triton.cdiv(size, huge_sz) * huge_sz
+
+    def _mbind(mode, mask):
+        nodemask = ctypes.c_ulong(mask)
+        libc.syscall.restype = ctypes.c_long
+        return libc.syscall(
+            ctypes.c_long(SYS_MBIND),
+            ctypes.c_void_p(addr),
+            ctypes.c_ulong(size),
+            ctypes.c_int(mode),
+            ctypes.byref(nodemask),
+            ctypes.c_ulong(65),
+            ctypes.c_uint(0),
+        )
+
+    if os.getenv("LIGHTLLM_DISABLE_NUMA_INTERLEAVE", "0") == "1":
+        logger.info("cpu cache numa interleave disabled by LIGHTLLM_DISABLE_NUMA_INTERLEAVE")
+        return False
+    nodes = _get_online_numa_nodes()
+    if len(nodes) <= 1:
+        return False
+    if max(nodes) >= 64:
+        logger.warning(f"more than 64 numa nodes ({nodes}), skip cpu cache numa interleave")
+        return False
+    try:
+        ret = _mbind(MPOL_INTERLEAVE, sum(1 << n for n in nodes))
+        if ret != 0:
+            logger.warning(
+                f"mbind MPOL_INTERLEAVE failed (errno={ctypes.get_errno()}), "
+                f"cpu kv cache pages will use default first-touch numa policy"
+            )
+            return False
+        logger.info(f"cpu kv cache pages interleaved across numa nodes {nodes}")
+        return True
+    except Exception as e:
+        logger.warning(f"cpu cache numa interleave skipped: {e}")
+        return False
+
+
 @lru_cache(maxsize=None)
 def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     libc = ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6", use_errno=True)
@@ -177,20 +254,6 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
     requested_size = size
     use_hugetlb = enable_huge_page()
-
-    # 计算大页大小（默认从 /proc/meminfo 读取 Hugepagesize）
-    def _get_default_hugepage_size() -> int:
-        try:
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if line.startswith("Hugepagesize:"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            kb = int(parts[1])
-                            return kb * 1024
-        except Exception:
-            pass
-        return 2 * 1024 * 1024  # fallback 2MB
 
     shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
     if use_hugetlb:
@@ -230,6 +293,8 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     if shm_addr == ctypes.c_void_p(-1).value:
         raise Exception("Error attaching shared memory")
     logger.info(f"Shared cpu kv cache tensor memory at address: {shm_addr}")
+
+    interleave_pages_across_numa_nodes(libc, shm_addr, size_to_alloc)
 
     # Best-effort memory prefaulting in background to speed up subsequent cudaHostRegister
     def _pre_warm_memory():
@@ -324,4 +389,6 @@ def attach_shm_kv_cache_ptr(key: int, size: int) -> int:
         raise Exception(f"Error attaching shared memory (errno={err})")
 
     logger.info(f"Attached to SHM key={key}, shmid={shmid}, addr={shm_addr}")
+
+    interleave_pages_across_numa_nodes(libc, shm_addr, size)
     return shm_addr

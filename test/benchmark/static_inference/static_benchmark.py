@@ -248,19 +248,20 @@ class StaticBenchmarkExecutor:
             token_rows=token_rows,
             req_idx=req_idx,
             prompt_len=case.context_len,
-            chunk_size=None,
+            chunk_size=max(1, 32768 // case.batch_size),
         )
         output = None
+        next_ids = None
         for model_input in inputs:
             output = self._forward_prefill_input(model_input, allow_overlap=not mtp_enabled)
+            if mtp_enabled:
+                next_ids = self._fill_mtp_prefill_kv(case, model_input, output, self._argmax_ids(output.logits))
         assert output is not None
         self._touch_output(output)
 
-        next_ids = self._argmax_ids(output.logits)
-
+        if not mtp_enabled:
+            next_ids = self._argmax_ids(output.logits)
         seq_len = cpu_i32_full((case.batch_size,), case.context_len)
-        if mtp_enabled:
-            next_ids = self._fill_mtp_prefill_kv(case, inputs[-1], output, next_ids)
         return req_idx, seq_len, next_ids
 
     def _fill_mtp_prefill_kv(
