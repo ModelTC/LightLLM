@@ -9,7 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
-from lightllm.common.basemodel import routing_manager as _routing_mgr
+from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
@@ -138,7 +138,8 @@ class FusedMoeWeight(BaseWeightTpl):
         infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        routing_capture_callback = _routing_mgr.make_routing_capture_callback(infer_state, self.layer_num_)
+        # Captures MoE topk expert ids for routed-experts metadata when enabled.
+        moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         return self.fuse_moe_impl(
             input_tensor=input_tensor,
             router_logits=router_logits,
@@ -152,7 +153,7 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             is_prefill=is_prefill,
-            routing_capture_callback=routing_capture_callback,
+            moe_capture_callback=moe_capture_callback,
             per_expert_scale=self.per_expert_scale,
             shared_expert_gate=shared_expert_gate,
         )
@@ -368,7 +369,6 @@ class FusedMoeWeight(BaseWeightTpl):
         w1_weight = f"{self.weight_prefix}.{expert_idx}.{self.w1_weight_name}.{self.quant_method.weight_suffix}"
         w2_weight = f"{self.weight_prefix}.{expert_idx}.{self.w2_weight_name}.{self.quant_method.weight_suffix}"
         w3_weight = f"{self.weight_prefix}.{expert_idx}.{self.w3_weight_name}.{self.quant_method.weight_suffix}"
-
         row_slice_func = self.row_slicer._slice_weight
         col_slice_func = self.col_slicer._slice_weight
         if w1_weight in weights:

@@ -121,7 +121,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
-        routing_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
+        # Callback to capture MoE topk expert ids (routed experts metadata).
+        moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
@@ -139,8 +140,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             shared_expert_gate=shared_expert_gate,
         )
 
-        if routing_capture_callback is not None:
-            routing_capture_callback(origin_topk_ids)
+        if moe_capture_callback is not None:
+            moe_capture_callback(origin_topk_ids)
 
         output = self._fused_experts(
             input_tensor=input_tensor,

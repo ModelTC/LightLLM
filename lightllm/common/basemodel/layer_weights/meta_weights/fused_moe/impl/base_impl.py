@@ -62,7 +62,8 @@ class FuseMoeBaseImpl:
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
-        routing_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
+        # Callback to capture MoE topk expert ids (routed experts metadata).
+        moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
         # Qwen3.5 uses this gate to control fused shared expert aggregation weights.
         shared_expert_gate: Optional[torch.Tensor] = None,

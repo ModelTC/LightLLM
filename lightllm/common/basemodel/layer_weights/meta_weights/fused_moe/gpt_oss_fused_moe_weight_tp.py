@@ -4,7 +4,7 @@ import threading
 from typing import Optional, Tuple, List, Dict, Any
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
-from lightllm.common.basemodel import routing_manager as _routing_mgr
+from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.quantize_method import QuantizationMethod
@@ -152,9 +152,10 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
 
         topk_weights, topk_ids = self._router(router_logits, top_k)
 
-        routing_capture_callback = _routing_mgr.make_routing_capture_callback(infer_state, self.layer_num_)
-        if routing_capture_callback is not None:
-            routing_capture_callback(topk_ids)
+        # Captures MoE topk expert ids for routed-experts metadata when enabled.
+        moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
+        if moe_capture_callback is not None:
+            moe_capture_callback(topk_ids)
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2

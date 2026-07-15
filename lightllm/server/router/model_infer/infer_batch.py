@@ -23,7 +23,7 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
-from lightllm.common.basemodel import routing_manager as _routing_mgr
+from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.basemodel import logprobs_manager as _prompt_logprobs_mgr
 
 logger = init_logger(__name__)
@@ -132,7 +132,7 @@ class InferenceContext:
         mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][: req.shm_req.input_len - 1]
         return mgr.extract(mem_indexes, topk)
 
-    def _collect_routing_data(self, req: "InferReq"):
+    def _collect_routed_experts(self, req: "InferReq"):
         if not (req.shm_req.finish_status.is_finished() or req.shm_req.stop_str_matched):
             return None
         visible_total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
@@ -141,8 +141,7 @@ class InferenceContext:
             return None
 
         mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0:capture_len]
-        mgr = _routing_mgr.g_routing_capture_manager
-        return mgr.extract_routing_data(mem_indexes)
+        return MoeRouteInfoManager.get_instance().extract(mem_indexes)
 
     def _dump_final_token_metadata(self, req: "InferReq"):
         prompt_logprobs = None
@@ -152,8 +151,9 @@ class InferenceContext:
 
         if _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager is not None:
             prompt_logprobs = self._collect_prompt_logprobs(req)
-        if _routing_mgr.g_routing_capture_manager is not None:
-            routed_experts = self._collect_routing_data(req)
+        mgr = MoeRouteInfoManager.get_instance()
+        if mgr is not None and mgr.routing_buffer is not None:
+            routed_experts = self._collect_routed_experts(req)
 
         req.shm_req.get_final_token_metadata().create(
             prompt_logprobs=prompt_logprobs,

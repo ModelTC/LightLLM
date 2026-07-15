@@ -29,7 +29,7 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
-from lightllm.common.basemodel.routing_manager import get_routing_config_from_model_dir, routing_dtype_id_to_np
+from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.server.io_struct import (
@@ -137,10 +137,8 @@ class HttpServerManager:
         # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
-        self._routing_config = (
-            get_routing_config_from_model_dir(args.model_dir)
-            if args.enable_return_routed_experts and args.node_rank == 0
-            else None
+        self._moe_route_info_manager = (
+            MoeRouteInfoManager.get_instance() if args.enable_return_routed_experts and args.node_rank == 0 else None
         )
 
         self.rl_controller = HttpRlController(self)
@@ -544,9 +542,9 @@ class HttpServerManager:
         return image_tokens, audio_tokens
 
     def _read_routed_experts_metadata(self, req: Req):
-        if self._routing_config is None:
+        if self._moe_route_info_manager is None:
             return None
-        num_moe_layers, topk, dtype_id = self._routing_config
+        mgr = self._moe_route_info_manager
         num_tokens = req.input_len + req.shm_cur_output_len - 1
         if num_tokens <= 0:
             return None
@@ -555,7 +553,7 @@ class HttpServerManager:
             # prompt top-k 和 routed experts 共用 final metadata shm，
             # routing offset 由请求里的 prompt 配置推导出来。
             return req.get_final_token_metadata().routed_experts_response(
-                num_tokens, num_moe_layers, topk, routing_dtype_id_to_np(dtype_id)
+                num_tokens, mgr.num_moe_layers, mgr.topk, mgr.get_np_dtype()
             )
         except FileNotFoundError:
             return None
@@ -1007,11 +1005,12 @@ class HttpServerManager:
                                         finish_status = FinishStatus(req.finish_status.status)
 
                                     if (
-                                        req.sample_params.prompt_logprobs >= 0 or self._routing_config is not None
+                                        req.sample_params.prompt_logprobs >= 0
+                                        or self._moe_route_info_manager is not None
                                     ) and await self._wait_until_infer_released(req):
                                         if req.sample_params.prompt_logprobs >= 0:
                                             metadata.update(req.get_prompt_logprobs_metadata(self.tokenizer))
-                                        if self._routing_config is not None:
+                                        if self._moe_route_info_manager is not None:
                                             routing_meta = self._read_routed_experts_metadata(req)
                                             if routing_meta is not None:
                                                 metadata["routed_experts"] = routing_meta
