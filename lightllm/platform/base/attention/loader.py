@@ -1,8 +1,6 @@
 import importlib
 import pkgutil
-
 from lightllm.platform.plugins import ATT
-from lightllm.platform.plugins.registration_validation import validate_extra_modules_registered
 
 
 _ATT_ROOT = "lightllm.common.basemodel.attention"
@@ -23,12 +21,12 @@ def _load_builtin_att_backends() -> None:
             importlib.import_module(module_info.name)
 
 
-def _load_att_backends(extra_modules: tuple[str, ...] = ()) -> None:
+def _load_att_backends(modules: tuple[str, ...] = ()) -> None:
     _load_builtin_att_backends()
-    for module_name in extra_modules:
+    for module_name in modules:
         importlib.import_module(module_name)
 
-    if not extra_modules:
+    if not modules:
         return
 
     from lightllm.platform.base.attention.registry import att_backend_registry
@@ -36,13 +34,16 @@ def _load_att_backends(extra_modules: tuple[str, ...] = ()) -> None:
     registered_modules = {
         spec.backend_cls.__module__ for spec in att_backend_registry.list_specs()
     }
-    validate_extra_modules_registered(
-        kind_spec=ATT.spec,
-        register_decorator="@register_att_backend",
-        extra_modules=extra_modules,
-        registered_module_names=registered_modules,
-        installed_plugins=ATT.installed(),
-    )
+    missing = [
+        module_name for module_name in modules if module_name not in registered_modules
+    ]
+    if missing:
+        raise RuntimeError(
+            f"{ATT.name}: {ATT.cli_flag('modules')} modules not registered "
+            f"by {ATT.register_decorator}: {missing}. "
+            f"Check {ATT.cli_flag('modules')} / {ATT.cli_flag('plugins')} "
+            f"and that they call {ATT.register_decorator}."
+        )
 
 
 _att_backends_loaded = False
@@ -53,5 +54,5 @@ def ensure_att_backends_loaded() -> None:
     if _att_backends_loaded:
         return
 
-    _load_att_backends(ATT.get().extra_modules)
+    _load_att_backends(ATT.get().modules)
     _att_backends_loaded = True

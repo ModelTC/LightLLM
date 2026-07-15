@@ -198,35 +198,3 @@ class StartArgs:
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
 
     hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa", "ascend", "maca"]})
-    extra_ops_plugins: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated lightllm.ops_plugins entry point names"},
-    )
-    extra_ops_fallback: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated impl families prepended to the platform op fallback chain"},
-    )
-    extra_ops_modules: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated Python modules to import for external @register_op implementations"},
-    )
-    extra_att_plugins: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated lightllm.att_plugins entry point names"},
-    )
-    extra_att_modules: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated Python modules to import for external @register_att_backend implementations"},
-    )
-    extra_sampling_plugins: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated lightllm.sampling_plugins entry point names"},
-    )
-    extra_sampling_fallback: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated impl families prepended to the platform sampling fallback chain"},
-    )
-    extra_sampling_modules: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated Python modules to import for external @register_sampling_op implementations"},
-    )

@@ -5,7 +5,7 @@ from lightllm.common.basemodel.triton_kernel.embedding import npu_embedding
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import npu_multimodal_emb
 from lightllm.models.llama.layer_infer.transformer_layer_infer import npu_ffn_fwd
 from lightllm.models.llama.triton_kernel.rotary_emb import npu_rotary_emb_fwd
-from lightllm.platform.base.ops import register_op
+from lightllm.platform.base.ops import register_op, out_like
 from lightllm.server.embed_cache.copy_to_cache import npu_offload_embed_tensor_to_cache
 
 
@@ -88,7 +88,11 @@ def ffn(
 
 @register_op(
     "ascend", 
-    out={"input_name": "weight","out_shape": (("input_ids", 0), ("weight", 1))},
+    out=lambda kwargs: (
+        (kwargs["input_ids"].shape[0], kwargs["weight"].shape[1]),
+        kwargs["weight"].dtype,
+        kwargs["weight"].device,
+    ),
 )
 def embedding(
     *,
@@ -106,7 +110,11 @@ def embedding(
 
 @register_op(
     "ascend", 
-    out={"input_name": "input", "out_shape": (("weight", 0), ("input", 1))},
+    out=lambda kwargs: (
+        (kwargs["weight"].shape[0], kwargs["input"].shape[1]),
+        kwargs["weight"].dtype,
+        kwargs["weight"].device,
+    ),
 )
 def lm_head(
     *,
@@ -118,7 +126,7 @@ def lm_head(
     return out
 
 
-@register_op("ascend", out={"input_name": "input"})
+@register_op("ascend", out=out_like("input"))
 def rms_norm(
     *,
     input: torch.Tensor,
@@ -137,7 +145,7 @@ def rms_norm(
     return out
 
 
-@register_op("ascend", out={"input_name": "input"})
+@register_op("ascend", out=out_like("input"))
 def layer_norm(
     *,
     input: torch.Tensor,

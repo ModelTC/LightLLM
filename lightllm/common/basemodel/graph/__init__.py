@@ -1,14 +1,5 @@
-from lightllm.common.basemodel.graph.acl_graph import AclGraph
-from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph
+from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph, register_decode_graph
 from lightllm.common.basemodel.graph.cuda_graph import CudaGraph
+from lightllm.common.basemodel.graph.acl_graph import AclGraph
 
-DECODE_GRAPH_MAP = {
-    "cuda": CudaGraph,
-    "musa": CudaGraph,
-    "ascend": AclGraph,
-    "maca": CudaGraph,
-}
-
-DecodeGraph.PLATFORM_CLASS_MAP = DECODE_GRAPH_MAP
-
-__all__ = ["DecodeGraph"]
+__all__ = ["DecodeGraph", "CudaGraph", "AclGraph", "register_decode_graph"]

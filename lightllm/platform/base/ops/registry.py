@@ -1,58 +1,8 @@
-import inspect
 from typing import Callable, TypeVar
-from lightllm.platform.base.ops.ensure_out import AutoOutSpec, wrap_with_out
+
+from lightllm.platform.base.ops.out import wrap_out
 
 F = TypeVar("F", bound=Callable)
-
-
-# Helper function to validate tensor name in function parameters
-def _require_tensor_param(op_name: str, param_name: str, parameters: dict[str, inspect.Parameter]) -> None:
-    if param_name not in parameters:
-        raise ValueError(
-            f"register_op({op_name!r}): tensor param {param_name!r} "
-            f"not found in function parameters {list(parameters)}"
-        )
-
-
-def _validate_auto_out_spec(op_name: str, out: AutoOutSpec, sig: inspect.Signature) -> None:
-    parameters = sig.parameters
-    # if out_shape, out_dtype, and out_device are all specified, then input_name is optional
-    fully_specified = (
-        out.get("out_shape") is not None
-        and out.get("out_dtype") is not None
-        and out.get("out_device") is not None
-    )
-    if not fully_specified:
-        if "input_name" not in out:
-            raise ValueError(
-                f"register_op({op_name!r}): 'input_name' is required unless "
-                "out_shape, out_dtype, and out_device are all specified"
-            )
-        _require_tensor_param(op_name, out["input_name"], parameters)
-
-    out_shape = out.get("out_shape")
-    if out_shape is not None:
-        if not isinstance(out_shape, tuple) or not out_shape:
-            raise ValueError(f"register_op({op_name!r}): 'out_shape' must be a non-empty tuple")
-        if not all(isinstance(dim, int) for dim in out_shape):
-            for item in out_shape:
-                if not isinstance(item, tuple) or len(item) != 2:
-                    raise ValueError(
-                        f"register_op({op_name!r}): invalid out_shape item {item!r}, "
-                        "expected (tensor_name, dim_index)"
-                    )
-                name, dim = item
-                if not isinstance(name, str) or not isinstance(dim, int):
-                    raise ValueError(
-                        f"register_op({op_name!r}): invalid out_shape item {item!r}, "
-                        "expected (tensor_name, dim_index)"
-                    )
-                _require_tensor_param(op_name, name, parameters)
-
-    for key in ("out_dtype", "out_device"):
-        spec = out.get(key)
-        if isinstance(spec, str):
-            _require_tensor_param(op_name, spec, parameters)
 
 
 class OpRegistry:
@@ -72,6 +22,21 @@ class OpRegistry:
     def has_impl_family(self, impl_family: str) -> bool:
         return bool(self._ops.get(impl_family))
 
+    def resolve(
+        self,
+        op_name: str,
+        *,
+        fallback_chain: tuple[str, ...],
+    ) -> Callable:
+        for family in fallback_chain:
+            impl = self.get(family, op_name)
+            if impl is not None:
+                return impl
+        raise KeyError(
+            f"Op '{op_name}' not found for "
+            f"fallback_chain={fallback_chain!r}"
+        )
+
 
 op_registry = OpRegistry()
 
@@ -80,16 +45,12 @@ def register_op(
     impl_family: str,
     *,
     name: str | None = None,
-    out: AutoOutSpec | None = None,
+    out: Callable | None = None,
 ) -> Callable[[F], F]:
 
     def decorator(fn: F) -> F:
         op_name = name or fn.__name__
-        if out is not None:
-            _validate_auto_out_spec(op_name, out, inspect.signature(fn))
-            impl: Callable = wrap_with_out(out, fn)
-        else:
-            impl = fn
+        impl = wrap_out(fn, out) if out is not None else fn
         op_registry.register(impl_family, op_name, impl)
         return fn
 

@@ -1,307 +1,175 @@
 from dataclasses import dataclass
 from importlib.metadata import entry_points, EntryPoint
-from typing import Any, Callable, Generic, Iterable, List, TypeVar
+from typing import Iterable, Any, Callable, List
 
-C = TypeVar("C", bound="ModulePluginConfig")
-
-
-@dataclass(frozen=True)
-class ModulePluginConfig:
-    """ Plugin config for module-based plugins. e.g., ATT """
-    extra_modules: tuple[str, ...] = ()
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 @dataclass(frozen=True)
-class FallbackPluginConfig(ModulePluginConfig):
-    """ Plugin config for fallback-based plugins. e.g., OPS, SAMPLING """
-    extra_fallback: tuple[str, ...] = ()
+class PluginConfig:
+    modules: tuple[str, ...] = ()
+    fallback: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class PluginKindSpec(Generic[C]):
-    kind: str
-    entry_point_group: str
-    config_cls: type[C]
-    fields: tuple[str, ...]
-    ambiguous_error: str
-
-    def merge_configs(self, configs: Iterable[C]) -> C:
-        return self.config_cls(**{
-            field: merge_config_field(configs, field)
-            for field in self.fields
-        })
-
-    def has_direct_config(self, config: C) -> bool:
-        return any(getattr(config, field) for field in self.fields)
-
-    def cli_flag(self, field: str) -> str:
-        return f"--extra_{self.kind}_{field}"
-
-    @property
-    def example_plugin_name(self) -> str:
-        return f"example_{self.kind}_plugin"
-
-
-class PluginKind(Generic[C]):
-
+class Plugin:
     def __init__(
         self,
-        spec: PluginKindSpec[C],
+        name: str,
+        entry_point_group: str,
         *,
-        validator: Callable[[C], None] | None = None,
-        resolve_fallback: Callable[[str, C | None], tuple[str, ...]] | None = None,
+        register_decorator: str,
+        platform_fallback_field: str | None = None,
     ) -> None:
-        self._spec = spec
-        self._validator = validator
-        self._resolve_fallback = resolve_fallback
-        self._config: C | None = None
+        self.name = name
+        self.entry_point_group = entry_point_group
+        self.register_decorator = register_decorator
+        self.platform_fallback_field = platform_fallback_field
+        self.config: PluginConfig | None = None
 
     @property
-    def spec(self) -> PluginKindSpec[C]:
-        return self._spec
+    def fields(self) -> tuple[str, ...]:
+        if self.platform_fallback_field is not None:
+            return ("modules", "fallback")
+        return ("modules",)
 
-    @property
-    def kind(self) -> str:
-        return self.spec.kind
+    def cli_flag(self, field: str) -> str:
+        return f"--extra_{self.name}_{field}"
 
-    @property
-    def config_cls(self) -> type[C]:
-        return self.spec.config_cls
+    def cli_help(self, field: str) -> str:
+        if field == "plugins":
+            return (
+                f"Comma-separated pip {self.name} plugin names "
+                f"(entry point group: {self.entry_point_group})."
+            )
+        if field == "modules":
+            return (
+                f"Comma-separated Python modules to import for external "
+                f"{self.register_decorator} implementations."
+            )
+        if field == "fallback":
+            return (
+                f"Comma-separated impl families prepended to the platform "
+                f"{self.name} fallback chain. Use with {self.cli_flag('modules')} "
+                f"for local overrides without a pip plugin package."
+            )
+        raise ValueError(f"Unknown plugin CLI field: {field!r}")
 
-    def configure(self) -> C:
-        # ops -> extra_ops_plugins, att -> extra_att_plugins, sampling -> extra_sampling_plugins
-        plugin_names = plugin_names_from_cli(self._spec.kind)
-        # Build *Config based on fallback/modules CLI flags
-        direct_config = plugin_config_from_cli(
-            self._spec.config_cls,
-            plugin_kind=self._spec.kind,
-            fields=self._spec.fields,
+    def configure(self) -> None:
+        plugins_config = self._config_from_plugins_cli()
+        direct_config = self._config_from_direct_cli()
+
+        # 校验，二者不可同时指定
+        if plugins_config is not None and direct_config is not None:
+            plugins_flag = self.cli_flag("plugins")
+            if self.platform_fallback_field is not None:
+                direct_flags = f"({self.cli_flag('modules')}, {self.cli_flag('fallback')})"
+            else:
+                direct_flags = self.cli_flag("modules")
+            raise RuntimeError(
+                f"{self.name} plugin configuration is ambiguous: "
+                f"use either {plugins_flag} or {direct_flags}, not both."
+            )
+
+        self.config = plugins_config or direct_config or PluginConfig()
+        self._validate_config(self.config)
+
+    def get(self) -> PluginConfig:
+        return self.config or PluginConfig()
+
+    def _config_from_plugins_cli(self) -> PluginConfig | None:
+        # 根据启动参数读 pip 安装的插件列表，读取自 --extra_xxx_plugins 参数
+        start_args = get_env_start_args()
+        names = to_str_tuple(getattr(start_args, f"extra_{self.name}_plugins", None))
+        if not names:
+            return None
+
+        # 加载这些插件
+        plugins_config = load_entry_point_plugins(
+            names,
+            entry_point_group=self.entry_point_group,
+            fields=self.fields,
+            plugin_kind=self.name,
+        )
+        return PluginConfig(
+            **{field: merge_config_field(plugins_config, field) for field in self.fields}
         )
 
-        has_plugins = bool(plugin_names)
-        has_direct = self._spec.has_direct_config(direct_config)
-        if has_plugins and has_direct:
-            raise RuntimeError(self._spec.ambiguous_error)
+    def _config_from_direct_cli(self) -> PluginConfig | None:
+        # 根据启动参数读内部插件，读取自 --extra_xxx_modules / --extra_xxx_fallback 参数
+        start_args = get_env_start_args()
+        config = PluginConfig(
+            **{
+                field: to_str_tuple(getattr(start_args, f"extra_{self.name}_{field}", None))
+                for field in self.fields
+            }
+        )
 
-        if has_plugins:
-            config = self._spec.merge_configs(
-                load_entry_point_plugins(
-                    plugin_names,
-                    entry_point_group=self._spec.entry_point_group,
-                    parser=self.parse,
-                    plugin_kind=self._spec.kind,
-                )
-            )
-        elif has_direct:
-            config = direct_config
-        else:
-            config = self._spec.config_cls()
-
-        if self._validator is not None:
-            self._validator(config)
-
-        self._config = config
+        if not any(getattr(config, field) for field in self.fields):
+            return None
         return config
 
-    def get(self) -> C:
-        if self._config is None:
-            return self._spec.config_cls()
-        return self._config
+    def _validate_config(self, config: PluginConfig) -> None:
+        # ATT 插件（只有 modules 字段）不用校验 fallback 字段
+        if self.platform_fallback_field is None:
+            return
 
-    def parse(self, value: Any) -> C:
-        return parse_plugin_config(
-            value,
-            self._spec.config_cls,
-            fields=self._spec.fields,
-            plugin_kind=self._spec.kind,
-        )
-
-    def installed(self) -> tuple[str, ...]:
-        return list_installed_plugin_names(self.spec.entry_point_group)
-
-    def resolve_fallback_for(
-        self,
-        platform: str,
-        config: C | None = None,
-    ) -> tuple[str, ...]:
-        if self._resolve_fallback is None:
-            raise TypeError(
-                f"Plugin kind {self.kind!r} does not support fallback resolution"
-            )
-        return self._resolve_fallback(platform, config)
-
-
-def make_fallback_plugin_validator(
-    spec: PluginKindSpec[FallbackPluginConfig],
-    *,
-    register_decorator: str,
-) -> Callable[[FallbackPluginConfig], None]:
-    def validate(config: FallbackPluginConfig) -> None:
-        if config.extra_modules and not config.extra_fallback:
-            modules_flag = spec.cli_flag("modules")
-            fallback_flag = spec.cli_flag("fallback")
+        # 校验，如果指定了 modules，则必须指定 fallback
+        if config.modules and not config.fallback:
             raise RuntimeError(
-                f"{modules_flag} requires {fallback_flag}: external modules must "
-                f"{register_decorator} under impl family names listed in extra_fallback."
+                f"{self.cli_flag('modules')} requires {self.cli_flag('fallback')}: "
+                f"external modules must register under impl family names listed in fallback."
             )
-
-    return validate
-
-
-def make_module_plugin_kind(
-    *,
-    kind: str,
-    entry_point_group: str,
-    ambiguous_error: str,
-    config_cls: type[ModulePluginConfig] = ModulePluginConfig,
-) -> PluginKind[ModulePluginConfig]:
-    spec = PluginKindSpec(
-        kind=kind,
-        entry_point_group=entry_point_group,
-        config_cls=config_cls,
-        fields=("extra_modules",),
-        ambiguous_error=ambiguous_error,
-    )
-    return PluginKind(spec=spec)
-
-
-def make_fallback_plugin_kind(
-    *,
-    kind: str,
-    entry_point_group: str,
-    ambiguous_error: str,
-    platform_fallback_field: str,
-    register_decorator: str,
-    config_cls: type[FallbackPluginConfig] = FallbackPluginConfig,
-) -> PluginKind[FallbackPluginConfig]:
-    spec = PluginKindSpec(
-        kind=kind,
-        entry_point_group=entry_point_group,
-        config_cls=config_cls,
-        fields=("extra_fallback", "extra_modules"),
-        ambiguous_error=ambiguous_error,
-    )
-    validator = make_fallback_plugin_validator(
-        spec,
-        register_decorator=register_decorator,
-    )
-
-    plugin = PluginKind(spec=spec, validator=validator)
-    plugin._resolve_fallback = make_fallback_resolver(plugin.get, platform_fallback_field)
-
-    return plugin
-
-
-def make_fallback_resolver(
-    get_config: Callable[[], FallbackPluginConfig],
-    platform_fallback_field: str,
-    *,
-    config_fallback_field: str = "extra_fallback",
-) -> Callable[[str, FallbackPluginConfig | None], tuple[str, ...]]:
-
-    def resolve(
-        platform: str,
-        plugin_config: FallbackPluginConfig | None = None,
-    ) -> tuple[str, ...]:
-        from lightllm.platform.base.registry import get_platform_spec
-
-        config = plugin_config or get_config()
-        platform_fallback = getattr(get_platform_spec(platform), platform_fallback_field)
-        merged: list[str] = []
-        seen: set[str] = set()
-        for family in getattr(config, config_fallback_field) + platform_fallback:
-            if family in seen:
-                continue
-            seen.add(family)
-            merged.append(family)
-        return tuple(merged)
-
-    return resolve
-
-
-def parse_csv(value: str | None) -> tuple[str, ...]:
-    """ Parse a comma-separated string into a tuple of strings. """
-    if not value:
-        return ()
-    return tuple(item.strip() for item in value.split(",") if item.strip())
-
-
-def normalize_tuple(values: Iterable[str] | None) -> tuple[str, ...]:
-    """ Normalize a list of strings into a tuple of strings. """
-    if not values:
-        return ()
-    return tuple(value.strip() for value in values if value and value.strip())
 
 
 def merge_config_field(configs: Iterable[Any], field_name: str) -> tuple[str, ...]:
-    """ Merge a list of config objects by a field name. """
-    added: set[str] = set()
+    merged: list[str] = []
+    seen: set[str] = set()
     for config in configs:
         for item in getattr(config, field_name):
-            if item not in added:
-                added.add(item)
-    return tuple(added)
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return tuple(merged)
 
 
 def _iter_entry_points(entry_point_group: str) -> Iterable[EntryPoint]:
-    """ Iterate over entry points in a group. """
-    entry_point = entry_points()
-    if hasattr(entry_point, "select"):
-        yield from entry_point.select(group=entry_point_group)
+    eps = entry_points()
+    if hasattr(eps, "select"):
+        yield from eps.select(group=entry_point_group)
     else:
-        yield from entry_point.get(entry_point_group, [])
-
-
-def plugin_names_from_cli(plugin_kind: str) -> tuple[str, ...]:
-    from lightllm.utils.envs_utils import get_env_start_args
-
-    args = get_env_start_args()
-    return parse_csv(getattr(args, f"extra_{plugin_kind}_plugins", None))
-
-
-def plugin_config_from_cli(
-    config_cls: type[C],
-    *,
-    plugin_kind: str,
-    fields: tuple[str, ...],
-) -> C:
-    from lightllm.utils.envs_utils import get_env_start_args
-
-    start_args = get_env_start_args()
-    return config_cls(**{
-        field: parse_csv(getattr(start_args, f"extra_{plugin_kind}_{field.removeprefix('extra_')}", None))
-        for field in fields
-    })
+        yield from eps.get(entry_point_group, [])
 
 
 def load_entry_point_plugins(
     plugin_names: tuple[str, ...],
     *,
     entry_point_group: str,
-    parser: Callable[[Any], C],
+    fields: tuple[str, ...],
     plugin_kind: str,
-) -> List[C]:
-    """ Load entry point plugins from a group. """
-    if not plugin_names:
-        return []
-
+) -> List[PluginConfig]:
+    # 按名字加载 pip 安装的 entry point 插件，每个插件解析成一份 PluginConfig
     selected = set(plugin_names)
-
-    configs: List[C] = []
+    configs: List[PluginConfig] = []
     loaded_names: set[str] = set()
     for entry_point in _iter_entry_points(entry_point_group):
         if entry_point.name not in selected:
             continue
+        # 执行插件注册函数，并用 parse_plugin_config 转成 PluginConfig
         register_fn: Callable[[], Any] = entry_point.load()
-        configs.append(parser(register_fn()))
+        configs.append(parse_plugin_config(register_fn(), fields, plugin_kind))
         loaded_names.add(entry_point.name)
 
+    def list_installed_plugin_names(entry_point_group: str) -> tuple[str, ...]:
+        return tuple(sorted(ep.name for ep in _iter_entry_points(entry_point_group)))
+
+    # 校验：请求的插件名都必须能在 entry point 组里找到
     missing = selected - loaded_names
     if missing:
         available = list_installed_plugin_names(entry_point_group)
         message = (
-            f"{plugin_kind} plugin(s) not found in entry point group {entry_point_group!r}: "
-            f"{sorted(missing)}"
+            f"{plugin_kind} plugin(s) not found in entry point group "
+            f"{entry_point_group!r}: {sorted(missing)}"
         )
         if available:
             message += f". Installed plugins: {available}"
@@ -311,32 +179,34 @@ def load_entry_point_plugins(
                 f"{entry_point_group!r} and pip install -e your plugin package."
             )
         raise RuntimeError(message)
-
     return configs
 
 
 def parse_plugin_config(
     value: Any,
-    config_cls: type[C],
-    *,
     fields: tuple[str, ...],
     plugin_kind: str,
-) -> C:
-    """ Parse a plugin config from a value. """
+) -> PluginConfig:
     if value is None:
-        return config_cls()
-
-    if isinstance(value, config_cls):
+        return PluginConfig()
+    if isinstance(value, PluginConfig):
         return value
-
     if isinstance(value, dict):
-        return config_cls(**{
-            field: normalize_tuple(value.get(field.removeprefix(f"extra_{plugin_kind}_")))
-            for field in fields
-        })
-
+        return PluginConfig(
+            **{
+                field: to_str_tuple(value.get(field))
+                for field in fields
+            }
+        )
     raise TypeError(f"Unsupported {plugin_kind} plugin config type: {type(value)!r}")
 
 
-def list_installed_plugin_names(entry_point_group: str) -> tuple[str, ...]:
-    return tuple(sorted(entry_point.name for entry_point in _iter_entry_points(entry_point_group)))
+def to_str_tuple(value: str | Iterable[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+
+    if isinstance(value, str):
+        parts: Iterable[str] = value.split(",")
+    else:
+        parts = value
+    return tuple(item.strip() for item in parts if item and item.strip())

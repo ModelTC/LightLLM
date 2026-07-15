@@ -1,7 +1,0 @@
-from lightllm.platform.backends.cuda import CudaBackend
-from lightllm.platform.base.registry import register_platform
-
-
-@register_platform("musa", ops_fallback=("cuda_like",), sampling_fallback=("cuda_like",))
-class MusaBackend(CudaBackend):
-    pass

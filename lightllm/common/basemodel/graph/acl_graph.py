@@ -2,7 +2,7 @@ import torch
 from dataclasses import dataclass, field
 from lightllm.common.basemodel.attention.paged_fa3.graph_utils import update_attn_params
 from lightllm.common.basemodel.batch_objs import ModelOutput
-from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph
+from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph, register_decode_graph
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.utils.log_utils import init_logger
 from typing import Any, Optional
@@ -10,6 +10,7 @@ from typing import Any, Optional
 logger = init_logger(__name__)
 
 
+@register_decode_graph("ascend")
 class AclGraph(DecodeGraph):
 
     def _init_decode_graph_extra(self):

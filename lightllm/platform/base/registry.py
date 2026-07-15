@@ -3,7 +3,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Type
 
 from lightllm.platform.base.graph import BackendGraph
+from lightllm.platform.base.ops import build_ops
 from lightllm.platform.base.runtime import BackendRuntime
+from lightllm.platform.base.sampling import build_sampling
 
 if TYPE_CHECKING:
     from lightllm.platform.base.ops.base import OpsProtocol
@@ -28,6 +30,13 @@ class Backend(ABC):
     _graph: BackendGraph
     _ops: "OpsProtocol"
     _sampling: "SamplingProtocol"
+
+
+    def __init__(self, runtime: BackendRuntime, graph: BackendGraph) -> None:
+        self._runtime = runtime
+        self._graph = graph
+        self._ops = build_ops(self.platform_name)
+        self._sampling = build_sampling(self.platform_name)
 
     @property
     def name(self) -> str:
@@ -80,17 +89,7 @@ def _ensure_platforms_registered() -> None:
         return
     _platforms_loaded = True
 
-    import importlib
-    import pkgutil
-
-    import lightllm.platform.backends as backends_pkg
-
-    for module_info in pkgutil.iter_modules(backends_pkg.__path__):
-        if module_info.name.startswith("_"):
-            continue
-        # To import the backend module to avoid adding it to __init__.py manually
-        importlib.import_module(f"{backends_pkg.__name__}.{module_info.name}")
-
+    import lightllm.platform.backends  # noqa: F401 — registers all platforms
 
 def get_platform_spec(platform: str) -> PlatformSpec:
     _ensure_platforms_registered()

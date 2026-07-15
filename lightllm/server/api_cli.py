@@ -1,5 +1,7 @@
 import argparse
 
+from lightllm.platform.plugins import add_plugin_cli_args
+
 
 def make_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
@@ -807,56 +809,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         choices=["cuda", "musa", "ascend", "maca"],
         help="""Hardware platform: cuda | musa | ascend | maca""",
     )
-    parser.add_argument(
-        "--extra_ops_plugins",
-        type=str,
-        default=None,
-        help="""Comma-separated pip ops plugin names (entry point group: lightllm.ops_plugins).""",
-    )
-    parser.add_argument(
-        "--extra_ops_fallback",
-        type=str,
-        default=None,
-        help="""Comma-separated impl families prepended to the platform op fallback chain.
-        Use with --extra_ops_modules for local kernel overrides without a pip plugin package.""",
-    )
-    parser.add_argument(
-        "--extra_ops_modules",
-        type=str,
-        default=None,
-        help="""Comma-separated Python modules to import for external @register_op implementations.""",
-    )
-    parser.add_argument(
-        "--extra_att_plugins",
-        type=str,
-        default=None,
-        help="""Comma-separated pip attention plugin names (entry point group: lightllm.att_plugins).""",
-    )
-    parser.add_argument(
-        "--extra_att_modules",
-        type=str,
-        default=None,
-        help="""Comma-separated Python modules to import for external @register_att_backend implementations.""",
-    )
-    parser.add_argument(
-        "--extra_sampling_plugins",
-        type=str,
-        default=None,
-        help="""Comma-separated pip sampling plugin names (entry point group: lightllm.sampling_plugins).""",
-    )
-    parser.add_argument(
-        "--extra_sampling_fallback",
-        type=str,
-        default=None,
-        help="""Comma-separated impl families prepended to the platform sampling fallback chain.
-        Use with --extra_sampling_modules for local sampling kernel overrides without a pip plugin package.""",
-    )
-    parser.add_argument(
-        "--extra_sampling_modules",
-        type=str,
-        default=None,
-        help="""Comma-separated Python modules to import for external @register_sampling_op implementations.""",
-    )
+    add_plugin_cli_args(parser)
     parser.add_argument(
         "--enable_torch_fallback",
         action="store_true",
