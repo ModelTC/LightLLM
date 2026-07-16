@@ -541,26 +541,6 @@ class HttpServerManager:
 
         return image_tokens, audio_tokens
 
-    def _read_routed_experts_metadata(self, req: Req):
-        if self._moe_route_info_manager is None:
-            return None
-        mgr = self._moe_route_info_manager
-        num_tokens = req.input_len + req.shm_cur_output_len - 1
-        if num_tokens <= 0:
-            return None
-
-        try:
-            # prompt top-k 和 routed experts 共用 final metadata shm，
-            # routing offset 由请求里的 prompt 配置推导出来。
-            return req.get_final_token_metadata().routed_experts_response(
-                num_tokens, mgr.num_moe_layers, mgr.topk, mgr.get_np_dtype()
-            )
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            logger.warning(f"Failed to read routing data for req {req.request_id}: {e}")
-            return None
-
     async def _wait_until_infer_released(self, req: Req, timeout: float = 60.0):
         start_time = time.time()
         while not req.shm_infer_released:
@@ -915,10 +895,6 @@ class HttpServerManager:
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
                 for req in req_status.group_req_objs.shm_req_objs:
-                    try:
-                        req.close_final_token_metadata_shm()
-                    except Exception as e:
-                        logger.debug(f"Failed to close final token metadata shm for req {req.request_id}: {e}")
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
@@ -1008,12 +984,22 @@ class HttpServerManager:
                                         req.sample_params.prompt_logprobs >= 0
                                         or self._moe_route_info_manager is not None
                                     ) and await self._wait_until_infer_released(req):
-                                        if req.sample_params.prompt_logprobs >= 0:
-                                            metadata.update(req.get_prompt_logprobs_metadata(self.tokenizer))
-                                        if self._moe_route_info_manager is not None:
-                                            routing_meta = self._read_routed_experts_metadata(req)
-                                            if routing_meta is not None:
-                                                metadata["routed_experts"] = routing_meta
+                                        try:
+                                            meta = req.get_final_token_metadata().read(self.tokenizer)
+                                        except Exception as e:
+                                            logger.warning(
+                                                f"Failed to read final token metadata for req {req.request_id}: {e}"
+                                            )
+                                            meta = None
+                                        if meta is not None:
+                                            if req.sample_params.prompt_logprobs >= 0:
+                                                metadata["prompt_logprobs"] = meta["prompt_logprobs"]
+                                                metadata["prompt_token_ids"] = meta["prompt_token_ids"]
+                                            if (
+                                                self._moe_route_info_manager is not None
+                                                and meta.get("routed_experts") is not None
+                                            ):
+                                                metadata["routed_experts"] = meta["routed_experts"]
 
                                 req.out_tokens_queue.pop_no_ret()
                                 token_list.append((req_id, text, metadata, finish_status))

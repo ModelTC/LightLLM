@@ -144,20 +144,24 @@ class InferenceContext:
         return MoeRouteInfoManager.get_instance().extract(mem_indexes)
 
     def _dump_final_token_metadata(self, req: "InferReq"):
-        prompt_logprobs = None
+        prompt_top_token_ids = None
+        prompt_top_logprobs = None
         routed_experts = None
 
         req.flush_prompt_selected_logprobs()
 
         prompt_logprobs_mgr = PromptLogprobsCaptureManager.get_instance()
         if prompt_logprobs_mgr is not None and prompt_logprobs_mgr.is_buffer_initialized():
-            prompt_logprobs = self._collect_prompt_logprobs(req)
+            collected = self._collect_prompt_logprobs(req)
+            if collected is not None:
+                prompt_top_token_ids, prompt_top_logprobs = collected
         mgr = MoeRouteInfoManager.get_instance()
         if mgr is not None and mgr.is_buffer_initialized():
             routed_experts = self._collect_routed_experts(req)
 
-        req.shm_req.get_final_token_metadata().create(
-            prompt_logprobs=prompt_logprobs,
+        req.shm_req.get_final_token_metadata().save(
+            prompt_top_token_ids=prompt_top_token_ids,
+            prompt_top_logprobs=prompt_top_logprobs,
             routed_experts=routed_experts,
         )
         return

@@ -298,10 +298,6 @@ class Req(ctypes.Structure):
     def get_final_token_metadata(self):
         return ReqFinalTokenMetadata(self)
 
-    def close_final_token_metadata_shm(self):
-        self.get_final_token_metadata().close_and_unlink()
-        return
-
     def _close_on_demand_shm_array(self, attr_name: str, shm_name: str):
         shm_array = getattr(self, attr_name, None)
         if shm_array is not None:
@@ -355,9 +351,6 @@ class Req(ctypes.Structure):
 
     def get_first_router_need_tokens(self):
         raise NotImplementedError("Subclasses should implement this method")
-
-    def get_prompt_logprobs_metadata(self, tokenizer=None):
-        return self.get_final_token_metadata().prompt_logprobs_response(tokenizer)
 
     def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
         token_id = int(self.shm_prompt_ids.arr[src_index])
