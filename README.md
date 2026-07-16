@@ -98,15 +98,19 @@ We have published a number of papers around components or features of LightLLM, 
 
 **constrained decoding**: accepted by [ACL2025](https://arxiv.org/pdf/2506.03887) and achieved the outstanding paper award.
 ```bibtex
-@inproceedings{
-anonymous2025pre,
-title={Pre\${\textasciicircum}3\$: Enabling Deterministic Pushdown Automata for Faster Structured {LLM} Generation},
-author={Anonymous},
-booktitle={Submitted to ACL Rolling Review - February 2025},
-year={2025},
-url={https://openreview.net/forum?id=g1aBeiyZEi},
-note={under review}
-}
+@inproceedings{chen-etal-2025-pre3,
+    title = "Pre$^3$: Enabling Deterministic Pushdown Automata for Faster Structured {LLM} Generation",
+    author = "Chen, Junyi and Bai, Shihao and Wang, Zaijun and Wu, Siyu and Du, Chuheng and Yang, Hailong and Gong, Ruihao and Liu, Shengzhong  and Wu, Fan and Chen, Guihai",
+    editor = "Che, Wanxiang and Nabende, Joyce and Shutova, Ekaterina and Pilehvar, Mohammad Taher",
+    booktitle = "Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)",
+    month = jul,
+    year = "2025",
+    address = "Vienna, Austria",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.acl-long.551/",
+    doi = "10.18653/v1/2025.acl-long.551",
+    pages = "11253--11267",
+    ISBN = "979-8-89176-251-0",
 ```
 
 **Request scheduler**: accepted by [ASPLOS’25](https://dl.acm.org/doi/10.1145/3676641.3716011):
