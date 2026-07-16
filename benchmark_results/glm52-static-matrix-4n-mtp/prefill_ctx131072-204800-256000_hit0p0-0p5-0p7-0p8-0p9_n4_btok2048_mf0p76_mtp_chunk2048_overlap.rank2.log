@@ -1,0 +1,47 @@
+INFO 07-16 21:33:29 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+WARNING 07-16 21:33:34 [fa4_utils.py:16] flash-attn-4 is not installed
+INFO 07-16 21:33:35 [config_utils.py:160] do not enable fused shared experts: EP MoE uses a separate implementation
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+INFO 07-16 21:33:37 [cache_tensor_manager.py:17] USE_GPU_TENSOR_CACHE is On
+WARNING 07-16 21:33:42 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+WARNING 07-16 21:33:43 [fa4_utils.py:16] flash-attn-4 is not installed
+rank 20 failed:
+Traceback (most recent call last):
+  File "/mnt/afs/niushengxiao/LightLLM/test/benchmark/static_inference/static_benchmark.py", line 1259, in run_worker
+    assert case.batch_size % 2 == 0, "microbatch overlap requires even batch_size"
+AssertionError: microbatch overlap requires even batch_size
+
+rank 16 failed:
+worker exited with code -15
+rank 17 failed:
+worker exited with code -15
+rank 18 failed:
+worker exited with code -15
+rank 19 failed:
+worker exited with code -15
+rank 21 failed:
+worker exited with code -15
+rank 22 failed:
+worker exited with code -15
+rank 23 failed:
+worker exited with code -15
+Traceback (most recent call last):
+  File "/mnt/afs/niushengxiao/LightLLM/test/benchmark/static_inference/test_model.py", line 15, in <module>
+    main()
+  File "/mnt/afs/niushengxiao/LightLLM/test/benchmark/static_inference/static_benchmark.py", line 1617, in main
+    run_benchmark(args, cases)
+  File "/mnt/afs/niushengxiao/LightLLM/test/benchmark/static_inference/static_benchmark.py", line 1516, in run_benchmark
+    raise RuntimeError(f"{len(failed)} worker(s) failed")
+RuntimeError: 8 worker(s) failed
