@@ -24,7 +24,7 @@ from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
+from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
@@ -42,7 +42,6 @@ from lightllm.utils.torch_memory_saver_utils import (
 )
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
-from .moe_route_info_manager import MoeRouteInfoManager
 
 logger = init_logger(__name__)
 
@@ -126,7 +125,6 @@ class TpPartBaseModel:
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._init_moe_route_info()
         self.load_weights(self.weight_dict)
 
         self._init_att_backend()
@@ -349,18 +347,6 @@ class TpPartBaseModel:
 
     def _init_custom(self):
         pass
-
-    def _init_moe_route_info(self):
-        if not self.args.enable_return_routed_experts:
-            return
-        # Capture buffer is only needed on dp_rank 0 (infer capture path).
-        # MTP draft models reuse the same singleton / buffer.
-        if get_current_rank_in_dp() != 0:
-            return
-        mgr = MoeRouteInfoManager.get_instance()
-        if mgr is not None:
-            mgr.init_capture_buffer(kv_cache_size=self.mem_manager.size + 1)
-        return
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):

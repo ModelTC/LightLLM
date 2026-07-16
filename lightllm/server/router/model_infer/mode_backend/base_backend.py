@@ -13,6 +13,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
+from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
@@ -224,10 +225,16 @@ class ModeBackend:
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
-        if self.args.enable_prompt_logprobs and self.is_master_in_dp:
-            mgr = PromptLogprobsCaptureManager.get_instance()
-            if mgr is not None:
-                mgr.init_capture_buffer(kv_cache_size=self.model.mem_manager.size + 1)
+        if self.is_master_in_dp:
+            kv_cache_size = self.model.mem_manager.size + 1
+            if self.args.enable_prompt_logprobs:
+                mgr = PromptLogprobsCaptureManager.get_instance()
+                if mgr is not None:
+                    mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
+            if self.args.enable_return_routed_experts:
+                mgr = MoeRouteInfoManager.get_instance()
+                if mgr is not None:
+                    mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
 
         self.init_custom()
 
