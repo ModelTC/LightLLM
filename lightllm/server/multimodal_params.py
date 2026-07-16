@@ -135,7 +135,8 @@ class ImageItem:
 
     async def preload(self, request: Request):
 
-        max_image_pixels = get_env_start_args().max_image_pixels
+        start_args = get_env_start_args()
+        max_image_pixels = start_args.max_image_pixels if start_args.enable_image_resize else None
 
         try:
             if self._type == "url":
@@ -165,7 +166,7 @@ class ImageItem:
             loop = asyncio.get_running_loop()
             # 1) Verify original input bytes first.
             src_w, src_h = await loop.run_in_executor(_IMAGE_VERIFY_POOL, _verify_image_bytes, img_data)
-            # 2) Resize (or no-op) after verification.
+            # 2) Resize (or no-op when max_image_pixels is disabled) after verification.
             img_data, resized_w, resized_h = await loop.run_in_executor(
                 _IMAGE_VERIFY_POOL,
                 _resize_image_bytes_if_needed,
@@ -277,7 +278,7 @@ def _verify_image_bytes(img_data: bytes) -> Tuple[int, int]:
 
 
 def _resize_image_bytes_if_needed(
-    img_data: bytes, src_w: int, src_h: int, max_image_pixels: int
+    img_data: bytes, src_w: int, src_h: int, max_image_pixels: Optional[int]
 ) -> Tuple[bytes, int, int]:
     """
     Resize image bytes to satisfy max pixel constraint and return resized bytes with size.
@@ -295,12 +296,12 @@ def _resize_image_bytes_if_needed(
         return buffer.getvalue(), new_w, new_h
 
 
-def _resize_image_dimensions_if_needed(src_w: int, src_h: int, max_image_pixels: int) -> Tuple[int, int]:
+def _resize_image_dimensions_if_needed(src_w: int, src_h: int, max_image_pixels: Optional[int]) -> Tuple[int, int]:
     """
     Compute resized (w, h) under a max pixel budget while preserving aspect ratio.
     """
     old_pixels = src_w * src_h
-    if old_pixels <= max_image_pixels:
+    if max_image_pixels is None or old_pixels <= max_image_pixels:
         return src_w, src_h
 
     scale = (max_image_pixels / old_pixels) ** 0.5

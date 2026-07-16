@@ -115,6 +115,7 @@ class StartArgs:
     cache_capacity: int = field(default=200)
     max_image_token_count: int = field(default=8192)
     max_image_pixels: int = field(default=8294400)
+    enable_image_resize: bool = field(default=False)
     embed_cache_storage_size: float = field(default=4)
     data_type: Optional[str] = field(
         default=None, metadata={"choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]}
