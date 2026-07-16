@@ -17,7 +17,8 @@ def test_get_moe_capture_callback_uses_global_manager(monkeypatch):
     calls = []
 
     class _Manager:
-        routing_buffer = object()  # non-None so get_moe_capture_callback proceeds
+        def is_buffer_initialized(self):
+            return True
 
         def get_moe_capture_callback(self, layer_index, mem_indexes):
             calls.append((layer_index, mem_indexes))
@@ -184,7 +185,7 @@ class TestMoeRouteInfoManager:
         assert manager.get_torch_dtype() == torch.uint8
         assert manager.get_np_dtype() == np.uint8
         assert manager.dtype_id == 1
-        assert manager.routing_buffer is None
+        assert not manager.is_buffer_initialized()
 
     def test_dtype_selection_int16(self):
         manager = MoeRouteInfoManager(
@@ -195,7 +196,7 @@ class TestMoeRouteInfoManager:
         assert manager.get_torch_dtype() == torch.int16
         assert manager.get_np_dtype() == np.int16
         assert manager.dtype_id == 2
-        assert manager.routing_buffer is None
+        assert not manager.is_buffer_initialized()
 
     def test_extract_preserves_uint8_values(self):
         _skip_without_cuda()
@@ -222,7 +223,7 @@ class TestMoeRouteInfoManager:
             topk=8,
             dtype_id=1,
         )
-        assert manager.routing_buffer is None
+        assert not manager.is_buffer_initialized()
         manager.init_capture_buffer(kv_cache_size=2048)
         assert manager.routing_buffer.shape == (2048, 48, 8)
         assert manager.routing_buffer.dtype == torch.uint8
@@ -258,5 +259,5 @@ class TestMoeRouteInfoManager:
             topk=8,
             dtype_id=1,
         )
-        assert manager.routing_buffer is None
+        assert not manager.is_buffer_initialized()
         assert manager.routing_buffer_ptr is None

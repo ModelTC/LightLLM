@@ -12,7 +12,7 @@ from lightllm.models import get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel import logprobs_manager as _prompt_logprobs_mgr
+from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
@@ -222,8 +222,12 @@ class ModeBackend:
             self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
             dist.barrier(group=self.node_nccl_group)
 
+        # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
+        # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.args.enable_prompt_logprobs and self.is_master_in_dp:
-            _prompt_logprobs_mgr.init_prompt_logprobs_capture(self.model.mem_manager)
+            mgr = PromptLogprobsCaptureManager.get_instance()
+            if mgr is not None:
+                mgr.init_capture_buffer(kv_cache_size=self.model.mem_manager.size + 1)
 
         self.init_custom()
 
@@ -413,7 +417,7 @@ class ModeBackend:
         run_reqs: List[InferReq],
         prompt_logits: torch.Tensor,
     ) -> None:
-        mgr = _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager
+        mgr = PromptLogprobsCaptureManager.get_instance()
 
         start_loc = 0
         for req_obj in run_reqs:
@@ -435,7 +439,7 @@ class ModeBackend:
                 logprobs = target_logits.float() - torch.logsumexp(logit_rows.float(), dim=-1)
                 ranks = (logit_rows > target_logits.view(-1, 1)).sum(dim=-1, dtype=torch.int32) + 1
                 req_obj.add_prompt_selected_logprobs_chunk(target_start, target_end, logprobs, ranks)
-            elif capture_count > 0 and topk > 0 and mgr is not None:
+            elif capture_count > 0 and topk > 0 and mgr is not None and mgr.is_buffer_initialized():
                 logit_rows = prompt_logits[start_loc : start_loc + capture_count]
                 log_normalizer = torch.logsumexp(logit_rows.float(), dim=-1)
                 valid_topk = min(topk, logit_rows.shape[-1])

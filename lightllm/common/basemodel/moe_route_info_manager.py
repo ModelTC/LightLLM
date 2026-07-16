@@ -172,9 +172,7 @@ class MoeRouteInfoManager:
         self.routing_buffer: Optional[torch.Tensor] = None
         self.routing_buffer_ptr: Optional[torch.Tensor] = None
 
-        logger.info(
-            f"MoeRouteInfoManager created: num_moe_layers={num_moe_layers}, topk={topk}, " f"dtype_id={dtype_id}"
-        )
+        logger.info(f"MoeRouteInfoManager created: num_moe_layers={num_moe_layers}, topk={topk}, dtype_id={dtype_id}")
 
     def get_np_dtype(self):
         if self.dtype_id == 1:
@@ -190,9 +188,13 @@ class MoeRouteInfoManager:
             return torch.int16
         return torch.int32
 
+    def is_buffer_initialized(self) -> bool:
+        """Whether phase-2 capture buffer has been allocated."""
+        return self.routing_buffer is not None
+
     def init_capture_buffer(self, kv_cache_size: int) -> None:
         """Phase-2 init: allocate pinned CPU routing buffer for capture/extract."""
-        if self.routing_buffer is not None:
+        if self.is_buffer_initialized():
             return
 
         torch_dtype = self.get_torch_dtype()
@@ -216,7 +218,8 @@ class MoeRouteInfoManager:
 
     def get_moe_capture_callback(self, layer_index: int, mem_indexes: torch.Tensor):
         """Return a callback that captures MoE topk expert ids into the routing buffer."""
-        assert self.routing_buffer is not None, "call init_capture_buffer() before capture"
+        if not self.is_buffer_initialized():
+            return None
         moe_layer_index = self.layer_index_to_moe_index.get(layer_index)
         if moe_layer_index is None:
             return None
@@ -230,7 +233,8 @@ class MoeRouteInfoManager:
         return moe_capture_callback
 
     def capture(self, moe_layer_index: int, topk_ids: torch.Tensor, mem_indexes: torch.Tensor) -> None:
-        assert self.routing_buffer_ptr is not None, "call init_capture_buffer() before capture"
+        if not self.is_buffer_initialized():
+            return
         assert topk_ids.dim() == 2
         assert topk_ids.shape[1] == self.topk
         assert mem_indexes.shape[0] >= topk_ids.shape[0]
@@ -245,7 +249,8 @@ class MoeRouteInfoManager:
         )
 
     def extract(self, mem_indexes: torch.Tensor) -> np.ndarray:
-        assert self.routing_buffer is not None, "call init_capture_buffer() before extract"
+        if not self.is_buffer_initialized():
+            return
         cpu_indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
         return self.routing_buffer[cpu_indexes, :, :].numpy()
 
@@ -253,6 +258,6 @@ class MoeRouteInfoManager:
 def get_moe_capture_callback(infer_state, layer_index: int):
     """Return a callback that captures MoE topk expert ids, or None if capture is disabled."""
     mgr = MoeRouteInfoManager.get_instance()
-    if mgr is None or mgr.routing_buffer is None:
+    if mgr is None or not mgr.is_buffer_initialized():
         return None
     return mgr.get_moe_capture_callback(layer_index=layer_index, mem_indexes=infer_state.mem_index)

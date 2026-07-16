@@ -24,7 +24,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.basemodel import logprobs_manager as _prompt_logprobs_mgr
+from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 
 logger = init_logger(__name__)
 
@@ -128,7 +128,7 @@ class InferenceContext:
         if topk <= 0 or req.shm_req.input_len <= 1:
             return None
 
-        mgr = _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager
+        mgr = PromptLogprobsCaptureManager.get_instance()
         mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][: req.shm_req.input_len - 1]
         return mgr.extract(mem_indexes, topk)
 
@@ -149,10 +149,11 @@ class InferenceContext:
 
         req.flush_prompt_selected_logprobs()
 
-        if _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager is not None:
+        prompt_logprobs_mgr = PromptLogprobsCaptureManager.get_instance()
+        if prompt_logprobs_mgr is not None and prompt_logprobs_mgr.is_buffer_initialized():
             prompt_logprobs = self._collect_prompt_logprobs(req)
         mgr = MoeRouteInfoManager.get_instance()
-        if mgr is not None and mgr.routing_buffer is not None:
+        if mgr is not None and mgr.is_buffer_initialized():
             routed_experts = self._collect_routed_experts(req)
 
         req.shm_req.get_final_token_metadata().create(
@@ -789,9 +790,13 @@ class InferReq:
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
                                 value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
                             )
-                            prompt_logprobs_mgr = _prompt_logprobs_mgr.g_prompt_logprobs_capture_manager
+                            prompt_logprobs_mgr = PromptLogprobsCaptureManager.get_instance()
                             prompt_topk = self.sampling_param.shm_param.prompt_logprobs
-                            if prompt_logprobs_mgr is not None and prompt_topk > 0:
+                            if (
+                                prompt_logprobs_mgr is not None
+                                and prompt_logprobs_mgr.is_buffer_initialized()
+                                and prompt_topk > 0
+                            ):
                                 prompt_logprobs_mgr.copy_slots(
                                     source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
                                     destination_indexes=tail_mems,
