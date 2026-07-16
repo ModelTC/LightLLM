@@ -117,6 +117,7 @@ class DistributeGroupManager:
         self.groups = []
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
+        self.ep_prefill_workspace = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
@@ -153,6 +154,7 @@ class DistributeGroupManager:
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
+            self.ep_prefill_workspace = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             return
@@ -170,7 +172,7 @@ class DistributeGroupManager:
             hidden=self.ll_hidden,
             num_topk=num_experts_per_tok,
             use_fp8_dispatch=True,
-            allow_multiple_reduction=False,
+            allow_multiple_reduction=True,
         )
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
@@ -179,10 +181,12 @@ class DistributeGroupManager:
         )
         self.ep_low_latency_buffer = deep_ep.Buffer(
             deepep_group,
-            int(1e9),
-            num_rdma_bytes,
+            num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=(self.ll_num_experts // global_world_size),
+        )
+        self.ep_prefill_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
+            torch.uint8, use_rdma_buffer=True
         )
         if is_sm100_gpu():
             if moe_intermediate_size is None:
