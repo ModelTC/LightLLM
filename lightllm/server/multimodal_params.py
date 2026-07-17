@@ -239,6 +239,25 @@ class MultimodalParams:
             await asyncio.gather(*tasks)
         return
 
+    def verify_resource_limits(self):
+        """校验多模态资源数量与 vision/audio 开关是否满足启动配置。
+
+        - images + audios 总数不能超过 ``--cache_capacity``
+        - 若携带 image，则不能处于 ``--disable_vision``
+        - 若携带 audio，则不能处于 ``--disable_audio``
+        """
+        args = get_env_start_args()
+        if len(self.images) + len(self.audios) > args.cache_capacity:
+            raise ValueError(
+                f"too many multimodal items: {len(self.images) + len(self.audios)}"
+                f" > cache_capacity={args.cache_capacity}"
+            )
+        if self.images and args.disable_vision:
+            raise ValueError("vision multimodal not enabled")
+        if self.audios and args.disable_audio:
+            raise ValueError("audio multimodal not enabled")
+        return
+
     def to_dict(self):
         ret = {}
         ret["images"] = [i.to_dict() for i in self.images]

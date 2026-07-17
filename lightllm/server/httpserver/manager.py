@@ -570,11 +570,7 @@ class HttpServerManager:
                     f"the request is rejected before tokenization."
                 )
             if self.enable_multimodal:
-                assert (
-                    len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
-                ), "too many multimodal items!"
-                if multimodal_params.audios:
-                    assert not self.args.disable_audio, "audio multimodal not enabled"
+                multimodal_params.verify_resource_limits()
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = await asyncio.to_thread(
                     self.tokenizer.encode,
@@ -599,19 +595,19 @@ class HttpServerManager:
 
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
-            if not self.enable_multimodal and not self.pd_mode.is_D():
+            if not self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
                     raise ValueError("prompt List[int] format contain id > vocab_size")
             else:
                 if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
-                    assert (
-                        len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
-                    ), "too many multimodal items!"
-                    if multimodal_params.audios:
-                        assert not self.args.disable_audio, "audio multimodal not enabled"
+                    multimodal_params.verify_resource_limits()
                     await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                    # prompt 已是 List[int]（预分词），但仍可能携带 images/audios。
+                    # 多模态 tokenizer.encode 不会对 int 再做文本分词，而是在已有 ids 上
+                    # 展开 image/audio 占位 token（如 <img></img> -> 连续 token_id）。
+                    # 因此，这里需要再次调用 tokenizer.encode 来展开 image/audio 占位 token。
                     return self.tokenizer.encode(
                         prompt,
                         multimodal_params,
