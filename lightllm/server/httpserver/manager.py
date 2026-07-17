@@ -29,7 +29,6 @@ from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
-from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.server.io_struct import (
@@ -137,9 +136,6 @@ class HttpServerManager:
         # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
-        self._moe_route_info_manager = (
-            MoeRouteInfoManager.get_instance() if args.enable_return_routed_experts and args.node_rank == 0 else None
-        )
 
         self.rl_controller = HttpRlController(self)
 
@@ -981,8 +977,7 @@ class HttpServerManager:
                                         finish_status = FinishStatus(req.finish_status.status)
 
                                     if (
-                                        req.sample_params.prompt_logprobs >= 0
-                                        or self._moe_route_info_manager is not None
+                                        req.sample_params.prompt_logprobs >= 0 or self.args.enable_return_routed_experts
                                     ) and await self._wait_until_infer_released(req):
                                         try:
                                             meta = req.get_final_token_metadata().read(self.tokenizer)
@@ -995,10 +990,7 @@ class HttpServerManager:
                                             if req.sample_params.prompt_logprobs >= 0:
                                                 metadata["prompt_logprobs"] = meta["prompt_logprobs"]
                                                 metadata["prompt_token_ids"] = meta["prompt_token_ids"]
-                                            if (
-                                                self._moe_route_info_manager is not None
-                                                and meta.get("routed_experts") is not None
-                                            ):
+                                            if meta.get("routed_experts") is not None:
                                                 metadata["routed_experts"] = meta["routed_experts"]
 
                                 req.out_tokens_queue.pop_no_ret()
