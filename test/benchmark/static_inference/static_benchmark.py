@@ -1256,7 +1256,9 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         group_size = 2 if (args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap) else 1
         if group_size == 2:
             for case in cases:
-                assert case.batch_size % 2 == 0, "microbatch overlap requires even batch_size"
+                assert case.batch_size == 1 or case.batch_size % 2 == 0, (
+                    "microbatch overlap requires batch_size=1 or an even batch_size"
+                )
 
         init_distributed_env(model_kvargs)
         dist_group_manager.create_groups(group_size=group_size)
@@ -1284,6 +1286,7 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         message = {"ok": True, "rank": rank_id, "results": results}
         all_rank_messages = [None] * int(args.tp) if rank_id == 0 else None
         dist.gather_object(message, all_rank_messages, dst=0)
+        dist.barrier()
         if rank_id == 0:
             message["all_rank_messages"] = all_rank_messages
         ans_queue.put(message)
@@ -1466,9 +1469,20 @@ def run_benchmark(args: SimpleNamespace, cases: Sequence[BenchmarkCase]) -> List
     messages = []
     while len(messages) < len(workers):
         try:
-            messages.append(ans_queue.get(timeout=5))
+            message = ans_queue.get(timeout=5)
+            messages.append(message)
+            if not message.get("ok"):
+                for proc in workers:
+                    if proc.is_alive():
+                        proc.terminate()
+                break
             continue
         except queue.Empty:
+            if any(proc.exitcode not in (None, 0) for proc in workers):
+                for proc in workers:
+                    if proc.is_alive():
+                        proc.terminate()
+                break
             if all(not proc.is_alive() for proc in workers):
                 break
 
