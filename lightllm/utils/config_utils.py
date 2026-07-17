@@ -527,6 +527,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe",
         "qwen3_vl_text",
         "qwen3_vl_moe_text",
+        "qwen3_omni_moe",
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
