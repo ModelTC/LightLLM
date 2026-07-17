@@ -3,7 +3,6 @@ import math
 import ctypes
 import numpy as np
 import time
-from multiprocessing import shared_memory
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
@@ -296,19 +295,6 @@ class Req(ctypes.Structure):
 
     def get_final_token_metadata(self):
         return ReqFinalTokenMetadata(self)
-
-    def _close_on_demand_shm_array(self, attr_name: str, shm_name: str):
-        shm_array = getattr(self, attr_name, None)
-        if shm_array is not None:
-            shm_array.close_shm()
-            setattr(self, attr_name, None)
-            return
-        try:
-            shm = shared_memory.SharedMemory(name=shm_name)
-            shm.close()
-            shm.unlink()
-        except FileNotFoundError:
-            pass
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()
