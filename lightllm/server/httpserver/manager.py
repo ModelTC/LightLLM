@@ -847,9 +847,6 @@ class HttpServerManager:
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
 
-    async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
-        return await self.rl_controller.abort_request(request)
-
     def _get_router_profiler_client(self):
         router_profiler_client = getattr(self, "router_profiler_client", None)
         if router_profiler_client is None or getattr(router_profiler_client, "closed", False):
@@ -1003,6 +1000,9 @@ class HttpServerManager:
 
             self.recycle_event.set()
         return
+
+    async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
+        return await self.rl_controller.abort_request(request)
 
     async def pause_generation(self):
         return await self.rl_controller.pause_generation()
