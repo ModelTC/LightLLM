@@ -65,7 +65,9 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
             )
         elif itype == "function_call_output":
             output = item.get("output")
-            if not isinstance(output, str):
+            if isinstance(output, list):
+                output = _content_parts_to_chat(output)
+            elif not isinstance(output, str):
                 output = json.dumps(output, ensure_ascii=False)
             messages.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": output})
         elif itype == "reasoning":
@@ -263,6 +265,7 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
     choice = (openai_dict.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason")
+    output_status = "incomplete" if finish_reason == "length" else "completed"
 
     output: List[Dict[str, Any]] = []
     reasoning_text = message.get("reasoning") or message.get("reasoning_content")
@@ -281,7 +284,7 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
             {
                 "type": "message",
                 "id": ids["message"],
-                "status": "completed",
+                "status": output_status,
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
@@ -295,7 +298,7 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
                 "call_id": tc.get("id"),
                 "name": fn.get("name"),
                 "arguments": fn.get("arguments") or "",
-                "status": "completed",
+                "status": output_status,
             }
         )
 
@@ -374,7 +377,7 @@ async def _openai_sse_to_responses_events(
                     "arguments": item["arguments"],
                 },
             )
-        item["status"] = "completed"
+        item["status"] = "incomplete" if finish_reason == "length" else "completed"
         response["output"].append(item)
         yield event("response.output_item.done", {"output_index": output_index, "item": item})
 
@@ -383,7 +386,8 @@ async def _openai_sse_to_responses_events(
         yield from close_current()
         output_index += 1
         current = (kind, item)
-        yield event("response.output_item.added", {"output_index": output_index, "item": item})
+        added_item = {**item, "content": []} if kind == "message" else item
+        yield event("response.output_item.added", {"output_index": output_index, "item": added_item})
         if kind == "message":
             yield event(
                 "response.content_part.added",
