@@ -30,9 +30,9 @@ DSV4_SWA_PAGE_SIZE = 128  # 128 slots/page
 DSV4_C4_PAGE_SIZE = 64  # 64 slots/page
 DSV4_C128_PAGE_SIZE = 2  # 2 slots/page
 DSV4_PROMPT_CACHE_PAGE_SIZE = DSV4_C4_PAGE_SIZE * 4  # 256 (= c4 ratio)
-# compressor state ring: c4 overlap 对为每页 2 个分组槽 × ratio 4 行；c128 是每请求的基础窗口，
-# 实际宽度会追加 mtp_step 个候选槽，再向上对齐到 ratio 4。
-DSV4_C4_STATE_RING = 8  # 8 rows/page
+# compressor state ring: c4 overlap 对的基础窗口为每页 2 个分组槽 × ratio 4 行；MTP
+# 追加候选槽，避免 rejected draft 覆盖仍存活的基础窗口。c128 同样追加候选槽，再对齐到 ratio 4。
+DSV4_C4_STATE_RING = 8  # 8 rows/page before MTP padding
 DSV4_C128_STATE_RING = 128  # 128 rows/request before MTP padding
 # swa 池占 full token 空间的比例(sglang DSV4 默认 swa_full_tokens_ratio=0.1 同值)。
 # 瞬时借页/驱逐走 swa 压力阀;池子大小仅按 ratio 切分,不再叠加结构性余量。
@@ -171,6 +171,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
         self.indexer_head_dim = indexer_head_dim
         self.max_request_num = max_request_num
+        self.c4_state_ring = DSV4_C4_STATE_RING + mtp_step
         self.c128_state_ring = _ceil_div(DSV4_C128_STATE_RING + mtp_step, 4) * 4
         self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
 
@@ -209,7 +210,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         indexer_bytes = self.indexer_bytes_per_token
         state_dtype_bytes = torch._utils._element_size(torch.float32)
         c4_state_width = 4 * self.head_dim + 4 * self.indexer_head_dim
-        c4_state_bytes = DSV4_C4_STATE_RING / DSV4_SWA_PAGE_SIZE * c4_state_width * state_dtype_bytes * self.n_c4
+        c4_state_bytes = self.c4_state_ring / DSV4_SWA_PAGE_SIZE * c4_state_width * state_dtype_bytes * self.n_c4
         swa_slot = kv_bytes * self.layer_num + c4_state_bytes
         compressed = (kv_bytes + indexer_bytes) * self.n_c4 / 4 + kv_bytes * self.n_c128 / 128
 
@@ -294,7 +295,7 @@ class DeepseekV4MemoryManager(MemoryManager):
             # 生灭 -> radix 命中零拷贝续算。行数 = 页数*ring + ring(HOLD 页) + 1(哨兵),
             # 取整到 ratio;末行哨兵 kv=0/score=-inf(KVAndScore.clear 语义),其余行由内核在
             # 组起点覆写,无需按页清零。last_dim = 2*coff*head_dim(overlap coff=2)。
-            state_rows = self._paged_state_rows(self.swa_num_pages, DSV4_C4_STATE_RING, 4)
+            state_rows = self._paged_state_rows(self.swa_num_pages, self.c4_state_ring, 4)
             self.c4_state_buffer = torch.zeros(
                 (self.n_c4, state_rows, 4 * self.head_dim), dtype=torch.float32, device="cuda"
             )
@@ -328,7 +329,8 @@ class DeepseekV4MemoryManager(MemoryManager):
         logger.info(
             f"DeepseekV4MemoryManager pools: full_tokens={size} swa={self.swa_size}({self.swa_num_pages}p) "
             f"c4={self.c4_size}(L={self.n_c4}) c128={self.c128_size}(L={self.n_c128}) "
-            f"c128_state_ring={self.c128_state_ring} max_requests={self.max_request_num} "
+            f"c4_state_ring={self.c4_state_ring} c128_state_ring={self.c128_state_ring} "
+            f"max_requests={self.max_request_num} "
             f"packed_kv_bytes={self.mla_bytes_per_token} indexer_bytes={self.indexer_bytes_per_token}"
         )
 

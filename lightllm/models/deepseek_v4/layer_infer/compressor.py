@@ -7,7 +7,7 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_C4_STATE_RING, DSV4_SWA_PAGE_SIZE
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_SWA_PAGE_SIZE
 
 
 @dataclass
@@ -304,7 +304,7 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
         out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
         state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
-        state_ring = DSV4_C4_STATE_RING
+        state_ring = mem_manager.c4_state_ring
         out_buffer = torch.empty(
             (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
             dtype=torch.bfloat16,
@@ -315,7 +315,7 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         if compress_ratio == 4:
             out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
             state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
-            state_ring = DSV4_C4_STATE_RING
+            state_ring = mem_manager.c4_state_ring
             out_pool = mem_manager.c4_pool
         elif compress_ratio == 128:
             out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.long().reshape(-1)]
