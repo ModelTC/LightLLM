@@ -487,7 +487,15 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return "qwen3_coder"
 
     # Qwen3 series
-    if model_type in ["qwen3", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe", "qwen3_vl_text", "qwen3_vl_moe_text"]:
+    if model_type in [
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_omni_moe",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+        "qwen3_vl_text",
+        "qwen3_vl_moe_text",
+    ]:
         return "qwen25"
 
     # DeepSeek V3
@@ -519,6 +527,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe",
         "qwen3_vl_text",
         "qwen3_vl_moe_text",
+        "qwen3_omni_moe",
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
