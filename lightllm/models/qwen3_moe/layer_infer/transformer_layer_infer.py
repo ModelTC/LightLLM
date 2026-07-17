@@ -313,7 +313,14 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 0 moe calu
         _0_moe_out = layer_weight.experts.prefilled_group_gemm(
-            _0_num_recv_tokens_per_expert_list, _0_recv_x, _0_recv_topk_idx, _0_recv_topk_weight
+            _0_num_recv_tokens_per_expert_list,
+            _0_handle.num_unaligned_recv_tokens_per_expert,
+            _0_handle.recv_src_metadata,
+            _0_recv_x,
+            _0_recv_topk_idx,
+            _0_recv_topk_weight,
+            workspace_index=0,
+            workspace_count=2,
         )
 
         # 1 dispatch execute
@@ -339,7 +346,14 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         # 1 moe calc
         _1_moe_out = layer_weight.experts.prefilled_group_gemm(
-            _1_num_recv_tokens_per_expert_list, _1_recv_x, _1_recv_topk_idx, _1_recv_topk_weight
+            _1_num_recv_tokens_per_expert_list,
+            _1_handle.num_unaligned_recv_tokens_per_expert,
+            _1_handle.recv_src_metadata,
+            _1_recv_x,
+            _1_recv_topk_idx,
+            _1_recv_topk_weight,
+            workspace_index=1,
+            workspace_count=2,
         )
 
         # wait 0 combine

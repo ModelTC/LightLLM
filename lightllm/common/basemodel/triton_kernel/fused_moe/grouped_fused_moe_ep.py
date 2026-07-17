@@ -1,7 +1,8 @@
 """Fused MoE kernel."""
 import torch
 import triton
-from typing import Any, Callable, Dict, Optional, Tuple
+import triton.language as tl
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
@@ -10,9 +11,13 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quan
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
-    tma_align_input_scale,
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import ep_scatter, ep_gather
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import (
+    ep_accumulate_expanded_chunk,
+    ep_compact_expanded_metadata,
+    ep_fill_m_indices,
+    ep_zero_expanded_padding,
+)
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
@@ -75,12 +80,11 @@ def masked_group_gemm(
     expected_m = min(expected_m, padded_m)
     qsilu_out_scale = torch.empty((E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32)
     qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
-    # groupgemm (masked layout)
-    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
-
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
     silu_and_mul_masked_post_quant_fwd(gemm_out_a, qsilu_out, qsilu_out_scale, block_size, masked_m)
+    del gemm_out_a
+    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
@@ -241,9 +245,6 @@ def fused_experts_impl(
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
 
-    M, K = hidden_states.shape
-    E, N, _ = w1.shape
-
     # qaunt hidden_states
     assert use_fp8_w8a8 and use_fp8_all2all, "use_fp8_w8a8 and use_fp8_all2all must be True"
 
@@ -258,11 +259,9 @@ def fused_experts_impl(
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
         allocate_on_comm_stream = previous_event is not None
-        # normal dispatch
-        # recv_x [recive_num_tokens, hidden] recv_x_scale [recive_num_tokens, hidden // block_size]
-        # recv_topk_idx [recive_num_tokens, topk_num]
-        # recv_topk_weights [recive_num_tokens, topk_num]
-        # num_recv_tokens_per_expert_list list [cur_node_expert_num] padding with expert_alignment=128
+        # Expanded dispatch directly produces expert-contiguous FP8 input and
+        # TMA-aligned scales for DeepGEMM.  DeepEP also keeps the metadata needed
+        # to reduce the expanded W2 output in combine.
         recv_x, recv_topk_idx, recv_topk_weights, handle, _ = buffer.dispatch(
             (qinput_tensor, input_scale),
             topk_idx=topk_idx,
@@ -274,76 +273,32 @@ def fused_experts_impl(
             allocate_on_comm_stream=allocate_on_comm_stream,
             do_cpu_sync=True,
             do_handle_copy=False,
+            do_expand=True,
+            use_tma_aligned_col_major_sf=True,
         )
+        # Dispatch is synchronous in this path.  Its FP8 source is no longer
+        # needed once the received tensors have been produced.
+        del qinput_tensor, input_scale
 
-        # scatter
-        all_tokens = sum(handle.num_recv_tokens_per_expert_list)  # calcu padding all nums.
-        # gather_out shape [recive_num_tokens, hidden]
-        gather_out = torch.empty_like(recv_x[0], device=hidden_states.device, dtype=hidden_states.dtype)
-        if all_tokens > 0:
-            input_tensor = [
-                torch.empty((all_tokens, K), device=hidden_states.device, dtype=qinput_tensor.dtype),
-                torch.empty((all_tokens, K // 128), device=hidden_states.device, dtype=torch.float32),
-            ]
-            # when m_indices is filled ok.
-            # m_indices show token use which expert, example, [0, 0, 0, 0, .... 1, 1, 1, 1,...., cur_expert_num - 1, ..]
-            # the count of 0 is num_recv_tokens_per_expert_list[0], the count of 1 is num_recv_tokens_per_expert_list[1]
-            # ...
-            m_indices = torch.empty(all_tokens, device=hidden_states.device, dtype=torch.int32)
-            # output_index shape [recive_num_tokens, topk_num]
-            # output_index use to show the token index in input_tensor
-            output_index = torch.empty_like(recv_topk_idx)
+        assert recv_topk_idx is None
+        gather_out = expanded_moe_chunked_reduce(
+            handle.num_recv_tokens_per_expert_list,
+            handle.num_unaligned_recv_tokens_per_expert,
+            recv_x,
+            recv_topk_weights,
+            handle.recv_src_metadata,
+            w1,
+            w1_scale,
+            w2,
+            w2_scale,
+            block_size_k,
+            get_prefill_moe_workspace(),
+            hidden_states.dtype,
+        )
+        del recv_x
 
-            num_recv_tokens_per_expert = torch.tensor(
-                handle.num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
-            ).cuda(non_blocking=True)
-
-            expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
-
-            ep_scatter(
-                recv_x[0],
-                recv_x[1],
-                recv_topk_idx,
-                num_recv_tokens_per_expert,
-                expert_start_loc,
-                input_tensor[0],
-                input_tensor[1],
-                m_indices,
-                output_index,
-            )
-
-            # groupgemm (contiguous layout)
-            gemm_out_a = torch.empty((all_tokens, N), device=hidden_states.device, dtype=hidden_states.dtype)
-            input_tensor[1] = tma_align_input_scale(input_tensor[1])
-            deepgemm_grouped_fp8_nt_contiguous(input_tensor, (w1, w1_scale), gemm_out_a, m_indices)
-
-            # silu_and_mul_fwd + qaunt
-            # TODO fused kernel
-            silu_out = torch.empty((all_tokens, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-
-            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
-            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-                silu_out, block_size_k, dtype=w1.dtype, column_major_scales=True, scale_tma_aligned=True
-            )
-
-            # groupgemm (contiguous layout)
-            gemm_out_b = torch.empty((all_tokens, K), device=hidden_states.device, dtype=hidden_states.dtype)
-
-            deepgemm_grouped_fp8_nt_contiguous((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, m_indices)
-
-            # gather and local reduce
-            ep_gather(gemm_out_b, recv_topk_idx, recv_topk_weights, output_index, gather_out)
-        else:
-            ######################################## warning ##################################################
-            # here is used to match autotune feature, make moe model run same triton kernel in different rank.
-            # in some special case, one rank will recv 0 token, so add a token to make it run triton kernel.
-            if Autotuner.is_autotune_warmup():
-                _gemm_out_a = torch.zeros((1, N), device=hidden_states.device, dtype=hidden_states.dtype)
-                _silu_out = torch.zeros((1, N // 2), device=hidden_states.device, dtype=hidden_states.dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
-                _gemm_out_a, _silu_out = None, None
-
-        # normal combine
+        # W2 chunks were reduced to the deduplicated receive-token layout. Keep
+        # the expanded handle for routing, but point its slots at the dense rows.
         combined_x, _, event = buffer.combine(
             gather_out,
             handle,
@@ -385,6 +340,164 @@ def deepgemm_grouped_fp8_nt_contiguous(
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_contiguous"):
             return deep_gemm.m_grouped_fp8_gemm_nt_contiguous(input_tuple, w_tuple, out, m_indices)
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
+
+
+def get_prefill_moe_workspace(
+    workspace_index: int = 0,
+    workspace_count: int = 1,
+):
+    """Map prefill MoE temporaries onto the idle low-latency RDMA buffer.
+
+    Prefill uses the ElasticBuffer while decode uses the legacy low-latency
+    buffer, so their communication phases are mutually exclusive.  The model
+    clears the low-latency buffer after every prefill before decode can use it.
+    """
+
+    workspace = dist_group_manager.ep_prefill_workspace
+    assert 0 <= workspace_index < workspace_count
+    workspace_size = workspace.numel() // workspace_count
+    workspace = workspace.narrow(0, workspace_index * workspace_size, workspace_size)
+    return workspace
+
+
+def expanded_moe_chunked_reduce(
+    num_recv_tokens_per_expert_list: List[int],
+    num_unaligned_recv_tokens_per_expert: torch.Tensor,
+    recv_x: Tuple[torch.Tensor, torch.Tensor],
+    recv_topk_weights: torch.Tensor,
+    recv_src_metadata: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_size_k: int,
+    workspace: torch.Tensor,
+    hidden_dtype: torch.dtype,
+):
+    """Run expanded W1/W2 in bounded chunks and reduce to dense rows."""
+    all_tokens = sum(num_recv_tokens_per_expert_list)
+    assert all_tokens == recv_x[0].shape[0]
+    intermediate_twice = w1.shape[1]
+    intermediate_size = intermediate_twice // 2
+    hidden_size = w2.shape[1]
+    if all_tokens == 0:
+        if Autotuner.is_autotune_warmup():
+            gemm_out = torch.zeros((1, intermediate_twice), device=recv_x[0].device, dtype=hidden_dtype)
+            silu_out = torch.zeros((1, intermediate_size), device=recv_x[0].device, dtype=hidden_dtype)
+            silu_and_mul_fwd(gemm_out, silu_out)
+        return torch.empty((0, hidden_size), device=recv_x[0].device, dtype=hidden_dtype)
+
+    m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
+    num_recv_tokens_per_expert = torch.tensor(
+        num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
+    ).cuda(non_blocking=True)
+    expert_start_loc = ep_fill_m_indices(num_recv_tokens_per_expert, m_indices)
+    ep_zero_expanded_padding(
+        recv_x[0],
+        recv_x[1],
+        recv_topk_weights,
+        num_recv_tokens_per_expert,
+        num_unaligned_recv_tokens_per_expert,
+        expert_start_loc,
+    )
+    del num_recv_tokens_per_expert, expert_start_loc
+    gather_rows = recv_src_metadata.shape[0]
+    gather_bytes = gather_rows * hidden_size * hidden_dtype.itemsize
+    silu_row_bytes = intermediate_size * hidden_dtype.itemsize
+    gemm_a_row_bytes = intermediate_twice * hidden_dtype.itemsize
+    gemm_b_row_bytes = hidden_size * hidden_dtype.itemsize
+    quant_row_bytes = intermediate_size * w2.dtype.itemsize
+    scale_row_bytes = (intermediate_size // block_size_k) * torch.float32.itemsize
+    quant_with_scale_row_bytes = quant_row_bytes + scale_row_bytes
+    # The same region is reused in three non-overlapping phases:
+    #   W1:    [SwiGLU output][W1 output]
+    #   quant: [SwiGLU output]...[FP8 output + TMA scales]
+    #   W2:    [W2 output]......[FP8 output + TMA scales]
+    # Keeping the quantized activation at the end lets W2 overwrite the old
+    # SwiGLU/W1 storage without allocating another tensor from the CUDA heap.
+    temp_row_bytes = max(
+        silu_row_bytes + gemm_a_row_bytes,
+        silu_row_bytes + quant_with_scale_row_bytes,
+        gemm_b_row_bytes + quant_with_scale_row_bytes,
+    )
+    max_chunk_rows = ((workspace.numel() - gather_bytes) // temp_row_bytes // 128) * 128
+    if max_chunk_rows <= 0:
+        raise RuntimeError(
+            f"DeepEP workspace cannot hold dense output: need {gather_bytes} bytes, have {workspace.numel()} bytes"
+        )
+
+    gather_out = workspace.narrow(0, 0, gather_bytes).view(hidden_dtype).view(gather_rows, hidden_size)
+    gather_out.zero_()
+    temp_offset = gather_bytes
+
+    for chunk_start in range(0, all_tokens, max_chunk_rows):
+        chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
+        chunk_rows = chunk_end - chunk_start
+        silu_bytes = chunk_rows * silu_row_bytes
+        gemm_a_bytes = chunk_rows * gemm_a_row_bytes
+        gemm_b_bytes = chunk_rows * gemm_b_row_bytes
+        quant_bytes = chunk_rows * quant_row_bytes
+        aligned_chunk_rows = (chunk_rows + 3) // 4 * 4
+        scale_storage_shape = (intermediate_size // block_size_k, aligned_chunk_rows)
+        scale_bytes = scale_storage_shape[0] * scale_storage_shape[1] * torch.float32.itemsize
+        temp_bytes = chunk_rows * temp_row_bytes
+        silu_out = workspace.narrow(0, temp_offset, silu_bytes).view(hidden_dtype).view(chunk_rows, intermediate_size)
+        gemm_region_offset = temp_offset + silu_bytes
+        gemm_out_a = (
+            workspace.narrow(0, gemm_region_offset, gemm_a_bytes)
+            .view(hidden_dtype)
+            .view(chunk_rows, intermediate_twice)
+        )
+        deepgemm_grouped_fp8_nt_contiguous(
+            (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
+            (w1, w1_scale),
+            gemm_out_a,
+            m_indices[chunk_start:chunk_end],
+        )
+        silu_and_mul_fwd(gemm_out_a, silu_out)
+        del gemm_out_a
+
+        quant_offset = temp_offset + temp_bytes - quant_bytes - scale_bytes
+        qsilu_workspace = (
+            workspace.narrow(0, quant_offset, quant_bytes).view(w2.dtype).view(chunk_rows, intermediate_size)
+        )
+        scale_workspace = (
+            workspace.narrow(0, quant_offset + quant_bytes, scale_bytes).view(torch.float32).view(scale_storage_shape)
+        )
+
+        def workspace_quant_alloc(shape, dtype, device):
+            if tuple(shape) == tuple(qsilu_workspace.shape) and dtype == qsilu_workspace.dtype:
+                return qsilu_workspace
+            if tuple(shape) == scale_storage_shape and dtype == torch.float32:
+                return scale_workspace
+            raise RuntimeError(f"unexpected prefill quant allocation: shape={shape}, dtype={dtype}")
+
+        qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+            silu_out,
+            block_size_k,
+            dtype=w2.dtype,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            alloc_func=workspace_quant_alloc,
+        )
+        gemm_out_b = workspace.narrow(0, temp_offset, gemm_b_bytes).view(hidden_dtype).view(chunk_rows, hidden_size)
+        deepgemm_grouped_fp8_nt_contiguous(
+            (qsilu_out, qsilu_out_scale),
+            (w2, w2_scale),
+            gemm_out_b,
+            m_indices[chunk_start:chunk_end],
+        )
+        del qsilu_out, qsilu_out_scale, silu_out
+        ep_accumulate_expanded_chunk(
+            gemm_out_b,
+            chunk_start,
+            recv_topk_weights,
+            recv_src_metadata,
+            gather_out,
+        )
+
+    ep_compact_expanded_metadata(recv_src_metadata)
+    return gather_out
 
 
 def _deepgemm_grouped_fp8_nt_masked(
