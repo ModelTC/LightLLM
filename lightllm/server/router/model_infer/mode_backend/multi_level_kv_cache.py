@@ -63,6 +63,9 @@ class MultiLevelKvCacheModule(object):
         all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
+            # 需要返回 prompt logprobs 信息的请求，不应该匹配 cpu cache。
+            # 因为一旦命中 cpu cache，这部分 prompt token 会直接复用缓存的 kv，
+            # 不再经过推理计算，也就无法得到对应的 logprobs 输出信息。
             if req.sampling_param.shm_param.prompt_logprobs >= 0:
                 continue
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
