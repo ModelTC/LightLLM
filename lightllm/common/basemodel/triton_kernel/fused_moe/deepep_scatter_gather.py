@@ -328,6 +328,40 @@ def ep_accumulate_expanded_chunk(
 
 
 @triton.jit
+def _compact_expanded_metadata_kernel(
+    recv_src_metadata,
+    metadata_stride_m,
+    metadata_stride_k,
+    TOPK: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    recv_token_id = tl.program_id(0)
+    topk_id = tl.arange(0, BLOCK_TOPK)
+    slot = tl.where(topk_id == 0, recv_token_id, -1)
+    tl.store(
+        recv_src_metadata + recv_token_id * metadata_stride_m + (topk_id + 2) * metadata_stride_k,
+        slot,
+        mask=topk_id < TOPK,
+    )
+
+
+@torch.no_grad()
+def ep_compact_expanded_metadata(recv_src_metadata: torch.Tensor):
+    """Point expanded combine metadata at pre-reduced dense token rows."""
+    topk = recv_src_metadata.shape[1] - 2
+    if recv_src_metadata.shape[0] == 0:
+        return
+    _compact_expanded_metadata_kernel[(recv_src_metadata.shape[0],)](
+        recv_src_metadata,
+        recv_src_metadata.stride(0),
+        recv_src_metadata.stride(1),
+        TOPK=topk,
+        BLOCK_TOPK=triton.next_power_of_2(topk),
+        num_warps=1,
+    )
+
+
+@triton.jit
 def _fwd_kernel_ep_gather(
     total_token_num,
     input_tensor,

@@ -14,6 +14,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import (
     ep_accumulate_expanded_chunk,
+    ep_compact_expanded_metadata,
     ep_fill_m_indices,
     ep_zero_expanded_padding,
 )
@@ -429,8 +430,8 @@ def fused_experts_impl(
         )
         del recv_x
 
-        # W2 chunks were reduced to the deduplicated receive-token layout.
-        handle.do_expand = False
+        # W2 chunks were reduced to the deduplicated receive-token layout. Keep
+        # the expanded handle for routing, but point its slots at the dense rows.
         combined_x, _, event = buffer.combine(
             gather_out,
             handle,
@@ -643,6 +644,7 @@ def expanded_moe_chunked_reduce(
             gather_out,
         )
 
+    ep_compact_expanded_metadata(recv_src_metadata)
     return gather_out
 
 

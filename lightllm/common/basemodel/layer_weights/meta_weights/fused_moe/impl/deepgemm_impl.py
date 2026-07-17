@@ -259,9 +259,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         handle: Any,
         overlap_event: Optional[Any] = None,
     ):
-        # Chunked W2 has already reduced expanded expert slots to dense rows.
-        handle.do_expand = False
-        # normal combine
+        # The prefill kernel keeps expanded routing metadata while pointing its
+        # single valid slot at each pre-reduced dense row.
         combined_x, _, event = dist_group_manager.ep_buffer.combine(
             gemm_out_b,
             handle,
