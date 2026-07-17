@@ -335,8 +335,6 @@ class HttpServerManager:
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
-        if sampling_params.prompt_logprobs >= 0 and not self.args.enable_prompt_logprobs:
-            raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0

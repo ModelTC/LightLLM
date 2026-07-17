@@ -3,6 +3,7 @@ import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
@@ -445,6 +446,8 @@ class SamplingParams(ctypes.Structure):
             )
         if self.prompt_logprobs < -1 or self.prompt_logprobs > MAX_PROMPT_LOGPROBS:
             raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
+        if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
+            raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 
