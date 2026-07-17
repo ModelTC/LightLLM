@@ -366,6 +366,8 @@ async def openai_responses(raw_request: Request) -> Response:
     except ServerBusyError as e:
         logger.error("%s", str(e), exc_info=True)
         return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
