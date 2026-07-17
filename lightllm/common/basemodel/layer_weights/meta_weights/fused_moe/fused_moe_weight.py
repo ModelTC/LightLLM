@@ -222,20 +222,28 @@ class FusedMoeWeight(BaseWeightTpl):
     def prefilled_group_gemm(
         self,
         num_recv_tokens_per_expert_list,
+        num_unaligned_recv_tokens_per_expert: torch.Tensor,
+        recv_src_metadata: torch.Tensor,
         recv_x: Tuple[torch.Tensor],
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
+        workspace_index: int = 0,
+        workspace_count: int = 1,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
             num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+            num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
+            recv_src_metadata=recv_src_metadata,
             recv_x=recv_x,
             recv_topk_idx=recv_topk_idx,
             recv_topk_weights=recv_topk_weights,
             w13=self.w13,
             w2=self.w2,
             hidden_dtype=hidden_dtype,
+            workspace_index=workspace_index,
+            workspace_count=workspace_count,
         )
 
     def low_latency_combine(
@@ -283,6 +291,17 @@ class FusedMoeWeight(BaseWeightTpl):
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
         return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+
+    def finalize_load(self):
+        if self.enable_ep_moe and not getattr(self, "_mega_moe_weights_transformed", False):
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
+                transform_mega_moe_weights_in_place,
+                use_sm100_mega_moe,
+            )
+
+            if use_sm100_mega_moe(self.quant_method):
+                transform_mega_moe_weights_in_place(self.w13, self.w2)
+                self._mega_moe_weights_transformed = True
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size

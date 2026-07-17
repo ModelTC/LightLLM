@@ -36,7 +36,8 @@ logger = init_logger(__name__)
         for token_num in range(1, 7, 2)
     ],
 )
-def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
+def test_silu_and_mul_masked(expert_num, token_num, hidden_dim, use_ue8m0_scales):
     quant_group_size = 128
     in_tensor = torch.randn((expert_num, token_num, hidden_dim), dtype=torch.bfloat16, device="cuda")
     out_tensor = torch.empty((expert_num, token_num, hidden_dim // 2), dtype=torch.float8_e4m3fn, device="cuda")
@@ -53,9 +54,17 @@ def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
         true_out_tensor_mid.view(-1, hidden_dim // 2),
         quant_group_size,
         alloc_func=torch.empty,
+        use_ue8m0_scales=use_ue8m0_scales,
     )
 
-    silu_and_mul_masked_post_quant_fwd(in_tensor, out_tensor, out_scale_tensor, quant_group_size, masked_m)
+    silu_and_mul_masked_post_quant_fwd(
+        in_tensor,
+        out_tensor,
+        out_scale_tensor,
+        quant_group_size,
+        masked_m,
+        use_ue8m0_scales=use_ue8m0_scales,
+    )
 
     true_out_tensor = true_out_tensor.view(out_tensor.shape)
     true_out_scale_tensor = true_out_scale_tensor.view(out_scale_tensor.shape)

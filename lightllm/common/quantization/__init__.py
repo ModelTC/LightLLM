@@ -43,6 +43,7 @@ class Quantcfg:
             self.quantized_weight = False
             self.static_activation = False
             self.hf_quantization_config = None
+            self._mapping_expert_quant_method()
             return
         self.quantized_weight = True
         activation_scheme = network_config.get("activation_scheme", "dynamic")
@@ -50,6 +51,19 @@ class Quantcfg:
         self.hf_quantization_config = hf_quantization_config
         self.hf_quantization_method = hf_quantization_config["quant_method"]
         self._mapping_quant_method()
+        self._mapping_expert_quant_method()
+
+    def _mapping_expert_quant_method(self):
+        expert_dtype = self.expert_dtype or self.network_config_.get("expert_dtype", None)
+        if expert_dtype is None:
+            return
+        target = self._get_expert_quant_type(expert_dtype)
+        for layer_num in range(self.layer_num):
+            if self.expert_dtype is not None:
+                self.quant_cfg[layer_num]["fused_moe"] = target
+            else:
+                self.quant_cfg[layer_num].setdefault("fused_moe", target)
+        logger.info(f"select fused_moe quant way from expert_dtype=`{expert_dtype}`: {target}")
 
     def _mapping_quant_method(self):
         if self.hf_quantization_method == "fp8":
@@ -63,18 +77,6 @@ class Quantcfg:
                     self.quant_type = "vllm-fp8w8a8-b128"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
 
-            # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
-            # 按其值给 fused_moe 选用对应的 deepgemm 量化方法。
-            expert_dtype = self.expert_dtype or self.network_config_.get("expert_dtype", None)
-            if expert_dtype is None:
-                return
-            target = self._get_expert_quant_type(expert_dtype)
-            for layer_num in range(self.layer_num):
-                if self.expert_dtype is not None:
-                    self.quant_cfg[layer_num]["fused_moe"] = target
-                else:
-                    self.quant_cfg[layer_num].setdefault("fused_moe", target)
-            logger.info(f"select fused_moe quant way from expert_dtype=`{expert_dtype}`: {target}")
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):

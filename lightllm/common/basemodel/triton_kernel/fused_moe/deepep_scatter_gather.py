@@ -152,6 +152,181 @@ def ep_scatter(
     return
 
 
+@torch.no_grad()
+def ep_fill_m_indices(
+    num_recv_tokens_per_expert: torch.Tensor,
+    m_indices: torch.Tensor,
+):
+    """Build DeepGEMM's contiguous expert index vector without scattering data."""
+    block_e = 128
+    num_experts = num_recv_tokens_per_expert.shape[0]
+    assert m_indices.shape[0] % block_e == 0
+
+    expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
+    _fwd_kernel_ep_scatter_1[(num_experts,)](
+        num_recv_tokens_per_expert,
+        expert_start_loc,
+        m_indices,
+        num_experts=num_experts,
+        num_warps=8,
+        BLOCK_E=block_e,
+        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+    )
+    return expert_start_loc
+
+
+@triton.jit
+def _zero_expanded_padding_kernel(
+    recv_x,
+    recv_x_stride_m,
+    recv_x_stride_k,
+    recv_x_scale,
+    recv_x_scale_stride_m,
+    recv_x_scale_stride_k,
+    recv_topk_weights,
+    num_recv_tokens_per_expert,
+    num_unaligned_recv_tokens_per_expert,
+    expert_start_loc,
+    hidden_size: tl.constexpr,
+    scale_hidden_size: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_SCALE_K: tl.constexpr,
+):
+    expert_id = tl.program_id(0)
+    pad_block_id = tl.program_id(1)
+    hidden_block_id = tl.program_id(2)
+    expert_start = tl.load(expert_start_loc + expert_id)
+    aligned_count = tl.load(num_recv_tokens_per_expert + expert_id)
+    actual_count = tl.load(num_unaligned_recv_tokens_per_expert + expert_id)
+    pad_offsets = pad_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_offsets = (expert_start + actual_count + pad_offsets).to(tl.int64)
+    row_mask = pad_offsets < aligned_count - actual_count
+
+    hidden_offsets = hidden_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
+    x_ptrs = recv_x + row_offsets[:, None] * recv_x_stride_m + hidden_offsets[None, :] * recv_x_stride_k
+    tl.store(x_ptrs, 0.0, mask=row_mask[:, None] & (hidden_offsets[None, :] < hidden_size))
+    if hidden_block_id == 0:
+        scale_offsets = tl.arange(0, BLOCK_SCALE_K)
+        scale_ptrs = (
+            recv_x_scale
+            + row_offsets[:, None] * recv_x_scale_stride_m
+            + scale_offsets[None, :] * recv_x_scale_stride_k
+        )
+        tl.store(scale_ptrs, 0.0, mask=row_mask[:, None] & (scale_offsets[None, :] < scale_hidden_size))
+        tl.store(recv_topk_weights + row_offsets, 0.0, mask=row_mask)
+
+
+@torch.no_grad()
+def ep_zero_expanded_padding(
+    recv_x: torch.Tensor,
+    recv_x_scale: torch.Tensor,
+    recv_topk_weights: torch.Tensor,
+    num_recv_tokens_per_expert: torch.Tensor,
+    num_unaligned_recv_tokens_per_expert: torch.Tensor,
+    expert_start_loc: torch.Tensor,
+):
+    block_m = 8
+    block_k = 256
+    scale_hidden_size = recv_x_scale.shape[1]
+    grid = (
+        num_recv_tokens_per_expert.shape[0],
+        triton.cdiv(127, block_m),
+        triton.cdiv(recv_x.shape[1], block_k),
+    )
+    _zero_expanded_padding_kernel[grid](
+        recv_x,
+        recv_x.stride(0),
+        recv_x.stride(1),
+        recv_x_scale,
+        recv_x_scale.stride(0),
+        recv_x_scale.stride(1),
+        recv_topk_weights,
+        num_recv_tokens_per_expert,
+        num_unaligned_recv_tokens_per_expert,
+        expert_start_loc,
+        hidden_size=recv_x.shape[1],
+        scale_hidden_size=scale_hidden_size,
+        BLOCK_M=block_m,
+        BLOCK_K=block_k,
+        BLOCK_SCALE_K=triton.next_power_of_2(scale_hidden_size),
+        num_warps=4,
+    )
+
+
+@triton.jit
+def _accumulate_expanded_chunk_kernel(
+    total_recv_tokens,
+    chunk,
+    chunk_stride_m,
+    chunk_stride_k,
+    chunk_start,
+    chunk_end,
+    weights,
+    recv_src_metadata,
+    metadata_stride_m,
+    metadata_stride_k,
+    output,
+    output_stride_m,
+    output_stride_k,
+    TOPK: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    hidden_block_id = tl.program_id(0)
+    start_recv_token_id = tl.program_id(1)
+    recv_token_grid_size = tl.num_programs(1)
+    hidden_offsets = hidden_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+
+    for recv_token_id in range(start_recv_token_id, total_recv_tokens, recv_token_grid_size):
+        output_ptrs = output + recv_token_id * output_stride_m + hidden_offsets * output_stride_k
+        accumulator = tl.load(output_ptrs).to(tl.float32)
+        for topk_id in range(TOPK):
+            slot = tl.load(
+                recv_src_metadata
+                + recv_token_id * metadata_stride_m
+                + (topk_id + 2) * metadata_stride_k
+            )
+            if slot >= chunk_start and slot < chunk_end:
+                local_row = (slot - chunk_start).to(tl.int64)
+                value = tl.load(chunk + local_row * chunk_stride_m + hidden_offsets * chunk_stride_k)
+                weight = tl.load(weights + slot)
+                accumulator += value.to(tl.float32) * weight
+        tl.store(output_ptrs, accumulator)
+
+
+@torch.no_grad()
+def ep_accumulate_expanded_chunk(
+    chunk: torch.Tensor,
+    chunk_start: int,
+    weights: torch.Tensor,
+    recv_src_metadata: torch.Tensor,
+    output: torch.Tensor,
+):
+    """Accumulate one contiguous expanded W2 chunk into dense receive-token rows."""
+    topk = recv_src_metadata.shape[1] - 2
+    block_d = 1024
+    assert chunk.shape[1] == output.shape[1] and output.shape[1] % block_d == 0
+    grid = (triton.cdiv(output.shape[1], block_d), min(output.shape[0], 1024))
+    _accumulate_expanded_chunk_kernel[grid](
+        output.shape[0],
+        chunk,
+        chunk.stride(0),
+        chunk.stride(1),
+        chunk_start,
+        chunk_start + chunk.shape[0],
+        weights,
+        recv_src_metadata,
+        recv_src_metadata.stride(0),
+        recv_src_metadata.stride(1),
+        output,
+        output.stride(0),
+        output.stride(1),
+        TOPK=topk,
+        BLOCK_D=block_d,
+        num_warps=2,
+    )
+
+
 @triton.jit
 def _fwd_kernel_ep_gather(
     total_token_num,
