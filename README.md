@@ -111,6 +111,7 @@ We have published a number of papers around components or features of LightLLM, 
     doi = "10.18653/v1/2025.acl-long.551",
     pages = "11253--11267",
     ISBN = "979-8-89176-251-0",
+}
 ```
 
 **Request scheduler**: accepted by [ASPLOS’25](https://dl.acm.org/doi/10.1145/3676641.3716011):
