@@ -77,6 +77,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -89,6 +90,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
             clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
         )
         return output
 

@@ -95,6 +95,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -125,6 +126,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         return self._fused_experts(
             input_tensor=input_tensor,
@@ -134,6 +136,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             topk_ids=topk_ids,
             is_prefill=is_prefill,
             clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
         )
 
     def __call__(

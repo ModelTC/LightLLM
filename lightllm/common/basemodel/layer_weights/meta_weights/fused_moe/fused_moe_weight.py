@@ -160,6 +160,7 @@ class FusedMoeWeight(BaseWeightTpl):
         topk_ids: torch.Tensor,
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ) -> torch.Tensor:
         return self.fuse_moe_impl.fused_experts_with_topk(
             input_tensor=input_tensor,
@@ -169,6 +170,7 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_ids=topk_ids,
             is_prefill=is_prefill,
             clamp_limit=clamp_limit,
+            alloc_tensor_func=alloc_tensor_func,
         )
 
     def low_latency_dispatch(

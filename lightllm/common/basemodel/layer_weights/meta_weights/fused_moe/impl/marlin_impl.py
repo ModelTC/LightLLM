@@ -31,6 +31,7 @@ class FuseMoeMarlin(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
         clamp_limit: Optional[float] = None,
+        alloc_tensor_func=torch.empty,
     ):
         assert clamp_limit is None, "awq_marlin fused MoE does not support clamp_limit yet"
 
