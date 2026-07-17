@@ -770,6 +770,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
     parser.add_argument(
+        "--enable_rl",
+        action="store_true",
+        default=False,
+        help="""enable RL control APIs (pause/continue/abort/weight update/memory occupation).
+        When disabled (default), HttpRlController is not initialized.""",
+    )
+    parser.add_argument(
         "--enable_torch_memory_saver",
         action="store_true",
         help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",

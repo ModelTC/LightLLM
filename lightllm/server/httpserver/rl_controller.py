@@ -1,12 +1,11 @@
 import asyncio
 import socket
 import time
+import rpyc
 from contextlib import asynccontextmanager
 from typing import Tuple
-
-import rpyc
 from rpyc.utils.classic import obtain
-
+from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.io_struct import (
     AbortReq,
     FlushCacheReq,
@@ -126,6 +125,21 @@ class HttpRlController:
 
     async def unregister_generation_admission(self, request_id: int) -> None:
         await self._generation_gate.unregister_pending_request(request_id)
+
+    def build_aborted_generation_outputs(self, group_request_id: int, sampling_params: SamplingParams):
+        """构造被 pause/abort 拦截请求的空结果，供 HTTP generate 流正常收尾。
+
+        场景：RL ``pause_generation`` / ``abort_request`` 期间，新请求会在
+        admission gate 处被标记 abort，此时请求尚未进入 router 队列，也没有
+        真实生成 token。为了让 stream / non-stream API 仍能按统一协议收到
+        ``FINISHED_ABORTED`` 并结束生成循环（而不是挂起或抛错），这里合成
+        n 路空输出。
+        """
+        finish_status = FinishStatus()
+        finish_status.set_status(FinishStatus.FINISHED_ABORTED)
+        metadata = {"prompt_tokens": 0, "count_output_tokens": 0}
+        for i in range(sampling_params.n):
+            yield group_request_id + i, "", metadata, finish_status
 
     async def _wait_for_abort_released(
         self,

@@ -212,6 +212,7 @@ class StartArgs:
     multinode_router_gloo_port: int = field(default=20001)
     schedule_time_interval: float = field(default=0.03)
     use_dynamic_prompt_cache: bool = field(default=False)
+    enable_rl: bool = field(default=False)
     enable_torch_memory_saver: bool = field(default=False)
     enable_weight_cpu_backup: bool = field(default=False)
     hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa"]})

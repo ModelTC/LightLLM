@@ -137,7 +137,7 @@ class HttpServerManager:
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
 
-        self.rl_controller = HttpRlController(self)
+        self.rl_controller: Optional[HttpRlController] = HttpRlController(self) if args.enable_rl else None
 
         self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)
@@ -351,11 +351,14 @@ class HttpServerManager:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
-            should_abort = await self.rl_controller.wait_if_generation_paused(group_request_id)
-            if should_abort:
-                for output in self._build_aborted_generation_outputs(group_request_id, sampling_params):
-                    yield output
-                return
+            if self.rl_controller is not None:
+                should_abort = await self.rl_controller.wait_if_generation_paused(group_request_id)
+                if should_abort:
+                    for output in self.rl_controller.build_aborted_generation_outputs(
+                        group_request_id, sampling_params
+                    ):
+                        yield output
+                    return
 
             original_multimodal_params = None
             if self.is_multinode_tp_master:
@@ -452,7 +455,8 @@ class HttpServerManager:
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
-            await self.rl_controller.unregister_generation_admission(group_request_id)
+            if self.rl_controller is not None:
+                await self.rl_controller.unregister_generation_admission(group_request_id)
 
             await self.transfer_to_next_module_or_node(
                 prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
@@ -507,19 +511,11 @@ class HttpServerManager:
             await self.abort(group_request_id)
             raise e
         finally:
-            await self.rl_controller.unregister_generation_admission(group_request_id)
+            if self.rl_controller is not None:
+                await self.rl_controller.unregister_generation_admission(group_request_id)
             async with self._run_reqs_count_lock:
                 self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
-
-    def _build_aborted_generation_outputs(self, group_request_id: int, sampling_params: SamplingParams):
-        # Paused requests never enter router queues, so synthesize an aborted empty
-        # result that both stream and non-stream APIs can consume normally.
-        finish_status = FinishStatus()
-        finish_status.set_status(FinishStatus.FINISHED_ABORTED)
-        metadata = {"prompt_tokens": 0, "count_output_tokens": 0}
-        for i in range(sampling_params.n):
-            yield group_request_id + i, "", metadata, finish_status
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
