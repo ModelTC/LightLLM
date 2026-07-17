@@ -58,6 +58,9 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
+    def get_fixed_memory_size(self):
+        return 0
+
     def profile_size(self, mem_fraction):
         if self.size is not None:
             return
@@ -66,13 +69,21 @@ class MemoryManager:
         world_size = dist.get_world_size()
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
-        self.size = int(available_memory * 1024 ** 3 / cell_size)
+        fixed_memory_size = self.get_fixed_memory_size()
+        available_memory_bytes = available_memory * 1024 ** 3 - fixed_memory_size
+        if available_memory_bytes <= 0:
+            raise RuntimeError(
+                f"{type(self).__name__} fixed buffers require {fixed_memory_size / 1024**3:.2f} GB, "
+                f"but only {available_memory:.2f} GB is available for KV cache"
+            )
+        self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
             self.size = tensor.item()
         logger.info(
             f"{str(available_memory)} GB space is available after load the model weight\n"
+            f"{str(fixed_memory_size / 1024 ** 2)} MB is reserved for fixed KV cache buffers\n"
             f"{str(cell_size / 1024 ** 2)} MB is the size of one token kv cache\n"
             f"{self.size} is the profiled max_total_token_num with the mem_fraction {mem_fraction}\n"
         )

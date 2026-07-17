@@ -33,9 +33,9 @@ class DeepseekV4PromptCachePayload:
     """prompt cache 载荷: swa 按页有效性 bitmap 和最后有效页。
 
     槽位与 compressor 状态都不进载荷: full_to_swa/full_to_c4/full_to_c128 以 full token 槽位
-    为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4/c128 compressor 状态以 swa
-    页派生寻址(随 swa 页生灭,命中零拷贝续算)。prompt cache 对齐到 256 token,
-    避免共享前缀停在 c4 物理页中间。
+    为键(radix 持有 full 槽 ⇒ 映射行存活,free 级联回收);c4 compressor 状态随 swa 页
+    生灭。c128 状态按 request ring 寻址；prompt cache 的 256-token 边界同时是 c128
+    分组边界，命中后新分组会在首次读取前覆写完整 128-token 窗口，因而无需保存状态。
 
     * ``swa_page_valid``: cpu bool [cache_len // page]，插入时按当下 full_to_swa 映射写定
       (页内 token 映射全有效才为 True)。匹配层据此把命中裁剪到"结尾页有效"的 page 边界,
@@ -562,7 +562,7 @@ class DeepseekV4ReqManager(ReqManager):
     def init_compress_state(self, req_idx: int):
         """新请求开始时重置 runtime 水位线(对应 mamba 的 init_linear_att_state 调用点)。
 
-        c4/c128 compressor state 都随 swa 页寻址,由内核按组覆写;请求复用时不做 per-req 清零。"""
+        c4 状态随 swa 页寻址；c128 request ring 依靠 overwrite-before-read，不做大块清零。"""
         self.clear_runtime_state(req_idx)
         return
 
@@ -875,8 +875,8 @@ class DeepseekV4ReqManager(ReqManager):
         self,
         cache_len: int,
     ) -> DeepseekV4PromptCachePayload:
-        """构造插入载荷。compressor 状态不进载荷(c4 随 swa 页生灭、c128 边界自然归零),
-        cache_len 不再受序列末端约束——任意 128 对齐前缀皆可插入。
+        """构造插入载荷。compressor 状态不进载荷(c4 随 swa 页生灭、c128 在 256 对齐
+        恢复点依靠 overwrite-before-read),cache_len 不再受序列末端约束。
         swa_page_valid 不在此填: 它必须用插入时刻的映射(infer batch 在 insert 前补)。"""
         assert self.mem_manager is not None
         return DeepseekV4PromptCachePayload(cache_len=int(cache_len))

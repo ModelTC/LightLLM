@@ -129,9 +129,8 @@ class InferenceContext:
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][0 : req.cur_kv_len])
             if self.is_deepseek_v4:
-                # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx,
-                # 必须在此复位出窗水位线 + 清 c128 在途状态(恢复命中走 extend,不会再有
-                # restore/zero 时机;c4 状态随 swa 页生灭,无需处理)。
+                # 槽位随 full 槽经 mem_manager.free 级联回收。pause 路径不释放 req_idx，
+                # 这里只复位出窗水位线；恢复从 0 重算，c128 request ring 会在读取前覆写。
                 self.req_manager.init_compress_state(req.req_idx)
         else:
             if not self.is_linear_att_mixed_model:
@@ -738,9 +737,9 @@ class InferReq:
                 ready_cache_len = share_node.node_prefix_total_len
                 # 从 cpu 到 gpu 是流内阻塞操作
                 g_infer_context.req_manager.req_to_token_indexs[self.req_idx, 0:ready_cache_len] = value_tensor
-                # DeepSeek-V4 命中无需任何恢复: 槽位由 full_to_* 映射键控(radix 持有 full 槽即有效,
-                # 命中长度已在 match_prefix 内按 bitmap 裁剪),c4 compressor 状态随 swa 页常驻
-                # (零拷贝续算),c128 状态在 128 对齐边界自然归零(init_compress_state 已清)。
+                # DeepSeek-V4 命中无需恢复 compressor 状态: 槽位由 full_to_* 映射键控(radix
+                # 持有 full 槽即有效),c4 状态随 swa 页常驻；命中点按 256 token 对齐，c128
+                # request ring 的下一组会在首次读取前完整覆写。
                 self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 

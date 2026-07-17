@@ -7,11 +7,7 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
-    DSV4_C4_STATE_RING,
-    DSV4_C128_STATE_RING,
-    DSV4_SWA_PAGE_SIZE,
-)
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_C4_STATE_RING, DSV4_SWA_PAGE_SIZE
 
 
 @dataclass
@@ -21,10 +17,12 @@ class CoreCompressorMetadata:
     out_slots: torch.Tensor
     mem_index: torch.Tensor
     state_buffer: torch.Tensor
+    state_ring: int
     out_buffer: torch.Tensor
     out_page_size: int
     position_ids: torch.Tensor
     b_req_idx: torch.Tensor
+    b_mtp_index: torch.Tensor
     b_seq_len: torch.Tensor
     b_ready_cache_len: Optional[torch.Tensor]
     b_q_start_loc: Optional[torch.Tensor]
@@ -97,11 +95,15 @@ def _save_partial_states_kernel(
         if position + COMPRESS_RATIO < seq_len:
             return
 
-    full_slot = tl.load(mem_index + token_idx).to(tl.int64)
-    swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
-    if swa_slot < 0:
-        return
-    state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
+    if IS_C4:
+        full_slot = tl.load(mem_index + token_idx).to(tl.int64)
+        swa_slot = tl.load(full_to_swa + full_slot).to(tl.int64)
+        if swa_slot < 0:
+            return
+        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
+    else:
+        req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
+        state_row = req_idx * STATE_RING + position % STATE_RING
 
     offs = tl.arange(0, BLOCK)
     mask = offs < STATE_WIDTH
@@ -122,6 +124,7 @@ def _fused_compress_norm_rope_insert_kernel(
     positions,
     token_to_batch_idx,
     b_req_idx,
+    b_mtp_index,
     b_seq_len,
     b_ready_cache_len,
     b_q_start_loc,
@@ -174,15 +177,16 @@ def _fused_compress_norm_rope_insert_kernel(
         ready_len = tl.load(b_ready_cache_len + batch_idx)
         q_start = tl.load(b_q_start_loc + batch_idx)
     else:
-        ready_len = position
-        q_start = token_idx
+        mtp_index = tl.load(b_mtp_index + batch_idx)
+        ready_len = position - mtp_index
+        q_start = token_idx - mtp_index
 
     token_offsets = tl.arange(0, WINDOW_SIZE)
     start = position - WINDOW_SIZE + 1
     gather_pos = start + token_offsets
     valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
-    use_current = (gather_pos >= ready_len) & valid_pos if IS_PREFILL else gather_pos == position
-    current_idx = q_start + (gather_pos - ready_len) if IS_PREFILL else token_idx + token_offsets * 0
+    use_current = (gather_pos >= ready_len) & valid_pos
+    current_idx = q_start + (gather_pos - ready_len)
 
     if IS_C4:
         full_slot = tl.load(
@@ -195,14 +199,8 @@ def _fused_compress_norm_rope_insert_kernel(
         state_valid = valid_pos & (~use_current) & (swa_slot >= 0)
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
     else:
-        full_slot = tl.load(
-            req_to_token + req_idx * req_to_token_stride0 + gather_pos,
-            mask=valid_pos & (~use_current),
-            other=0,
-        ).to(tl.int64)
-        swa_slot = tl.load(full_to_swa + full_slot, mask=valid_pos & (~use_current), other=-1).to(tl.int64)
-        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-        state_valid = valid_pos & (~use_current) & (swa_slot >= 0)
+        state_row = req_idx * STATE_RING + gather_pos % STATE_RING
+        state_valid = valid_pos & (~use_current)
         head_offset = token_offsets * 0
 
     offs = tl.arange(0, BLOCK)
@@ -306,6 +304,7 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
         out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
         state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
+        state_ring = DSV4_C4_STATE_RING
         out_buffer = torch.empty(
             (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
             dtype=torch.bfloat16,
@@ -316,10 +315,12 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         if compress_ratio == 4:
             out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
             state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
+            state_ring = DSV4_C4_STATE_RING
             out_pool = mem_manager.c4_pool
         elif compress_ratio == 128:
             out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.long().reshape(-1)]
             state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
+            state_ring = mem_manager.c128_state_ring
             out_pool = mem_manager.c128_pool
         else:
             raise AssertionError(f"invalid DeepSeek-V4 compress ratio {compress_ratio}")
@@ -343,10 +344,12 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         out_slots=out_slots,
         mem_index=infer_state.mem_index,
         state_buffer=state_buffer,
+        state_ring=state_ring,
         out_buffer=out_buffer,
         out_page_size=out_page_size,
         position_ids=infer_state.position_ids,
         b_req_idx=infer_state.b_req_idx,
+        b_mtp_index=infer_state.b_mtp_index,
         b_seq_len=infer_state.b_seq_len,
         b_ready_cache_len=infer_state.b_ready_cache_len,
         b_q_start_loc=infer_state.b_q_start_loc,
@@ -403,7 +406,7 @@ def fused_compress(
     state_width = kv_score.shape[-1] // 2
     state_last_dim = metadata.state_buffer.shape[-1]
     is_c4 = compress_ratio == 4
-    state_ring = DSV4_C4_STATE_RING if is_c4 else DSV4_C128_STATE_RING
+    state_ring = metadata.state_ring
     block_state = triton.next_power_of_2(state_width)
     block_head = triton.next_power_of_2(head_dim)
 
@@ -415,6 +418,7 @@ def fused_compress(
         metadata.position_ids,
         metadata.token_to_batch_idx,
         metadata.b_req_idx,
+        metadata.b_mtp_index,
         metadata.b_seq_len,
         metadata.b_ready_cache_len if metadata.b_ready_cache_len is not None else metadata.b_seq_len,
         metadata.b_q_start_loc if metadata.b_q_start_loc is not None else metadata.b_seq_len,

@@ -30,9 +30,10 @@ DSV4_SWA_PAGE_SIZE = 128  # 128 slots/page
 DSV4_C4_PAGE_SIZE = 64  # 64 slots/page
 DSV4_C128_PAGE_SIZE = 2  # 2 slots/page
 DSV4_PROMPT_CACHE_PAGE_SIZE = DSV4_C4_PAGE_SIZE * 4  # 256 (= c4 ratio)
-# compressor state ring: c4 overlap 对为每页 2 个分组槽 × ratio 4 行;c128 离线聚合为每页 1 组。
+# compressor state ring: c4 overlap 对为每页 2 个分组槽 × ratio 4 行；c128 是每请求的基础窗口，
+# 实际宽度会追加 mtp_step 个候选槽，再向上对齐到 ratio 4。
 DSV4_C4_STATE_RING = 8  # 8 rows/page
-DSV4_C128_STATE_RING = 128  # 128 rows/page
+DSV4_C128_STATE_RING = 128  # 128 rows/request before MTP padding
 # swa 池占 full token 空间的比例(sglang DSV4 默认 swa_full_tokens_ratio=0.1 同值)。
 # 瞬时借页/驱逐走 swa 压力阀;池子大小仅按 ratio 切分,不再叠加结构性余量。
 DSV4_SWA_FULL_TOKENS_RATIO = 0.1  # 0.1
@@ -148,8 +149,9 @@ class DeepseekV4MemoryManager(MemoryManager):
         head_dim,
         layer_num,
         compress_rates: List[int],
+        max_request_num: int,
+        mtp_step: int,
         indexer_head_dim: int = 128,
-        max_request_num: Optional[int] = None,
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
@@ -161,12 +163,15 @@ class DeepseekV4MemoryManager(MemoryManager):
         ), f"DeepSeek-V4 packed indexer-K 期望 indexer_head_dim={self.indexer_head_dim_default}"
         assert len(compress_rates) == layer_num, f"compress_rates 长度 {len(compress_rates)} 必须等于 layer_num {layer_num}"
         assert all(r in (0, 4, 128) for r in compress_rates), "compress_rates 取值只能是 0/4/128"
+        assert max_request_num > 0, "max_request_num 必须为正数"
+        assert 0 <= mtp_step < DSV4_C128_STATE_RING, "mtp_step 必须位于 [0, 128)"
 
         self.compress_rates = list(compress_rates)
         self.n_c4 = sum(1 for r in self.compress_rates if r == 4)
         self.n_c128 = sum(1 for r in self.compress_rates if r == 128)
         self.indexer_head_dim = indexer_head_dim
         self.max_request_num = max_request_num
+        self.c128_state_ring = _ceil_div(DSV4_C128_STATE_RING + mtp_step, 4) * 4
         self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
 
         # 全局层号 -> 各压缩池内的压实层号(同 qwen3next 的层号压实手法)
@@ -204,15 +209,15 @@ class DeepseekV4MemoryManager(MemoryManager):
         indexer_bytes = self.indexer_bytes_per_token
         state_dtype_bytes = torch._utils._element_size(torch.float32)
         c4_state_width = 4 * self.head_dim + 4 * self.indexer_head_dim
-        c128_state_width = 2 * self.head_dim
         c4_state_bytes = DSV4_C4_STATE_RING / DSV4_SWA_PAGE_SIZE * c4_state_width * state_dtype_bytes * self.n_c4
-        c128_state_bytes = (
-            DSV4_C128_STATE_RING / DSV4_SWA_PAGE_SIZE * c128_state_width * state_dtype_bytes * self.n_c128
-        )
-        swa_slot = kv_bytes * self.layer_num + c4_state_bytes + c128_state_bytes
+        swa_slot = kv_bytes * self.layer_num + c4_state_bytes
         compressed = (kv_bytes + indexer_bytes) * self.n_c4 / 4 + kv_bytes * self.n_c128 / 128
 
         return swa_slot * self.swa_full_tokens_ratio + compressed
+
+    def get_fixed_memory_size(self):
+        state_rows = (self.max_request_num + 1) * self.c128_state_ring + 1
+        return self.n_c128 * state_rows * (2 * self.head_dim) * torch._utils._element_size(torch.float32)
 
     # ------------------------------------------------------------------ buffers
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
@@ -312,9 +317,9 @@ class DeepseekV4MemoryManager(MemoryManager):
             )
             self.full_to_c128_indexs = torch.full((size + 1,), -1, dtype=torch.int32, device="cuda")
             self.full_to_c128_indexs[size] = self.c128_pool.HOLD_TOKEN_MEMINDEX
-            # c128 compressor 在途状态: 与 c4 同样由 full->swa 推导行号,但 ring=128 且无 overlap。
-            # last_dim = 2*head_dim;末行是 swa 缺失/出窗时读取的哨兵。
-            state_rows = self._paged_state_rows(self.swa_num_pages, DSV4_C128_STATE_RING, 128)
+            # c128 compressor 在途状态按 request 寻址。每个 request 保留完整的 128-token
+            # 聚合窗口以及 MTP 候选余量；最后一行供无效请求/位置读取哨兵。
+            state_rows = (self.max_request_num + 1) * self.c128_state_ring + 1
             self.c128_state_buffer = torch.zeros(
                 (self.n_c128, state_rows, 2 * self.head_dim), dtype=torch.float32, device="cuda"
             )
@@ -323,6 +328,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         logger.info(
             f"DeepseekV4MemoryManager pools: full_tokens={size} swa={self.swa_size}({self.swa_num_pages}p) "
             f"c4={self.c4_size}(L={self.n_c4}) c128={self.c128_size}(L={self.n_c128}) "
+            f"c128_state_ring={self.c128_state_ring} max_requests={self.max_request_num} "
             f"packed_kv_bytes={self.mla_bytes_per_token} indexer_bytes={self.indexer_bytes_per_token}"
         )
 
@@ -355,7 +361,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         return self.c4_indexer_state_buffer[self.layer_to_c4_idx[layer_index]]
 
     def get_c128_state_buffer(self, layer_index: int) -> torch.Tensor:
-        assert self.compress_rates[layer_index] == 128, "只有 c128(HCA) 层有 paged compressor state"
+        assert self.compress_rates[layer_index] == 128, "只有 c128(HCA) 层有 request-scoped compressor state"
         return self.c128_state_buffer[self.layer_to_c128_idx[layer_index]]
 
     # ------------------------------------------------------------------ swa slot lifecycle

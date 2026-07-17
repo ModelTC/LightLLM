@@ -89,6 +89,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             compress_rates=self._get_compress_rates(layer_num),
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
+            mtp_step=self.args.mtp_step,
             mem_fraction=self.mem_fraction,
         )
         self.req_manager.mem_manager = self.mem_manager
