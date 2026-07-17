@@ -128,6 +128,14 @@ def _text_format_to_response_format(body: Dict[str, Any]) -> Optional[Dict[str, 
 
 
 def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
+    truncation = body.get("truncation")
+    if truncation not in (None, "disabled"):
+        raise ValueError("Only truncation='disabled' is supported")
+
+    effort = (body.get("reasoning") or {}).get("effort")
+    if effort is not None and effort not in ("low", "medium", "high"):
+        raise ValueError("reasoning.effort must be one of: low, medium, high")
+
     messages: List[Dict[str, Any]] = []
     if body.get("instructions"):
         messages.append({"role": "system", "content": body["instructions"]})
@@ -177,8 +185,7 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         else:
             chat["tool_choice"] = tool_choice
 
-    effort = (body.get("reasoning") or {}).get("effort")
-    if effort in ("low", "medium", "high"):
+    if effort is not None:
         chat["reasoning_effort"] = effort
 
     response_format = _text_format_to_response_format(body)
@@ -360,7 +367,12 @@ async def _openai_sse_to_responses_events(
         elif kind == "function_call":
             yield event(
                 "response.function_call_arguments.done",
-                {"item_id": item["id"], "output_index": output_index, "arguments": item["arguments"]},
+                {
+                    "item_id": item["id"],
+                    "output_index": output_index,
+                    "name": item["name"],
+                    "arguments": item["arguments"],
+                },
             )
         item["status"] = "completed"
         response["output"].append(item)
@@ -487,14 +499,14 @@ async def _openai_sse_to_responses_events(
         if failed_error is not None:
             break
 
-    for e in close_current():
-        yield e
-
     if failed_error is not None:
         response["status"] = "failed"
         response["error"] = {"code": "server_error", "message": failed_error.get("message", "generation failed")}
         yield event("response.failed", {"response": response})
         return
+
+    for e in close_current():
+        yield e
 
     response["usage"] = _usage_to_responses(usage)
     if finish_reason == "length":
