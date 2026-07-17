@@ -24,6 +24,7 @@ from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.gc_utils import freeze_gc, gc_frozen_and_disabled
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
@@ -131,11 +132,13 @@ class TpPartBaseModel:
         self._autotune_warmup()
         self._full_att_decode_autotune()
         self._init_padded_req()
-        self._init_cudagraph()
-        self._init_prefill_cuda_graph()
+        with gc_frozen_and_disabled("cudagraph-capture"):
+            self._init_cudagraph()
+            self._init_prefill_cuda_graph()
         self._check_max_len_infer()
         torch.cuda.empty_cache()
         set_model_init_status(True)
+        freeze_gc("model-infer-worker")
         return
 
     def _init_config(self):
@@ -654,7 +657,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
