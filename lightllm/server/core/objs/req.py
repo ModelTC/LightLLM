@@ -76,7 +76,6 @@ class PrefixTokenIdsStruct(ctypes.Structure):
 
 class Req(ctypes.Structure):
     _pack_ = 4
-
     _fields_ = [
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
@@ -436,6 +435,7 @@ class ChunkedPrefillReq(Req):
         return need_tokens
 
     def get_first_router_need_tokens(self):
+
         return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
 
 
