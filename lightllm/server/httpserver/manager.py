@@ -3,8 +3,8 @@ import zmq
 import zmq.asyncio
 import asyncio
 import uvloop
-import socket
 import rpyc
+import socket
 import time
 import copy
 import hashlib
@@ -333,6 +333,7 @@ class HttpServerManager:
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+
         start_time = time.time()
         if sampling_params.prompt_logprobs >= 0 and not self.args.enable_prompt_logprobs:
             raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
@@ -372,7 +373,6 @@ class HttpServerManager:
 
             # 记录请求到达的相关信息
             await self._log_req_header(request_headers, group_request_id)
-
             # encode
             prompt_ids = await self._encode(prompt, multimodal_params, sampling_params)
             self._log_stage_timing(
@@ -492,7 +492,7 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except (asyncio.CancelledError, Exception) as e:
+        except (asyncio.CancelledError, BaseException) as e:
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {group_request_id} {e.reason}")
             elif isinstance(e, asyncio.CancelledError):
@@ -507,7 +507,7 @@ class HttpServerManager:
             if group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
             await self.abort(group_request_id)
-            raise
+            raise e
         finally:
             await self.rl_controller.unregister_generation_admission(group_request_id)
             async with self._run_reqs_count_lock:
@@ -683,6 +683,7 @@ class HttpServerManager:
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
+
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -725,6 +726,7 @@ class HttpServerManager:
         req_status: "ReqStatus",
         request: Request,
     ):
+
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
