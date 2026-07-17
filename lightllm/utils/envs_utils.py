@@ -83,8 +83,10 @@ def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
 
 @lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_decode():
-    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
+    args = get_env_start_args()
+    required = args.running_max_req_size * (args.mtp_step + 1)
+    required = ((required + 7) // 8) * 8
+    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", required))
 
 
 def get_lightllm_gunicorn_keep_alive():
