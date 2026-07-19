@@ -402,28 +402,18 @@ class ModeBackend:
         selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
         return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
 
-    def _select_prefill_sample_logits(self, logits: torch.Tensor, model_input: ModelInput) -> torch.Tensor:
-        q_lens = model_input.b_seq_len - model_input.b_ready_cache_len
-        last_index = torch.cumsum(q_lens, dim=0, dtype=torch.long) - 1
-        return logits[last_index, :]
-
-    def _prepare_prefill_logits(
+    def _capture_prompt_logprobs_if_needed(
         self,
         model_input: ModelInput,
         run_reqs: List[InferReq],
-        prompt_logits: torch.Tensor,
-    ):
-        if not self.model.return_all_prompt_logics:
-            return prompt_logits
-        self._capture_prompt_logprobs(model_input, run_reqs, prompt_logits)
-        return self._select_prefill_sample_logits(prompt_logits, model_input)
-
-    def _capture_prompt_logprobs(
-        self,
-        model_input: ModelInput,
-        run_reqs: List[InferReq],
-        prompt_logits: torch.Tensor,
+        prompt_logits: Optional[torch.Tensor],
     ) -> None:
+        # 仅在开启 return_all_prompt_logics（如 enable_prompt_logprobs）且存在完整的
+        # prefill logits 时，才需要捕获每个 prompt token 的 logprobs 信息。此时用于采样
+        # 的 logits 已经只对应每个请求最后一个位置，无需再处理。
+        if not self.model.return_all_prompt_logics or prompt_logits is None:
+            return
+
         mgr = PromptLogprobsCaptureManager.get_instance()
 
         start_loc = 0

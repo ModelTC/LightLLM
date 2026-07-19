@@ -529,13 +529,13 @@ class TpPartBaseModel:
     def _create_unpad_prefill_model_output(
         self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
     ):
-        if self.return_all_prompt_logics:
-            new_model_output = copy.copy(padded_model_output)
-            new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
-        else:
-            new_model_output = copy.copy(padded_model_output)
-            # 移除多余的pad 的那个 req 对应的 logics
-            new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output = copy.copy(padded_model_output)
+        # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
+        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
+        # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
+        if new_model_output.prompt_logics is not None:
+            new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
@@ -710,7 +710,7 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        model_output = ModelOutput(logits=predict_logits)
+        model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
@@ -983,8 +983,8 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        model_output = ModelOutput(logits=predict_logits.contiguous())
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
+        model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
+        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
 
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
