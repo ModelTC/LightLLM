@@ -110,9 +110,8 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
-            logits = model_output.logits
             (_, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu,) = self._sample_and_scatter_token(
-                logits=logits,
+                logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,
@@ -195,14 +194,13 @@ class ChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
-            logits = model_output.logits
             (
                 next_token_ids,
                 next_token_ids_cpu,
                 next_token_logprobs_cpu,
                 next_token_ranks_cpu,
             ) = self._sample_and_scatter_token(
-                logits=logits,
+                logits=model_output.logits,
                 b_req_idx=model_input.b_req_idx,
                 b_mtp_index=model_input.b_mtp_index,
                 run_reqs=run_reqs,

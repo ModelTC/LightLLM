@@ -158,7 +158,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
-            logits = model_output.logits
             if run_reqs_num > 0:
                 (
                     _,
@@ -166,7 +165,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=logits[:run_reqs_num],
+                    logits=model_output.logits[:run_reqs_num],
                     b_req_idx=model_input.b_req_idx[:run_reqs_num],
                     b_mtp_index=model_input.b_mtp_index[:run_reqs_num],
                     run_reqs=run_reqs,
@@ -408,7 +407,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             model_output: ModelOutput = self.model.forward(model_input)
             b_has_out_cpu = model_input.b_prefill_has_output_cpu[0:req_num]
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
-            logits = model_output.logits[0:req_num, :]
             b_req_idx = model_input.b_req_idx[0:req_num]
             b_mtp_index = model_input.b_mtp_index[0:req_num]
 
@@ -419,7 +417,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_logprobs_cpu,
                     next_token_ranks_cpu,
                 ) = self._sample_and_scatter_token(
-                    logits=logits,
+                    logits=model_output.logits[0:req_num, :],
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
