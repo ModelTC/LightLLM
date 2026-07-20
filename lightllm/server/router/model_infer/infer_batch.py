@@ -25,6 +25,7 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
+from lightllm.server.router.model_infer.infer_req_ext import PromptSelectedLogprobsExt
 
 logger = init_logger(__name__)
 
@@ -148,7 +149,7 @@ class InferenceContext:
         prompt_top_logprobs = None
         routed_experts = None
 
-        req.flush_prompt_selected_logprobs()
+        req.prompt_selected_logprobs.flush()
 
         prompt_logprobs_mgr = PromptLogprobsCaptureManager.get_instance()
         if prompt_logprobs_mgr is not None and prompt_logprobs_mgr.is_buffer_initialized():
@@ -646,7 +647,7 @@ class InferReq:
 
         self.cur_kv_len = 0
         self.cur_output_len = 0
-        self.prompt_selected_logprobs_chunks = []
+        self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
@@ -667,38 +668,6 @@ class InferReq:
             self.linear_att_cache_len = linear_block_num * self.args.linear_att_hash_page_size
             self.linear_att_len_to_big_page_id = SortedDict()
 
-        return
-
-    def add_prompt_selected_logprobs_chunk(
-        self,
-        target_start: int,
-        target_end: int,
-        logprobs: torch.Tensor,
-        ranks: torch.Tensor,
-    ):
-        # prefill 热路径只发起异步 D2H 拷贝，避免在这里等待 GPU 结果。
-        # final metadata dump 真正需要读数据时，再通过 event 确认拷贝完成。
-        logprobs_cpu = torch.empty(logprobs.shape, dtype=logprobs.dtype, device="cpu", pin_memory=True)
-        ranks_cpu = torch.empty(ranks.shape, dtype=ranks.dtype, device="cpu", pin_memory=True)
-        logprobs_cpu.copy_(logprobs, non_blocking=True)
-        ranks_cpu.copy_(ranks, non_blocking=True)
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream())
-        self.prompt_selected_logprobs_chunks.append((target_start, target_end, logprobs_cpu, ranks_cpu, event))
-        return
-
-    def flush_prompt_selected_logprobs(self):
-        if not self.prompt_selected_logprobs_chunks:
-            return
-
-        for target_start, target_end, logprobs_cpu, ranks_cpu, event in self.prompt_selected_logprobs_chunks:
-            # HTTP 进程从 shm_logprobs 读取 prompt_logprobs=0，
-            # 因此必须在标记 infer released 前提交这部分元信息。
-            event.synchronize()
-            self.shm_req.shm_logprobs.arr["logprob"][target_start:target_end] = logprobs_cpu.numpy()
-            self.shm_req.shm_logprobs.arr["rank"][target_start:target_end] = ranks_cpu.numpy()
-
-        self.prompt_selected_logprobs_chunks.clear()
         return
 
     def _match_radix_cache(self):

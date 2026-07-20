@@ -435,7 +435,7 @@ class ModeBackend:
                 target_logits = logit_rows.gather(1, target_token_ids.long().view(-1, 1)).view(-1)
                 logprobs = target_logits.float() - torch.logsumexp(logit_rows.float(), dim=-1)
                 ranks = (logit_rows > target_logits.view(-1, 1)).sum(dim=-1, dtype=torch.int32) + 1
-                req_obj.add_prompt_selected_logprobs_chunk(target_start, target_end, logprobs, ranks)
+                req_obj.prompt_selected_logprobs.add_chunk(target_start, target_end, logprobs, ranks)
             elif capture_count > 0 and topk > 0 and mgr is not None and mgr.is_buffer_initialized():
                 logit_rows = prompt_logits[start_loc : start_loc + capture_count]
                 log_normalizer = torch.logsumexp(logit_rows.float(), dim=-1)
