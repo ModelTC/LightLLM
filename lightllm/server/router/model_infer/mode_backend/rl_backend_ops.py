@@ -41,13 +41,13 @@ class RlBackendOps:
         self.logger = backend.logger
 
     @classmethod
-    def supports(cls, func_name: str) -> bool:
-        return func_name in cls.SUPPORTED
+    def supports(cls, op_name: str) -> bool:
+        return op_name in cls.SUPPORTED
 
-    def dispatch(self, func_name: str, func_args):
-        if not self.supports(func_name):
-            raise ValueError(f"RlBackendOps does not support function {func_name}")
-        return getattr(self, func_name)(func_args)
+    def dispatch(self, op_name: str, op_args):
+        if not self.supports(op_name):
+            raise ValueError(f"RlBackendOps does not support op {op_name}")
+        return getattr(self, op_name)(op_args)
 
     def flush_cache(self, request: FlushCacheReq):
         if self.backend.radix_cache is not None:

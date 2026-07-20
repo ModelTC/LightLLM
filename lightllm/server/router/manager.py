@@ -30,8 +30,8 @@ from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.server.io_struct import (
-    GeneralHttpToModelRpcReq,
-    GeneralModelToHttpRpcRsp,
+    RlOpReq,
+    RlOpRsp,
 )
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
@@ -575,7 +575,7 @@ class RouterManager:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
-        await self._process_special_reqs()
+        await self._process_rl_ops()
 
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
@@ -584,32 +584,30 @@ class RouterManager:
                 self._generate_new_batch()
         return
 
-    async def _process_special_reqs(self):
+    async def _process_rl_ops(self):
         # master: 从 RL rpyc 队列里取出 (req, future) — slave 的队列恒为空(无 rpyc service)
         pairs = self.rl_op_queue.pop_all()
 
-        reqs: List[GeneralHttpToModelRpcReq] = [req for req, _ in pairs]
+        reqs: List[RlOpReq] = [req for req, _ in pairs]
 
         # 多机 TP:master 通过 NCCL 广播 req 到 slave router;slave 在自己的主循环里到达此处时,会从 broadcast 收到 master 的 reqs
         if self.is_multinode_tp:
-            reqs = self.broadcast_reqs_to_other_nodes(reqs)
+            reqs = self.broadcast_rl_ops_to_other_nodes(reqs)
 
         for i, req in enumerate(reqs):
-            assert isinstance(req, GeneralHttpToModelRpcReq), "special request must be GeneralHttpToModelRpcReq"
+            assert isinstance(req, RlOpReq), "rl op request must be RlOpReq"
             try:
-                ret = await self.forward_to_model(req)
+                ret = await self.rl_op(req)
             except BaseException as e:
-                logger.exception(f"forward_to_model failed for {req.func_name}: {e}")
-                ret = GeneralModelToHttpRpcRsp(
-                    success=False, msg=f"forward_to_model error: {e}", func_name=req.func_name
-                )
+                logger.exception(f"rl_op failed for {req.op_name}: {e}")
+                ret = RlOpRsp(success=False, msg=f"rl_op error: {e}", op_name=req.op_name)
             # 只有 master 持有 future,slave 的 pairs 始终为空
             if i < len(pairs):
                 _, fut = pairs[i]
                 if not fut.done():
                     fut.set_result(ret)
 
-    def broadcast_reqs_to_other_nodes(self, reqs: List[GeneralHttpToModelRpcReq]):
+    def broadcast_rl_ops_to_other_nodes(self, reqs: List[RlOpReq]):
         req_num = len(reqs)
         if self.node_rank == 0:
             req_nums = [len(reqs)]
@@ -626,19 +624,19 @@ class RouterManager:
                 dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
         return reqs
 
-    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
-        forward_to_model_tasks = []
+    async def rl_op(self, req: RlOpReq) -> RlOpRsp:
+        rl_op_tasks = []
         for model_rpc_client in self.model_rpc_clients:
-            forward_to_model_tasks.append(model_rpc_client.forward_to_model(req))
-        all_ret = await asyncio.gather(*forward_to_model_tasks)
-        ret: GeneralModelToHttpRpcRsp = next((res for res in all_ret if not res.success), all_ret[0])
+            rl_op_tasks.append(model_rpc_client.rl_op(req))
+        all_ret = await asyncio.gather(*rl_op_tasks)
+        ret: RlOpRsp = next((res for res in all_ret if not res.success), all_ret[0])
         ret.success = all(res.success for res in all_ret)
         if self.is_multinode_tp:
             output_list = [None for _ in range(self.nnodes)] if self.node_rank == 0 else None
             dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
             if self.node_rank == 0:
                 for res in output_list:
-                    res: GeneralModelToHttpRpcRsp
+                    res: RlOpRsp
                     if not res.success:
                         ret = res
                         break

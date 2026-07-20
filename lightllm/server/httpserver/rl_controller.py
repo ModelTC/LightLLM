@@ -9,8 +9,8 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.io_struct import (
     AbortReq,
     FlushCacheReq,
-    GeneralHttpToModelRpcReq,
-    GeneralModelToHttpRpcRsp,
+    RlOpReq,
+    RlOpRsp,
     InitWeightsUpdateGroupReq,
     DestroyWeightsUpdateGroupReq,
     ReleaseMemoryReq,
@@ -220,7 +220,7 @@ class HttpRlController:
         """Release requests waiting at the pause gate."""
         await self._generation_gate.resume()
 
-    def _call_router_rl_sync(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+    def _call_rl_op_sync(self, req: RlOpReq) -> RlOpRsp:
         from lightllm.utils.retry_utils import retry
 
         conn = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
@@ -237,65 +237,65 @@ class HttpRlController:
             except BaseException:
                 pass
 
-    async def _call_router_rl(self, func_name: str, func_args=None) -> GeneralModelToHttpRpcRsp:
-        req = GeneralHttpToModelRpcReq(func_name=func_name, func_args=func_args)
+    async def _call_rl_op(self, op_name: str, op_args=None) -> RlOpRsp:
+        req = RlOpReq(op_name=op_name, op_args=op_args)
         try:
-            return await asyncio.to_thread(self._call_router_rl_sync, req)
+            return await asyncio.to_thread(self._call_rl_op_sync, req)
         except BaseException as e:
-            logger.exception(f"rl rpyc call {func_name} failed: {e}")
-            return GeneralModelToHttpRpcRsp(
+            logger.exception(f"rl op {op_name} failed: {e}")
+            return RlOpRsp(
                 success=False,
-                msg=f"rl rpyc call {func_name} error: {e}",
-                func_name=func_name,
+                msg=f"rl op {op_name} error: {e}",
+                op_name=op_name,
             )
 
     async def flush_cache(self, request: FlushCacheReq):
-        return await self._call_router_rl("flush_cache", request)
+        return await self._call_rl_op("flush_cache", request)
 
     async def release_memory_occupation(self, request: ReleaseMemoryReq):
         assert (
             len(self.manager.req_id_to_out_inf) == 0
         ), "there are still requests running, cannot release memory occupation"
-        return await self._call_router_rl("release_memory_occupation", request.tags)
+        return await self._call_rl_op("release_memory_occupation", request.tags)
 
     async def resume_memory_occupation(self, request: ResumeMemoryReq):
-        return await self._call_router_rl("resume_memory_occupation", request.tags)
+        return await self._call_rl_op("resume_memory_occupation", request.tags)
 
     async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
-        return await self._call_router_rl("init_weights_update_group", request)
+        return await self._call_rl_op("init_weights_update_group", request)
 
     async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
-        return await self._call_router_rl("destroy_weights_update_group", request)
+        return await self._call_rl_op("destroy_weights_update_group", request)
 
     async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
         if request.abort_all_requests:
             success, msg = await self.abort_request(AbortReq(abort_all=True))
             if not success:
-                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_distributed")
+                return RlOpRsp(success=False, msg=msg, op_name="update_weights_from_distributed")
         if request.flush_cache:
             ret = await self.flush_cache(FlushCacheReq())
             if not ret.success:
                 return ret
-        return await self._call_router_rl("update_weights_from_distributed", request)
+        return await self._call_rl_op("update_weights_from_distributed", request)
 
-    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
+    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> RlOpRsp:
         if request.abort_all_requests:
             success, msg = await self.abort_request(AbortReq(abort_all=True))
             if not success:
-                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_tensor")
+                return RlOpRsp(success=False, msg=msg, op_name="update_weights_from_tensor")
         if request.flush_cache:
             ret = await self.flush_cache(FlushCacheReq())
             if not ret.success:
                 return ret
-        return await self._call_router_rl("update_weights_from_tensor", request)
+        return await self._call_rl_op("update_weights_from_tensor", request)
 
-    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
+    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> RlOpRsp:
         if request.abort_all_requests:
             success, msg = await self.abort_request(AbortReq(abort_all=True))
             if not success:
-                return GeneralModelToHttpRpcRsp(success=False, msg=msg, func_name="update_weights_from_ipc")
+                return RlOpRsp(success=False, msg=msg, op_name="update_weights_from_ipc")
         if request.flush_cache:
             ret = await self.flush_cache(FlushCacheReq())
             if not ret.success:
                 return ret
-        return await self._call_router_rl("update_weights_from_ipc", request)
+        return await self._call_rl_op("update_weights_from_ipc", request)

@@ -31,19 +31,8 @@ from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, Asyn
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.server.io_struct import (
-    AbortReq,
-    FlushCacheReq,
-    ReleaseMemoryReq,
-    ResumeMemoryReq,
-    InitWeightsUpdateGroupReq,
-    DestroyWeightsUpdateGroupReq,
-    UpdateWeightsFromDistributedReq,
-    UpdateWeightsFromTensorReq,
-    UpdateWeightsFromIPCReq,
-    GeneralModelToHttpRpcRsp,
-)
 from .rl_controller import HttpRlController
+from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -54,7 +43,7 @@ from rpyc.utils.classic import obtain
 logger = init_logger(__name__)
 
 
-class HttpServerManager:
+class HttpServerManager(HttpRlManagerHelper, object):
     def __init__(
         self,
         args: StartArgs,
@@ -996,39 +985,6 @@ class HttpServerManager:
 
             self.recycle_event.set()
         return
-
-    async def abort_request(self, request: AbortReq) -> Tuple[bool, str]:
-        return await self.rl_controller.abort_request(request)
-
-    async def pause_generation(self):
-        return await self.rl_controller.pause_generation()
-
-    async def continue_generation(self):
-        return await self.rl_controller.continue_generation()
-
-    async def flush_cache(self, request: FlushCacheReq):
-        return await self.rl_controller.flush_cache(request)
-
-    async def release_memory_occupation(self, request: ReleaseMemoryReq):
-        return await self.rl_controller.release_memory_occupation(request)
-
-    async def resume_memory_occupation(self, request: ResumeMemoryReq):
-        return await self.rl_controller.resume_memory_occupation(request)
-
-    async def init_weights_update_group(self, request: InitWeightsUpdateGroupReq):
-        return await self.rl_controller.init_weights_update_group(request)
-
-    async def destroy_weights_update_group(self, request: DestroyWeightsUpdateGroupReq):
-        return await self.rl_controller.destroy_weights_update_group(request)
-
-    async def update_weights_from_distributed(self, request: UpdateWeightsFromDistributedReq):
-        return await self.rl_controller.update_weights_from_distributed(request)
-
-    async def update_weights_from_tensor(self, request: UpdateWeightsFromTensorReq) -> GeneralModelToHttpRpcRsp:
-        return await self.rl_controller.update_weights_from_tensor(request)
-
-    async def update_weights_from_ipc(self, request: UpdateWeightsFromIPCReq) -> GeneralModelToHttpRpcRsp:
-        return await self.rl_controller.update_weights_from_ipc(request)
 
 
 class ReqStatus:

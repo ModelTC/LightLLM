@@ -6,7 +6,7 @@ from typing import List, Tuple
 import rpyc
 from rpyc.utils.classic import obtain
 
-from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
+from lightllm.server.io_struct import RlOpReq, RlOpRsp
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -14,21 +14,21 @@ logger = init_logger(__name__)
 
 class RouterRlOpQueue:
     def __init__(self):
-        self._queue: "queue.Queue[Tuple[GeneralHttpToModelRpcReq, concurrent.futures.Future]]" = queue.Queue()
+        self._queue: "queue.Queue[Tuple[RlOpReq, concurrent.futures.Future]]" = queue.Queue()
 
-    def submit(self, req: GeneralHttpToModelRpcReq, timeout: float = 300.0) -> GeneralModelToHttpRpcRsp:
+    def submit(self, req: RlOpReq, timeout: float = 300.0) -> RlOpRsp:
         fut: concurrent.futures.Future = concurrent.futures.Future()
         self._queue.put((req, fut))
         try:
             return fut.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
-            return GeneralModelToHttpRpcRsp(
+            return RlOpRsp(
                 success=False,
-                msg=f"rl op {req.func_name} timeout after {timeout}s",
-                func_name=req.func_name,
+                msg=f"rl op {req.op_name} timeout after {timeout}s",
+                op_name=req.op_name,
             )
 
-    def pop_all(self) -> List[Tuple[GeneralHttpToModelRpcReq, concurrent.futures.Future]]:
+    def pop_all(self) -> List[Tuple[RlOpReq, concurrent.futures.Future]]:
         pairs = []
         while True:
             try:
@@ -43,7 +43,7 @@ class RouterRlRpcService(rpyc.Service):
         super().__init__()
         self.rl_op_queue = rl_op_queue
 
-    def exposed_rl_op(self, req: GeneralHttpToModelRpcReq):
+    def exposed_rl_op(self, req: RlOpReq):
         return self.rl_op_queue.submit(obtain(req))
 
 

@@ -51,7 +51,6 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
-from lightllm.server.io_struct import ReleaseMemoryReq, ResumeMemoryReq
 from dataclasses import dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
@@ -62,16 +61,6 @@ from .api_models import (
     CompletionResponse,
     ModelCard,
     ModelListResponse,
-)
-from .io_struct import (
-    AbortReq,
-    FlushCacheReq,
-    InitWeightsUpdateGroupReq,
-    DestroyWeightsUpdateGroupReq,
-    UpdateWeightsFromDistributedReq,
-    UpdateWeightsFromTensorReq,
-    UpdateWeightsFromIPCReq,
-    GeneralModelToHttpRpcRsp,
 )
 from .build_prompt import build_prompt, init_tokenizer
 
@@ -438,89 +427,10 @@ async def metrics() -> Response:
     return response
 
 
-@app.post("/abort_request")
-async def abort_request(request: AbortReq, raw_request: Request):
-    """Abort a request."""
-    try:
-        success, msg = await g_objs.httpserver_manager.abort_request(request)
-        if not success:
-            return create_error_response(HTTPStatus.REQUEST_TIMEOUT, msg, err_type="AbortRequestTimeout")
-        return Response(status_code=200)
-    except Exception as e:
-        logger.error("abort_request error occurred: %s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
+# RL 控制面接口（abort / pause / flush / memory / weight update），见 api_http_rl.py
+from .api_http_rl import router as rl_router
 
-
-async def handle_request_common(request_obj, handler):
-    try:
-        ret: GeneralModelToHttpRpcRsp = await handler(request_obj)
-        if ret.success:
-            return JSONResponse({"success": ret.success, "message": ret.msg}, status_code=200)
-        else:
-            return create_error_response(HTTPStatus.BAD_REQUEST, ret.msg)
-    except Exception as e:
-        logger.error("handle_request_common (%s) error occurred: %s", str(request_obj), str(e), exc_info=True)
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
-
-
-@app.post("/init_weights_update_group")
-async def init_weights_update_group(request: InitWeightsUpdateGroupReq, raw_request: Request):
-    """Init weights update group."""
-    return await handle_request_common(request, g_objs.httpserver_manager.init_weights_update_group)
-
-
-@app.post("/destroy_weights_update_group")
-async def destroy_weights_update_group(request: DestroyWeightsUpdateGroupReq, raw_request: Request):
-    """Destroy weights update group."""
-    return await handle_request_common(request, g_objs.httpserver_manager.destroy_weights_update_group)
-
-
-@app.post("/update_weights_from_distributed")
-async def update_weights_from_distributed(request: UpdateWeightsFromDistributedReq, raw_request: Request):
-    """Update model parameter from distributed online."""
-    return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_distributed)
-
-
-@app.post("/update_weights_from_tensor")
-async def update_weights_from_tensor(request: UpdateWeightsFromTensorReq, raw_request: Request):
-    """Update model parameter from distributed online."""
-    return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_tensor)
-
-
-@app.post("/update_weights_from_ipc")
-async def update_weights_from_ipc(request: UpdateWeightsFromIPCReq, raw_request: Request):
-    return await handle_request_common(request, g_objs.httpserver_manager.update_weights_from_ipc)
-
-
-@app.post("/flush_cache")
-@app.get("/flush_cache")
-async def flush_cache():
-    """Flush the radix cache."""
-    return await handle_request_common(FlushCacheReq(), g_objs.httpserver_manager.flush_cache)
-
-
-@app.post("/pause_generation")
-async def pause_generation():
-    await g_objs.httpserver_manager.pause_generation()
-    return Response(content="Generation paused successfully.", status_code=200)
-
-
-@app.post("/continue_generation")
-async def continue_generation():
-    await g_objs.httpserver_manager.continue_generation()
-    return Response(content="Generation continued successfully.", status_code=200)
-
-
-@app.get("/release_memory_occupation")
-@app.post("/release_memory_occupation")
-async def release_memory_occupation(request: ReleaseMemoryReq):
-    return await handle_request_common(request, g_objs.httpserver_manager.release_memory_occupation)
-
-
-@app.get("/resume_memory_occupation")
-@app.post("/resume_memory_occupation")
-async def resume_memory_occupation(request: ResumeMemoryReq):
-    return await handle_request_common(request, g_objs.httpserver_manager.resume_memory_occupation)
+app.include_router(rl_router)
 
 
 @app.websocket("/pd_register")

@@ -34,7 +34,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
-from lightllm.server.io_struct import GeneralHttpToModelRpcReq, GeneralModelToHttpRpcRsp
+from lightllm.server.io_struct import RlOpReq, RlOpRsp
 
 logger = init_logger(__name__)
 
@@ -113,23 +113,18 @@ class ModelRpcServer(rpyc.Service):
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
 
-    def exposed_forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
+    def exposed_rl_op(self, req: RlOpReq) -> RlOpRsp:
         try:
             req = obtain(req)
             if self.rl_backend_ops is None:
                 raise ValueError("RL backend ops is not initialized")
-            if not RlBackendOps.supports(req.func_name):
-                raise ValueError(
-                    f"Unsupported RL backend function {req.func_name}. "
-                    f"Supported functions: {sorted(RlBackendOps.SUPPORTED)}"
-                )
-            success, ret = self.rl_backend_ops.dispatch(req.func_name, req.func_args)
-            return GeneralModelToHttpRpcRsp(success=success, msg=str(ret), func_name=req.func_name, func_rsp=ret)
+            if not RlBackendOps.supports(req.op_name):
+                raise ValueError(f"Unsupported RL op {req.op_name}. Supported ops: {sorted(RlBackendOps.SUPPORTED)}")
+            success, ret = self.rl_backend_ops.dispatch(req.op_name, req.op_args)
+            return RlOpRsp(success=success, msg=str(ret), op_name=req.op_name, op_result=ret)
         except BaseException as e:
-            logger.exception(f"forward to model backend failed: {str(e)}")
-            return GeneralModelToHttpRpcRsp(
-                success=False, msg=f"forward to model backend failed: {str(e)}", func_name=req.func_name
-            )
+            logger.exception(f"rl op failed: {str(e)}")
+            return RlOpRsp(success=False, msg=f"rl op failed: {str(e)}", op_name=req.op_name)
 
 
 class ModelRpcClient:
@@ -154,7 +149,7 @@ class ModelRpcClient:
 
         self._init_model = async_wrap(self.conn.root.init_model)
         self._get_max_total_token_num = async_wrap(self.conn.root.get_max_total_token_num)
-        self._forward_to_model = async_wrap(self.conn.root.forward_to_model)
+        self._rl_op = async_wrap(self.conn.root.rl_op)
         return
 
     async def init_model(self, kvargs):
@@ -166,8 +161,8 @@ class ModelRpcClient:
         ans = self._get_max_total_token_num()
         return obtain(await ans)
 
-    async def forward_to_model(self, req: GeneralHttpToModelRpcReq) -> GeneralModelToHttpRpcRsp:
-        ans = self._forward_to_model(req)
+    async def rl_op(self, req: RlOpReq) -> RlOpRsp:
+        ans = self._rl_op(req)
         return obtain(await ans)
 
 
