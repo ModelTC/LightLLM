@@ -101,6 +101,98 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="just help to distinguish internal model name, use 'host:port/get_model_name' to get",
     )
     parser.add_argument(
+        "--visual_remote_url",
+        type=str,
+        default=None,
+        help=(
+            "Enable the OpenAI chat visual proxy for multimodal requests and send builtin "
+            "vision_reader calls to this remote OpenAI-compatible service. The value may be "
+            "a service root, a /v1 base URL, or a full /v1/chat/completions URL."
+        ),
+    )
+    parser.add_argument(
+        "--visual_remote_model",
+        type=str,
+        default=None,
+        help="Model name sent to the visual upstream. Defaults to the incoming main-model name.",
+    )
+    parser.add_argument(
+        "--visual_remote_api_key_env",
+        type=str,
+        default="LIGHTLLM_VISUAL_REMOTE_API_KEY",
+        help="Environment variable containing the visual upstream Bearer token.",
+    )
+    parser.add_argument(
+        "--visual_remote_headers_env",
+        type=str,
+        default="LIGHTLLM_VISUAL_REMOTE_HEADERS",
+        help="Environment variable containing a JSON object of additional visual upstream headers.",
+    )
+    parser.add_argument(
+        "--visual_allow_insecure_remote_url",
+        action="store_true",
+        help=(
+            "Allow a non-loopback visual upstream over plain HTTP. Disabled by default because images and "
+            "credentials would cross the network without transport encryption."
+        ),
+    )
+    parser.add_argument(
+        "--visual_trace_secret_env",
+        type=str,
+        default="LIGHTLLM_VISUAL_TRACE_SECRET",
+        help="Environment variable containing the required 32+ byte visual trace encryption secret.",
+    )
+    parser.add_argument(
+        "--visual_trace_previous_secret_env",
+        type=str,
+        default="LIGHTLLM_VISUAL_TRACE_PREVIOUS_SECRET",
+        help="Optional environment variable containing the previous trace secret during key rotation.",
+    )
+    parser.add_argument("--visual_remote_timeout", type=float, default=90.0)
+    parser.add_argument("--visual_remote_connect_timeout", type=float, default=5.0)
+    parser.add_argument("--visual_remote_max_retries", type=int, default=2)
+    parser.add_argument("--visual_remote_max_concurrency", type=int, default=32)
+    parser.add_argument("--visual_remote_queue_timeout", type=float, default=2.0)
+    parser.add_argument("--visual_max_inflight_requests", type=int, default=16)
+    parser.add_argument("--visual_circuit_failure_threshold", type=int, default=5)
+    parser.add_argument("--visual_circuit_recovery_seconds", type=float, default=30.0)
+    parser.add_argument("--visual_agent_timeout", type=float, default=180.0)
+    parser.add_argument("--visual_max_images", type=int, default=8)
+    parser.add_argument("--visual_max_image_bytes", type=int, default=20 * 1024 * 1024)
+    parser.add_argument("--visual_max_total_image_bytes", type=int, default=40 * 1024 * 1024)
+    parser.add_argument("--visual_max_remote_response_bytes", type=int, default=64 * 1024)
+    parser.add_argument("--visual_max_upstream_body_bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--visual_max_trace_bytes", type=int, default=256 * 1024)
+    parser.add_argument("--visual_trace_ttl_seconds", type=int, default=3600)
+    parser.add_argument("--visual_max_choices", type=int, default=4)
+    parser.add_argument(
+        "--visual_allow_local_files",
+        action="store_true",
+        help="Allow file:// images only inside explicitly configured local roots. Disabled by default.",
+    )
+    parser.add_argument(
+        "--visual_local_file_root",
+        action="append",
+        default=[],
+        help="Allowed root for file:// images. Repeat for multiple roots; requires --visual_allow_local_files.",
+    )
+    parser.add_argument(
+        "--visual_allow_remote_image_urls",
+        action="store_true",
+        help="Allow the visual upstream to fetch HTTPS image URLs. Disabled by default to prevent SSRF.",
+    )
+    parser.add_argument(
+        "--visual_allow_http_image_urls",
+        action="store_true",
+        help="Also allow plain HTTP image URLs; requires --visual_allow_remote_image_urls.",
+    )
+    parser.add_argument(
+        "--visual_remote_image_host",
+        action="append",
+        default=[],
+        help="Exact allowed hostname for remote image URLs. Repeat as needed.",
+    )
+    parser.add_argument(
         "--model_owner",
         type=str,
         default=None,

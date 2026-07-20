@@ -100,6 +100,11 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
+    if args.visual_remote_url:
+        from .visual_chat_proxy import validate_visual_proxy_startup
+
+        validate_visual_proxy_startup(args)
+
     if args.run_mode in ["normal", "prefill", "decode", "visual_only"]:
         _check_anthropic_pdf_parsing_startup()
 
@@ -542,6 +547,11 @@ def pd_master_start(args):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    if args.visual_remote_url:
+        from .visual_chat_proxy import validate_visual_proxy_startup
+
+        validate_visual_proxy_startup(args)
 
     _check_anthropic_pdf_parsing_startup()
 

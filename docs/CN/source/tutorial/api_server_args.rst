@@ -149,6 +149,39 @@ PD 分离模式参数
     * ``llama3``
     * ``mistral``
 
+.. option:: --visual_remote_url
+
+    可选的 OpenAI-compatible 远端多模态服务地址。设置后，多模态
+    ``/v1/chat/completions`` 请求会使用本地 LightLLM 模型作为 agent，并注入服务端内建
+    ``vision_reader`` 工具。本地模型只接收 ``<image_n/>`` 标签；仅当 agent 调用
+    ``vision_reader`` 时，真实图片才会发送到该远端服务。参数可以是服务根地址、
+    ``/v1`` base URL，或完整的 chat completions URL。
+
+    生产安全默认要求 ``LIGHTLLM_VISUAL_TRACE_SECRET`` 包含至少 32 字节且持久化保存的
+    随机密钥，内部 reader trace 会使用该密钥进行认证加密。轮换密钥时，可暂时将旧密钥
+    放在 ``LIGHTLLM_VISUAL_TRACE_PREVIOUS_SECRET`` 中，直至存量工具会话结束。远端 Bearer
+    trace 默认一小时后过期（可通过 ``--visual_trace_ttl_seconds`` 调整），并绑定当前模型和
+    规范化后的图片。远端 Bearer token 从 ``LIGHTLLM_VISUAL_REMOTE_API_KEY`` 读取；额外请求头可通过
+    ``LIGHTLLM_VISUAL_REMOTE_HEADERS`` 提供 JSON object。密钥值不会作为命令行参数接收。
+    非本机远端地址必须使用 HTTPS；仅 localhost/回环地址默认允许 HTTP。遗留可信内网如确实
+    无法启用 TLS，必须显式配置 ``--visual_allow_insecure_remote_url`` 并承担明文传输风险。
+
+    默认拒绝 ``file://`` 图片和远程图片 URL。本地文件必须同时配置
+    ``--visual_allow_local_files`` 和至少一个可重复的 ``--visual_local_file_root``；远程 URL
+    必须配置 ``--visual_allow_remote_image_urls``，并通过可重复的
+    ``--visual_remote_image_host`` 设置精确域名白名单。默认仅允许 HTTPS；只有显式配置
+    ``--visual_allow_http_image_urls`` 才允许 HTTP。远端视觉服务也必须在 DNS 解析及跳转后
+    执行相同白名单校验；否则应保持远程 URL 禁用，并使用有大小限制的栅格图片 data URL。
+
+    资源保护参数包括 ``--visual_max_images``、``--visual_max_image_bytes``、
+    ``--visual_max_total_image_bytes``、``--visual_max_choices``、
+    ``--visual_agent_timeout``、``--visual_max_inflight_requests``、
+    ``--visual_remote_timeout``、
+    ``--visual_remote_max_concurrency`` 和 ``--visual_remote_max_retries``。
+    远端客户端使用连接池、有界等待队列、响应体限长和熔断器；熔断阈值及恢复时间可通过
+    ``--visual_circuit_failure_threshold`` 和 ``--visual_circuit_recovery_seconds`` 配置。
+    ``--visual_remote_model`` 可单独指定远端视觉模型名。
+
 不同并行模式设置参数
 --------------------
 

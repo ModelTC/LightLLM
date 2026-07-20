@@ -149,6 +149,49 @@ Memory and Batch Processing Parameters
     * ``llama3``
     * ``mistral``
 
+.. option:: --visual_remote_url
+
+    Optional URL of an OpenAI-compatible multimodal service. When set, multimodal
+    ``/v1/chat/completions`` requests use the local LightLLM model as the agent and
+    expose a server-side ``vision_reader`` tool. The local model receives
+    ``<image_n/>`` tags instead of image payloads; image payloads are sent to this
+    remote service only when the agent calls ``vision_reader``. The value may be a
+    service root, a ``/v1`` base URL, or a full chat completions URL.
+
+    Production-safe defaults require ``LIGHTLLM_VISUAL_TRACE_SECRET`` to contain a
+    persistent random secret of at least 32 bytes. Internal reader traces are
+    authenticated-encrypted with this secret. During key rotation, put the old
+    secret in ``LIGHTLLM_VISUAL_TRACE_PREVIOUS_SECRET`` until outstanding tool
+    conversations have completed. Traces expire after
+    ``--visual_trace_ttl_seconds`` (one hour by default) and are bound to the
+    current model and normalized image. Upstream credentials are read from
+    ``LIGHTLLM_VISUAL_REMOTE_API_KEY``; additional headers may be supplied as a JSON
+    object in ``LIGHTLLM_VISUAL_REMOTE_HEADERS``. Secret values are never accepted
+    directly as command-line arguments.
+    Non-local upstreams must use HTTPS; only localhost and loopback addresses may
+    use HTTP by default. A trusted legacy network without TLS requires the explicit
+    ``--visual_allow_insecure_remote_url`` opt-out and accepts plaintext transport risk.
+
+    ``file://`` images and remote image URLs are denied by default. Local files
+    require ``--visual_allow_local_files`` plus one or more repeated
+    ``--visual_local_file_root`` options. Remote URLs require
+    ``--visual_allow_remote_image_urls`` and an exact hostname allowlist supplied
+    with repeated ``--visual_remote_image_host`` options. HTTPS is required unless
+    ``--visual_allow_http_image_urls`` is explicitly set. The visual upstream must
+    also enforce the same allowlist after DNS resolution and redirects; otherwise
+    keep remote URLs disabled and send bounded raster-image data URLs.
+
+    Resource controls include ``--visual_max_images``,
+    ``--visual_max_image_bytes``, ``--visual_max_total_image_bytes``,
+    ``--visual_max_choices``, ``--visual_agent_timeout``,
+    ``--visual_max_inflight_requests``, ``--visual_remote_timeout``,
+    ``--visual_remote_max_concurrency``, and
+    ``--visual_remote_max_retries``. The upstream client uses pooled connections,
+    a bounded queue, bounded response bodies, and a circuit breaker configurable
+    with ``--visual_circuit_failure_threshold`` and
+    ``--visual_circuit_recovery_seconds``. ``--visual_remote_model`` selects a
+    model name independently from the local agent model.
+
 Different Parallel Mode Setting Parameters
 -------------------------------------------
 
