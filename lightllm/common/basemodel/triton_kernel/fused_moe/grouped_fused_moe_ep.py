@@ -259,10 +259,20 @@ def fused_experts_impl(
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(hidden_states, block_size_k, dtype=w1.dtype)
         allocate_on_comm_stream = previous_event is not None
-        # Expanded dispatch directly produces expert-contiguous FP8 input and
-        # TMA-aligned scales for DeepGEMM.  DeepEP also keeps the metadata needed
-        # to reduce the expanded W2 output in combine.
-        recv_x, recv_topk_idx, recv_topk_weights, handle, _ = buffer.dispatch(
+        # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
+        #   recv_x[0]: [num_expanded_tokens, hidden]
+        #   recv_x[1]: [num_expanded_tokens, hidden // block_size_k], with a
+        #              TMA-aligned column-major physical layout
+        #   recv_topk_weights: [num_expanded_tokens]
+        # Here, num_expanded_tokens is the sum of each local expert's token count padded to expert_alignment.
+        # handle.num_recv_tokens_per_expert_list: a Python list of length num_local_experts;
+        #     each value is the expert's token count padded to expert_alignment, and
+        #     their sum is num_expanded_tokens
+        # handle.num_unaligned_recv_tokens_per_expert: [num_local_experts], the actual
+        #     token counts before alignment padding
+        # handle.recv_src_metadata: [num_recv_tokens, topk + 2]; the last topk columns
+        #     map each deduplicated receive token to rows in the expanded tensors
+        recv_x, _, recv_topk_weights, handle, _ = buffer.dispatch(
             (qinput_tensor, input_scale),
             topk_idx=topk_idx,
             topk_weights=topk_weights,
@@ -280,7 +290,6 @@ def fused_experts_impl(
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
 
-        assert recv_topk_idx is None
         gather_out = expanded_moe_chunked_reduce(
             handle.num_recv_tokens_per_expert_list,
             handle.num_unaligned_recv_tokens_per_expert,
@@ -346,14 +355,7 @@ def get_prefill_moe_workspace(
     workspace_index: int = 0,
     workspace_count: int = 1,
 ):
-    """Map prefill MoE temporaries onto the idle low-latency RDMA buffer.
-
-    Prefill uses the ElasticBuffer while decode uses the legacy low-latency
-    buffer, so their communication phases are mutually exclusive.  The model
-    clears the low-latency buffer after every prefill before decode can use it.
-    """
-
-    workspace = dist_group_manager.ep_prefill_workspace
+    workspace = dist_group_manager.prefill_moe_workspace
     assert 0 <= workspace_index < workspace_count
     workspace_size = workspace.numel() // workspace_count
     workspace = workspace.narrow(0, workspace_index * workspace_size, workspace_size)
@@ -374,12 +376,12 @@ def expanded_moe_chunked_reduce(
     workspace: torch.Tensor,
     hidden_dtype: torch.dtype,
 ):
-    """Run expanded W1/W2 in bounded chunks and reduce to dense rows."""
-    all_tokens = sum(num_recv_tokens_per_expert_list)
-    assert all_tokens == recv_x[0].shape[0]
-    intermediate_twice = w1.shape[1]
-    intermediate_size = intermediate_twice // 2
-    hidden_size = w2.shape[1]
+    """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
+    alignment = 128
+    all_tokens, intermediate_twice = recv_x[0].shape[0], w1.shape[1]
+    intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
+    assert all_tokens == sum(num_recv_tokens_per_expert_list) and all_tokens % alignment == 0
+    assert workspace.dtype == torch.uint8 and workspace.ndim == 1 and workspace.is_contiguous()
     if all_tokens == 0:
         if Autotuner.is_autotune_warmup():
             gemm_out = torch.zeros((1, intermediate_twice), device=recv_x[0].device, dtype=hidden_dtype)
@@ -388,45 +390,43 @@ def expanded_moe_chunked_reduce(
         return torch.empty((0, hidden_size), device=recv_x[0].device, dtype=hidden_dtype)
 
     m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
-    num_recv_tokens_per_expert = torch.tensor(
-        num_recv_tokens_per_expert_list, dtype=torch.int32, pin_memory=True, device="cpu"
-    ).cuda(non_blocking=True)
-    expert_start_loc = ep_fill_m_indices(num_recv_tokens_per_expert, m_indices)
+    expert_start_loc = ep_fill_m_indices(num_unaligned_recv_tokens_per_expert, m_indices)
     ep_zero_expanded_padding(
         recv_x[0],
         recv_x[1],
         recv_topk_weights,
-        num_recv_tokens_per_expert,
         num_unaligned_recv_tokens_per_expert,
         expert_start_loc,
     )
-    del num_recv_tokens_per_expert, expert_start_loc
+    del expert_start_loc
+
     gather_rows = recv_src_metadata.shape[0]
     gather_bytes = gather_rows * hidden_size * hidden_dtype.itemsize
     silu_row_bytes = intermediate_size * hidden_dtype.itemsize
     gemm_a_row_bytes = intermediate_twice * hidden_dtype.itemsize
     gemm_b_row_bytes = hidden_size * hidden_dtype.itemsize
-    quant_row_bytes = intermediate_size * w2.dtype.itemsize
-    scale_row_bytes = (intermediate_size // block_size_k) * torch.float32.itemsize
-    quant_with_scale_row_bytes = quant_row_bytes + scale_row_bytes
+    q_data_row_bytes = intermediate_size * w2.dtype.itemsize
+    scale_cols = intermediate_size // block_size_k
+    scale_row_bytes = scale_cols * torch.float32.itemsize
     # The same region is reused in three non-overlapping phases:
     #   W1:    [SwiGLU output][W1 output]
     #   quant: [SwiGLU output]...[FP8 output + TMA scales]
     #   W2:    [W2 output]......[FP8 output + TMA scales]
-    # Keeping the quantized activation at the end lets W2 overwrite the old
-    # SwiGLU/W1 storage without allocating another tensor from the CUDA heap.
+    quant_row_bytes = q_data_row_bytes + scale_row_bytes
     temp_row_bytes = max(
         silu_row_bytes + gemm_a_row_bytes,
-        silu_row_bytes + quant_with_scale_row_bytes,
-        gemm_b_row_bytes + quant_with_scale_row_bytes,
+        silu_row_bytes + quant_row_bytes,
+        gemm_b_row_bytes + quant_row_bytes,
     )
-    max_chunk_rows = ((workspace.numel() - gather_bytes) // temp_row_bytes // 128) * 128
+    max_chunk_rows = (workspace.numel() - gather_bytes) // temp_row_bytes // alignment * alignment
     if max_chunk_rows <= 0:
+        minimum_bytes = gather_bytes + alignment * temp_row_bytes
         raise RuntimeError(
-            f"DeepEP workspace cannot hold dense output: need {gather_bytes} bytes, have {workspace.numel()} bytes"
+            f"DeepEP workspace needs at least {minimum_bytes} bytes "
+            f"({gather_bytes} dense + {alignment * temp_row_bytes} temporary), have {workspace.numel()} bytes"
         )
 
-    gather_out = workspace.narrow(0, 0, gather_bytes).view(hidden_dtype).view(gather_rows, hidden_size)
+    gather_out = workspace[:gather_bytes].view(hidden_dtype).view(gather_rows, hidden_size)
     gather_out.zero_()
     temp_offset = gather_bytes
 
@@ -436,18 +436,15 @@ def expanded_moe_chunked_reduce(
         silu_bytes = chunk_rows * silu_row_bytes
         gemm_a_bytes = chunk_rows * gemm_a_row_bytes
         gemm_b_bytes = chunk_rows * gemm_b_row_bytes
-        quant_bytes = chunk_rows * quant_row_bytes
-        aligned_chunk_rows = (chunk_rows + 3) // 4 * 4
-        scale_storage_shape = (intermediate_size // block_size_k, aligned_chunk_rows)
-        scale_bytes = scale_storage_shape[0] * scale_storage_shape[1] * torch.float32.itemsize
+        q_data_bytes = chunk_rows * q_data_row_bytes
+        scale_storage_shape = (scale_cols, chunk_rows)
+        scale_bytes = chunk_rows * scale_row_bytes
         temp_bytes = chunk_rows * temp_row_bytes
-        silu_out = workspace.narrow(0, temp_offset, silu_bytes).view(hidden_dtype).view(chunk_rows, intermediate_size)
-        gemm_region_offset = temp_offset + silu_bytes
-        gemm_out_a = (
-            workspace.narrow(0, gemm_region_offset, gemm_a_bytes)
-            .view(hidden_dtype)
-            .view(chunk_rows, intermediate_twice)
+        silu_out = (
+            workspace[temp_offset : temp_offset + silu_bytes].view(hidden_dtype).view(chunk_rows, intermediate_size)
         )
+        gemm_out_a = workspace[temp_offset + silu_bytes : temp_offset + silu_bytes + gemm_a_bytes]
+        gemm_out_a = gemm_out_a.view(hidden_dtype).view(chunk_rows, intermediate_twice)
         deepgemm_grouped_fp8_nt_contiguous(
             (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
             (w1, w1_scale),
@@ -457,13 +454,11 @@ def expanded_moe_chunked_reduce(
         silu_and_mul_fwd(gemm_out_a, silu_out)
         del gemm_out_a
 
-        quant_offset = temp_offset + temp_bytes - quant_bytes - scale_bytes
-        qsilu_workspace = (
-            workspace.narrow(0, quant_offset, quant_bytes).view(w2.dtype).view(chunk_rows, intermediate_size)
-        )
-        scale_workspace = (
-            workspace.narrow(0, quant_offset + quant_bytes, scale_bytes).view(torch.float32).view(scale_storage_shape)
-        )
+        quant_offset = temp_offset + temp_bytes - q_data_bytes - scale_bytes
+        qsilu_workspace = workspace[quant_offset : quant_offset + q_data_bytes]
+        qsilu_workspace = qsilu_workspace.view(w2.dtype).view(chunk_rows, intermediate_size)
+        scale_workspace = workspace[quant_offset + q_data_bytes : quant_offset + q_data_bytes + scale_bytes]
+        scale_workspace = scale_workspace.view(torch.float32).view(scale_storage_shape)
 
         def workspace_quant_alloc(shape, dtype, device):
             if tuple(shape) == tuple(qsilu_workspace.shape) and dtype == qsilu_workspace.dtype:
@@ -480,7 +475,9 @@ def expanded_moe_chunked_reduce(
             scale_tma_aligned=True,
             alloc_func=workspace_quant_alloc,
         )
-        gemm_out_b = workspace.narrow(0, temp_offset, gemm_b_bytes).view(hidden_dtype).view(chunk_rows, hidden_size)
+        gemm_out_b = (
+            workspace[temp_offset : temp_offset + gemm_b_bytes].view(hidden_dtype).view(chunk_rows, hidden_size)
+        )
         deepgemm_grouped_fp8_nt_contiguous(
             (qsilu_out, qsilu_out_scale),
             (w2, w2_scale),
@@ -488,13 +485,7 @@ def expanded_moe_chunked_reduce(
             m_indices[chunk_start:chunk_end],
         )
         del qsilu_out, qsilu_out_scale, silu_out
-        ep_accumulate_expanded_chunk(
-            gemm_out_b,
-            chunk_start,
-            recv_topk_weights,
-            recv_src_metadata,
-            gather_out,
-        )
+        ep_accumulate_expanded_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
 
     ep_compact_expanded_metadata(recv_src_metadata)
     return gather_out
