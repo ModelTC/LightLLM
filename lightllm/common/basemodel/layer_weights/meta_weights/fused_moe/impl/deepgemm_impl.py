@@ -12,7 +12,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     get_ep_num_sms,
     masked_group_gemm,
     get_prefill_moe_workspace,
-    expanded_moe_chunked_reduce,
+    chunked_expanded_moe_forward,
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
@@ -221,7 +221,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         assert recv_topk_idx is None
-        gather_out = expanded_moe_chunked_reduce(
+        gather_out = chunked_expanded_moe_forward(
             num_recv_tokens_per_expert_list,
             num_unaligned_recv_tokens_per_expert,
             recv_x,
@@ -256,8 +256,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         handle: Any,
         overlap_event: Optional[Any] = None,
     ):
-        # The prefill kernel keeps expanded routing metadata while pointing its
-        # single valid slot at each pre-reduced dense row.
+        # normal combine
         combined_x, _, event = dist_group_manager.ep_buffer.combine(
             gemm_out_b,
             handle,
