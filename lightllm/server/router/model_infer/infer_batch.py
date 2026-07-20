@@ -23,9 +23,8 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
-from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
-from lightllm.server.router.model_infer.infer_req_ext import PromptSelectedLogprobsExt
+from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
 
 logger = init_logger(__name__)
 
@@ -123,49 +122,6 @@ class InferenceContext:
                     slave_req.related_master_req = master_req
 
         return req_objs
-
-    def _collect_prompt_logprobs(self, req: "InferReq"):
-        topk = req.sampling_param.shm_param.prompt_logprobs
-        if topk <= 0 or req.shm_req.input_len <= 1:
-            return None
-
-        mgr = PromptLogprobsCaptureManager.get_instance()
-        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][: req.shm_req.input_len - 1]
-        return mgr.extract(mem_indexes, topk)
-
-    def _collect_routed_experts(self, req: "InferReq"):
-        if not (req.shm_req.finish_status.is_finished() or req.shm_req.stop_str_matched):
-            return None
-        visible_total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
-        capture_len = min(req.cur_kv_len, visible_total_len - 1)
-        if capture_len <= 0:
-            return None
-
-        mem_indexes = self.req_manager.req_to_token_indexs[req.req_idx][0:capture_len]
-        return MoeRouteInfoManager.get_instance().extract(mem_indexes)
-
-    def _dump_final_token_metadata(self, req: "InferReq"):
-        prompt_top_token_ids = None
-        prompt_top_logprobs = None
-        routed_experts = None
-
-        req.prompt_selected_logprobs.flush()
-
-        prompt_logprobs_mgr = PromptLogprobsCaptureManager.get_instance()
-        if prompt_logprobs_mgr is not None and prompt_logprobs_mgr.is_buffer_initialized():
-            collected = self._collect_prompt_logprobs(req)
-            if collected is not None:
-                prompt_top_token_ids, prompt_top_logprobs = collected
-        mgr = MoeRouteInfoManager.get_instance()
-        if mgr is not None and mgr.is_buffer_initialized():
-            routed_experts = self._collect_routed_experts(req)
-
-        req.shm_req.get_final_token_metadata().save(
-            prompt_top_token_ids=prompt_top_token_ids,
-            prompt_top_logprobs=prompt_top_logprobs,
-            routed_experts=routed_experts,
-        )
-        return
 
     def free_a_req_mem(self, free_token_index: List, req: "InferReq"):
         if self.radix_cache is None:
@@ -324,7 +280,7 @@ class InferenceContext:
                 req.clear_master_slave_state()
 
             if should_modify_shm:
-                self._dump_final_token_metadata(req)
+                req.final_token_metadata.dump()
 
             self.free_a_req_mem(free_token_index, req)
 
@@ -648,6 +604,7 @@ class InferReq:
         self.cur_kv_len = 0
         self.cur_output_len = 0
         self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
+        self.final_token_metadata = FinalTokenMetadataExt(self)
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
