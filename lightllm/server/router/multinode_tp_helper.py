@@ -136,7 +136,13 @@ class RouterMultiNodeTpHelper:
                 if req.request_id in aborted_req_ids:
                     req.is_aborted = True
 
-        if not aborted_req_ids or self.schedule_new_batch is None:
+        if not aborted_req_ids:
+            return
+        if self.schedule_new_batch is None:
+            logger.warning(
+                f"aborted_req_ids non-empty but schedule_new_batch is None, "
+                f"skip release, aborted_ids={sorted(aborted_req_ids)}"
+            )
             return
 
         for req_id in aborted_req_ids:
