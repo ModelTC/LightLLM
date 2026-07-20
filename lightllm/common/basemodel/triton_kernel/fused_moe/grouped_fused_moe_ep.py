@@ -12,11 +12,11 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quan
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
 )
-from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_scatter_gather import (
-    ep_accumulate_expanded_chunk,
-    ep_compact_expanded_metadata,
-    ep_fill_m_indices,
-    ep_zero_expanded_padding,
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
+    ep_build_m_indices,
+    ep_compact_metadata,
+    ep_gather_chunk,
+    ep_zero_padding,
 )
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
@@ -290,7 +290,7 @@ def fused_experts_impl(
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
 
-        gather_out = expanded_moe_chunked_reduce(
+        gather_out = chunked_expanded_moe_forward(
             handle.num_recv_tokens_per_expert_list,
             handle.num_unaligned_recv_tokens_per_expert,
             recv_x,
@@ -306,8 +306,7 @@ def fused_experts_impl(
         )
         del recv_x
 
-        # W2 chunks were reduced to the deduplicated receive-token layout. Keep
-        # the expanded handle for routing, but point its slots at the dense rows.
+        # normal combine
         combined_x, _, event = buffer.combine(
             gather_out,
             handle,
@@ -362,19 +361,21 @@ def get_prefill_moe_workspace(
     return workspace
 
 
-def expanded_moe_chunked_reduce(
-    num_recv_tokens_per_expert_list: List[int],
-    num_unaligned_recv_tokens_per_expert: torch.Tensor,
-    recv_x: Tuple[torch.Tensor, torch.Tensor],
-    recv_topk_weights: torch.Tensor,
-    recv_src_metadata: torch.Tensor,
-    w1: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
+def chunked_expanded_moe_forward(
+    num_recv_tokens_per_expert_list: List[int],  # [num_local_experts], 128-aligned token counts
+    num_unaligned_recv_tokens_per_expert: torch.Tensor,  # [num_local_experts], actual token counts
+    recv_x: Tuple[
+        torch.Tensor, torch.Tensor  # [fp8, scale]
+    ],  # ([num_expanded_tokens, hidden_size], [num_expanded_tokens, hidden_size // block_size_k])
+    recv_topk_weights: torch.Tensor,  # [num_expanded_tokens]
+    recv_src_metadata: torch.Tensor,  # [num_recv_tokens, topk + 2]
+    w1: torch.Tensor,  # [num_local_experts, 2 * intermediate_size, hidden_size]
+    w1_scale: torch.Tensor,  # [num_local_experts, 2 * intermediate_size // block_size_k, hidden_size // block_size_k]
+    w2: torch.Tensor,  # [num_local_experts, hidden_size, intermediate_size]
+    w2_scale: torch.Tensor,  # [num_local_experts, hidden_size // block_size_k, intermediate_size // block_size_k]
     block_size_k: int,
-    workspace: torch.Tensor,
-    hidden_dtype: torch.dtype,
+    workspace: torch.Tensor,  # [workspace_bytes], uint8
+    hidden_dtype: torch.dtype,  # scalar dtype descriptor
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     alignment = 128
@@ -390,8 +391,8 @@ def expanded_moe_chunked_reduce(
         return torch.empty((0, hidden_size), device=recv_x[0].device, dtype=hidden_dtype)
 
     m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
-    expert_start_loc = ep_fill_m_indices(num_unaligned_recv_tokens_per_expert, m_indices)
-    ep_zero_expanded_padding(
+    expert_start_loc = ep_build_m_indices(num_unaligned_recv_tokens_per_expert, m_indices)
+    ep_zero_padding(
         recv_x[0],
         recv_x[1],
         recv_topk_weights,
@@ -485,9 +486,9 @@ def expanded_moe_chunked_reduce(
             m_indices[chunk_start:chunk_end],
         )
         del qsilu_out, qsilu_out_scale, silu_out
-        ep_accumulate_expanded_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
+        ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
 
-    ep_compact_expanded_metadata(recv_src_metadata)
+    ep_compact_metadata(recv_src_metadata)
     return gather_out
 
 
