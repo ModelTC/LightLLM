@@ -43,27 +43,44 @@ def _content_parts_to_chat(parts: List[Any]) -> List[Dict[str, Any]]:
     return chat_parts
 
 
+def _reasoning_item_text(item: Dict[str, Any]) -> str:
+    for field in ("content", "summary"):
+        parts = item.get(field)
+        if isinstance(parts, str):
+            if parts:
+                return parts
+            continue
+        if isinstance(parts, list):
+            text = "".join(
+                part if isinstance(part, str) else part.get("text", "")
+                for part in parts
+                if isinstance(part, (str, dict))
+            )
+            if text:
+                return text
+    return ""
+
+
 def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
     messages: List[Dict[str, Any]] = []
+    assistant_message: Optional[Dict[str, Any]] = None
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("input items must be objects")
         itype = item.get("type")
         if itype == "function_call":
-            messages.append(
+            if assistant_message is None:
+                assistant_message = {"role": "assistant", "content": ""}
+                messages.append(assistant_message)
+            assistant_message.setdefault("tool_calls", []).append(
                 {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": item.get("call_id") or item.get("id"),
-                            "type": "function",
-                            "function": {"name": item.get("name"), "arguments": item.get("arguments") or ""},
-                        }
-                    ],
+                    "id": item.get("call_id") or item.get("id"),
+                    "type": "function",
+                    "function": {"name": item.get("name"), "arguments": item.get("arguments") or ""},
                 }
             )
         elif itype == "function_call_output":
+            assistant_message = None
             output = item.get("output")
             if isinstance(output, list):
                 output = _content_parts_to_chat(output)
@@ -71,7 +88,12 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
                 output = json.dumps(output, ensure_ascii=False)
             messages.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": output})
         elif itype == "reasoning":
-            continue
+            reasoning_text = _reasoning_item_text(item)
+            if reasoning_text:
+                if assistant_message is None:
+                    assistant_message = {"role": "assistant", "content": ""}
+                    messages.append(assistant_message)
+                assistant_message["reasoning_content"] = assistant_message.get("reasoning_content", "") + reasoning_text
         elif itype in (None, "message"):
             role = item.get("role", "user")
             if role == "developer":
@@ -79,7 +101,11 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
             content = item.get("content")
             if isinstance(content, list):
                 content = _content_parts_to_chat(content)
-            messages.append({"role": role, "content": content})
+            if role == "assistant" and assistant_message is not None:
+                assistant_message["content"] = content if content is not None else ""
+            else:
+                messages.append({"role": role, "content": content})
+            assistant_message = None
         else:
             raise ValueError(f"Unsupported input item type: {itype}")
     return messages
@@ -135,8 +161,8 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("Only truncation='disabled' is supported")
 
     effort = (body.get("reasoning") or {}).get("effort")
-    if effort is not None and effort not in ("low", "medium", "high"):
-        raise ValueError("reasoning.effort must be one of: low, medium, high")
+    if effort is not None:
+        raise ValueError("reasoning.effort is not supported")
 
     messages: List[Dict[str, Any]] = []
     if body.get("instructions"):
@@ -186,9 +212,6 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
             chat["tool_choice"] = {"type": "function", "function": {"name": tool_choice.get("name")}}
         else:
             chat["tool_choice"] = tool_choice
-
-    if effort is not None:
-        chat["reasoning_effort"] = effort
 
     response_format = _text_format_to_response_format(body)
     if response_format:
