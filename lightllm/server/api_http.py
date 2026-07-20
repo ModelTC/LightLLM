@@ -353,6 +353,29 @@ async def anthropic_messages(raw_request: Request) -> Response:
         return Response(status_code=499)
 
 
+@app.post("/v1/responses")
+async def openai_responses(raw_request: Request) -> Response:
+    if get_env_start_args().run_mode in ["prefill", "decode"]:
+        return create_error_response(
+            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+        )
+    from .api_responses import responses_impl
+
+    try:
+        return await responses_impl(raw_request)
+    except ServerBusyError as e:
+        logger.error("%s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+    except ValueError as e:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ClientDisconnected as e:
+        logger.warning(str(e))
+        return Response(status_code=499)
+    except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+
+
 @app.get("/v1/models", response_model=ModelListResponse)
 async def get_models(raw_request: Request):
     model_name = g_objs.args.model_name
