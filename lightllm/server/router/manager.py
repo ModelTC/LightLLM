@@ -1,7 +1,6 @@
 import time
 import uvloop
 import asyncio
-import torch
 import pickle
 import inspect
 import setproctitle
@@ -38,11 +37,12 @@ from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
 from .rl_rpyc import RouterRlOpHelper, start_router_rl_rpyc_server
+from .multinode_tp_helper import RouterMultiNodeTpHelper
 
 logger = init_logger(__name__)
 
 
-class RouterManager(object, RouterRlOpHelper):
+class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     def __init__(self, args: StartArgs):
         self.args = args
         self.model_weightdir = args.model_dir
@@ -291,7 +291,11 @@ class RouterManager(object, RouterRlOpHelper):
             await self._add_batch(new_batch)
 
         self._filter_reqs_from_running_batch()
-        aborted_reqs = self._get_aborted_reqs_from_running_batch()
+        # 多机 TP：abort 阶段2（从 running_batch 提取）；阶段1 在调度 new_batch 时完成
+        if self.is_multinode_tp:
+            aborted_reqs = self.get_aborted_reqs_from_running_batch_multinode_tp()
+        else:
+            aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
         stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
@@ -350,42 +354,12 @@ class RouterManager(object, RouterRlOpHelper):
                 self.running_batch = None
         return
 
-    def _sync_abort_req_ids_from_master(self, reqs: List[Req]):
-        local_aborted_req_ids = [req.request_id for req in reqs if req.is_aborted]
-        if not self.is_multinode_tp:
-            return set(local_aborted_req_ids)
-
-        # 多节点 TP 下 abort 只以 rank 0 httpserver 看到的状态为准。
-        if not self.is_multinode_tp_master:
-            local_aborted_req_ids = []
-
-        aborted_req_num = torch.tensor([len(local_aborted_req_ids)], dtype=torch.int64, device="cpu")
-        dist.broadcast(aborted_req_num, src=0, group=self.mulitnode_group)
-        aborted_req_num = int(aborted_req_num.item())
-        if aborted_req_num == 0:
-            return set()
-
-        if self.is_multinode_tp_master:
-            aborted_req_ids = torch.tensor(local_aborted_req_ids, dtype=torch.int64, device="cpu")
-        else:
-            aborted_req_ids = torch.empty(aborted_req_num, dtype=torch.int64, device="cpu")
-        dist.broadcast(aborted_req_ids, src=0, group=self.mulitnode_group)
-        return {int(req_id) for req_id in aborted_req_ids.tolist()}
-
-    def _mark_reqs_aborted(self, reqs: List[Req], aborted_req_ids):
-        if not aborted_req_ids:
-            return
-        for req in reqs:
-            if req.request_id in aborted_req_ids:
-                req.is_aborted = True
-        return
-
     def _get_aborted_reqs_from_running_batch(self) -> List[Req]:
+        """非多机 TP：直接读本地 shm 的 is_aborted。"""
         ans = []
-        running_reqs = [] if self.running_batch is None else self.running_batch.reqs
-        aborted_req_ids = self._sync_abort_req_ids_from_master(running_reqs)
-        self._mark_reqs_aborted(running_reqs, aborted_req_ids)
-        for req in running_reqs:
+        if self.running_batch is None:
+            return ans
+        for req in self.running_batch.reqs:
             if req.is_aborted and req._router_aborted is False:
                 req._router_aborted = True
                 ans.append(req)
@@ -465,89 +439,6 @@ class RouterManager(object, RouterRlOpHelper):
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
         return
 
-    def _multinode_tp_generate_new_batch(self):
-        try:
-            dist.barrier(group=self.mulitnode_group)
-
-            # 调度的时候需要考虑当前运行的batch，和调度了但是暂时还没有推理的部分请求。
-            if self.is_multinode_tp_master:
-                new_batch = self.req_queue.generate_new_batch(
-                    Batch.merge_two_batch(self.running_batch, self.schedule_new_batch)
-                )
-                if new_batch is not None:
-                    req_ids = [req.request_id for req in new_batch.reqs]
-                else:
-                    req_ids = []
-                dist.broadcast_object_list([len(req_ids)], src=0, group=self.mulitnode_group)
-                if len(req_ids) == 0:
-                    new_batch = None
-                else:
-                    dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-                    req_id_select_mark = [1 for _ in range(len(req_ids))]
-                    req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
-                    # select_mark 仍需 MIN allreduce: slave 是否已经从 httpserver 收到 generate 请求
-                    dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-                    aborted_req_ids = self._sync_abort_req_ids_from_master(new_batch.reqs)
-                    back_req_list = []
-                    for req_id, select in zip(req_ids, req_id_select_mark.tolist()):
-                        is_aborted = req_id in aborted_req_ids
-                        if select == 1 and not is_aborted:
-                            continue
-                        req = new_batch.pop_req(req_id)
-                        if is_aborted and select == 1:
-                            req.is_aborted = True
-                            self.req_queue.release_aborted_req(req)
-                        else:
-                            back_req_list.append(req)
-                    self.req_queue.waiting_req_list = back_req_list + self.req_queue.waiting_req_list
-                    if new_batch.is_clear():
-                        new_batch = None
-            else:
-                req_nums = [None]
-                dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
-                req_num = req_nums[0]
-                if req_num == 0:
-                    new_batch = None
-                else:
-                    req_ids = [None for _ in range(req_num)]
-                    dist.broadcast_object_list(req_ids, src=0, group=self.mulitnode_group)
-                    id_to_req_obj = {req.request_id: req for req in self.req_queue.waiting_req_list}
-                    req_id_select_mark = []
-                    for req_id in req_ids:
-                        req_id_select_mark.append(1 if req_id in id_to_req_obj else 0)
-                    req_id_select_mark = torch.tensor(req_id_select_mark, dtype=torch.int32, device="cpu")
-                    dist.all_reduce(req_id_select_mark, op=dist.ReduceOp.MIN, group=self.mulitnode_group)
-                    aborted_req_ids = self._sync_abort_req_ids_from_master([])
-                    select_reqs = []
-                    aborted_reqs = []
-                    for req_id, select in zip(req_ids, req_id_select_mark.tolist()):
-                        if select == 1:
-                            req = id_to_req_obj[req_id]
-                            if req_id in aborted_req_ids:
-                                req.is_aborted = True
-                                aborted_reqs.append(req)
-                                continue
-                            select_reqs.append(req)
-                    handled_req_ids = {req.request_id for req in select_reqs + aborted_reqs}
-                    if handled_req_ids:
-                        self.req_queue.waiting_req_list = [
-                            req for req in self.req_queue.waiting_req_list if req.request_id not in handled_req_ids
-                        ]
-                    for req in aborted_reqs:
-                        self.req_queue.release_aborted_req(req)
-                    if select_reqs:
-                        new_batch = Batch(-1, reqs=select_reqs, dp_size_in_node=self.dp_size_in_node)
-                    else:
-                        new_batch = None
-
-            self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
-
-            dist.barrier(group=self.mulitnode_group)
-        except Exception as e:
-            logger.exception(str(e))
-            raise e
-        return
-
     async def _recv_new_reqs_and_schedule(self):
         if not hasattr(self, "recv_max_count"):
             self.recv_max_count = 64
@@ -571,7 +462,7 @@ class RouterManager(object, RouterRlOpHelper):
         await self.process_rl_ops()
 
         if self.is_multinode_tp:
-            self._multinode_tp_generate_new_batch()
+            self.multinode_tp_generate_new_batch()
         else:
             if self._get_paused_req_num() == 0:
                 self._generate_new_batch()
