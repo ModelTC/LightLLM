@@ -29,10 +29,6 @@ from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.server.io_struct import (
-    RlOpReq,
-    RlOpRsp,
-)
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
@@ -41,12 +37,12 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
-from .rl_rpyc import RouterRlOpQueue, start_router_rl_rpyc_server
+from .rl_rpyc import RouterRlOpHelper, start_router_rl_rpyc_server
 
 logger = init_logger(__name__)
 
 
-class RouterManager:
+class RouterManager(object, RouterRlOpHelper):
     def __init__(self, args: StartArgs):
         self.args = args
         self.model_weightdir = args.model_dir
@@ -111,9 +107,6 @@ class RouterManager:
             else CpuKvCacheClient(only_create_meta_data=True, init_shm_data=False)
         )
         self.router_statics = RouterStatics(self.args)
-
-        # RL 管理 rpyc 队列:rpyc 线程把请求放进来,asyncio 主循环每个 step 取出处理
-        self.rl_op_queue = RouterRlOpQueue()
         self.profiler_cmd_queue = RouterProfilerCmdQueue()
 
         return
@@ -575,7 +568,7 @@ class RouterManager:
             # 当队列已经开始清空的时候，将一次接受的数量下调
             self.recv_max_count = 64
 
-        await self._process_rl_ops()
+        await self.process_rl_ops()
 
         if self.is_multinode_tp:
             self._multinode_tp_generate_new_batch()
@@ -583,64 +576,6 @@ class RouterManager:
             if self._get_paused_req_num() == 0:
                 self._generate_new_batch()
         return
-
-    async def _process_rl_ops(self):
-        # master: 从 RL rpyc 队列里取出 (req, future) — slave 的队列恒为空(无 rpyc service)
-        pairs = self.rl_op_queue.pop_all()
-
-        reqs: List[RlOpReq] = [req for req, _ in pairs]
-
-        # 多机 TP:master 通过 NCCL 广播 req 到 slave router;slave 在自己的主循环里到达此处时,会从 broadcast 收到 master 的 reqs
-        if self.is_multinode_tp:
-            reqs = self.broadcast_rl_ops_to_other_nodes(reqs)
-
-        for i, req in enumerate(reqs):
-            assert isinstance(req, RlOpReq), "rl op request must be RlOpReq"
-            try:
-                ret = await self.rl_op(req)
-            except BaseException as e:
-                logger.exception(f"rl_op failed for {req.op_name}: {e}")
-                ret = RlOpRsp(success=False, msg=f"rl_op error: {e}", op_name=req.op_name)
-            # 只有 master 持有 future,slave 的 pairs 始终为空
-            if i < len(pairs):
-                _, fut = pairs[i]
-                if not fut.done():
-                    fut.set_result(ret)
-
-    def broadcast_rl_ops_to_other_nodes(self, reqs: List[RlOpReq]):
-        req_num = len(reqs)
-        if self.node_rank == 0:
-            req_nums = [len(reqs)]
-            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
-            req_num = req_nums[0]
-            if req_num > 0:
-                dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
-        else:
-            req_nums = [None]
-            dist.broadcast_object_list(req_nums, src=0, group=self.mulitnode_group)
-            req_num = req_nums[0]
-            if req_num > 0:
-                reqs = [None for _ in range(req_num)]
-                dist.broadcast_object_list(reqs, src=0, group=self.mulitnode_group)
-        return reqs
-
-    async def rl_op(self, req: RlOpReq) -> RlOpRsp:
-        rl_op_tasks = []
-        for model_rpc_client in self.model_rpc_clients:
-            rl_op_tasks.append(model_rpc_client.rl_op(req))
-        all_ret = await asyncio.gather(*rl_op_tasks)
-        ret: RlOpRsp = next((res for res in all_ret if not res.success), all_ret[0])
-        ret.success = all(res.success for res in all_ret)
-        if self.is_multinode_tp:
-            output_list = [None for _ in range(self.nnodes)] if self.node_rank == 0 else None
-            dist.gather_object(ret, output_list, dst=0, group=self.mulitnode_group)
-            if self.node_rank == 0:
-                for res in output_list:
-                    res: RlOpRsp
-                    if not res.success:
-                        ret = res
-                        break
-        return ret
 
     def clean_up(self):
         return
@@ -667,10 +602,7 @@ def start_router_process(args, pipe_writer):
             args,
             router.profiler_cmd_queue,
         )
-        router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(
-            args,
-            router.rl_op_queue,
-        )
+        router.rl_rpyc_server, router.rl_rpyc_thread = start_router_rl_rpyc_server(args, router)
     except:
         import traceback
         import sys
