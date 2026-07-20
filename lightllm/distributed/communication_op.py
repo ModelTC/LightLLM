@@ -109,7 +109,7 @@ class DistributeGroupManager:
         self.groups = []
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
-        self.ep_prefill_workspace = None
+        self.prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
@@ -146,7 +146,7 @@ class DistributeGroupManager:
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
-            self.ep_prefill_workspace = None
+            self.prefill_moe_workspace = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             return
@@ -177,7 +177,8 @@ class DistributeGroupManager:
             low_latency_mode=True,
             num_qps_per_rank=(self.ll_num_experts // global_world_size),
         )
-        self.ep_prefill_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
+        # 当前rank的low-latency RDMA通信空间在prefill阶段处于空闲状态，将其复用为prefill MoE计算的临时工作区，降低峰值显存占用。
+        self.prefill_moe_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
             torch.uint8, use_rdma_buffer=True
         )
         if is_sm100_gpu():
@@ -215,7 +216,8 @@ class DistributeGroupManager:
 
     def clear_deepep_buffer(self):
         """
-        Prefill after using ElasticBuffer may leave the legacy low-latency buffer dirty for decode.
+        Prefill MoE compute reuses the low-latency RDMA buffer as workspace.
+        Clean it before the buffer is used by low-latency decode kernels.
         """
         if self.ep_low_latency_buffer is not None:
             self.ep_low_latency_buffer.clean_low_latency_buffer(

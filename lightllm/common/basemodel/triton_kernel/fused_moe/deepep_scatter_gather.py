@@ -14,16 +14,19 @@ def _fwd_kernel_ep_scatter_1(
     num_experts: tl.constexpr,
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
+    ALIGN_COUNTS: tl.constexpr,
 ):
     cur_expert = tl.program_id(0)
 
     offset_cumsum = tl.arange(0, BLOCK_EXPERT_NUM)
     tokens_per_expert = tl.load(num_recv_tokens_per_expert + offset_cumsum, mask=offset_cumsum < num_experts, other=0)
-    cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
-    tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
-
-    cur_expert_start = tl.load(expert_start_loc + cur_expert)
+    if ALIGN_COUNTS:
+        tokens_per_expert = (tokens_per_expert + BLOCK_E - 1) // BLOCK_E * BLOCK_E
+    cur_expert_start = tl.sum(tl.where(offset_cumsum < cur_expert, tokens_per_expert, 0))
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
+    if ALIGN_COUNTS:
+        cur_expert_token_num = (cur_expert_token_num + BLOCK_E - 1) // BLOCK_E * BLOCK_E
+    tl.store(expert_start_loc + cur_expert, cur_expert_start)
 
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E)
@@ -117,6 +120,7 @@ def ep_scatter(
         num_warps=num_warps,
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        ALIGN_COUNTS=False,
     )
 
     grid = min(recv_topk.shape[0], 1024 * 8)
@@ -154,23 +158,24 @@ def ep_scatter(
 
 @torch.no_grad()
 def ep_fill_m_indices(
-    num_recv_tokens_per_expert: torch.Tensor,
+    num_unaligned_recv_tokens_per_expert: torch.Tensor,
     m_indices: torch.Tensor,
 ):
-    """Build DeepGEMM's contiguous expert index vector without scattering data."""
+    """Build aligned expert offsets and DeepGEMM's expert index vector."""
     block_e = 128
-    num_experts = num_recv_tokens_per_expert.shape[0]
+    num_experts = num_unaligned_recv_tokens_per_expert.shape[0]
     assert m_indices.shape[0] % block_e == 0
 
-    expert_start_loc = torch.empty_like(num_recv_tokens_per_expert)
+    expert_start_loc = torch.empty_like(num_unaligned_recv_tokens_per_expert)
     _fwd_kernel_ep_scatter_1[(num_experts,)](
-        num_recv_tokens_per_expert,
+        num_unaligned_recv_tokens_per_expert,
         expert_start_loc,
         m_indices,
         num_experts=num_experts,
         num_warps=8,
         BLOCK_E=block_e,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        ALIGN_COUNTS=True,
     )
     return expert_start_loc
 
@@ -184,7 +189,6 @@ def _zero_expanded_padding_kernel(
     recv_x_scale_stride_m,
     recv_x_scale_stride_k,
     recv_topk_weights,
-    num_recv_tokens_per_expert,
     num_unaligned_recv_tokens_per_expert,
     expert_start_loc,
     hidden_size: tl.constexpr,
@@ -197,8 +201,8 @@ def _zero_expanded_padding_kernel(
     pad_block_id = tl.program_id(1)
     hidden_block_id = tl.program_id(2)
     expert_start = tl.load(expert_start_loc + expert_id)
-    aligned_count = tl.load(num_recv_tokens_per_expert + expert_id)
     actual_count = tl.load(num_unaligned_recv_tokens_per_expert + expert_id)
+    aligned_count = (actual_count + 127) // 128 * 128
     pad_offsets = pad_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
     row_offsets = (expert_start + actual_count + pad_offsets).to(tl.int64)
     row_mask = pad_offsets < aligned_count - actual_count
@@ -220,7 +224,6 @@ def ep_zero_expanded_padding(
     recv_x: torch.Tensor,
     recv_x_scale: torch.Tensor,
     recv_topk_weights: torch.Tensor,
-    num_recv_tokens_per_expert: torch.Tensor,
     num_unaligned_recv_tokens_per_expert: torch.Tensor,
     expert_start_loc: torch.Tensor,
 ):
@@ -228,7 +231,7 @@ def ep_zero_expanded_padding(
     block_k = 256
     scale_hidden_size = recv_x_scale.shape[1]
     grid = (
-        num_recv_tokens_per_expert.shape[0],
+        num_unaligned_recv_tokens_per_expert.shape[0],
         triton.cdiv(127, block_m),
         triton.cdiv(recv_x.shape[1], block_k),
     )
@@ -240,7 +243,6 @@ def ep_zero_expanded_padding(
         recv_x_scale.stride(0),
         recv_x_scale.stride(1),
         recv_topk_weights,
-        num_recv_tokens_per_expert,
         num_unaligned_recv_tokens_per_expert,
         expert_start_loc,
         hidden_size=recv_x.shape[1],
