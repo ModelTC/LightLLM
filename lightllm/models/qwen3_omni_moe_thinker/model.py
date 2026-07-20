@@ -101,7 +101,6 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
-                    multimodal_params.images[image_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
@@ -143,6 +142,12 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
             if audio_cnt != audio_id:
                 raise ValueError(audio_cnt == audio_id, f"invalid audio tag num: {audio_cnt} vs {audio_id}!")
         input_ids.extend(origin_ids)
+
+        if multimodal_params:
+            image_search_start = 0
+            for image in multimodal_params.images:
+                image.start_idx = input_ids.index(image.token_id, image_search_start)
+                image_search_start = image.start_idx + image.token_num
 
         return input_ids
 
