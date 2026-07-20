@@ -392,9 +392,7 @@ class InferenceContext:
                     or can_alloc_dsv4_c4_page_num is not None
                     or can_alloc_dsv4_c128_slot_num is not None
                 ):
-                    swa_page_num, c4_page_num, c128_slot_num = req.get_dsv4_prefill_need_page_and_slot_num(
-                        is_chuncked_prefill=False
-                    )
+                    swa_page_num, c4_page_num, c128_slot_num = req.get_dsv4_recover_need_page_and_slot_num()
                     if can_alloc_dsv4_swa_page_num is not None and swa_page_num > can_alloc_dsv4_swa_page_num:
                         break
                     if can_alloc_dsv4_c4_page_num is not None and c4_page_num > can_alloc_dsv4_c4_page_num:
@@ -1016,6 +1014,23 @@ class InferReq:
             c4_page_num = (last - 1) // self.dsv4_c4_page_size - first // self.dsv4_c4_page_size + 1
 
         c128_slot_num = max(0, end // 128 - start // 128) if self.dsv4_has_c128 else 0
+        return swa_page_num, c4_page_num, c128_slot_num
+
+    def get_dsv4_recover_need_page_and_slot_num(self) -> Tuple[int, int, int]:
+        swa_page_num, c4_page_num, c128_slot_num = self.get_dsv4_prefill_need_page_and_slot_num(
+            is_chuncked_prefill=False
+        )
+        if swa_page_num == 0 or self.args.disable_chunked_prefill:
+            return swa_page_num, c4_page_num, c128_slot_num
+
+        # C4/C128 accumulate across recovery chunks; only SWA is evicted chunk by chunk.
+        req_manager: DeepseekV4ReqManager = g_infer_context.req_manager
+        prompt_cache_page_size = req_manager.get_prompt_cache_page_size()
+        peak_token_num = min(
+            self.get_cur_total_len(),
+            self.args.chunked_prefill_size + int(req_manager.sliding_window) + 2 * prompt_cache_page_size,
+        )
+        swa_page_num = (peak_token_num + self.dsv4_swa_page_size - 1) // self.dsv4_swa_page_size
         return swa_page_num, c4_page_num, c128_slot_num
 
     def get_dsv4_decode_need_page_and_slot_num(self) -> Tuple[int, int, int]:
