@@ -309,11 +309,11 @@ class InferenceContext:
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
 
     @torch.no_grad()
-    def _filter(self, finished_request_ids: List[int], is_owner_dp: bool = True):
+    def _filter(self, finished_request_ids: List[int], modify_shm_finish_state: bool = True):
         if len(finished_request_ids) == 0:
             return
 
-        owns_shared_req = is_owner_dp and self.backend.is_master_in_dp
+        should_modify_shm = modify_shm_finish_state and self.backend.is_master_in_dp
 
         free_req_index = []
         free_token_index = []
@@ -321,13 +321,15 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
-            if owns_shared_req:
+
+            if should_modify_shm:
                 self._dump_final_token_metadata(req)
+
             self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
-            if owns_shared_req:
+            if should_modify_shm:
                 req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 

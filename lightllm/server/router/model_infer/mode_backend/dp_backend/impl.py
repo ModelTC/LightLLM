@@ -78,9 +78,13 @@ class DPChunkedPrefillBackend(ModeBackend):
         trans_taskes = self.dp_kv_shared_module.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
         self.dp_kv_shared_module.kv_trans(trans_tasks=trans_taskes)
 
+        # other_dp_reqs 只是为本 DP 做完 prefix cache / KV 拉取后的临时本地对象，
+        # 真正推理仍在其归属 DP 上进行。这里仅清理本 DP 的 InferReq 与 KV 引用，
+        # 不能写 shm_infer_released / final token metadata，否则会误把归属 DP
+        # 上尚未结束的请求标记为已完成。所以设置 modify_shm_finish_state 为 False。
         g_infer_context._filter(
             finished_request_ids=[req[0] for req in other_dp_reqs],
-            is_owner_dp=False,
+            modify_shm_finish_state=False,
         )
 
         req_ids = [e[0] for e in current_dp_reqs]
