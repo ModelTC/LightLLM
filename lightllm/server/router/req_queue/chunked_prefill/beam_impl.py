@@ -1,11 +1,7 @@
 import uuid
-import time
 from typing import List
 from ...batch import Batch, Req
 from lightllm.server.router.req_queue.base_queue import BaseQueue
-from lightllm.utils.log_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 class ChunkedBeamContinuesBatchQueue(BaseQueue):
@@ -66,22 +62,6 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         else:
             return False, new_batch_first_router_need_tokens
 
-    def _filter_aborted_reqs(self):
-        # 先移除在等待队列中已经处于aborted状态的请求, 如果发现存在aborted的请求，
-        # 则休眠10ms，保证httpserver将所有属于一组的请求都置为aborted请求，再将
-        # 请求从队列中移除。
-        exist_aborted_req = len([req for req in self.waiting_req_list if req.is_aborted]) > 0
-        if exist_aborted_req:
-            time.sleep(0.01)
-            aborted_reqs = [req for req in self.waiting_req_list if req.is_aborted]
-            self.waiting_req_list = [req for req in self.waiting_req_list if not req.is_aborted]
-            for req in aborted_reqs:
-                req: Req = req
-                logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
-                self.free_aborted_req_cpu_cache_pages(req)
-                self.router.shm_req_manager.put_back_req_obj(req)
-        return
-
     # @calculate_time(show=True, min_cost_ms=10)
     def generate_new_batch(self, current_batch: Batch):
         if len(self.waiting_req_list) == 0:
@@ -93,7 +73,7 @@ class ChunkedBeamContinuesBatchQueue(BaseQueue):
         if req_is_full:
             return None
 
-        self._filter_aborted_reqs()
+        self.filter_aborted_reqs()
         if len(self.waiting_req_list) == 0:
             return None
 

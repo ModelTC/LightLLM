@@ -61,6 +61,10 @@ class ChunkedPrefillQueue(BaseQueue):
         if req_is_full:
             return None
 
+        self.filter_aborted_reqs()
+        if len(self.waiting_req_list) == 0:
+            return None
+
         is_busy = self.is_busy()
 
         new_batch_first_router_need_tokens = (
@@ -69,16 +73,11 @@ class ChunkedPrefillQueue(BaseQueue):
 
         self._init_cache_list(current_batch, is_busy)
         can_run_list = []
-        abort_req_list = []
         consumed_req_count = 0
 
         waiting_queue = self.waiting_req_list
 
         for req in waiting_queue:
-            if self.should_release_aborted_req_in_queue(req):
-                consumed_req_count += 1
-                abort_req_list.append(req)
-                continue
             ok_insert, new_batch_first_router_need_tokens = self._can_add_new_req(
                 req, is_busy, new_batch_first_router_need_tokens
             )
@@ -90,8 +89,6 @@ class ChunkedPrefillQueue(BaseQueue):
         new_batch = None
         if len(can_run_list) != 0:
             new_batch = Batch(uuid.uuid4().int, can_run_list, dp_size_in_node=self.dp_size_in_node)
-        for req in abort_req_list:
-            self.release_aborted_req(req)
         self.waiting_req_list = self.waiting_req_list[consumed_req_count:]
         return new_batch
 
