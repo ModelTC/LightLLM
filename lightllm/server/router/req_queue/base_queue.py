@@ -49,7 +49,9 @@ class BaseQueue:
         req.link_logprobs_shm_array()
         req.finish_token_index = input_len
         req.shm_prompt_ids.arr[input_len] = self.args.eos_id[0]
-        req.shm_logprobs.arr[input_len] = (0.0, -1)
+        # shm_logprobs 为 structured array: [("logprob", f32), ("rank", i32)]
+        req.shm_logprobs.arr["logprob"][input_len] = 0.0
+        req.shm_logprobs.arr["rank"][input_len] = -1
         req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
 
         # 所有数据准备完后再通知 detokenizer
