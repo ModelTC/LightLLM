@@ -5,7 +5,8 @@
 ``req.<ext>`` 访问。
 
 当前包含：
-- :class:`PromptSelectedLogprobsExt`：``prompt_logprobs=0`` 路径的异步落盘缓冲
+- :class:`PromptSelectedLogprobsExt`：prompt logprobs 相关辅助
+  （``topk=0`` 异步落盘 + ``topk>0`` mem slot 拷贝）
 - :class:`FinalTokenMetadataExt`：请求结束时汇总并写出 final token metadata
 """
 
@@ -22,35 +23,31 @@ if TYPE_CHECKING:
 
 
 class PromptSelectedLogprobsExt:
-    """``prompt_logprobs=0`` 时，真实命中 prompt token 的 logprob/rank 异步缓冲。
+    """InferReq 上的 prompt logprobs 辅助对象。
 
-    背景
-    ----
-    ``prompt_logprobs`` 有两条互斥路径：
+    覆盖两条路径中与本请求强绑定的操作：
 
-    - ``topk > 0``：走 :class:`PromptLogprobsCaptureManager`，按 KV mem slot
-      写入 pinned buffer，请求结束时由 :class:`FinalTokenMetadataExt` extract。
-    - ``topk == 0``：返回真实命中的 prompt token 的 logprob 与全词表 rank，
-      HTTP 侧从 ``shm_logprobs`` 读取。本类服务后者。
+    - ``topk == 0``：:meth:`add_chunk` / :meth:`flush` —— 热路径异步 D2H，
+      结束时写入 ``shm_logprobs``（HTTP 直接读）。
+    - mem 重映射：:meth:`copy_capture_slots_if_needed` —— radix / linear
+      att 匹配把 KV 拷到新 mem slot 时，同步拷贝 CaptureManager 中已有的
+      top-k 数据，保证后续请求复用 radix 时元数据仍完整。
 
-    为何需要缓冲而不是 prefill 当场写 shm
-    ------------------------------------
-    prefill（含 chunked prefill）热路径上，logprob/rank 刚在 GPU 上算完。
-    若立刻 ``.cpu()`` / synchronize 再写 shm，会打断 overlap、拖慢调度。
-    因此这里只发起 **非阻塞 D2H**，把结果挂到 chunk 列表；真正需要交给
-    HTTP 进程前（``FinalTokenMetadataExt.dump`` → ``flush``）再
-    ``event.synchronize()`` 并写入 ``shm_logprobs``。
+    为何 ``topk==0`` 需要缓冲而不是 prefill 当场写 shm
+    -----------------------------------------------
+    prefill（含 chunked prefill）热路径上立刻 ``.cpu()`` / synchronize 会
+    打断 overlap。因此只做非阻塞 D2H；``FinalTokenMetadataExt.dump`` →
+    ``flush`` 时再 sync 写 shm。
 
-    chunk 语义
-    ----------
-    chunked prefill 会多次调用 :meth:`add_chunk`，每次对应一段
-    ``[target_start, target_end)`` 的 prompt 位置。flush 时按段写回 shm。
+    chunk 语义（``topk==0``）
+    ------------------------
+    chunked prefill 多次 :meth:`add_chunk`，每段对应
+    ``[target_start, target_end)``；flush 时按段写回。
 
     生命周期
     --------
-    InferReq 初始化时创建本对象；请求结束 dump metadata 时 flush；
-    之后 chunks 清空。必须在 ``shm_infer_released=True`` 之前完成 flush，
-    否则 HTTP recycle 可能读到未写完的 shm_logprobs。
+    InferReq 初始化时创建；dump metadata 前 flush；必须在
+    ``shm_infer_released=True`` 之前完成，避免 HTTP 读到未写完数据。
     """
 
     # (target_start, target_end, logprobs_cpu, ranks_cpu, copy_done_event)
@@ -100,6 +97,33 @@ class PromptSelectedLogprobsExt:
             shm_logprobs.arr["rank"][target_start:target_end] = ranks_cpu.numpy()
 
         self._chunks.clear()
+
+    def copy_capture_slots_if_needed(
+        self,
+        source_indexes: torch.Tensor,
+        destination_indexes: torch.Tensor,
+    ) -> None:
+        """KV mem slot 重映射时，拷贝 CaptureManager 中的 prompt top-k 数据。
+
+        场景：linear att radix 小页命中后，尾部 KV 从共享小页 mem 拷到新申请的
+        ``tail_mems``。top-k prompt logprobs 按 mem slot 索引存放，必须随 KV
+        一并拷到新 slot。
+
+        不能按「当前请求的 prompt_logprobs」决定是否拷贝：source slot 上的
+        数据可能来自更早的 ``topk>0`` 请求；destination 之后还可能插回
+        radix cache，被后续 ``topk>0`` 请求复用。若此处因当前 ``topk<=0``
+        跳过拷贝，后续复用方会 extract 到空/错误数据。只要 capture buffer
+        已初始化，就按 ``max_topk`` 全宽拷贝以保留可复用元数据。
+        """
+        mgr = PromptLogprobsCaptureManager.get_instance()
+        if mgr is None or not mgr.is_buffer_initialized():
+            return
+
+        mgr.copy_slots(
+            source_indexes=source_indexes,
+            destination_indexes=destination_indexes,
+            topk=mgr.max_topk,
+        )
 
 
 class FinalTokenMetadataExt:

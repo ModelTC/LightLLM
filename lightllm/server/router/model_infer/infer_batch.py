@@ -23,7 +23,6 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
-from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
 
 logger = init_logger(__name__)
@@ -723,18 +722,11 @@ class InferReq:
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
                                 value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
                             )
-                            prompt_logprobs_mgr = PromptLogprobsCaptureManager.get_instance()
-                            prompt_topk = self.sampling_param.shm_param.prompt_logprobs
-                            if (
-                                prompt_logprobs_mgr is not None
-                                and prompt_logprobs_mgr.is_buffer_initialized()
-                                and prompt_topk > 0
-                            ):
-                                prompt_logprobs_mgr.copy_slots(
-                                    source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
-                                    destination_indexes=tail_mems,
-                                    topk=prompt_topk,
-                                )
+                            # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
+                            self.prompt_selected_logprobs.copy_capture_slots_if_needed(
+                                source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
+                                destination_indexes=tail_mems,
+                            )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
                             g_infer_context.req_manager.copy_small_page_buffer_to_linear_att_state(
