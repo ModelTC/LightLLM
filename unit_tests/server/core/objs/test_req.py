@@ -74,6 +74,12 @@ def test_token_healing_req_post_init():
 def test_finish_status(req):
     req.finish_status.set_status(req.finish_status.FINISHED_STOP)
     assert req.finish_status.is_finished()
+    assert req.finish_status.get_finish_reason() == "stop"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_ERROR)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_finished_error()
+    assert req.finish_status.get_finish_reason() == "error"
 
 
 if __name__ == "__main__":

@@ -165,6 +165,10 @@ class FinalTokenMetadataExt:
         if topk <= 0 or req.shm_req.input_len <= 1:
             return None
 
+        # prefill 未跑完（含中途 abort）：不满 input_len-1，不导出 logprobs
+        if req.cur_kv_len < req.shm_req.input_len:
+            return None
+
         mgr = PromptLogprobsCaptureManager.get_instance()
         mem_indexes = self._mem_indexes()[: req.shm_req.input_len - 1]
         return mgr.extract(mem_indexes, topk)
