@@ -293,6 +293,10 @@ Multimodal Parameters
 
     If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
 
+.. option:: --disable_image_resize
+
+    Disable automatic resize for images exceeding ``--max_image_pixels``. Resize is enabled by default.
+
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``

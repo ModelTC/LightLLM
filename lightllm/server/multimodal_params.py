@@ -135,7 +135,7 @@ class ImageItem:
 
         start_args = get_env_start_args()
         max_image_pixels = start_args.max_image_pixels
-        enable_image_resize = start_args.enable_image_resize
+        disable_image_resize = start_args.disable_image_resize
 
         try:
             if self._type == "url":
@@ -149,15 +149,15 @@ class ImageItem:
                 # 的 token 计数判断, 所以只需要图片长宽信息，不需要具体图片的内容信息
                 src_w = self._data[0]
                 src_h = self._data[1]
-                if enable_image_resize:
+                if disable_image_resize:
+                    self.image_w, self.image_h = src_w, src_h
+                else:
                     self.image_w, self.image_h = _resize_image_dimensions_if_needed(src_w, src_h, max_image_pixels)
                     if (self.image_w, self.image_h) != (src_w, src_h):
                         logger.warning(
                             f"image_size pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels}, "
                             f"resized to {self.image_w}x{self.image_h}"
                         )
-                else:
-                    self.image_w, self.image_h = src_w, src_h
                 return
             else:
                 raise ValueError(f"cannot read image which type is {self._type}!")
@@ -168,8 +168,10 @@ class ImageItem:
             loop = asyncio.get_running_loop()
             # 1) Verify original input bytes first.
             src_w, src_h = await loop.run_in_executor(_IMAGE_VERIFY_POOL, _verify_image_bytes, img_data)
-            # 2) Resize after verification only when --enable_image_resize is set.
-            if enable_image_resize:
+            # 2) Resize after verification unless --disable_image_resize is set.
+            if disable_image_resize:
+                self.image_w, self.image_h = src_w, src_h
+            else:
                 img_data, resized_w, resized_h = await loop.run_in_executor(
                     _IMAGE_VERIFY_POOL,
                     _resize_image_bytes_if_needed,
@@ -184,8 +186,6 @@ class ImageItem:
                         f"image pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels},"
                         f" resized to {self.image_w}x{self.image_h}"
                     )
-            else:
-                self.image_w, self.image_h = src_w, src_h
 
             self._preload_data = img_data
             return

@@ -294,6 +294,10 @@ PD 分离模式参数
 
     当输入图片超过该阈值时，LightLLM 会先自动将其缩放到该像素预算内，再继续后续流程。
 
+.. option:: --disable_image_resize
+
+    禁用对超过 ``--max_image_pixels`` 的图片的自动缩放。默认开启自动缩放。
+
 .. option:: --visual_infer_batch_size
 
     每次推理批次中处理的图像数量，默认为 ``1``

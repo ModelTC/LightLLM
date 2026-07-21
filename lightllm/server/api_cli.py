@@ -448,12 +448,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--max_image_pixels",
         type=int,
         default=3686400,  # 8294400 is 4k, 3686400 is 2k
-        help="maximum allowed pixel count for one image when --enable_image_resize is set",
+        help="maximum allowed pixel count for one image before resize preprocessing",
     )
     parser.add_argument(
-        "--enable_image_resize",
+        "--disable_image_resize",
         action="store_true",
-        help="automatically resize images exceeding --max_image_pixels (disabled by default)",
+        help="disable automatic resize for images exceeding --max_image_pixels (enabled by default)",
     )
     parser.add_argument(
         "--embed_cache_storage_size",
