@@ -1,6 +1,8 @@
 from setuptools import setup, find_packages
 
-package_data = {"lightllm": ["common/all_kernel_configs/*/*.json", "common/triton_utils/*/*/*/*/*.json"]}
+package_data = {
+    "lightllm": ["common/all_kernel_configs/*/*.json", "common/triton_utils/*/*/*/*/*.json", "server/templates/*.jinja"]
+}
 setup(
     name="lightllm",
     version="1.1.0",

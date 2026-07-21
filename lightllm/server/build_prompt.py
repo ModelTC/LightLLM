@@ -22,6 +22,7 @@ def init_tokenizer(args):
             tokenizer.tokenizer.chat_template = chat_template_str
         else:
             tokenizer.chat_template = chat_template_str
+        logger.info("Chat template source: explicit --chat_template file %s", chat_path)
         return
 
     # 如果 tokenizer 目录下存在chat_template.json， 同时不存在 chat_template.jinja,
@@ -41,9 +42,24 @@ def init_tokenizer(args):
                     else:
                         tokenizer.chat_template = template_data["chat_template"]
 
-                    logger.info(f"Loaded chat_template.json from {default_chat_template_path}")
+                    logger.info("Chat template source: legacy model file %s", default_chat_template_path)
+                    return
         except Exception as e:
             logger.warning(f"Failed to load chat_template.json from {default_chat_template_path}: {e}")
+
+    jinja_path = os.path.join(args.model_dir, "chat_template.jinja")
+    if os.path.exists(jinja_path):
+        logger.info("Chat template source: model file %s loaded by the tokenizer", jinja_path)
+    else:
+        wrapped_tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+        if getattr(wrapped_tokenizer, "chat_template", None):
+            logger.info("Chat template source: tokenizer metadata under %s", args.model_dir)
+        else:
+            logger.warning(
+                "No chat template found in --chat_template, chat_template.jinja, "
+                "chat_template.json, or tokenizer metadata under %s",
+                args.model_dir,
+            )
     return
 
 

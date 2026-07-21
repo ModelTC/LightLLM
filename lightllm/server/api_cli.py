@@ -105,16 +105,28 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Enable the OpenAI chat visual proxy for multimodal requests and send builtin "
-            "vision_reader calls to this remote OpenAI-compatible service. The value may be "
-            "a service root, a /v1 base URL, or a full /v1/chat/completions URL."
+            "Enable the visual proxy for multimodal chat requests. By default, builtin vision_reader calls "
+            "use the remote OpenAI /v1/chat/completions API. Nova accuracy compatibility uses the LightLLM "
+            "/generate API instead. The value may be a service root or the corresponding full endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--visual_nova_accuracy_compat",
+        action="store_true",
+        help=(
+            "Use the bundled nova_vision_demo prompt contract for accuracy A/B tests. "
+            "This switches the visual upstream to LightLLM /generate, uses Nova's exact "
+            "vision-reader prompt and decoding defaults, and disables prompt-changing safety annotations."
         ),
     )
     parser.add_argument(
         "--visual_remote_model",
         type=str,
         default=None,
-        help="Model name sent to the visual upstream. Defaults to the incoming main-model name.",
+        help=(
+            "Model name sent to the visual upstream. Defaults to the incoming main-model name. "
+            "This does not select a chat template; the upstream service uses its own startup configuration."
+        ),
     )
     parser.add_argument(
         "--visual_remote_api_key_env",
@@ -136,18 +148,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
             "credentials would cross the network without transport encryption."
         ),
     )
-    parser.add_argument(
-        "--visual_trace_secret_env",
-        type=str,
-        default="LIGHTLLM_VISUAL_TRACE_SECRET",
-        help="Environment variable containing the required 32+ byte visual trace encryption secret.",
-    )
-    parser.add_argument(
-        "--visual_trace_previous_secret_env",
-        type=str,
-        default="LIGHTLLM_VISUAL_TRACE_PREVIOUS_SECRET",
-        help="Optional environment variable containing the previous trace secret during key rotation.",
-    )
     parser.add_argument("--visual_remote_timeout", type=float, default=90.0)
     parser.add_argument("--visual_remote_connect_timeout", type=float, default=5.0)
     parser.add_argument("--visual_remote_max_retries", type=int, default=2)
@@ -157,13 +157,28 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visual_circuit_failure_threshold", type=int, default=5)
     parser.add_argument("--visual_circuit_recovery_seconds", type=float, default=30.0)
     parser.add_argument("--visual_agent_timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--visual_builtin_trace_format",
+        "--builtin-trace-format",
+        dest="visual_builtin_trace_format",
+        choices=["xml", "natural"],
+        default="xml",
+        help=(
+            "Format used to preserve builtin vision_reader calls in the public reasoning field. "
+            "Both formats are replayed through the model's native chat template on later turns."
+        ),
+    )
     parser.add_argument("--visual_max_images", type=int, default=8)
     parser.add_argument("--visual_max_image_bytes", type=int, default=20 * 1024 * 1024)
-    parser.add_argument("--visual_max_total_image_bytes", type=int, default=40 * 1024 * 1024)
-    parser.add_argument("--visual_max_remote_response_bytes", type=int, default=64 * 1024)
-    parser.add_argument("--visual_max_upstream_body_bytes", type=int, default=1024 * 1024)
-    parser.add_argument("--visual_max_trace_bytes", type=int, default=256 * 1024)
-    parser.add_argument("--visual_trace_ttl_seconds", type=int, default=3600)
+    parser.add_argument(
+        "--visual_max_total_image_bytes", type=int, default=40 * 1024 * 1024
+    )
+    parser.add_argument(
+        "--visual_max_remote_response_bytes", type=int, default=64 * 1024
+    )
+    parser.add_argument(
+        "--visual_max_upstream_body_bytes", type=int, default=1024 * 1024
+    )
     parser.add_argument("--visual_max_choices", type=int, default=4)
     parser.add_argument(
         "--visual_allow_local_files",
@@ -240,7 +255,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="max tokens num for new cat batch, it control prefill batch size to Preventing OOM",
     )
     parser.add_argument(
-        "--eos_id", nargs="+", type=int, default=None, help="eos stop token id, if None, will load from config.json"
+        "--eos_id",
+        nargs="+",
+        type=int,
+        default=None,
+        help="eos stop token id, if None, will load from config.json",
     )
     parser.add_argument(
         "--tool_call_parser",
@@ -287,7 +306,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "chat template jinja file path. For example:\n"
+            "Chat template Jinja file for this server. It overrides templates from the model/tokenizer and is not "
+            "forwarded to a visual upstream. For example:\n"
             "- /test/chat_template/tool_chat_template_deepseekv31.jinja\n"
             "- /test/chat_template/tool_chat_template_deepseekv32.jinja\n"
             "- /test/chat_template/tool_chat_template_qwen.jinja\n"
@@ -296,10 +316,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--running_max_req_size", type=int, default=256, help="the max size for forward requests in the same time"
+        "--running_max_req_size",
+        type=int,
+        default=256,
+        help="the max size for forward requests in the same time",
     )
     parser.add_argument("--nnodes", type=int, default=1, help="the number of nodes")
-    parser.add_argument("--node_rank", type=int, default=0, help="the rank of the current node")
+    parser.add_argument(
+        "--node_rank", type=int, default=0, help="the rank of the current node"
+    )
     parser.add_argument(
         "--multinode_httpmanager_port",
         type=int,
@@ -312,7 +337,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=20001,
         help="the gloo port for multinode router, default is 20001",
     )
-    parser.add_argument("--tp", type=int, default=1, help="model tp parral size, the default is 1")
+    parser.add_argument(
+        "--tp", type=int, default=1, help="model tp parral size, the default is 1"
+    )
     parser.add_argument(
         "--dp",
         type=int,
@@ -346,7 +373,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         When deploying in multi-node manner, the value should be set to the IP of the master node""",
     )
     parser.add_argument(
-        "--nccl_port", type=int, default=None, help="the nccl_port to build a distributed environment for PyTorch"
+        "--nccl_port",
+        type=int,
+        default=None,
+        help="the nccl_port to build a distributed environment for PyTorch",
     )
     parser.add_argument(
         "--use_config_server_to_init_nccl",
@@ -360,9 +390,22 @@ def make_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
-    parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
-    parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
-    parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
+    parser.add_argument(
+        "--detail_log",
+        action="store_true",
+        help="enable to print input infos in requests.",
+    )
+    parser.add_argument(
+        "--disable_log_stats",
+        action="store_true",
+        help="disable logging throughput stats.",
+    )
+    parser.add_argument(
+        "--log_stats_interval",
+        type=int,
+        default=10,
+        help="log stats interval in second.",
+    )
     parser.add_argument(
         "--disable_shm_warning",
         action="store_true",
@@ -405,14 +448,30 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."
+        "--use_dynamic_prompt_cache",
+        action="store_true",
+        help="This argument is deprecated and no longer in use.",
     )
-    parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
+    parser.add_argument(
+        "--disable_dynamic_prompt_cache",
+        action="store_true",
+        help="disable dynamic prompt cache",
+    )
 
-    parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
-    parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
-    parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
-    parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
+    parser.add_argument(
+        "--chunked_prefill_size", type=int, default=None, help="chunked prefill size"
+    )
+    parser.add_argument(
+        "--disable_chunked_prefill",
+        action="store_true",
+        help="whether to disable chunked prefill",
+    )
+    parser.add_argument(
+        "--diverse_mode", action="store_true", help="diversity generation mode"
+    )
+    parser.add_argument(
+        "--token_healing_mode", action="store_true", help="code model infer mode"
+    )
 
     parser.add_argument(
         "--output_constraint_mode",
@@ -440,7 +499,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
-        "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
+        "--enable_mps",
+        action="store_true",
+        help="Whether to enable nvidia mps for multimodal service.",
     )
     parser.add_argument(
         "--disable_symm_mem_allreduce",
@@ -531,7 +592,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument(
-        "--cache_capacity", type=int, default=200, help="cache server capacity for multimodal resources"
+        "--cache_capacity",
+        type=int,
+        default=200,
+        help="cache server capacity for multimodal resources",
     )
     parser.add_argument(
         "--max_image_token_count",
@@ -558,22 +622,50 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="the data type of the model weight",
     )
-    parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
-
-    parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
-
-    parser.add_argument("--use_tgi_api", action="store_true", help="use tgi input and ouput format")
     parser.add_argument(
-        "--health_monitor", action="store_true", help="check the health of service and restart when error"
+        "--return_all_prompt_logprobs",
+        action="store_true",
+        help="return all prompt tokens logprobs",
     )
-    parser.add_argument("--metric_gateway", type=str, default=None, help="address for collecting monitoring metrics")
-    parser.add_argument("--job_name", type=str, default="lightllm", help="job name for monitor")
+
     parser.add_argument(
-        "--grouping_key", action="append", default=[], help="grouping_key for the monitor in the form key=value"
+        "--use_reward_model", action="store_true", help="use reward model"
     )
-    parser.add_argument("--push_interval", type=int, default=10, help="interval of pushing monitoring metrics")
+
     parser.add_argument(
-        "--visual_infer_batch_size", type=int, default=None, help="number of images to process in each inference batch"
+        "--use_tgi_api", action="store_true", help="use tgi input and ouput format"
+    )
+    parser.add_argument(
+        "--health_monitor",
+        action="store_true",
+        help="check the health of service and restart when error",
+    )
+    parser.add_argument(
+        "--metric_gateway",
+        type=str,
+        default=None,
+        help="address for collecting monitoring metrics",
+    )
+    parser.add_argument(
+        "--job_name", type=str, default="lightllm", help="job name for monitor"
+    )
+    parser.add_argument(
+        "--grouping_key",
+        action="append",
+        default=[],
+        help="grouping_key for the monitor in the form key=value",
+    )
+    parser.add_argument(
+        "--push_interval",
+        type=int,
+        default=10,
+        help="interval of pushing monitoring metrics",
+    )
+    parser.add_argument(
+        "--visual_infer_batch_size",
+        type=int,
+        default=None,
+        help="number of images to process in each inference batch",
     )
     parser.add_argument(
         "--visual_send_batch_size",
@@ -585,7 +677,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument(
-        "--visual_gpu_ids", nargs="+", type=int, default=None, help="List of GPU IDs to use, e.g., 0 1 2"
+        "--visual_gpu_ids",
+        nargs="+",
+        type=int,
+        default=None,
+        help="List of GPU IDs to use, e.g., 0 1 2",
     )
     parser.add_argument(
         "--visual_reserved_mem_gb",
@@ -595,8 +691,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         reserves exactly this many GB of GPU memory (held, not freed) and skips the dummy-image probe.
         Use as a backstop for models without an automatic worst-case builder, or to override a bad estimate.""",
     )
-    parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
-    parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
+    parser.add_argument(
+        "--visual_tp",
+        type=int,
+        default=1,
+        help="number of tensort parallel instances for ViT",
+    )
+    parser.add_argument(
+        "--visual_dp",
+        type=int,
+        default=1,
+        help="number of data parallel instances for ViT",
+    )
     parser.add_argument(
         "--visual_nccl_ports",
         nargs="+",
@@ -614,7 +720,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
             """,
     )
     parser.add_argument(
-        "--audio_gpu_ids", nargs="+", type=int, default=None, help="GPU IDs for audio encoder, e.g., 0 1 2"
+        "--audio_gpu_ids",
+        nargs="+",
+        type=int,
+        default=None,
+        help="GPU IDs for audio encoder, e.g., 0 1 2",
     )
     parser.add_argument(
         "--audio_tp",
@@ -622,7 +732,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=1,
         help="Tensor parallel size for audio encoder (only 1 is supported; use audio_dp to scale)",
     )
-    parser.add_argument("--audio_dp", type=int, default=1, help="Data parallel replicas for audio encoder")
+    parser.add_argument(
+        "--audio_dp",
+        type=int,
+        default=1,
+        help="Data parallel replicas for audio encoder",
+    )
     parser.add_argument(
         "--audio_nccl_ports",
         nargs="+",
@@ -649,9 +764,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         --config_server_visual_redis_port""",
     )
     parser.add_argument(
-        "--enable_monitor_auth", action="store_true", help="Whether to open authentication for push_gateway"
+        "--enable_monitor_auth",
+        action="store_true",
+        help="Whether to open authentication for push_gateway",
     )
-    parser.add_argument("--disable_cudagraph", action="store_true", help="Disable the cudagraph of the decoding stage")
+    parser.add_argument(
+        "--disable_cudagraph",
+        action="store_true",
+        help="Disable the cudagraph of the decoding stage",
+    )
     parser.add_argument(
         "--enable_prefill_cudagraph",
         action="store_true",
@@ -865,9 +986,16 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=256,
         help="""The token page size of cpu cache""",
     )
-    parser.add_argument("--enable_disk_cache", action="store_true", help="""enable disk cache to store kv cache.""")
     parser.add_argument(
-        "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
+        "--enable_disk_cache",
+        action="store_true",
+        help="""enable disk cache to store kv cache.""",
+    )
+    parser.add_argument(
+        "--disk_cache_storage_size",
+        type=float,
+        default=10,
+        help="""The capacity of disk cache. GB used.""",
     )
     parser.add_argument(
         "--disk_cache_dir",

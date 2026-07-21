@@ -1,0 +1,353 @@
+{% macro render_extra_keys(json_dict, handled_keys) %}
+    {%- if json_dict is mapping %}
+        {%- for json_key in json_dict if json_key not in handled_keys %}
+            {%- if json_dict[json_key] is string %}
+                {{-'\n<' ~ json_key ~ '>' ~ (json_dict[json_key] | string) ~ '</' ~ json_key ~ '>' }}
+            {%- else %}
+                {{- '\n<' ~ json_key ~ '>' ~ (json_dict[json_key] | tojson | safe) ~ '</' ~ json_key ~ '>' }}
+            {%- endif %}
+        {%- endfor %}
+    {%- endif %}
+{%- endmacro %}
+{%- set builtin_vision_reader_enabled = enable_builtin_vision_reader is defined and enable_builtin_vision_reader %}
+{%- set builtin_vision_reader_tool = {
+    'type': 'function',
+    'function': {
+        'name': 'vision_reader',
+        'description': 'BUILTIN tag-based vision reader. Use this only for images already shown in the conversation history with XML tags such as <image_1/>. MUST be called before answering any question that depends on image, screenshot, chart, table, UI state, visual layout, OCR, object counting, color, position, or PDF page appearance. Never answer visual-content questions from memory or assumptions. The image parameter MUST be the exact XML tag visible in the conversation history, not a file path, URL, file:// URI, or base64 string. If no <image_n/> tag appears in the conversation history, do not call this builtin tool. For local files or URLs such as /tmp/slide.jpg, call an external/user-provided path-based image tool if available, for example tools with parameters named image_path, path, url, or image_url.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'image': {
+                    'type': 'string',
+                    'description': 'The exact XML image tag visible in the conversation history, such as <image_1/>. Do not pass a file path, URL, file:// URI, or base64 string to this builtin tool.'
+                },
+                'task': {
+                    'type': 'string',
+                    'description': 'The task or question for the vision reader.'
+                }
+            },
+            'required': ['image', 'task']
+        }
+    }
+} %}
+{%- set image_count = namespace(value=0) %}
+{%- set video_count = namespace(value=0) %}
+{%- macro render_content(content, do_vision_count, is_system_content=false) %}
+    {%- if content is string %}
+        {{- content }}
+    {%- elif content is iterable and content is not mapping %}
+        {%- for item in content %}
+            {%- if 'image' in item or 'image_url' in item or item.type == 'image' %}
+                {%- if is_system_content %}
+                    {{- raise_exception('System message cannot contain images.') }}
+                {%- endif %}
+                {%- if do_vision_count %}
+                    {%- set image_count.value = image_count.value + 1 %}
+                {%- endif %}
+                {%- if do_vision_count and builtin_vision_reader_enabled %}
+                    {{- '<image_' ~ image_count.value ~ '/>' }}
+                {%- elif do_vision_count and add_vision_id is defined and add_vision_id %}
+                    {{- 'Picture ' ~ image_count.value ~ ': ' }}
+                {%- endif %}
+                {%- if render_vision_placeholders is defined and render_vision_placeholders %}
+                    {{- '<|vision_start|><|image_pad|><|vision_end|>' }}
+                {%- endif %}
+            {%- elif 'video' in item or item.type == 'video' %}
+                {%- if is_system_content %}
+                    {{- raise_exception('System message cannot contain videos.') }}
+                {%- endif %}
+                {%- if do_vision_count %}
+                    {%- set video_count.value = video_count.value + 1 %}
+                {%- endif %}
+                {%- if do_vision_count and add_vision_id is defined and add_vision_id %}
+                    {{- 'Video ' ~ video_count.value ~ ': ' }}
+                {%- endif %}
+                {%- if render_vision_placeholders is defined and render_vision_placeholders %}
+                    {{- '<|vision_start|><|video_pad|><|vision_end|>' }}
+                {%- endif %}
+            {%- elif 'text' in item %}
+                {{- item.text }}
+            {%- else %}
+                {{- raise_exception('Unexpected item type in content.') }}
+            {%- endif %}
+        {%- endfor %}
+    {%- elif content is none or content is undefined %}
+        {{- '' }}
+    {%- else %}
+        {{- raise_exception('Unexpected content type.') }}
+    {%- endif %}
+{%- endmacro %}
+{%- macro render_tool(tool) %}
+    {%- if tool.function is defined %}
+        {%- set tool = tool.function %}
+    {%- endif %}
+    {{- "\n<function>\n<name>" ~ tool.name ~ "</name>" }}
+    {%- if tool.description is defined %}
+        {{- '\n<description>' ~ (tool.description | trim) ~ '</description>' }}
+    {%- endif %}
+    {{- '\n<parameters>' }}
+    {%- if tool.parameters is defined and tool.parameters is mapping and tool.parameters.properties is defined and tool.parameters.properties is mapping %}
+        {%- for param_name, param_fields in tool.parameters.properties|items %}
+            {{- '\n<parameter>' }}
+            {{- '\n<name>' ~ param_name ~ '</name>' }}
+            {%- if param_fields.type is defined %}
+                {{- '\n<type>' ~ (param_fields.type | string) ~ '</type>' }}
+            {%- endif %}
+            {%- if param_fields.description is defined %}
+                {{- '\n<description>' ~ (param_fields.description | trim) ~ '</description>' }}
+            {%- endif %}
+            {%- set handled_keys = ['name', 'type', 'description'] %}
+            {{- render_extra_keys(param_fields, handled_keys) }}
+            {{- '\n</parameter>' }}
+        {%- endfor %}
+    {%- endif %}
+    {%- set handled_keys = ['type', 'properties'] %}
+    {{- render_extra_keys(tool.parameters, handled_keys) }}
+    {{- '\n</parameters>' }}
+    {%- set handled_keys = ['type', 'name', 'description', 'parameters'] %}
+    {{- render_extra_keys(tool, handled_keys) }}
+    {{- '\n</function>' }}
+{%- endmacro %}
+{%- if not messages %}
+    {{- raise_exception('No messages provided.') }}
+{%- endif %}
+{%- set default_system_prompt = '你是商汤科技开发的日日新融合模态大模型，中文名叫商量，英文名叫SensenNova-v6.7-Flash，一个由商汤科技开发的有用无害的人工智能助手。' %}
+{%- set sys = namespace(content='', count=0, done=false) %}
+{%- for message in messages %}
+    {%- if not sys.done %}
+        {%- if message.role == 'system' %}
+            {%- set rendered = render_content(message.content, false, true)|trim %}
+            {%- if rendered %}
+                {%- if sys.content %}
+                    {%- set sys.content = sys.content ~ '\n\n' ~ rendered %}
+                {%- else %}
+                    {%- set sys.content = rendered %}
+                {%- endif %}
+            {%- endif %}
+            {%- set sys.count = sys.count + 1 %}
+        {%- else %}
+            {%- set sys.done = true %}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- set effective_tools = namespace(value=[], has_vision_reader=false) %}
+{%- if tools is defined and tools and tools is iterable and tools is not mapping %}
+    {%- for input_tool in tools %}
+        {%- if input_tool.function is defined %}
+            {%- set normalized_tool = input_tool.function %}
+        {%- else %}
+            {%- set normalized_tool = input_tool %}
+        {%- endif %}
+        {%- if normalized_tool.name is defined and normalized_tool.name == 'vision_reader' %}
+            {%- set effective_tools.has_vision_reader = true %}
+        {%- endif %}
+        {%- set effective_tools.value = effective_tools.value + [input_tool] %}
+    {%- endfor %}
+{%- endif %}
+{%- if builtin_vision_reader_enabled and not effective_tools.has_vision_reader %}
+    {%- set effective_tools.value = effective_tools.value + [builtin_vision_reader_tool] %}
+{%- endif %}
+{%- if effective_tools.value %}
+    {{- '<|im_start|>system\n' ~ default_system_prompt }}
+    {{- "# Tools\n\nYou have access to the following functions:\n\n" }}
+    {{- "<tools>" }}
+    {%- for tool in effective_tools.value %}
+        {{- render_tool(tool) }}
+    {%- endfor %}
+    {{- "\n</tools>" }}
+    {{- '\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- The builtin vision_reader can only read XML image tags that are visible in the conversation history, for example <image_1/>. If no <image_n/> tag appears in the conversation history, do not call builtin vision_reader.\n- If any visible <image_n/> tag is relevant to the user question, call builtin vision_reader before giving a final answer. This is mandatory for image, screenshot, chart, table, UI state, visual layout, OCR, object counting, color, position, or PDF page appearance questions. Never answer visual-content questions from memory or assumptions.\n- Image addressing has two different modes. The builtin vision_reader reads conversation images by XML tag. External/user-provided image tools that ask for image_path, path, url, or image_url require a real file path or URL; never pass an XML tag to those external tools unless their schema explicitly asks for an XML tag.\n- If a user-provided external tool is also named vision_reader, treat it as the external tool described by its schema; the builtin tag-based vision_reader is not injected under a duplicate name.\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>' }}
+    {%- if sys.content %}
+        {{- '\n\n' + sys.content }}
+    {%- endif %}
+    {{- '<|im_end|>\n' }}
+{%- else %}
+    {%- if sys.content %}
+        {{- '<|im_start|>system\n' ~ default_system_prompt ~ sys.content ~ '<|im_end|>\n' }}
+    {%- else %}
+        {{- '<|im_start|>system\n' ~ default_system_prompt ~ '<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{%- for message in messages[::-1] %}
+    {%- set index = (messages|length - 1) - loop.index0 %}
+    {%- if ns.multi_step_tool and message.role == "user" %}
+        {%- set content = render_content(message.content, false)|trim %}
+        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}
+            {%- set ns.multi_step_tool = false %}
+            {%- set ns.last_query_index = index %}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- if ns.multi_step_tool %}
+    {{- raise_exception('No user query found in messages.') }}
+{%- endif %}
+{%- for message in messages %}
+    {%- set content = render_content(message.content, true)|trim %}
+    {%- if message.role == "system" %}
+        {%- if loop.index0 >= sys.count %}
+            {{- raise_exception('System message must be at the beginning.') }}
+        {%- endif %}
+    {%- elif message.role == "user" %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
+    {%- elif message.role == "assistant" %}
+        {%- set reasoning_content = '' %}
+        {%- if message.reasoning_content is string %}
+            {%- set reasoning_content = message.reasoning_content %}
+        {%- else %}
+            {%- if '</think>' in content %}
+                {%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+                {%- set content = content.split('</think>')[-1].lstrip('\n') %}
+            {%- endif %}
+        {%- endif %}
+        {%- set reasoning_content = reasoning_content|trim %}
+        {%- set has_hidden_tool_trace = '<tool_call>' in reasoning_content or '</tool_call>' in reasoning_content or '<tool_response>' in reasoning_content or '</tool_response>' in reasoning_content %}
+        {%- if has_hidden_tool_trace %}
+            {%- if reasoning_content.count('<tool_call>') != reasoning_content.count('</tool_call>') %}
+                {{- raise_exception('Malformed reasoning_content tool trace: unmatched tool_call tags.') }}
+            {%- endif %}
+            {%- if reasoning_content.count('<tool_response>') != reasoning_content.count('</tool_response>') %}
+                {{- raise_exception('Malformed reasoning_content tool trace: unmatched tool_response tags.') }}
+            {%- endif %}
+            {%- if reasoning_content.count('<tool_call>') != reasoning_content.count('<tool_response>') %}
+                {{- raise_exception('Malformed reasoning_content tool trace: every tool_call must have one following tool_response.') }}
+            {%- endif %}
+            {%- set trace = namespace(remaining=reasoning_content, segments=[]) %}
+            {%- for _ in range(reasoning_content.count('<tool_call>')) %}
+                {%- set call_open_parts = trace.remaining.split('<tool_call>', 1) %}
+                {%- if call_open_parts|length != 2 %}
+                    {{- raise_exception('Malformed reasoning_content tool trace: missing tool_call open tag.') }}
+                {%- endif %}
+                {%- set reasoning_before_call = call_open_parts[0] %}
+                {%- if '<tool_response>' in reasoning_before_call or '</tool_response>' in reasoning_before_call %}
+                    {{- raise_exception('Malformed reasoning_content tool trace: tool_response appeared before its tool_call.') }}
+                {%- endif %}
+                {%- set call_close_parts = call_open_parts[1].split('</tool_call>', 1) %}
+                {%- if call_close_parts|length != 2 %}
+                    {{- raise_exception('Malformed reasoning_content tool trace: missing tool_call close tag.') }}
+                {%- endif %}
+                {%- set tool_call_block = '<tool_call>' ~ call_close_parts[0] ~ '</tool_call>' %}
+                {%- set response_open_parts = call_close_parts[1].split('<tool_response>', 1) %}
+                {%- if response_open_parts|length != 2 %}
+                    {{- raise_exception('Malformed reasoning_content tool trace: missing tool_response after tool_call.') }}
+                {%- endif %}
+                {%- if response_open_parts[0]|trim %}
+                    {{- raise_exception('Malformed reasoning_content tool trace: unexpected content between tool_call and tool_response.') }}
+                {%- endif %}
+                {%- set response_close_parts = response_open_parts[1].split('</tool_response>', 1) %}
+                {%- if response_close_parts|length != 2 %}
+                    {{- raise_exception('Malformed reasoning_content tool trace: missing tool_response close tag.') }}
+                {%- endif %}
+                {%- set trace.segments = trace.segments + [{'reasoning': reasoning_before_call, 'tool_call': tool_call_block, 'tool_response': response_close_parts[0]}] %}
+                {%- set trace.remaining = response_close_parts[1] %}
+            {%- endfor %}
+            {%- if '<tool_call>' in trace.remaining or '</tool_call>' in trace.remaining or '<tool_response>' in trace.remaining or '</tool_response>' in trace.remaining %}
+                {{- raise_exception('Malformed reasoning_content tool trace: dangling tool trace tag.') }}
+            {%- endif %}
+            {%- for segment in trace.segments %}
+                {{- '<|im_start|>' + message.role + '\n' }}
+                {%- if segment.reasoning|trim %}
+                    {{- '<think>\n' + (segment.reasoning|trim) + '\n</think>\n\n' }}
+                {%- endif %}
+                {{- segment.tool_call|trim }}
+                {{- '<|im_end|>\n' }}
+                {{- '<|im_start|>user\n<tool_response>\n' }}
+                {{- segment.tool_response|trim }}
+                {{- '\n</tool_response><|im_end|>\n' }}
+            {%- endfor %}
+            {%- set final_reasoning = trace.remaining|trim %}
+            {%- set final_content = content|trim %}
+            {%- set has_normal_tool_calls = message.tool_calls is defined and message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}
+            {%- if final_reasoning or final_content or has_normal_tool_calls %}
+                {{- '<|im_start|>' + message.role + '\n' }}
+                {%- if final_reasoning %}
+                    {{- '<think>\n' + final_reasoning + '\n</think>' }}
+                    {%- if final_content or has_normal_tool_calls %}
+                        {{- '\n\n' }}
+                    {%- endif %}
+                {%- endif %}
+                {{- final_content }}
+                {%- if has_normal_tool_calls %}
+                    {%- for tool_call in message.tool_calls %}
+                        {%- if tool_call.function is defined %}
+                            {%- set tool_call = tool_call.function %}
+                        {%- endif %}
+                        {%- if loop.first %}
+                            {%- if final_content|trim %}
+                                {{- '\n\n<tool_call>\n<function=' + tool_call.name + '>\n' }}
+                            {%- else %}
+                                {{- '<tool_call>\n<function=' + tool_call.name + '>\n' }}
+                            {%- endif %}
+                        {%- else %}
+                            {{- '\n<tool_call>\n<function=' + tool_call.name + '>\n' }}
+                        {%- endif %}
+                        {%- if tool_call.arguments is defined %}
+                            {%- for args_name, args_value in tool_call.arguments|items %}
+                                {{- '<parameter=' + args_name + '>\n' }}
+                                {%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else args_value | string %}
+                                {{- args_value }}
+                                {{- '\n</parameter>\n' }}
+                            {%- endfor %}
+                        {%- endif %}
+                        {{- '</function>\n</tool_call>' }}
+                    {%- endfor %}
+                {%- endif %}
+                {{- '<|im_end|>\n' }}
+            {%- endif %}
+        {%- else %}
+            {%- if loop.index0 > ns.last_query_index %}
+                {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content + '\n</think>\n\n' + content }}
+            {%- else %}
+                {{- '<|im_start|>' + message.role + '\n' + content }}
+            {%- endif %}
+            {%- if message.tool_calls is defined and message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}
+                {%- for tool_call in message.tool_calls %}
+                    {%- if tool_call.function is defined %}
+                        {%- set tool_call = tool_call.function %}
+                    {%- endif %}
+                    {%- if loop.first %}
+                        {%- if content|trim %}
+                            {{- '\n\n<tool_call>\n<function=' + tool_call.name + '>\n' }}
+                        {%- else %}
+                            {{- '<tool_call>\n<function=' + tool_call.name + '>\n' }}
+                        {%- endif %}
+                    {%- else %}
+                        {{- '\n<tool_call>\n<function=' + tool_call.name + '>\n' }}
+                    {%- endif %}
+                    {%- if tool_call.arguments is defined %}
+                        {%- for args_name, args_value in tool_call.arguments|items %}
+                            {{- '<parameter=' + args_name + '>\n' }}
+                            {%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else args_value | string %}
+                            {{- args_value }}
+                            {{- '\n</parameter>\n' }}
+                        {%- endfor %}
+                    {%- endif %}
+                    {{- '</function>\n</tool_call>' }}
+                {%- endfor %}
+            {%- endif %}
+            {{- '<|im_end|>\n' }}
+        {%- endif %}
+    {%- elif message.role == "tool" %}
+        {%- if loop.previtem and loop.previtem.role != "tool" %}
+            {{- '<|im_start|>user' }}
+        {%- endif %}
+        {{- '\n<tool_response>\n' }}
+        {{- content }}
+        {{- '\n</tool_response>' }}
+        {%- if not loop.last and loop.nextitem.role != "tool" %}
+            {{- '<|im_end|>\n' }}
+        {%- elif loop.last %}
+            {{- '<|im_end|>\n' }}
+        {%- endif %}
+    {%- else %}
+        {{- raise_exception('Unexpected message role.') }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is false %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- else %}
+        {{- '<think>\n' }}
+    {%- endif %}
+{%- endif %}

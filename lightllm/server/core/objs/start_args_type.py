@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 # 只是为了更好的编程提示
 
@@ -8,13 +8,24 @@ from typing import List, Optional, Tuple
 class StartArgs:
     run_mode: str = field(
         default="normal",
-        metadata={"choices": ["normal", "pd_master", "prefill", "decode", "config_server", "visual_only"]},
+        metadata={
+            "choices": [
+                "normal",
+                "pd_master",
+                "prefill",
+                "decode",
+                "config_server",
+                "visual_only",
+            ]
+        },
     )
     host: str = field(default="127.0.0.1")
     port: int = field(default=8000)
     zmq_mode: str = field(
         default="ipc:///tmp/",
-        metadata={"help": "use socket mode or ipc mode, only can be set in ['tcp://', 'ipc:///tmp/']"},
+        metadata={
+            "help": "use socket mode or ipc mode, only can be set in ['tcp://', 'ipc:///tmp/']"
+        },
     )
     pd_master_ip: str = field(default="127.0.0.1")
     pd_master_port: int = field(default=1212)
@@ -26,12 +37,11 @@ class StartArgs:
     select_p_d_node_strategy: str = field(default=None)
     model_name: str = field(default="default_model_name")
     visual_remote_url: Optional[str] = field(default=None)
+    visual_nova_accuracy_compat: bool = field(default=False)
     visual_remote_model: Optional[str] = field(default=None)
     visual_remote_api_key_env: str = field(default="LIGHTLLM_VISUAL_REMOTE_API_KEY")
     visual_remote_headers_env: str = field(default="LIGHTLLM_VISUAL_REMOTE_HEADERS")
     visual_allow_insecure_remote_url: bool = field(default=False)
-    visual_trace_secret_env: str = field(default="LIGHTLLM_VISUAL_TRACE_SECRET")
-    visual_trace_previous_secret_env: str = field(default="LIGHTLLM_VISUAL_TRACE_PREVIOUS_SECRET")
     visual_remote_timeout: float = field(default=90.0)
     visual_remote_connect_timeout: float = field(default=5.0)
     visual_remote_max_retries: int = field(default=2)
@@ -41,13 +51,14 @@ class StartArgs:
     visual_circuit_failure_threshold: int = field(default=5)
     visual_circuit_recovery_seconds: float = field(default=30.0)
     visual_agent_timeout: float = field(default=180.0)
+    visual_builtin_trace_format: str = field(
+        default="xml", metadata={"choices": ["xml", "natural"]}
+    )
     visual_max_images: int = field(default=8)
     visual_max_image_bytes: int = field(default=20 * 1024 * 1024)
     visual_max_total_image_bytes: int = field(default=40 * 1024 * 1024)
     visual_max_remote_response_bytes: int = field(default=64 * 1024)
     visual_max_upstream_body_bytes: int = field(default=1024 * 1024)
-    visual_max_trace_bytes: int = field(default=256 * 1024)
-    visual_trace_ttl_seconds: int = field(default=3600)
     visual_max_choices: int = field(default=4)
     visual_allow_local_files: bool = field(default=False)
     visual_local_file_root: List[str] = field(default_factory=list)
@@ -63,7 +74,17 @@ class StartArgs:
     eos_id: List[int] = field(default_factory=list)
     tool_call_parser: Optional[str] = field(
         default=None,
-        metadata={"choices": ["llama3", "qwen25", "mistral", "deepseekv3", "kimi_k2", "qwen", "qwen3_coder"]},
+        metadata={
+            "choices": [
+                "llama3",
+                "qwen25",
+                "mistral",
+                "deepseekv3",
+                "kimi_k2",
+                "qwen",
+                "qwen3_coder",
+            ]
+        },
     )
     reasoning_parser: Optional[str] = field(
         default=None,
@@ -109,7 +130,9 @@ class StartArgs:
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)
     token_healing_mode: bool = field(default=False)
-    output_constraint_mode: str = field(default="none", metadata={"choices": ["none", "simple", "xgrammar"]})
+    output_constraint_mode: str = field(
+        default="none", metadata={"choices": ["none", "simple", "xgrammar"]}
+    )
     first_token_constraint_mode: bool = field(default=False)
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
@@ -126,7 +149,10 @@ class StartArgs:
     max_image_pixels: int = field(default=8294400)
     embed_cache_storage_size: float = field(default=4)
     data_type: Optional[str] = field(
-        default=None, metadata={"choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]}
+        default=None,
+        metadata={
+            "choices": ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
+        },
     )
     return_all_prompt_logprobs: bool = field(default=False)
     use_reward_model: bool = field(default=False)
@@ -163,7 +189,9 @@ class StartArgs:
     graph_max_len_in_batch: int = field(default=0)
     quant_type: Optional[str] = field(default=None)
     quant_cfg: Optional[str] = field(default=None)
-    expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
+    expert_dtype: Optional[str] = field(
+        default=None, metadata={"choices": ["fp8", "fp4"]}
+    )
     vit_quant_type: Optional[str] = field(default=None)
     vit_quant_cfg: Optional[str] = field(default=None)
     llm_prefill_att_backend: List[str] = field(
@@ -173,15 +201,29 @@ class StartArgs:
         default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     vit_att_backend: List[str] = field(
-        default=("auto",), metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
+        default=("auto",),
+        metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]},
     )
     llm_kv_type: str = field(
-        default="None", metadata={"choices": ["None", "int8kv", "int4kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"]}
+        default="None",
+        metadata={
+            "choices": [
+                "None",
+                "int8kv",
+                "int4kv",
+                "fp8kv_sph",
+                "fp8kv_spt",
+                "fp8kv_dsa",
+            ]
+        },
     )
     llm_kv_quant_group_size: int = field(default=8)
-    sampling_backend: str = field(default="triton", metadata={"choices": ["triton", "flashinfer"]})
+    sampling_backend: str = field(
+        default="triton", metadata={"choices": ["triton", "flashinfer"]}
+    )
     penalty_counter_mode: str = field(
-        default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
+        default="gpu_counter",
+        metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]},
     )
     enable_ep_moe: bool = field(default=False)
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
@@ -231,5 +273,9 @@ class StartArgs:
     linear_att_page_block_num: int = field(default=10000000)
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
-    linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
-    gdn_prefill_backend: Optional[str] = field(default="fla", metadata={"choices": ["fla", "flashqla"]})
+    linear_att_ssm_data_type: Optional[str] = field(
+        default="float32", metadata={"choices": ["bfloat16", "float32"]}
+    )
+    gdn_prefill_backend: Optional[str] = field(
+        default="fla", metadata={"choices": ["fla", "flashqla"]}
+    )

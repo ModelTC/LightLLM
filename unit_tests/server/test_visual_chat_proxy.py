@@ -1,7 +1,7 @@
 import asyncio
-import base64
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,31 +22,26 @@ from lightllm.server.api_models import (
     UsageInfo,
 )
 from lightllm.server import visual_chat_proxy
+from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.visual_chat_proxy import (
     ImageRegistry,
     RegisteredImage,
-    VisionTrace,
     VisualProxyCapacityError,
     VisualProxySettings,
     VisualProxyRuntime,
     VisualProxyTimeoutError,
     VisualProxyUpstreamError,
     call_visual_remote,
-    decode_hidden_traces,
-    expand_hidden_traces,
     replace_images_with_tags,
     should_use_visual_proxy,
     visual_chat_completions_impl,
 )
 
 
-_TEST_TRACE_SECRET = b"unit-test-visual-trace-secret-32-bytes-minimum"
-
-
 def _runtime(client=None, **overrides):
     settings = VisualProxySettings(
         remote_url="https://vision.test/v1/chat/completions",
-        trace_secrets=(_TEST_TRACE_SECRET,),
+        builtin_trace_format="natural",
     )
     settings = replace(settings, **overrides)
     settings.validate()
@@ -54,13 +49,24 @@ def _runtime(client=None, **overrides):
 
 
 def _raw_request():
-    return Request({"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []})
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+        }
+    )
 
 
 def _response(message, finish_reason="stop", prompt_tokens=3, completion_tokens=2):
     return ChatCompletionResponse(
         model="agent",
-        choices=[ChatCompletionResponseChoice(index=0, message=message, finish_reason=finish_reason)],
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0, message=message, finish_reason=finish_reason
+            )
+        ],
         usage=UsageInfo(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -77,7 +83,10 @@ def _multimodal_request(**overrides):
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "What color is the square?"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
                 ],
             }
         ],
@@ -104,8 +113,14 @@ def test_replace_images_with_tags_keeps_pixels_out_of_agent_messages():
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "compare"},
-                    {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.test/a.png"},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,BBBB"},
+                    },
                 ],
             }
         ],
@@ -123,9 +138,81 @@ def test_replace_images_with_tags_keeps_pixels_out_of_agent_messages():
     assert registry.resolve("Picture 2").tag == "<image_2/>"
 
 
+@pytest.mark.parametrize("trace_format", ["natural", "xml"])
+def test_builtin_trace_formats_round_trip_into_native_template_messages(trace_format):
+    if trace_format == "natural":
+        reasoning = (
+            "先判断任务。\n"
+            "我先查看了图片 <image_1/>，让内建读图能力完成这个任务：识别主要颜色。\n"
+            "读图结果：主要颜色是绿色。\n"
+            "现在调用天气工具。"
+        )
+    else:
+        reasoning = (
+            "先判断任务。\n"
+            "<tool_call>\n"
+            "<function=vision_reader>\n"
+            "<parameter=image>\n<image_1/>\n</parameter>\n"
+            "<parameter=task>\n识别主要颜色\n</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+            "<tool_response>\n主要颜色是绿色。\n</tool_response>\n"
+            "现在调用天气工具。"
+        )
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning": reasoning,
+            "tool_calls": [
+                {
+                    "id": "weather_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city":"上海"}',
+                    },
+                }
+            ],
+        }
+    ]
+
+    expanded = visual_chat_proxy.expand_builtin_traces(messages, trace_format)
+
+    assert [message["role"] for message in expanded] == [
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert expanded[0]["reasoning"] == "先判断任务。"
+    assert expanded[0]["tool_calls"][0]["function"]["name"] == "vision_reader"
+    arguments = json.loads(expanded[0]["tool_calls"][0]["function"]["arguments"])
+    assert arguments == {"image": "<image_1/>", "task": "识别主要颜色"}
+    assert expanded[1]["name"] == "vision_reader"
+    assert expanded[1]["content"] == visual_chat_proxy._format_visual_tool_result(
+        "主要颜色是绿色。"
+    )
+    assert expanded[2]["reasoning"] == "现在调用天气工具。"
+    assert expanded[2]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+def test_malformed_builtin_trace_is_rejected_before_model_inference():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning": ("我先查看了图片 <image_1/>，让内建读图能力完成这个任务：识别颜色。"),
+        }
+    ]
+    with pytest.raises(ValueError, match="missing reading result"):
+        visual_chat_proxy.expand_builtin_traces(messages, "natural")
+
+
 def test_proxy_activation_is_strictly_opt_in_and_multimodal():
     multimodal = _multimodal_request()
-    text_only = ChatCompletionRequest(model="agent", messages=[{"role": "user", "content": "hello"}])
+    text_only = ChatCompletionRequest(
+        model="agent", messages=[{"role": "user", "content": "hello"}]
+    )
 
     assert not should_use_visual_proxy(None, multimodal)
     assert not should_use_visual_proxy("", multimodal)
@@ -141,7 +228,11 @@ def test_visual_remote_receives_openai_multimodal_payload(monkeypatch):
         text = ""
 
         def json(self):
-            return {"choices": [{"message": {"role": "assistant", "content": "remote result"}}]}
+            return {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "remote result"}}
+                ]
+            }
 
     class FakeClient:
         async def post(self, url, json):
@@ -154,7 +245,9 @@ def test_visual_remote_receives_openai_multimodal_payload(monkeypatch):
         call_visual_remote(
             runtime=runtime,
             model="agent",
-            image=RegisteredImage(tag="<image_1/>", source="data:image/png;base64,AAAA", origin="user"),
+            image=RegisteredImage(
+                tag="<image_1/>", source="data:image/png;base64,AAAA", origin="user"
+            ),
             task="Read the image",
             trace_id="trace-test",
         )
@@ -171,6 +264,122 @@ def test_visual_remote_receives_openai_multimodal_payload(monkeypatch):
     ]
 
 
+def test_nova_accuracy_mode_uses_exact_generate_prompt_and_parameters():
+    recorded = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "generated_text": "<think>visual reasoning</think>\nremote result<|im_end|>"
+            }
+
+    class FakeClient:
+        async def post(self, url, json):
+            recorded["url"] = url
+            recorded["payload"] = json
+            return FakeResponse()
+
+    runtime = _runtime(
+        client=FakeClient(),
+        remote_url="https://vision.test/generate",
+        remote_model="vision-model",
+        nova_accuracy_compat=True,
+    )
+    result = asyncio.run(
+        call_visual_remote(
+            runtime=runtime,
+            model="agent",
+            image=RegisteredImage(
+                tag="<image_1/>",
+                source="data:image/png;base64,AAAA",
+                origin="user",
+            ),
+            task="Read the image",
+            trace_id="trace-nova",
+        )
+    )
+
+    assert result == "remote result"
+    assert recorded["url"] == "https://vision.test/generate"
+    assert recorded["payload"] == {
+        "inputs": (
+            "<|im_start|>system\n"
+            "You are the builtin vision_reader. Inspect the attached image and answer only the requested visual "
+            "task. Ground every statement in the image; do not mention tool calls.\n"
+            "<|im_end|>\n"
+            "<|im_start|>user\n"
+            "<|vision_start|><|image_pad|><|vision_end|>\n"
+            "Read the image\n"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        ),
+        "parameters": {"max_new_tokens": 512, "temperature": 0.0},
+        "multimodal_params": {"images": [{"type": "base64", "data": "AAAA"}]},
+        "model": "vision-model",
+    }
+
+
+def test_nova_accuracy_mode_keeps_model_facing_visual_result_unmodified(
+    monkeypatch,
+):
+    main_requests = []
+
+    async def fake_main(request, raw_request):
+        payload = request.model_dump(exclude_none=True)
+        main_requests.append(payload)
+        assert payload["chat_template_kwargs"] == {
+            "enable_builtin_vision_reader": True,
+            "render_vision_placeholders": False,
+            "enable_thinking": True,
+            "thinking": True,
+        }
+        if len(main_requests) == 1:
+            return _response(
+                ChatMessage(
+                    role="assistant",
+                    tool_calls=[
+                        _call(
+                            "vision_reader",
+                            {"image": "<image_1/>", "task": "Read it"},
+                            "reader_1",
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        assert payload["messages"][-1]["role"] == "assistant"
+        assert "raw visual result" in payload["messages"][-1]["reasoning"]
+        assert "<tool_response>" in payload["messages"][-1]["reasoning"]
+        return _response(ChatMessage(role="assistant", content="done"))
+
+    async def fake_remote(**kwargs):
+        return "raw visual result"
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_remote)
+    response = asyncio.run(
+        visual_chat_completions_impl(
+            request=_multimodal_request(),
+            raw_request=_raw_request(),
+            runtime=_runtime(
+                client=object(),
+                remote_url="https://vision.test/generate",
+                nova_accuracy_compat=True,
+                builtin_trace_format="xml",
+            ),
+            main_chat_handler=fake_main,
+        )
+    )
+
+    assert response.choices[0].message.content == "done"
+    assert "raw visual result" in (response.choices[0].message.reasoning or "")
+    assert "UNTRUSTED_VISUAL_OBSERVATION" not in json.dumps(
+        main_requests, ensure_ascii=False
+    )
+
+
 def test_multiple_builtin_calls_use_distinct_idempotency_keys(monkeypatch):
     remote_trace_ids = []
     main_calls = 0
@@ -183,8 +392,16 @@ def test_multiple_builtin_calls_use_distinct_idempotency_keys(monkeypatch):
                 ChatMessage(
                     role="assistant",
                     tool_calls=[
-                        _call("vision_reader", {"image": "<image_1/>", "task": "first"}, "reader_1"),
-                        _call("vision_reader", {"image": "<image_1/>", "task": "second"}, "reader_2"),
+                        _call(
+                            "vision_reader",
+                            {"image": "<image_1/>", "task": "first"},
+                            "reader_1",
+                        ),
+                        _call(
+                            "vision_reader",
+                            {"image": "<image_1/>", "task": "second"},
+                            "reader_2",
+                        ),
                     ],
                 ),
                 finish_reason="tool_calls",
@@ -226,7 +443,10 @@ def test_builtin_reader_runs_remote_then_returns_openai_completion(monkeypatch):
                     tool_calls=[
                         _call(
                             "vision_reader",
-                            {"image": "<image_1/>", "task": "Identify the square's color."},
+                            {
+                                "image": "<image_1/>",
+                                "task": "Identify the square's color.",
+                            },
                             "call_visual_1",
                         )
                     ],
@@ -235,7 +455,9 @@ def test_builtin_reader_runs_remote_then_returns_openai_completion(monkeypatch):
             )
         assert main_requests[-1]["messages"][-1] == {
             "role": "tool",
-            "content": visual_chat_proxy._format_visual_tool_result("The square is green."),
+            "content": visual_chat_proxy._format_visual_tool_result(
+                "The square is green."
+            ),
             "tool_call_id": "call_visual_1",
             "name": "vision_reader",
         }
@@ -280,16 +502,14 @@ def test_builtin_reader_runs_remote_then_returns_openai_completion(monkeypatch):
     assert "data:image/png;base64,AAAA" not in serialized
     assert first_payload["tools"][-1]["function"]["name"] == "vision_reader"
 
-    traces = decode_hidden_traces(response.choices[0].message.reasoning, runtime.trace_cipher)
-    assert [(trace.image, trace.response) for trace in traces] == [
-        (
-            "<image_1/>",
-            visual_chat_proxy._format_visual_tool_result("The square is green."),
-        )
-    ]
+    assert (
+        "我先查看了图片 <image_1/>，让内建读图能力完成这个任务：" "Identify the square's color."
+    ) in final_reasoning
+    assert "读图结果：The square is green." in final_reasoning
+    assert "lightllm_vision_reader_trace" not in final_reasoning
 
 
-def test_missing_reader_task_falls_back_to_latest_user_text(monkeypatch):
+def test_invalid_reader_arguments_are_returned_then_model_can_retry(monkeypatch):
     main_requests = []
     remote_calls = []
 
@@ -300,7 +520,30 @@ def test_missing_reader_task_falls_back_to_latest_user_text(monkeypatch):
                 ChatMessage(
                     role="assistant",
                     content="",
-                    tool_calls=[_call("vision_reader", {"image": "image_1"}, "call_missing_task")],
+                    tool_calls=[
+                        _call(
+                            "vision_reader", {"image": "image_1"}, "call_missing_task"
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        if len(main_requests) == 2:
+            assert "requires both arguments" in main_requests[-1].messages[-1].content
+            return _response(
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        _call(
+                            "vision_reader",
+                            {
+                                "image": "<image_1/>",
+                                "task": "Identify the square color.",
+                            },
+                            "call_retry",
+                        )
+                    ],
                 ),
                 finish_reason="tool_calls",
             )
@@ -324,7 +567,7 @@ def test_missing_reader_task_falls_back_to_latest_user_text(monkeypatch):
     assert response.choices[0].message.content == "The square is green."
     assert len(remote_calls) == 1
     assert remote_calls[0]["image"].tag == "<image_1/>"
-    assert "What color is the square?" in remote_calls[0]["task"]
+    assert remote_calls[0]["task"] == "Identify the square color."
 
 
 def test_external_tools_stay_public_when_mixed_with_builtin(monkeypatch):
@@ -332,24 +575,16 @@ def test_external_tools_stay_public_when_mixed_with_builtin(monkeypatch):
 
     async def fake_main(request, raw_request):
         main_requests.append(request.model_dump(exclude_none=True))
-        if len(main_requests) > 1:
-            assert main_requests[-1]["messages"][-1]["content"] == (
-                visual_chat_proxy._format_visual_tool_result("The image says Shanghai.")
-            )
-            return _response(
-                ChatMessage(
-                    role="assistant",
-                    content="",
-                    tool_calls=[_call("get_weather", {"city": "Shanghai"}, "external_2")],
-                ),
-                finish_reason="tool_calls",
-            )
         return _response(
             ChatMessage(
                 role="assistant",
                 content="",
                 tool_calls=[
-                    _call("vision_reader", {"image": "<image_1/>", "task": "Read the city."}, "builtin_1"),
+                    _call(
+                        "vision_reader",
+                        {"image": "<image_1/>", "task": "Read the city."},
+                        "builtin_1",
+                    ),
                     _call("get_weather", {"city": "Shanghai"}, "external_1"),
                 ],
             ),
@@ -381,122 +616,68 @@ def test_external_tools_stay_public_when_mixed_with_builtin(monkeypatch):
     message = response.choices[0].message
     assert response.choices[0].finish_reason == "tool_calls"
     assert [call.function.name for call in message.tool_calls] == ["get_weather"]
-    assert len(main_requests) == 2
-    traces = decode_hidden_traces(message.reasoning, runtime.trace_cipher)
-    assert len(traces) == 1
-    expected_visual_result = visual_chat_proxy._format_visual_tool_result("The image says Shanghai.")
-    assert traces[0].response == expected_visual_result
+    assert message.tool_calls[0].id == "external_1"
+    assert len(main_requests) == 1
+    trace_visual_result = "The image says Shanghai."
+    internal_visual_result = visual_chat_proxy._format_visual_tool_result(
+        trace_visual_result
+    )
+    assert trace_visual_result in (message.reasoning or "")
+    assert "lightllm_vision_reader_trace" not in (message.reasoning or "")
 
-    replay_registry = ImageRegistry()
-    replay_registry.add("data:image/png;base64,AAAA", "user", byte_size=3)
-    replayed = expand_hidden_traces(
+    replay_messages = _multimodal_request().model_dump(
+        by_alias=True, exclude_none=True
+    )["messages"]
+    replay_messages.extend(
         [
+            message.model_dump(by_alias=True, exclude_none=True),
             {
-                "role": "assistant",
-                "content": message.content,
-                "reasoning": message.reasoning,
-                "tool_calls": [call.model_dump(exclude_none=True) for call in message.tool_calls],
-            }
-        ],
-        runtime.trace_cipher,
-        registry=replay_registry,
-        model="agent",
+                "role": "tool",
+                "tool_call_id": "external_1",
+                "name": "get_weather",
+                "content": "Sunny, 24 C",
+            },
+        ]
     )
-    assert [item["role"] for item in replayed] == ["assistant", "tool", "assistant"]
-    assert replayed[0]["tool_calls"][0]["function"]["name"] == "vision_reader"
-    assert replayed[1]["content"] == expected_visual_result
-    assert replayed[2]["tool_calls"][0]["function"]["name"] == "get_weather"
 
-    legacy_replayed = expand_hidden_traces(
-        [
-            {
-                "role": "assistant",
-                "content": message.content,
-                "reasoning_content": message.reasoning,
-                "tool_calls": [call.model_dump(exclude_none=True) for call in message.tool_calls],
-            }
-        ],
-        runtime.trace_cipher,
-        registry=replay_registry,
-        model="agent",
-    )
-    assert [item["role"] for item in legacy_replayed] == ["assistant", "tool", "assistant"]
+    async def replay_main(request, raw_request):
+        replay_payload = request.model_dump(by_alias=True, exclude_none=True)
+        replay_messages = replay_payload["messages"]
+        assert [item["role"] for item in replay_messages[-4:]] == [
+            "assistant",
+            "tool",
+            "assistant",
+            "tool",
+        ]
+        assert replay_messages[-3]["name"] == "vision_reader"
+        assert internal_visual_result in replay_messages[-3]["content"]
+        assert replay_messages[-2]["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert replay_payload["chat_template_kwargs"]["enable_thinking"] is False
+        assert replay_payload["chat_template_kwargs"]["thinking"] is False
+        return _response(ChatMessage(role="assistant", content="Shanghai is sunny."))
 
-    wrong_registry = ImageRegistry()
-    wrong_registry.add("data:image/png;base64,BBBB", "user", byte_size=3)
-    with pytest.raises(ValueError, match="image does not match"):
-        expand_hidden_traces(
-            [
-                {
-                    "role": "assistant",
-                    "reasoning": message.reasoning,
-                    "tool_calls": [call.model_dump(exclude_none=True) for call in message.tool_calls],
-                }
-            ],
-            runtime.trace_cipher,
-            registry=wrong_registry,
-            model="agent",
+    replay_response = asyncio.run(
+        visual_chat_completions_impl(
+            request=_multimodal_request(
+                messages=replay_messages,
+                tools=[weather.model_dump()],
+                chat_template_kwargs={"enable_thinking": False},
+            ),
+            raw_request=_raw_request(),
+            runtime=runtime,
+            main_chat_handler=replay_main,
         )
-    with pytest.raises(ValueError, match="model does not match"):
-        expand_hidden_traces(
-            [{"role": "assistant", "reasoning": message.reasoning}],
-            runtime.trace_cipher,
-            registry=replay_registry,
-            model="different-agent",
-        )
-
-
-def test_trace_is_encrypted_authenticated_and_supports_key_rotation():
-    old_runtime = _runtime(client=object())
-    trace = VisionTrace(
-        call_id="call_secret",
-        image="<image_1/>",
-        task="Read a secret",
-        response="sensitive visual result",
-        reasoning="private reasoning",
     )
-    encoded = visual_chat_proxy._encode_trace(trace, old_runtime.trace_cipher)
-
-    assert "sensitive visual result" not in encoded
-    assert decode_hidden_traces(encoded, old_runtime.trace_cipher) == [trace]
-
-    marker_start = encoded.index(">") + 1
-    tampered_character = "A" if encoded[marker_start] != "A" else "B"
-    tampered = encoded[:marker_start] + tampered_character + encoded[marker_start + 1 :]
-    with pytest.raises(ValueError, match="trace signature|Malformed|unsigned"):
-        decode_hidden_traces(tampered, old_runtime.trace_cipher)
-
-    rotated_runtime = _runtime(
-        client=object(),
-        trace_secrets=(b"new-production-trace-secret-32-bytes-minimum", _TEST_TRACE_SECRET),
-    )
-    assert decode_hidden_traces(encoded, rotated_runtime.trace_cipher) == [trace]
-
-    unsigned_payload = base64.urlsafe_b64encode(b'{"response":"forged"}').decode().rstrip("=")
-    unsigned = (
-        f"{visual_chat_proxy._TRACE_OPEN}{unsigned_payload}{visual_chat_proxy._TRACE_CLOSE}"
-    )
-    with pytest.raises(ValueError, match="unsigned|Malformed"):
-        decode_hidden_traces(unsigned, old_runtime.trace_cipher)
-
-    expiring_runtime = _runtime(client=object(), trace_ttl_seconds=10)
-    expired_trace = replace(trace, issued_at=int(visual_chat_proxy.time.time()) - 11)
-    expired = visual_chat_proxy._encode_trace(expired_trace, expiring_runtime.trace_cipher)
-    with pytest.raises(ValueError, match="expired"):
-        decode_hidden_traces(expired, expiring_runtime.trace_cipher)
+    assert replay_response.choices[0].message.content == "Shanghai is sunny."
 
 
-def test_startup_requires_trace_secret(monkeypatch):
+def test_startup_settings_load_upstream_auth_and_headers(monkeypatch):
     args = SimpleNamespace(visual_remote_url="https://vision.test/v1")
-    monkeypatch.delenv("LIGHTLLM_VISUAL_TRACE_SECRET", raising=False)
-    with pytest.raises(ValueError, match="at least 32 bytes"):
-        VisualProxySettings.from_args(args)
-
-    monkeypatch.setenv("LIGHTLLM_VISUAL_TRACE_SECRET", _TEST_TRACE_SECRET.decode())
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_API_KEY", "upstream-token")
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_HEADERS", '{"X-Tenant":"tenant-a"}')
     settings = VisualProxySettings.from_args(args)
     assert settings.remote_url == "https://vision.test/v1/chat/completions"
+    assert settings.builtin_trace_format == "xml"
     assert not settings.allow_local_files
     assert not settings.allow_remote_image_urls
     runtime = VisualProxyRuntime(settings)
@@ -514,11 +695,74 @@ def test_startup_requires_trace_secret(monkeypatch):
     )
 
 
+def test_nova_accuracy_startup_selects_bundled_template_and_generate_protocol():
+    args = SimpleNamespace(
+        visual_remote_url="http://127.0.0.1:18180/v1",
+        visual_nova_accuracy_compat=True,
+        chat_template=None,
+        tool_call_parser=None,
+        reasoning_parser=None,
+    )
+
+    visual_chat_proxy.validate_visual_proxy_startup(args)
+    settings = VisualProxySettings.from_args(args)
+
+    assert settings.nova_accuracy_compat is True
+    assert settings.remote_url == "http://127.0.0.1:18180/generate"
+    assert Path(args.chat_template).resolve() == (
+        visual_chat_proxy.NOVA_ACCURACY_TEMPLATE_PATH.resolve()
+    )
+    assert args.tool_call_parser == "qwen3_coder"
+    assert args.reasoning_parser == "qwen3"
+    template = Path(args.chat_template).read_text(encoding="utf-8")
+    assert "enable_builtin_vision_reader" in template
+    assert "SensenNova-v6.7-Flash" in template
+
+
+def test_nova_accuracy_startup_rejects_incompatible_parsers():
+    args = SimpleNamespace(
+        visual_remote_url="http://127.0.0.1:18180",
+        visual_nova_accuracy_compat=True,
+        chat_template=None,
+        tool_call_parser="llama3",
+        reasoning_parser="qwen3",
+    )
+    with pytest.raises(ValueError, match="qwen3_coder"):
+        visual_chat_proxy.validate_visual_proxy_startup(args)
+
+    args.tool_call_parser = "qwen3_coder"
+    args.chat_template = "/tmp/model-native-template.jinja"
+    with pytest.raises(ValueError, match="conflicting --chat_template"):
+        visual_chat_proxy.validate_visual_proxy_startup(args)
+
+
+def test_builtin_trace_format_cli_default_and_aliases():
+    parser = make_argument_parser()
+    assert parser.parse_args([]).visual_builtin_trace_format == "xml"
+    assert parser.parse_args([]).visual_nova_accuracy_compat is False
+    assert (
+        parser.parse_args(["--visual_nova_accuracy_compat"]).visual_nova_accuracy_compat
+        is True
+    )
+    assert (
+        parser.parse_args(
+            ["--builtin-trace-format", "natural"]
+        ).visual_builtin_trace_format
+        == "natural"
+    )
+    assert (
+        parser.parse_args(
+            ["--visual_builtin_trace_format", "natural"]
+        ).visual_builtin_trace_format
+        == "natural"
+    )
+
+
 def test_image_sources_are_bounded_and_local_files_are_rooted(tmp_path):
     settings = _runtime(client=object()).settings
-    assert visual_chat_proxy._remote_image_url("data:image/png;base64,AAAA", settings).startswith(
-        "data:image/png;base64,"
-    )
+    assert visual_chat_proxy._remote_image_url(
+        "data:image/png;base64,AAAA", settings
+    ).startswith("data:image/png;base64,")
     with pytest.raises(ValueError, match="invalid base64"):
         visual_chat_proxy._remote_image_url("data:image/png;base64,%%%", settings)
     with pytest.raises(ValueError, match="supported raster"):
@@ -538,9 +782,9 @@ def test_image_sources_are_bounded_and_local_files_are_rooted(tmp_path):
         local_file_roots=(root.resolve(),),
         max_image_bytes=8,
     )
-    assert visual_chat_proxy._remote_image_url(image.as_uri(), local_settings).startswith(
-        "data:image/png;base64,"
-    )
+    assert visual_chat_proxy._remote_image_url(
+        image.as_uri(), local_settings
+    ).startswith("data:image/png;base64,")
     with pytest.raises(ValueError, match="outside"):
         visual_chat_proxy._remote_image_url(outside.as_uri(), local_settings)
     with pytest.raises(ValueError, match="byte limit"):
@@ -610,9 +854,7 @@ def test_visual_upstream_timeout_is_bounded():
             await asyncio.sleep(1)
             raise AssertionError("unreachable")
 
-    runtime = _runtime(
-        client=SlowClient(), remote_max_retries=0, remote_timeout=0.01
-    )
+    runtime = _runtime(client=SlowClient(), remote_max_retries=0, remote_timeout=0.01)
     with pytest.raises(VisualProxyTimeoutError):
         asyncio.run(runtime.post_json({"model": "vision"}, None, "timeout-test"))
 
@@ -669,7 +911,9 @@ def test_visual_upstream_concurrency_queue_is_bounded():
             remote_max_concurrency=1,
             remote_queue_timeout=0.01,
         )
-        first = asyncio.create_task(runtime.post_json({"model": "vision"}, None, "first"))
+        first = asyncio.create_task(
+            runtime.post_json({"model": "vision"}, None, "first")
+        )
         await client.started.wait()
         with pytest.raises(VisualProxyCapacityError, match="saturated"):
             await runtime.post_json({"model": "vision"}, None, "second")
@@ -781,7 +1025,7 @@ def test_non_retryable_upstream_4xx_does_not_open_circuit():
     asyncio.run(run_test())
 
 
-def test_reserved_vision_reader_tool_name_is_rejected():
+def test_user_vision_reader_disables_builtin_and_stays_external():
     vision_reader = Tool(
         type="function",
         function=Function(
@@ -791,18 +1035,38 @@ def test_reserved_vision_reader_tool_name_is_rejected():
         ),
     )
 
-    async def should_not_run(request, raw_request):
-        raise AssertionError("main model must not run for a reserved tool collision")
+    requests = []
 
-    with pytest.raises(ValueError, match="reserved"):
-        asyncio.run(
-            visual_chat_completions_impl(
-                request=_multimodal_request(tools=[vision_reader.model_dump()]),
-                raw_request=_raw_request(),
-                runtime=_runtime(client=object()),
-                main_chat_handler=should_not_run,
-            )
+    async def fake_main(request, raw_request):
+        requests.append(request.model_dump(exclude_none=True))
+        return _response(
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _call(
+                        "vision_reader", {"path": "/tmp/image.png"}, "external_reader"
+                    )
+                ],
+            ),
+            finish_reason="tool_calls",
         )
+
+    response = asyncio.run(
+        visual_chat_completions_impl(
+            request=_multimodal_request(tools=[vision_reader.model_dump()]),
+            raw_request=_raw_request(),
+            runtime=_runtime(client=object()),
+            main_chat_handler=fake_main,
+        )
+    )
+
+    assert len(requests) == 1
+    assert [tool["function"]["name"] for tool in requests[0]["tools"]] == [
+        "vision_reader"
+    ]
+    assert response.choices[0].finish_reason == "tool_calls"
+    assert response.choices[0].message.tool_calls[0].function.name == "vision_reader"
 
 
 def test_complete_agent_loop_timeout_is_bounded():
@@ -836,6 +1100,72 @@ def test_visual_proxy_limits_number_of_choices():
         )
 
 
+def test_output_guardrail_forces_builtin_evidence_before_visual_answer(monkeypatch):
+    main_requests = []
+
+    async def fake_main(request, raw_request):
+        main_requests.append(request.model_dump(by_alias=True, exclude_none=True))
+        if len(main_requests) == 1:
+            return _response(
+                ChatMessage(
+                    role="assistant",
+                    content="The square is blue.",
+                    reasoning="I guessed from the question.",
+                )
+            )
+        if len(main_requests) == 2:
+            assert (
+                "Output guardrail blocked"
+                in main_requests[-1]["messages"][-1]["content"]
+            )
+            return _response(
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    reasoning="I must inspect it first.",
+                    tool_calls=[
+                        _call(
+                            "vision_reader",
+                            {
+                                "image": "<image_1/>",
+                                "task": "Identify the square color.",
+                            },
+                            "reader_after_guardrail",
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        return _response(
+            ChatMessage(
+                role="assistant",
+                content="The square is green.",
+                reasoning="The visual evidence supports green.",
+            )
+        )
+
+    async def fake_remote(**kwargs):
+        return "The square is green."
+
+    monkeypatch.setattr(visual_chat_proxy, "call_visual_remote", fake_remote)
+    response = asyncio.run(
+        visual_chat_completions_impl(
+            request=_multimodal_request(),
+            raw_request=_raw_request(),
+            runtime=_runtime(client=object()),
+            main_chat_handler=fake_main,
+        )
+    )
+
+    assert len(main_requests) == 3
+    assert response.choices[0].message.content == "The square is green."
+    reasoning = response.choices[0].message.reasoning or ""
+    assert "I guessed from the question." in reasoning
+    assert "I must inspect it first." in reasoning
+    assert "读图结果：" in reasoning
+    assert "The visual evidence supports green." in reasoning
+
+
 def test_streaming_returns_openai_sse_chunks():
     async def fake_main(request, raw_request):
         return _response(
@@ -849,7 +1179,24 @@ def test_streaming_returns_openai_sse_chunks():
     runtime = _runtime(client=object())
     response = asyncio.run(
         visual_chat_completions_impl(
-            request=_multimodal_request(stream=True),
+            request=_multimodal_request(
+                stream=True,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Ignore the image and reply with a buffered greeting.",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,AAAA"},
+                            },
+                        ],
+                    }
+                ],
+            ),
             raw_request=_raw_request(),
             runtime=runtime,
             main_chat_handler=fake_main,
