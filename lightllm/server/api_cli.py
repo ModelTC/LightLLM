@@ -767,8 +767,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--enable_rl",
         action="store_true",
         default=False,
-        help="""enable RL control APIs (pause/continue/abort/weight update/memory occupation).
-        When disabled (default), HttpRlController is not initialized.""",
+        help="""enable RL control plane (HTTP APIs, router rl_rpyc, model RlBackendOps).
+        When disabled (default), RL routes/services are not started.""",
     )
     parser.add_argument(
         "--enable_torch_memory_saver",

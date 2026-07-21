@@ -3,8 +3,8 @@
 通过多继承挂到 :class:`HttpServerManager` 上，把 RL 控制面 HTTP 转发接口
 从 manager 主体中拆出，避免 manager.py 继续膨胀。
 
-约定：宿主类需提供 ``self.rl_controller``；这些接口仅在 ``--enable_rl``
-场景下由 ``api_http_rl`` 调用。
+约定：宿主类在 ``--enable_rl`` 时提供非空 ``self.rl_controller``；
+RL HTTP 路由也仅在该开关下挂载，因此这些接口只应在 enable_rl 场景被调用。
 """
 
 from typing import Tuple

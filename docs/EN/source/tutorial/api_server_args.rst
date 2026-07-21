@@ -309,10 +309,6 @@ Multimodal Parameters
 
     Number of data parallel instances for ViT, default is ``1``
 
-.. option:: --visual_nccl_ports
-
-    List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
-
 .. option:: --vit_att_backend
 
     Set the attention backend for ViT. Available options:

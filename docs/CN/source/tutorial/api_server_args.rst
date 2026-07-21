@@ -310,10 +310,6 @@ PD 分离模式参数
 
     ViT 的数据并行实例数量，默认为 ``1``
 
-.. option:: --visual_nccl_ports
-
-    为 ViT 构建分布式环境的 NCCL 端口列表，例如 29500 29501 29502，默认为 [29500]
-
 .. option:: --vit_att_backend
 
     设置 ViT 使用的注意力后端。可选值为：

@@ -100,7 +100,7 @@ class ModelRpcServer(rpyc.Service):
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
-        self.rl_backend_ops = RlBackendOps(self.backend)
+        self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
 
         # only deepseekv3 can support auto_update_redundancy_expert
         if self.args.auto_update_redundancy_expert:
