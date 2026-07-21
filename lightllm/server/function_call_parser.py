@@ -1532,30 +1532,30 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """One-time parsing for DSML format tool calls."""
-        idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
-        if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+        block_start = text.find(self.bot_token)
+        if block_start == -1:
+            return StreamingParseResult(normal_text=text, calls=[])
 
-        tool_indices = self._get_tool_indices(tools)
+        block_body_start = block_start + len(self.bot_token)
+        block_end = text.find(self.eot_token, block_body_start)
+        if block_end == -1:
+            return StreamingParseResult(normal_text=text, calls=[])
+
+        normal_text = text[:block_start].removesuffix("\n\n")
+
         calls = []
 
-        invoke_matches = self.invoke_regex.findall(text)
+        invoke_matches = self.invoke_regex.findall(text[block_body_start:block_end])
         for func_name, invoke_body in invoke_matches:
-            if func_name not in tool_indices:
-                logger.warning(f"Model attempted to call undefined function: {func_name}")
-                continue
-
             param_matches = self.param_regex.findall(invoke_body)
             args_json = self._dsml_params_to_json(param_matches)
-
-            calls.append(
-                ToolCallItem(
-                    tool_index=tool_indices[func_name],
-                    name=func_name,
-                    parameters=args_json,
-                )
-            )
+            match_result = {
+                "name": func_name,
+                "parameters": json.loads(args_json),
+            }
+            for item in self.parse_base_json(match_result, tools):
+                item.tool_index = len(calls)
+                calls.append(item)
 
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
@@ -1579,16 +1579,19 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     normal_text = normal_text.replace(e_token, "")
             return StreamingParseResult(normal_text=normal_text)
 
+        normal_text = ""
+
         # Mark that we're inside a function_calls block
         if self.has_tool_call(current_text):
+            block_start = current_text.find(self.bot_token)
+            normal_text = current_text[:block_start].removesuffix("\n\n")
+            current_text = current_text[block_start:]
+            self._buffer = current_text
             self._in_function_calls = True
 
         # Check if function_calls block has ended
         if self.eot_token in current_text:
             self._in_function_calls = False
-
-        if not hasattr(self, "_tool_indices"):
-            self._tool_indices = self._get_tool_indices(tools)
 
         calls: List[ToolCallItem] = []
 
@@ -1681,19 +1684,18 @@ class DeepSeekV32Detector(BaseFormatDetector):
                     self.streamed_args_for_tool.append("")
 
                 if not self.current_tool_name_sent:
-                    if func_name in self._tool_indices:
-                        calls.append(
-                            ToolCallItem(
-                                tool_index=self.current_tool_id,
-                                name=func_name,
-                                parameters="",
-                            )
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=func_name,
+                            parameters="",
                         )
-                        self.current_tool_name_sent = True
-                        self.prev_tool_call_arr[self.current_tool_id] = {
-                            "name": func_name,
-                            "arguments": {},
-                        }
+                    )
+                    self.current_tool_name_sent = True
+                    self.prev_tool_call_arr[self.current_tool_id] = {
+                        "name": func_name,
+                        "arguments": {},
+                    }
                 else:
                     # Stream arguments as complete parameters are parsed
                     param_matches = self.param_regex.findall(partial_body)
@@ -1720,11 +1722,11 @@ class DeepSeekV32Detector(BaseFormatDetector):
                         except json.JSONDecodeError:
                             pass
 
-            return StreamingParseResult(normal_text="", calls=calls)
+            return StreamingParseResult(normal_text=normal_text, calls=calls)
 
         except Exception as e:
             logger.error(f"Error in DeepSeekV32 parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text="", calls=calls)
+            return StreamingParseResult(normal_text=normal_text, calls=calls)
 
 
 class Qwen3CoderDetector(BaseFormatDetector):
