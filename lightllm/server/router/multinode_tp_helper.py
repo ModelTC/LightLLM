@@ -3,6 +3,7 @@
 Public 入口：
 1. ``multinode_tp_generate_new_batch`` — 跨节点调度（内部会调用 abort 阶段1）
 2. ``get_aborted_reqs_from_running_batch_multinode_tp`` — abort 阶段2（running）
+3. ``get_stop_str_matched_reqs_from_running_batch_multinode_tp`` — stop_str 阶段2（running）
 """
 
 import torch
@@ -121,6 +122,29 @@ class RouterMultiNodeTpHelper:
         return marks.tolist()
 
     # ==================================================================
+    # Public: StopStr
+    # ==================================================================
+
+    def get_stop_str_matched_reqs_from_running_batch_multinode_tp(self) -> List[Req]:
+        """同步 stop_str_matched 状态，返回所有节点共同确认的待停止请求。"""
+        running_reqs = [] if self.running_batch is None else list(self.running_batch.reqs)
+        id_to_req = {req.request_id: req for req in running_reqs}
+
+        local_matched_req_ids = [
+            req_id for req_id, req in id_to_req.items() if req.stop_str_matched and not req._router_stop_str_matched
+        ]
+
+        matched_req_ids = self._allgather_stop_str_matched_req_ids(local_matched_req_ids)
+
+        ans = []
+        for req_id in matched_req_ids:
+            req = id_to_req.get(req_id)
+            if req is not None and not req._router_stop_str_matched:
+                req._router_stop_str_matched = True
+                ans.append(req)
+        return ans
+
+    # ==================================================================
     # Private: Abort
     # ==================================================================
 
@@ -173,3 +197,23 @@ class RouterMultiNodeTpHelper:
             aborted_req_ids = torch.empty(aborted_req_num, dtype=torch.int64, device="cpu")
         dist.broadcast(aborted_req_ids, src=0, group=self.mulitnode_group)
         return {int(req_id) for req_id in aborted_req_ids.tolist()}
+
+    def _allgather_stop_str_matched_req_ids(self, local_matched_req_ids: List[int]) -> List[int]:
+        """各节点独立提供本地 stop_str_matched req_ids，all_gather 后取交集并排序。
+
+        取交集的原因：
+        - 多机 TP 下同一请求的各 TP shard 可能分布在不同节点；
+        - 只有当一个请求在所有节点的 running_batch 中都 ``stop_str_matched=True`` 时，
+          才认为该请求真正匹配停止字符串，需要下发 StopStrMatchedReqCmd；
+        - 若某节点未匹配到而其他节点匹配到，说明该请求的 detokenization 状态尚不一致，
+          应等下一轮调度再确认，避免不一致的下发。
+
+        排序原因：
+        - 保证各节点返回的 req 顺序一致，避免因集合迭代顺序不同导致下游处理顺序不一致。
+        """
+        gathered = [None] * self.nnodes
+        dist.all_gather_object(gathered, local_matched_req_ids, group=self.mulitnode_group)
+        all_matched = set(gathered[0])
+        for ids in gathered[1:]:
+            all_matched &= set(ids)
+        return sorted(all_matched)

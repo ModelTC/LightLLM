@@ -298,7 +298,10 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             aborted_reqs = self._get_aborted_reqs_from_running_batch()
         if aborted_reqs:
             await self._aborted_reqs(aborted_reqs=aborted_reqs)
-        stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
+        if self.is_multinode_tp:
+            stop_str_matched_reqs = self.get_stop_str_matched_reqs_from_running_batch_multinode_tp()
+        else:
+            stop_str_matched_reqs = self._get_stop_str_reqs_from_running_batch()
         if stop_str_matched_reqs:
             await self._stop_str_matched_reqs(stop_str_matched_reqs=stop_str_matched_reqs)
         return
@@ -366,10 +369,6 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         return ans
 
     def _get_stop_str_reqs_from_running_batch(self) -> List[Req]:
-        # to do, 多节点tp模式，暂时不能支持 stop str 匹配退出
-        if self.is_multinode_tp:
-            return []
-
         ans = []
         if self.running_batch is None:
             return ans
