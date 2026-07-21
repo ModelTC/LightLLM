@@ -545,14 +545,6 @@ DeepSeek 冗余专家参数
 监控和日志参数
 --------------
 
-.. option:: --disable_log_stats
-
-    禁用吞吐量统计日志记录
-
-.. option:: --log_stats_interval
-
-    记录统计信息的间隔（秒），默认为 ``10``
-
 .. option:: --health_monitor
 
     检查服务健康状态并在出错时重启

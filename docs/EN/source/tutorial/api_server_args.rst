@@ -546,14 +546,6 @@ DeepSeek Redundant Expert Parameters
 Monitoring and Logging Parameters
 ---------------------------------
 
-.. option:: --disable_log_stats
-
-    Disable throughput statistics logging
-
-.. option:: --log_stats_interval
-
-    Interval for recording statistics (seconds), default is ``10``
-
 .. option:: --health_monitor
 
     Check service health status and restart on error
