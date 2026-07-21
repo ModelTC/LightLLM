@@ -77,10 +77,8 @@ class AudioItem:
         assert self._preload_data is not None
         ans = self._preload_data
         self._preload_data = None
-        return ans
-
-    def free(self):
         self._data = None
+        return ans
 
     def to_dict(self):
         ret = {}
