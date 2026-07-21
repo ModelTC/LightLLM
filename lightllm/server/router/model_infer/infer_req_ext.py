@@ -175,10 +175,7 @@ class FinalTokenMetadataExt:
         return mgr.extract(mem_indexes, topk)
 
     def collect_routed_experts(self) -> Optional[np.ndarray]:
-        """从 MoeRouteInfoManager 提取已完成请求的 routed expert 信息。
-
-        仅在请求已 finished / stop_str_matched，且存在可导出长度时返回数据。
-        """
+        """从 MoeRouteInfoManager 提取已完成请求的 routed expert 信息。"""
         req = self._req
 
         visible_total_len = req.shm_req.input_len + req.cur_output_len
