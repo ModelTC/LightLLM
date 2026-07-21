@@ -102,7 +102,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=True,
+            causal=self.infer_state.prefill_causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,

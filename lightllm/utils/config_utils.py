@@ -186,6 +186,20 @@ def auto_set_fused_shared_experts(args) -> None:
 
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
+    if config_json.get("type") in {"pi0", "pi05"}:
+        from lightllm.models.pi0.config import Pi0VLAConfig
+
+        config = Pi0VLAConfig.from_model_dir(model_path)
+        pi0_text_config = {
+            "hidden_size": config.vlm_hidden_size,
+            "num_hidden_layers": config.depth,
+            "num_attention_heads": config.num_attention_heads,
+            "num_key_value_heads": config.num_key_value_heads,
+            "head_dim": config.head_dim,
+        }
+        for key in key_name:
+            if key in pi0_text_config:
+                return pi0_text_config[key]
     for key in key_name:
         try:
             value = config_json[key]
@@ -249,6 +263,16 @@ def get_layer_num(model_path: str) -> int:
 
 
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
+    # PaliGemma/Gemma SentencePiece uses </s>=1.  The action path does not
+    # sample a text token, but the ordinary LightLLM request structures still
+    # require a valid EOS list during startup; keeping the real tokenizer id
+    # also leaves the standard text-generation path usable for future VLAs.
+    try:
+        if get_model_type(model_path) in {"pi0", "pi05"}:
+            return [1]
+    except Exception:
+        pass
+
     # gemma4 special eos_token_id
     try:
         model_type = get_model_type(model_path)
@@ -332,6 +356,18 @@ def get_model_architectures(model_path: str):
 def get_vocab_size(model_path: str):
     try:
         config_json = get_config_json(model_path)
+    except Exception:
+        logger.error("can not get vocab_size from config.json, return 0")
+        return 0
+
+    if config_json.get("type") in {"pi0", "pi05"}:
+        from lightllm.models.pi0.config import Pi0VLAConfig
+
+        # LeRobot config.json omits this field. Keep checkpoint parsing errors
+        # visible instead of silently starting with an invalid zero-sized head.
+        return Pi0VLAConfig.from_model_dir(model_path).vocab_size
+
+    try:
         # qwen3-omini special
         if "thinker_config" in config_json:
             config_json = config_json["thinker_config"]
@@ -345,7 +381,7 @@ def get_vocab_size(model_path: str):
         if not isinstance(vocab_size, int):
             vocab_size = int(vocab_size)
         return vocab_size
-    except:
+    except Exception:
         logger.error("can not get vocab_size from config.json, return 0")
         return 0
 
@@ -375,7 +411,9 @@ def has_vision_module(model_path: str) -> bool:
         from transformers.configuration_utils import PretrainedConfig
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
-        model_type = model_cfg["model_type"]
+        model_type = model_cfg.get("model_type") or model_cfg.get("type")
+        if model_type in {"pi0", "pi05"}:
+            return True
         if model_type == "qwen":
             # QWenVisionTransformer
             model_cfg["visual"]
@@ -463,7 +501,11 @@ def get_model_type(model_path: str) -> Optional[str]:
     """Get model type from config.json"""
     try:
         config_json = get_config_json(model_path)
-        model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
+        model_type = (
+            config_json.get("model_type")
+            or config_json.get("type")
+            or config_json.get("text_config", {}).get("model_type")
+        )
         return model_type
     except Exception as e:
         logger.error(f"Failed to get model_type from {model_path}: {e}")

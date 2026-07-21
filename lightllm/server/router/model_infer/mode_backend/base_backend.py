@@ -55,10 +55,12 @@ from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 class ModeBackend:
     def __init__(self) -> None:
         self.shm_req_manager = ShmReqManager()
+        self.request_lifecycle = None
 
         self.overlap_event_manager = OverlapEventManager()
         # 标识是否支持 overlap 功能，很多子类模式如 xgrammar 和 outlines 当前不支持 overlap 高性能模式
         self.support_overlap = True
+        self.infer_loop_idle_time = 0.02
 
         # prefill_mask_func 和 decode_mask_func 用于控制在采样输出前，通过对logics的调整，改变输出的选择空间，
         # 主要是为约束输出模式进行定制的操作
@@ -226,6 +228,22 @@ class ModeBackend:
             dist.barrier(group=self.node_nccl_group)
 
         self.init_custom()
+
+        if self.args.enable_vla:
+            from lightllm.server.inference_runtime.runtime import (
+                VLARequestLifecycle,
+            )
+
+            self.request_lifecycle = VLARequestLifecycle(self)
+            self.request_lifecycle.init()
+            # Action submission contains target-TP collectives.  Keep their
+            # ordering identical on every rank by serializing the ordinary
+            # backend's two infer-loop threads.  This is scoped to the
+            # optional action runtime; normal text backends retain overlap.
+            self.support_overlap = False
+            # Action completion and the next state tick are latency-sensitive;
+            # keep the generic idle loop responsive while no LM batch runs.
+            self.infer_loop_idle_time = 0.001
 
         if self.args.enable_dp_prompt_cache_fetch:
             self.init_dp_kv_shared()
@@ -561,6 +579,10 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
         """
+        lifecycle = self.request_lifecycle
+        if lifecycle is not None:
+            lifecycle.poll()
+
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
 
@@ -607,6 +629,8 @@ class ModeBackend:
                 continue
 
             if req_obj.infer_aborted or req_obj.finish_status.is_finished():
+                if lifecycle is not None and lifecycle.should_defer_release(req_obj):
+                    continue
                 if support_overlap:
                     # 延迟处理
                     req_obj.filter_mark = True
@@ -614,6 +638,9 @@ class ModeBackend:
                 else:
                     finished_reqs.append(req_obj)
                     continue
+
+            if lifecycle is not None and not lifecycle.is_schedulable(req_obj):
+                continue
 
             if no_decode:
                 is_decode = False
@@ -628,7 +655,9 @@ class ModeBackend:
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
+                    if wait_pause_count < pause_max_req_num and (
+                        lifecycle is None or lifecycle.can_pause(req_obj)
+                    ):
                         req_obj.wait_pause = True
                         wait_pause_count += 1
             else:
@@ -646,7 +675,9 @@ class ModeBackend:
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= token_num
                 else:
-                    if wait_pause_count < pause_max_req_num:
+                    if wait_pause_count < pause_max_req_num and (
+                        lifecycle is None or lifecycle.can_pause(req_obj)
+                    ):
                         req_obj.wait_pause = True
                         wait_pause_count += 1
 

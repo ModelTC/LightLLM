@@ -105,6 +105,16 @@ class HttpServerManager:
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
+        if args.enable_vla:
+            from lightllm.models.pi0.config import Pi0VLAConfig
+            from lightllm.models.pi0.preprocessing import Pi0PrePostProcessor
+            from lightllm.server.actionserver.shared_store import ActionOutputStore
+
+            self.vla_config = Pi0VLAConfig.from_start_args(args)
+            self.action_output_store = ActionOutputStore.from_args(args)
+            self.action_prepost_processor = Pi0PrePostProcessor(self.vla_config)
+            self._context_owner_waiters = {}
+
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
@@ -319,8 +329,24 @@ class HttpServerManager:
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
+        output_plan = None
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
+        if (
+            getattr(multimodal_params, "action", None) is not None
+            or getattr(multimodal_params, "outputs", None) is not None
+        ):
+            from lightllm.server.inference_runtime.http_adapter import (
+                resolve_request_output_plan,
+            )
+
+            output_plan = resolve_request_output_plan(
+                multimodal_params,
+                sampling_params,
+                action_runtime_enabled=self.args.enable_vla,
+            )
+        wants_action = output_plan is not None and output_plan.wants_action
+        wants_text = output_plan is None or output_plan.wants_text
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
         self._log_stage_timing(
@@ -428,7 +454,13 @@ class HttpServerManager:
                 f"{[(req_obj.request_id, req_obj.index_in_shm_mem) for req_obj in req_objs]}"
             )
 
-            req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
+            req_status = ReqStatus(
+                group_request_id,
+                multimodal_params,
+                req_objs,
+                start_time,
+                output_plan=output_plan,
+            )
             self.req_id_to_out_inf[group_request_id] = req_status
 
             await self.transfer_to_next_module_or_node(
@@ -440,14 +472,16 @@ class HttpServerManager:
                 "request_forwarded",
             )
 
-            results_generator = self._wait_to_token_package(
-                start_time,
-                prompt_ids,
-                group_request_id,
-                sampling_params,
-                req_status,
-                request,
-            )
+            results_generator = None
+            if wants_text:
+                results_generator = self._wait_to_token_package(
+                    start_time,
+                    prompt_ids,
+                    group_request_id,
+                    sampling_params,
+                    req_status,
+                    request,
+                )
 
             # 计算输入 token 使用量统计
             image_tokens, audio_tokens = self._count_multimodal_tokens(multimodal_params)
@@ -459,13 +493,59 @@ class HttpServerManager:
             }
 
             is_first_gen_token = True
-            async for sub_req_id, request_output, metadata, finish_status in results_generator:
-                # 只有第一个生成的 token 的 metadata 中包含 input_usage
-                if is_first_gen_token:
-                    metadata["input_usage"] = input_usage
-                    is_first_gen_token = False
+            if not wants_action:
+                assert results_generator is not None
+                async for sub_req_id, request_output, metadata, finish_status in results_generator:
+                    # 只有第一个生成的 token 的 metadata 中包含 input_usage
+                    if is_first_gen_token:
+                        metadata["input_usage"] = input_usage
+                        is_first_gen_token = False
 
-                yield sub_req_id, request_output, metadata, finish_status
+                    yield sub_req_id, request_output, metadata, finish_status
+
+            else:
+                from lightllm.server.inference_runtime.output_collector import (
+                    OutputCollector,
+                )
+
+                collector = OutputCollector(
+                    plan=output_plan,
+                    request_id=group_request_id,
+                    text_events=results_generator,
+                    action_result=lambda: self._wait_to_action_output_and_finish(
+                        start_time,
+                        prompt_ids,
+                        group_request_id,
+                        sampling_params,
+                        req_status,
+                        multimodal_params.action,
+                        request,
+                        drain_internal_text=(
+                            not wants_text
+                            and multimodal_params.action.requires_prefix_inputs
+                        ),
+                    ),
+                    # Successful one-shot outputs release their slot in
+                    # _wait_to_action_output. Persistent CREATE/REPLACE waits
+                    # for the public API layer to resolve handle ownership.
+                    mark_output_consumed=None,
+                    mark_output_discarded=lambda: self._mark_action_output_discarded(
+                        req_status
+                    ),
+                )
+                collected_events = collector.collect()
+                try:
+                    async for collected_output in collected_events:
+                        sub_req_id, request_output, metadata, finish_status = (
+                            collected_output.as_legacy_tuple()
+                        )
+                        if is_first_gen_token:
+                            metadata["input_usage"] = input_usage
+                            is_first_gen_token = False
+
+                        yield sub_req_id, request_output, metadata, finish_status
+                finally:
+                    await collected_events.aclose()
 
         except (ClientDisconnected, Exception) as e:
             logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
@@ -479,12 +559,260 @@ class HttpServerManager:
             # 进行回收。
             if group_request_id not in self.req_id_to_out_inf:
                 await self._release_multimodal_resources(multimodal_params)
+            if wants_action and group_request_id in self.req_id_to_out_inf:
+                self._mark_action_output_discarded(
+                    self.req_id_to_out_inf[group_request_id]
+                )
             await self.abort(group_request_id)
             raise e
         finally:
             async with self._run_reqs_count_lock:
                 self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
+
+    async def _wait_to_action_output_and_finish(
+        self,
+        start_time,
+        prompt_ids,
+        group_request_id,
+        sampling_params,
+        req_status,
+        action_request,
+        request,
+        *,
+        drain_internal_text: bool,
+    ):
+        """Join action completion with the unchanged LLM finish path.
+
+        Prefix-building action-only requests still produce one internal token
+        through ordinary prefill/post-handle. Drain it so detokenization sets
+        ``can_released_mark`` and the standard ``Req.can_release`` contract can
+        recycle the request. Context reuse/close finishes with zero tokens and
+        therefore needs no hidden text consumer.
+        """
+
+        action_task = asyncio.create_task(
+            self._wait_to_action_output(
+                group_request_id,
+                req_status,
+                action_request,
+                request,
+            )
+        )
+        if not drain_internal_text:
+            return await action_task
+
+        async def drain_text_output():
+            async for _ in self._wait_to_token_package(
+                start_time,
+                prompt_ids,
+                group_request_id,
+                sampling_params,
+                req_status,
+                request,
+            ):
+                pass
+
+        finish_task = asyncio.create_task(drain_text_output())
+        tasks = (action_task, finish_task)
+        try:
+            action_response, _ = await asyncio.gather(*tasks)
+            return action_response
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _wait_to_action_output(
+        self,
+        group_request_id: int,
+        req_status: "ReqStatus",
+        action_request,
+        request: Request,
+    ):
+        if len(req_status.group_req_objs.shm_req_objs) != 1:
+            raise ValueError("action requests require n=1 and best_of=1")
+        req = req_status.group_req_objs.shm_req_objs[0]
+        slot_index = req.index_in_shm_mem
+        deadline = time.monotonic() + action_request.timeout
+        from lightllm.server.actionserver.objs import ActionTaskIdentity
+
+        identity = ActionTaskIdentity(
+            slot_index,
+            int(req.request_id),
+            int(req.request_id),
+        )
+        persistent_request = bool(
+            getattr(action_request, "persists_prefix", False)
+        )
+        if persistent_request:
+            req_status.action_context_owner_identity = identity
+            self._context_owner_waiters[identity] = req_status
+
+        while True:
+            from lightllm.server.actionserver.objs import (
+                ActionContextOwnerDisposition,
+                ActionOutcome,
+                ActionReleaseDecision,
+                ActionStatus,
+            )
+
+            status = self.action_output_store.get_status(slot_index)
+            current_identity = self.action_output_store.get_identity(slot_index)
+            if (
+                status is not ActionStatus.IDLE
+                and current_identity != identity
+            ):
+                raise RuntimeError("action output slot changed request generation")
+            if (
+                status is ActionStatus.DONE
+                and self.action_output_store.all_ranks_retired(slot_index)
+            ):
+                response = self.action_output_store.read_response(
+                    slot_index,
+                    action_request.request_id,
+                    identity=identity,
+                )
+                if response.actions is not None:
+                    response.actions = self.action_prepost_processor.postprocess_actions(
+                        response.actions,
+                        action_request.raw_state,
+                    )
+                owner_required = (
+                    persistent_request
+                    and self.action_output_store.get_context_owner_disposition(
+                        identity
+                    )
+                    is not ActionContextOwnerDisposition.NONE
+                )
+                if owner_required:
+                    response.context_owner_identity = identity
+                else:
+                    if persistent_request:
+                        self._context_owner_waiters.pop(identity, None)
+                        req_status.action_context_owner_identity = None
+                    if not self.action_output_store.release_slot(identity):
+                        raise RuntimeError("action output slot was already released")
+                    req_status.mark_action_output_consumed()
+                self.latest_success_infer_time_mark.set_value(int(time.time()))
+                return response
+
+            release_decision = self.action_output_store.get_release_decision(
+                slot_index,
+                identity=identity,
+            )
+            if (
+                status in {
+                    ActionStatus.HAS_OUTPUT,
+                    ActionStatus.ERROR,
+                    ActionStatus.DONE,
+                }
+                and release_decision is ActionReleaseDecision.RESTART_REQUIRED
+            ):
+                # The process must restart before KV can be reused, but the
+                # generation-guarded terminal error can still be surfaced.
+                # Treat the release decision as authoritative if a successful
+                # payload publication raced the local safe-ACK deadline.
+                response = self.action_output_store.read_terminal_response(
+                    identity,
+                    action_request.request_id,
+                )
+                response.actions = None
+                response.outcome = ActionOutcome.RESTART_REQUIRED
+                response.restart_required = True
+                if response.error_info is None:
+                    response.error_info = (
+                        "action workers did not prove KV release before the "
+                        "safe-ACK deadline"
+                    )
+                owner_required = (
+                    persistent_request
+                    and self.action_output_store.get_context_owner_disposition(
+                        identity
+                    )
+                    is not ActionContextOwnerDisposition.NONE
+                )
+                if owner_required:
+                    response.context_owner_identity = identity
+                else:
+                    if persistent_request:
+                        self._context_owner_waiters.pop(identity, None)
+                        req_status.action_context_owner_identity = None
+                return response
+
+            if req_status.aborted or bool(getattr(req, "is_aborted", False)):
+                raise RuntimeError(f"action request {group_request_id} was aborted")
+            if not self.disable_abort and request is not None and await request.is_disconnected():
+                await self.abort(group_request_id)
+                raise ClientDisconnected(
+                    group_request_id=group_request_id,
+                    reason="_wait_to_action_output detected a disconnected client",
+                )
+            if time.monotonic() >= deadline:
+                await self.abort(group_request_id)
+                raise TimeoutError(
+                    f"timed out waiting for action request {group_request_id}"
+                )
+            await asyncio.sleep(0.002)
+
+    def _mark_action_output_discarded(self, req_status: "ReqStatus") -> None:
+        identity = req_status.action_context_owner_identity
+        if identity is None:
+            req_status.mark_action_output_discarded()
+            return
+        from lightllm.server.actionserver.objs import (
+            ActionContextOwnerDisposition,
+        )
+
+        if (
+            req_status.action_context_owner_disposition
+            is ActionContextOwnerDisposition.DELIVERED
+        ):
+            # Public response assembly already transferred ownership to the
+            # client; a late request abort must not revoke that context.
+            return
+        self.resolve_action_context_owner(identity, delivered=False)
+
+    def resolve_action_context_owner(
+        self,
+        identity,
+        *,
+        delivered: bool,
+    ) -> bool:
+        """Resolve a committed context only after the public response layer.
+
+        This is intentionally later than action-result collection: response
+        assembly or client cancellation can still fail after the InferReq has
+        already completed its ordinary LLM finish/filter path.
+        """
+
+        req_status = self._context_owner_waiters.get(identity)
+        if req_status is None:
+            return False
+        from lightllm.server.actionserver.objs import (
+            ActionContextOwnerDisposition,
+        )
+
+        disposition = (
+            ActionContextOwnerDisposition.DELIVERED
+            if delivered
+            else ActionContextOwnerDisposition.DISCARDED
+        )
+        previous = req_status.action_context_owner_disposition
+        if previous is not None and previous is not disposition:
+            raise RuntimeError(
+                "persistent context owner disposition was already resolved"
+            )
+        req_status.action_context_owner_disposition = disposition
+        req_status.action_output_ready_to_release = True
+        if not delivered:
+            req_status.action_output_discarded = True
+        self.action_output_store.mark_context_owner_disposition(
+            identity,
+            disposition,
+        )
+        return True
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:
         image_tokens = 0
@@ -629,6 +957,24 @@ class HttpServerManager:
     ):
 
         if self.pd_mode.is_P_or_NORMAL():
+            action_request = getattr(
+                group_req_objs.multimodal_params,
+                "action",
+                None,
+            )
+            if action_request is not None:
+                from lightllm.server.actionserver.objs import ActionRequest
+
+                if isinstance(action_request, dict):
+                    action_request = ActionRequest.from_dict(action_request)
+                if not action_request.requires_prefix_inputs:
+                    # High-frequency context tasks carry no new visual/audio
+                    # input and must reach the router without a VLM/ViT pass.
+                    self.send_to_router.send_pyobj(
+                        group_req_objs.to_group_req_index(),
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                    return
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
                 return
@@ -797,6 +1143,34 @@ class HttpServerManager:
         group_req_objs: GroupReqObjs = req_status.group_req_objs
         for req in group_req_objs.shm_req_objs:
             req.is_aborted = True
+        if req_status.action_output_pending:
+            self._mark_action_output_discarded(req_status)
+            from lightllm.server.actionserver.objs import (
+                ActionStatus,
+                ActionTaskIdentity,
+            )
+
+            for req in group_req_objs.shm_req_objs:
+                identity = ActionTaskIdentity(
+                    req.index_in_shm_mem,
+                    int(req.request_id),
+                    int(req.request_id),
+                )
+                if (
+                    self.action_output_store.matches(identity)
+                    and self.action_output_store.get_status(req.index_in_shm_mem)
+                    is ActionStatus.DONE
+                    and self.action_output_store.all_ranks_retired(
+                        req.index_in_shm_mem
+                    )
+                ):
+                    try:
+                        released = self.action_output_store.release_slot(identity)
+                    except RuntimeError:
+                        released = False
+                    if released:
+                        req_status.mark_action_output_consumed()
+                        self._context_owner_waiters.pop(identity, None)
         logger.warning(f"aborted group_request_id {group_req_objs.group_req_id}")
         return True
 
@@ -832,11 +1206,78 @@ class HttpServerManager:
             release_req_status: List[ReqStatus] = []
             for group_req_id_ in list(self.req_id_to_out_inf.keys()):
                 req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id_, None)
+                if (
+                    req_status is not None
+                    and req_status.action_output_pending
+                    and req_status.action_output_ready_to_release
+                ):
+                    from lightllm.server.actionserver.objs import (
+                        ActionContextOwnerDisposition,
+                        ActionStatus,
+                        ActionTaskIdentity,
+                    )
+
+                    for req in req_status.group_req_objs.shm_req_objs:
+                        identity = ActionTaskIdentity(
+                            req.index_in_shm_mem,
+                            int(req.request_id),
+                            int(req.request_id),
+                        )
+                        owner_identity = req_status.action_context_owner_identity
+                        owner_disposition = (
+                            req_status.action_context_owner_disposition
+                        )
+                        if (
+                            owner_identity == identity
+                            and owner_disposition
+                            in {
+                                ActionContextOwnerDisposition.DELIVERED,
+                                ActionContextOwnerDisposition.DISCARDED,
+                            }
+                        ):
+                            self.action_output_store.mark_context_owner_disposition(
+                                identity,
+                                owner_disposition,
+                            )
+                        status = self.action_output_store.get_status(
+                            req.index_in_shm_mem
+                        )
+                        if (
+                            status is ActionStatus.DONE
+                            and self.action_output_store.matches(identity)
+                            and self.action_output_store.all_ranks_retired(
+                                req.index_in_shm_mem
+                            )
+                        ):
+                            try:
+                                released = self.action_output_store.release_slot(
+                                    identity
+                                )
+                            except RuntimeError:
+                                released = False
+                            if released:
+                                status = ActionStatus.IDLE
+                        if status is ActionStatus.IDLE:
+                            # Before dispatch an aborted persistent owner has
+                            # no matching task generation. Wait until the
+                            # ordinary request itself is releasable, proving
+                            # that no context was committed.
+                            if (
+                                owner_identity == identity
+                                and not self.action_output_store.matches(identity)
+                                and not req.can_release()
+                            ):
+                                continue
+                            req_status.mark_action_output_consumed()
+                            self._context_owner_waiters.pop(identity, None)
                 if req_status is not None and req_status.can_release():
                     release_req_status.append(req_status)
 
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
+                owner_identity = req_status.action_context_owner_identity
+                if owner_identity is not None:
+                    self._context_owner_waiters.pop(owner_identity, None)
                 _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
                     _is_aborted = _is_aborted or req.is_aborted
@@ -947,7 +1388,15 @@ class HttpServerManager:
 
 
 class ReqStatus:
-    def __init__(self, group_request_id, multimodal_params, req_objs: List[Req], start_time) -> None:
+    def __init__(
+        self,
+        group_request_id,
+        multimodal_params,
+        req_objs: List[Req],
+        start_time,
+        *,
+        output_plan=None,
+    ) -> None:
         self.lock = asyncio.Lock()
         self.event = asyncio.Event()
         self.group_req_objs = GroupReqObjs(
@@ -958,8 +1407,25 @@ class ReqStatus:
         )
         self.out_token_info_list = []
         self.aborted = False
+        self.output_plan = output_plan
+        self.action_output_pending = bool(
+            output_plan is not None and output_plan.wants_action
+        )
+        self.action_output_discarded = False
+        self.action_output_ready_to_release = False
+        self.action_context_owner_identity = None
+        self.action_context_owner_disposition = None
+
+    def mark_action_output_consumed(self):
+        self.action_output_pending = False
+
+    def mark_action_output_discarded(self):
+        self.action_output_discarded = True
+        self.action_output_ready_to_release = True
 
     def can_release(self):
+        if self.action_output_pending:
+            return False
         for req in self.group_req_objs.shm_req_objs:
             if not req.can_release():
                 return False

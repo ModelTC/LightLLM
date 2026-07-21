@@ -46,7 +46,7 @@ class _ModelRegistries:
 
     def get_model(self, model_cfg: dict, model_kvargs: dict) -> tuple:
         """Get model"""
-        model_type = model_cfg.get("model_type", "")
+        model_type = model_cfg.get("model_type") or model_cfg.get("type", "")
         configs = self._registry.get(model_type, [])
         matches = []
         for cfg in configs:
@@ -69,7 +69,7 @@ class _ModelRegistries:
 
     def get_model_class(self, model_cfg: dict):
         """Get model"""
-        model_type = model_cfg.get("model_type", "")
+        model_type = model_cfg.get("model_type") or model_cfg.get("type", "")
         configs = self._registry.get(model_type, [])
         matches = []
         for cfg in configs:

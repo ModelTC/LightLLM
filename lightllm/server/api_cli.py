@@ -857,4 +857,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 (you should set it up by yourself).
                 A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
+    parser.add_argument("--vla_action_dim", type=int, default=None)
+    parser.add_argument("--vla_action_horizon", type=int, default=None)
+    parser.add_argument("--vla_num_denoise_steps", type=int, default=None)
+    parser.add_argument("--vla_max_prefix_tokens", type=int, default=1024)
+    parser.add_argument("--vla_tokenizer_path", type=str, default=None)
+    parser.add_argument("--vla_norm_config", type=str, default=None)
+    parser.add_argument("--vla_robot_adapter", type=str, default=None)
+    parser.add_argument("--vla_action_postprocess_config", type=str, default=None)
+    parser.add_argument("--action_nccl_port", type=int, default=None)
     return parser

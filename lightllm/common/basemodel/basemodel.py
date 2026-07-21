@@ -384,6 +384,8 @@ class TpPartBaseModel:
         infer_state.mem_index = model_input.mem_indexes
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
+        infer_state.prefill_causal = getattr(self, "prefill_causal", True)
+        infer_state.use_ieee_fp32_attention = getattr(self, "use_ieee_fp32_attention", False)
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens

@@ -250,6 +250,54 @@ async def generate(request: Request) -> Response:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 
 
+@app.post("/v1/vla/actions")
+async def vla_actions(request: Request) -> Response:
+    if not g_objs.args.enable_vla:
+        return create_error_response(
+            HTTPStatus.NOT_FOUND, "this server was not started with a VLA model"
+        )
+    try:
+        from lightllm.server.actionserver.api import generate_actions
+
+        return await generate_actions(request, g_objs.httpserver_manager)
+    except (TypeError, ValueError) as exc:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
+    except ClientDisconnected as exc:
+        logger.warning(str(exc))
+        return Response(status_code=499)
+    except TimeoutError as exc:
+        return create_error_response(HTTPStatus.GATEWAY_TIMEOUT, str(exc))
+    except Exception as exc:
+        logger.error("VLA action request failed: %s", str(exc), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(exc))
+
+
+@app.delete("/v1/vla/contexts/{context_id}")
+async def vla_close_context(context_id: str, request: Request) -> Response:
+    if not g_objs.args.enable_vla:
+        return create_error_response(
+            HTTPStatus.NOT_FOUND, "this server was not started with a VLA model"
+        )
+    try:
+        from lightllm.server.actionserver.api import close_prefix_context
+
+        return await close_prefix_context(
+            request,
+            g_objs.httpserver_manager,
+            context_id,
+        )
+    except (TypeError, ValueError) as exc:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
+    except ClientDisconnected as exc:
+        logger.warning(str(exc))
+        return Response(status_code=499)
+    except TimeoutError as exc:
+        return create_error_response(HTTPStatus.GATEWAY_TIMEOUT, str(exc))
+    except Exception as exc:
+        logger.error("VLA context close failed: %s", str(exc), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(exc))
+
+
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
     if get_env_start_args().run_mode in ["prefill", "decode"]:

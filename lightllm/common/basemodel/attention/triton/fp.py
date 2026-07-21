@@ -87,6 +87,8 @@ class TritonPrefillAttState(BasePrefillAttState):
             self.infer_state.max_q_seq_len,
             self.infer_state.req_manager.req_to_token_indexs,
             sliding_window=sliding_window,
+            causal=self.infer_state.prefill_causal,
+            use_ieee_fp32_attention=self.infer_state.use_ieee_fp32_attention,
         )
         return out
 

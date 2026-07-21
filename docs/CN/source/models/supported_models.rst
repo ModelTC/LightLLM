@@ -94,3 +94,17 @@ Reward模型
     -  :code:`--use_reward_model`
   * - `Qwen2-Reward <https://huggingface.co/Qwen/Qwen2-Reward>`_
     -  :code:`--use_reward_model`
+
+视觉-语言-动作模型
+^^^^^^^^^^^^^^^^^
+
+.. list-table::
+  :widths: 25 25
+  :header-rows: 1
+
+  * - 模型
+    - 备注
+  * - OpenPI π₀
+    - LeRobot checkpoint；使用 :doc:`VLA 推理路径 <../tutorial/vla_pi0>`。
+  * - OpenPI π₀.₅
+    - LeRobot checkpoint；复用普通 VLM pipeline，并启动独立 actionserver。

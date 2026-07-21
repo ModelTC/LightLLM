@@ -76,6 +76,11 @@ def normal_or_p_d_start(args):
 
     args: StartArgs = args
 
+    from lightllm.utils.config_utils import get_model_type
+    from lightllm.server.inference_runtime.compatibility import configure_vla_runtime
+
+    configure_vla_runtime(args, model_type=get_model_type(args.model_dir))
+
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
@@ -190,6 +195,9 @@ def normal_or_p_d_start(args):
 
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True
+
+    if args.enable_vla and args.enable_tpsp_mix_mode:
+        raise ValueError("VLA action inference does not currently support TPSP mix mode")
 
     if args.enable_prefill_decode_mixed:
         assert args.run_mode == "normal", "--enable_prefill_decode_mixed only supports run_mode normal"
@@ -339,6 +347,10 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
+    if args.enable_vla and args.data_type in {"fp32", "float32"}:
+        args.llm_prefill_att_backend = ["triton"]
+        args.llm_decode_att_backend = ["triton"]
+
     already_uesd_ports = [args.port]
     if args.nccl_port is not None:
         already_uesd_ports.append(args.nccl_port)
@@ -346,6 +358,8 @@ def normal_or_p_d_start(args):
         already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
     if not args.disable_audio and args.audio_nccl_ports is not None:
         already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
+    if args.enable_vla and args.action_nccl_port is not None:
+        already_uesd_ports.append(args.action_nccl_port)
 
     # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
     # 捕获到端口设置冲突的问题
@@ -353,8 +367,18 @@ def normal_or_p_d_start(args):
     ports_locker.lock_port()
 
     node_world_size = args.tp // args.nnodes
+    action_port_count = 0
+    if args.enable_vla:
+        action_port_count = 1 + int(args.action_nccl_port is None)
     can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
+        num=(
+            10
+            + node_world_size
+            + args.visual_dp * args.visual_tp
+            + args.visual_dp
+            + args.audio_dp
+            + action_port_count
+        ),
         used_ports=already_uesd_ports,
     )
     logger.info(f"alloced ports: {can_use_ports}")
@@ -383,6 +407,13 @@ def normal_or_p_d_start(args):
         can_use_ports = can_use_ports[args.audio_dp :]
     else:
         args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
+
+    if args.enable_vla:
+        args.action_port = can_use_ports[0]
+        can_use_ports = can_use_ports[1:]
+        if args.action_nccl_port is None:
+            args.action_nccl_port = can_use_ports[0]
+            can_use_ports = can_use_ports[1:]
 
     # 将申请好的端口放入args参数中
     if args.nccl_port is None:
@@ -489,6 +520,14 @@ def normal_or_p_d_start(args):
             (args,),
         ],
     )
+
+    if args.enable_vla:
+        from .actionserver.manager import start_action_process
+
+        process_manager.start_submodule_processes(
+            start_funcs=[start_action_process],
+            start_args=[(args,)],
+        )
 
     # 启动 Hypercorn
     command = [

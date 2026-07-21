@@ -48,6 +48,10 @@ class InferStateInfo:
         # 的sum值, 其值等于 sum(b_ready_cache_len)
         self.prefix_total_token_num: int = None
         self.is_prefill: bool = None
+        # Full-attention policy is selected per inference state. Ordinary
+        # language-model prefill keeps the causal default.
+        self.prefill_causal: bool = True
+        self.use_ieee_fp32_attention: bool = False
 
         self.mem_manager: MemoryManager = None
         self.req_manager: ReqManager = None

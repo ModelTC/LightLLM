@@ -80,7 +80,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
             self.backend.tp_kv_head_num,
             self.backend.head_dim,
             1,
-            causal=True,
+            causal=self.infer_state.prefill_causal,
             pos_encoding_mode="NONE",
             logits_soft_cap=0.0,
             q_data_type=self.backend.q_data_type,

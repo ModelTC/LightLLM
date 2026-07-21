@@ -15,6 +15,7 @@ from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.vit.model import VisionTransformer
+from lightllm.models.pi0.visual import Pi0VisionModel
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
 from lightllm.models.qwen2_5_vl.qwen2_5_visual import Qwen2_5_VisionTransformerPretrainedModel
@@ -75,7 +76,7 @@ class VisualModelRpcServer(rpyc.Service):
                 "quant_cfg": kvargs["quant_cfg"],
                 "max_batch_size": kvargs["max_batch_size"],
             }
-            self.model_type = model_cfg["model_type"]
+            self.model_type = model_cfg.get("model_type") or model_cfg.get("type")
             if self.model_type == "qwen":
                 self.model = QWenVisionTransformer(**model_cfg["visual"]).eval().bfloat16()
             elif self.model_type == "qwen2_vl":
@@ -90,7 +91,9 @@ class VisualModelRpcServer(rpyc.Service):
                 self.model = (
                     Qwen3VisionTransformerPretrainedModel(kvargs, **model_cfg["vision_config"]).eval().bfloat16()
                 )
-            elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
+            elif self.model_type in {"pi0", "pi05"}:
+                self.model = Pi0VisionModel(kvargs)
+            elif model_cfg.get("architectures", [""])[0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":
                 self.model = LlavaVisionModel()

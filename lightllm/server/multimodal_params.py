@@ -223,9 +223,32 @@ class MultimodalParams:
         self,
         images: List[dict] = [],
         audios: List[dict] = [],
+        action=None,
+        outputs=None,
+        state=None,
     ) -> None:
         self.images = [ImageItem(**i) for i in images]
         self.audios = [AudioItem(**a) for a in audios]
+        if isinstance(action, dict):
+            from lightllm.server.actionserver.objs import ActionRequest
+
+            action = ActionRequest.from_dict(action)
+        self.action = action
+        # ``outputs`` is intentionally transported with the multimodal payload:
+        # it describes which inference branches consume the already prepared
+        # prefix, rather than a sampling policy.  ``None`` retains the legacy
+        # behavior (text unless an action payload is present).
+        self.outputs = (
+            None
+            if outputs is None
+            else [outputs]
+            if isinstance(outputs, str)
+            else list(outputs)
+        )
+        # Pi0.5 needs normalized observation state during prompt tokenization
+        # even for text-only requests.  Keep that input independent from the
+        # optional action task so selecting only the text branch is possible.
+        self.state = state
         return
 
     async def verify_and_preload(self, request: Request):
@@ -240,6 +263,12 @@ class MultimodalParams:
         ret = {}
         ret["images"] = [i.to_dict() for i in self.images]
         ret["audios"] = [a.to_dict() for a in self.audios]
+        if self.action is not None:
+            ret["action"] = self.action.to_dict()
+        if self.outputs is not None:
+            ret["outputs"] = self.outputs
+        if self.state is not None:
+            ret["state"] = self.state
         return ret
 
     def to_origin_dict(self):
@@ -249,6 +278,12 @@ class MultimodalParams:
         ret = {}
         ret["images"] = [i.to_origin_dict() for i in self.images]
         ret["audios"] = [a.to_origin_dict() for a in self.audios]
+        if self.action is not None:
+            ret["action"] = self.action.to_dict()
+        if self.outputs is not None:
+            ret["outputs"] = self.outputs
+        if self.state is not None:
+            ret["state"] = self.state
         return ret
 
 

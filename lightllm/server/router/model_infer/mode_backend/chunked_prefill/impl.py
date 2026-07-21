@@ -93,7 +93,7 @@ class ChunkedPrefillBackend(ModeBackend):
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
-                    time.sleep(0.02)
+                    time.sleep(self.infer_loop_idle_time)
                     continue
 
         except BaseException as e:
