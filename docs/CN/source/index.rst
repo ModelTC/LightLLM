@@ -52,6 +52,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    FP8 KV 量化与校准 <tutorial/fp8_kv_quantization>
    多级缓存部署 <tutorial/multi_level_cache_deployment>
    多模态部署 <tutorial/multimodal>
+   π₀ / π₀.₅ VLA 推理 <tutorial/vla_pi0>
    奖励模型部署 <tutorial/reward_model>
    OpenAI 接口使用 <tutorial/openai>
    工具调用（Function Calling） <tutorial/function_calling>

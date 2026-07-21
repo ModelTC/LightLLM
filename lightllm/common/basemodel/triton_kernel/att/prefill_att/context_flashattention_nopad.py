@@ -43,6 +43,8 @@ def _fwd_kernel(
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
     SLIDING_WINDOW_LEFT: tl.constexpr,
+    CAUSAL: tl.constexpr,
+    USE_IEEE_FP32_ATTENTION: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -77,7 +79,13 @@ def _fwd_kernel(
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
-    block_end_loc = tl.minimum(block_start_loc + BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
+    if CAUSAL:
+        block_end_loc = tl.minimum(
+            block_start_loc + BLOCK_M + prompt_cache_len,
+            cur_batch_seq_len + prompt_cache_len,
+        )
+    else:
+        block_end_loc = cur_batch_seq_len + prompt_cache_len
 
     if USE_SLIDING_WINDOW:
         kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
@@ -99,13 +107,18 @@ def _fwd_kernel(
         ).to(tl.int64)
         off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
         k = tl.load(K + off_k, mask=k_pos[None, :] < block_end_loc, other=0.0)
-        qk = tl.dot(q, k)
+        if USE_IEEE_FP32_ATTENTION:
+            qk = tl.dot(q, k, input_precision="ieee")
+        else:
+            qk = tl.dot(q, k)
 
         if USE_SLIDING_WINDOW:
             # FA-style left inclusive offset + causal (right=0).
             mask = ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT) & (q_pos[:, None] >= k_pos[None, :])
-        else:
+        elif CAUSAL:
             mask = q_pos[:, None] >= k_pos[None, :]
+        else:
+            mask = k_pos[None, :] < block_end_loc
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -121,7 +134,10 @@ def _fwd_kernel(
         off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
         v = tl.load(V + off_v, mask=k_pos[:, None] < block_end_loc, other=0.0)
         p = p.to(v.dtype)
-        acc = tl.dot(p, v, acc)
+        if USE_IEEE_FP32_ATTENTION:
+            acc = tl.dot(p, v, acc, input_precision="ieee")
+        else:
+            acc = tl.dot(p, v, acc)
         # update m_i and l_i
         m_i = m_ij
 
@@ -148,6 +164,8 @@ def context_attention_fwd(
     max_input_len,
     req_to_token_indexs,
     sliding_window=(-1, -1),
+    causal=True,
+    use_ieee_fp32_attention=False,
 ):
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
@@ -179,6 +197,7 @@ def context_attention_fwd(
         sliding_window_left = -1
     else:
         use_sliding_window = True
+        assert causal, "non-causal sliding-window prefill is not supported"
         assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
         sliding_window_left = int(sliding_window[0])
 
@@ -214,6 +233,8 @@ def context_attention_fwd(
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
         SLIDING_WINDOW_LEFT=sliding_window_left,
+        CAUSAL=causal,
+        USE_IEEE_FP32_ATTENTION=use_ieee_fp32_attention,
         num_warps=num_warps,
         num_stages=num_stages,
     )

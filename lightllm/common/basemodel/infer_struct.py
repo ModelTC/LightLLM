@@ -45,6 +45,10 @@ class InferStateInfo:
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
         self.is_prefill: bool = None
+        # Full-attention policy is selected per inference state. Ordinary
+        # language-model prefill keeps the causal default.
+        self.prefill_causal: bool = True
+        self.use_ieee_fp32_attention: bool = False
 
         self.mem_manager: MemoryManager = None
         self.req_manager: ReqManager = None

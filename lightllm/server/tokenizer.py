@@ -47,6 +47,15 @@ def get_tokenizer(
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     """Gets a tokenizer for the given model name via Huggingface."""
+    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
+    model_type = model_cfg.get("model_type") or model_cfg.get("type", "")
+    if model_type in {"pi0", "pi05"}:
+        from lightllm.models.pi0.tokenizer import Pi0TokenizerAdapter
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        configured_path = getattr(get_env_start_args(), "vla_tokenizer_path", None)
+        return Pi0TokenizerAdapter(tokenizer_name, configured_path)
+
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
@@ -78,7 +87,6 @@ def get_tokenizer(
             "slowdown. Consider using a fast tokenizer instead."
         )
 
-    model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.

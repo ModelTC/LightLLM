@@ -95,3 +95,16 @@ Reward Models
   * - `Qwen2-Reward <https://huggingface.co/Qwen/Qwen2-Reward>`_
     -  :code:`--use_reward_model`
 
+Vision-Language-Action Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+  :widths: 25 25
+  :header-rows: 1
+
+  * - Model
+    - Notes
+  * - OpenPI π₀
+    - LeRobot checkpoint; use :doc:`the VLA inference path <../tutorial/vla_pi0>`.
+  * - OpenPI π₀.₅
+    - LeRobot checkpoint using the normal VLM pipeline plus actionserver.
