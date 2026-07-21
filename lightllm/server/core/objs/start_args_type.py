@@ -85,7 +85,6 @@ class StartArgs:
     max_req_total_len: Optional[int] = field(default=None)
     nccl_host: str = field(default="127.0.0.1")
     nccl_port: int = field(default=None)
-    lightllm_instance_id: int = field(default=0)
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
