@@ -402,13 +402,13 @@ class ModeBackend:
         return next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
     def _get_next_token_ranks(self, logits: torch.Tensor, next_token_ids: torch.Tensor) -> torch.Tensor:
-        """计算（或占位）每个 next token 在 vocab 上的 1-based rank。
+        """计算（或占位）每个 next token 在 vocab 上的 1-based rank（GPU tensor）。
 
-        仅 ``--enable_rl`` 时做真实 rank；否则返回常量 ``-1``，避免 O(batch * vocab) 比较。
+        仅 ``--enable_rl`` 时做真实 rank；否则返回 GPU 常量 ``-1``，避免 O(batch * vocab) 比较。
         下游 async_copy 在同样条件下会忽略该返回值。
         """
         if not self.args.enable_rl:
-            return g_pin_mem_manager.get_const_cpu_tensor(
+            return g_pin_mem_manager.get_const_gpu_tensor(
                 key="next_token_ranks",
                 shape=next_token_ids.shape,
                 fill_value=-1,

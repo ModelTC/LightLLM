@@ -10,8 +10,9 @@ class PinMemTensorManager:
         self.key_to_tensor_list: Dict[str, List[torch.Tensor]] = collections.defaultdict(list)
         self.key_to_alloc_index: Dict[str, int] = {}
         self.buffer_size = 4
-        # 常量 tensor 缓存：逻辑 key -> 已 fill 的 CPU pin_memory buffer
-        self.key_to_const_tensor: Dict[str, torch.Tensor] = {}
+        # 常量 tensor 缓存：逻辑 key -> 已 fill 的 buffer
+        self.key_to_const_cpu_tensor: Dict[str, torch.Tensor] = {}
+        self.key_to_const_gpu_tensor: Dict[str, torch.Tensor] = {}
 
     def alloc_pin_tensor(self, key: str, size: int, dtype: torch.dtype) -> torch.Tensor:
         """
@@ -65,13 +66,39 @@ class PinMemTensorManager:
             size *= int(dim)
 
         with self.lock:
-            buf = self.key_to_const_tensor.get(key)
+            buf = self.key_to_const_cpu_tensor.get(key)
             if buf is None or buf.numel() < size:
                 n = max(size, 2048)
                 buf = torch.full((n,), fill_value, dtype=dtype, device="cpu", pin_memory=True)
-                self.key_to_const_tensor[key] = buf
+                self.key_to_const_cpu_tensor[key] = buf
             else:
                 assert buf.dtype == dtype, f"const cpu tensor key={key!r} dtype mismatch: {buf.dtype} vs {dtype}"
+            return buf[:size].view(tuple(int(d) for d in shape))
+
+    def get_const_gpu_tensor(
+        self,
+        key: str,
+        shape: Sequence[int],
+        fill_value: Union[int, float, bool],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """返回指定 ``shape`` 的 GPU 常量 tensor 切片（按需扩容）。
+
+        与 ``get_const_cpu_tensor`` 对称：热路径上需要 GPU 侧占位常量、又不想每 step
+        ``torch.full`` 时使用。设备取当前 CUDA device。
+        """
+        size = 1
+        for dim in shape:
+            size *= int(dim)
+
+        with self.lock:
+            buf = self.key_to_const_gpu_tensor.get(key)
+            if buf is None or buf.numel() < size:
+                n = max(size, 2048)
+                buf = torch.full((n,), fill_value, dtype=dtype, device="cuda")
+                self.key_to_const_gpu_tensor[key] = buf
+            else:
+                assert buf.dtype == dtype, f"const gpu tensor key={key!r} dtype mismatch: {buf.dtype} vs {dtype}"
             return buf[:size].view(tuple(int(d) for d in shape))
 
 
