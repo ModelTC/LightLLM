@@ -1,6 +1,7 @@
 import os
 import math
 import ctypes
+import asyncio
 import numpy as np
 import time
 from .sampling_params import SamplingParams
@@ -295,6 +296,20 @@ class Req(ctypes.Structure):
 
     def get_final_token_metadata(self):
         return ReqFinalTokenMetadata(self)
+
+    async def wait_until_final_token_metadata_ready(self, timeout: float = 60.0) -> bool:
+        """等待推理侧写完 final_token_metadata 并释放该请求。
+
+        Infer 在 dump final_token_metadata 之后才会置 ``shm_infer_released=True``，
+        因此以该标志作为 metadata 已可安全读取的信号。超时返回 False。
+        """
+        start_time = time.time()
+        while not self.shm_infer_released:
+            if time.time() - start_time > timeout:
+                logger.warning(f"wait final_token_metadata ready timeout, req_id={self.request_id}, timeout={timeout}s")
+                return False
+            await asyncio.sleep(0.005)
+        return True
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()

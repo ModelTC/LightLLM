@@ -527,15 +527,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         return image_tokens, audio_tokens
 
-    async def _wait_until_infer_released(self, req: Req, timeout: float = 60.0):
-        start_time = time.time()
-        while not req.shm_infer_released:
-            if time.time() - start_time > timeout:
-                logger.warning(f"wait infer release timeout, req_id={req.request_id}, timeout={timeout}s")
-                return False
-            await asyncio.sleep(0.005)
-        return True
-
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
@@ -963,7 +954,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
                                     if (
                                         req.sample_params.prompt_logprobs >= 0 or self.args.enable_return_routed_experts
-                                    ) and await self._wait_until_infer_released(req):
+                                    ) and await req.wait_until_final_token_metadata_ready():
                                         try:
                                             meta = req.get_final_token_metadata().read(self.tokenizer)
                                         except Exception as e:
