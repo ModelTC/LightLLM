@@ -340,6 +340,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
+            # RL：进入 generation admission。若当前处于 pause_generation / abort，
+            # 在此阻塞等待恢复；若被标记 abort，则直接返回 FINISHED_ABORTED 空结果，
+            # 不进入后续 encode / 调度（请求尚未占用 router 资源）。
             if self.rl_controller is not None:
                 should_abort = await self.rl_controller.wait_if_generation_paused(group_request_id)
                 if should_abort:
@@ -444,6 +447,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
+            # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
+            # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
             if self.rl_controller is not None:
                 await self.rl_controller.unregister_generation_admission(group_request_id)
 
@@ -500,6 +505,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
             await self.abort(group_request_id)
             raise e
         finally:
+            # RL：兜底注销 generation admission（含中途异常 / abort 提前 return），
+            # 防止 pending 请求泄漏导致 pause 无法正确结束。
             if self.rl_controller is not None:
                 await self.rl_controller.unregister_generation_admission(group_request_id)
             async with self._run_reqs_count_lock:
