@@ -180,10 +180,8 @@ class FinalTokenMetadataExt:
         仅在请求已 finished / stop_str_matched，且存在可导出长度时返回数据。
         """
         req = self._req
-        if not (req.shm_req.finish_status.is_finished() or req.shm_req.stop_str_matched):
-            return None
 
-        visible_total_len = req.shm_req.input_len + req.shm_req.shm_cur_output_len
+        visible_total_len = req.shm_req.input_len + req.cur_output_len
         capture_len = min(req.cur_kv_len, visible_total_len - 1)
         if capture_len <= 0:
             return None
