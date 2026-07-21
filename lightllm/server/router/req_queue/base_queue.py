@@ -56,6 +56,8 @@ class BaseQueue:
 
         # 所有数据准备完后再通知 detokenizer
         req.candetoken_out_len = 1
+        # 未进 Infer，无 final_token_metadata 可写；置位以免 HTTP 空等
+        req.shm_infer_released = True
 
     def release_aborted_req(self, req: Req):
         logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")

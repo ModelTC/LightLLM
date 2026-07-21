@@ -1,6 +1,7 @@
 import pytest
 import easydict
 from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
+from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils.envs_utils import set_env_start_args
 
 
@@ -48,7 +49,7 @@ def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
     req.shm_logprobs.arr["rank"][1] = 315
     req.shm_logprobs.arr["rank"][2] = 4
 
-    metadata = req.get_final_token_metadata().read()
+    metadata = ReqFinalTokenMetadata(req).read()
 
     assert metadata["prompt_token_ids"] == [1, 2, 3]
     assert metadata["prompt_logprobs"] == [

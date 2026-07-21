@@ -17,6 +17,7 @@ import torch
 
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
+from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -218,7 +219,7 @@ class FinalTokenMetadataExt:
             routed_experts = self.collect_routed_experts()
 
         # 阶段 4：统一 pickle 写入 final token metadata shm，供 HTTP 编码进响应。
-        req.shm_req.get_final_token_metadata().save(
+        ReqFinalTokenMetadata(req.shm_req).save(
             prompt_top_token_ids=prompt_top_token_ids,
             prompt_top_logprobs=prompt_top_logprobs,
             routed_experts=routed_experts,

@@ -13,7 +13,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
-from typing import List, Any, Union
+from typing import Any, Dict, List, Union
 from lightllm.utils.log_utils import init_logger
 from .logprob_utils import logprob_info
 from .token_metadata import ReqFinalTokenMetadata
@@ -312,22 +312,46 @@ class Req(ctypes.Structure):
         self.shm_logprobs.link_shm()
         return
 
-    def get_final_token_metadata(self):
-        return ReqFinalTokenMetadata(self)
+    async def merge_final_token_metadata(
+        self,
+        metadata: Dict[str, Any],
+        tokenizer: Any,
+        enable_return_routed_experts: bool = False,
+        timeout: float = 60.0,
+    ) -> None:
+        """等待并读取 final token metadata，按需合并进 HTTP 输出 ``metadata``。
 
-    async def wait_until_final_token_metadata_ready(self, timeout: float = 60.0) -> bool:
-        """等待推理侧写完 final_token_metadata 并释放该请求。
-
-        Infer 在 dump final_token_metadata 之后才会置 ``shm_infer_released=True``，
-        因此以该标志作为 metadata 已可安全读取的信号。超时返回 False。
+        仅在需要 ``prompt_logprobs`` / ``routed_experts`` 时执行；失败或超时
+        不改动 ``metadata``（仅打 warning）。
         """
+        # 阶段 1：判断本请求是否需要 final token metadata。
+        need_prompt_logprobs = self.sample_params.prompt_logprobs >= 0
+        if not (need_prompt_logprobs or enable_return_routed_experts):
+            return
+
+        # 阶段 2：等待 Infer 写完 metadata 并释放。
+        # Infer 在 dump 之后才会置 shm_infer_released=True，以此作为可读信号。
         start_time = time.time()
         while not self.shm_infer_released:
             if time.time() - start_time > timeout:
                 logger.warning(f"wait final_token_metadata ready timeout, req_id={self.request_id}, timeout={timeout}s")
-                return False
+                return
             await asyncio.sleep(0.005)
-        return True
+
+        # 阶段 3：从 shm 读取并解码（read 内部已尽量吞掉 shm 缺失等错误）。
+        try:
+            meta = ReqFinalTokenMetadata(self).read(tokenizer)
+        except Exception as e:
+            logger.warning(f"Failed to read final token metadata for req {self.request_id}: {e}")
+            return
+
+        # 阶段 4：按需合并进 HTTP 输出 metadata。
+        if need_prompt_logprobs:
+            metadata["prompt_logprobs"] = meta["prompt_logprobs"]
+            metadata["prompt_token_ids"] = meta["prompt_token_ids"]
+        if meta.get("routed_experts") is not None:
+            metadata["routed_experts"] = meta["routed_experts"]
+        return
 
     def get_prompt_ids(self):
         return self.shm_prompt_ids.arr[: self.input_len].tolist()

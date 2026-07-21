@@ -952,22 +952,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
 
-                                    if (
-                                        req.sample_params.prompt_logprobs >= 0 or self.args.enable_return_routed_experts
-                                    ) and await req.wait_until_final_token_metadata_ready():
-                                        try:
-                                            meta = req.get_final_token_metadata().read(self.tokenizer)
-                                        except Exception as e:
-                                            logger.warning(
-                                                f"Failed to read final token metadata for req {req.request_id}: {e}"
-                                            )
-                                            meta = None
-                                        if meta is not None:
-                                            if req.sample_params.prompt_logprobs >= 0:
-                                                metadata["prompt_logprobs"] = meta["prompt_logprobs"]
-                                                metadata["prompt_token_ids"] = meta["prompt_token_ids"]
-                                            if meta.get("routed_experts") is not None:
-                                                metadata["routed_experts"] = meta["routed_experts"]
+                                    await req.merge_final_token_metadata(
+                                        metadata,
+                                        self.tokenizer,
+                                        enable_return_routed_experts=self.args.enable_return_routed_experts,
+                                    )
 
                                 req.out_tokens_queue.pop_no_ret()
                                 token_list.append((req_id, text, metadata, finish_status))
