@@ -845,11 +845,12 @@ class InferReq:
             end = self.linear_att_cache_len
         return end
 
-    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank=None):
+    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):
         index = self.shm_req.input_len + output_len
         self.shm_req.shm_prompt_ids.arr[index - 1] = next_token_id
-        self.shm_req.shm_logprobs.arr["logprob"][index - 1] = logprob
-        self.shm_req.shm_logprobs.arr["rank"][index - 1] = -1 if rank is None else rank
+        # structured dtype 整行赋值比分字段 arr["logprob"][i] / arr["rank"][i] 更快
+        # （少两次 field view 查找；bench 约 196ns vs 327ns/次）
+        self.shm_req.shm_logprobs.arr[index - 1] = (logprob, rank)
         return
 
     def update_mtp_accepted_token_num(self, accept_token_num: int):
@@ -919,11 +920,11 @@ class InferReqUpdatePack:
         self,
         next_token_id: int,
         next_token_logprob: float,
+        next_token_rank: int,
         eos_ids: List[int],
-        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
+        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
-        next_token_rank=None,
     ):
         # pd_prefill_chunked_handle_func 主要是为了处理 pd prefill 模式下
         # 分块 prefill 后，形成对应的pd 分块传输处理。

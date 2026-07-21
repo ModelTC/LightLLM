@@ -372,11 +372,11 @@ class ModeBackend:
         self,
         next_token_ids: torch.Tensor,
         next_token_logprobs: torch.Tensor,
-        next_token_ranks: torch.Tensor = None,
+        next_token_ranks: torch.Tensor,
     ):
         """
-        这个函数会把next token id、logprobs和可选rank保存到pinned memory中
-        这样可以保障post_handle 函数可以读取到正常的输出结果。
+        把 next token id / logprobs / ranks 异步拷到 pinned memory，
+        供后续 post_handle 读取。ranks 始终有值（不需要时为常量 -1）。
         """
         next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
             key="next_token_ids",
@@ -386,19 +386,34 @@ class ModeBackend:
             key="next_token_logprobs",
             gpu_tensor=next_token_logprobs,
         )
-        next_token_ranks_cpu = (
-            None
-            if next_token_ranks is None
-            else g_pin_mem_manager.async_copy_from_gpu_tensor(
+        # 仅 enable_rl 需要真实 rank；否则跳过 D2H，返回常量 -1。
+        if self.args.enable_rl:
+            next_token_ranks_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="next_token_ranks",
                 gpu_tensor=next_token_ranks,
             )
-        )
+        else:
+            next_token_ranks_cpu = g_pin_mem_manager.get_const_cpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids_cpu.shape,
+                fill_value=-1,
+                dtype=torch.int32,
+            )
         return next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
-    def _get_next_token_ranks(self, logits: torch.Tensor, next_token_ids: torch.Tensor):
-        if not self.is_master_in_dp:
-            return None
+    def _get_next_token_ranks(self, logits: torch.Tensor, next_token_ids: torch.Tensor) -> torch.Tensor:
+        """计算（或占位）每个 next token 在 vocab 上的 1-based rank。
+
+        仅 ``--enable_rl`` 时做真实 rank；否则返回常量 ``-1``，避免 O(batch * vocab) 比较。
+        下游 async_copy 在同样条件下会忽略该返回值。
+        """
+        if not self.args.enable_rl:
+            return g_pin_mem_manager.get_const_cpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids.shape,
+                fill_value=-1,
+                dtype=torch.int32,
+            )
         selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
         return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
 
@@ -564,10 +579,9 @@ class ModeBackend:
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
+                                    next_token_rank=-1,
                                     eos_ids=self.eos_id,
-                                    extra_post_req_handle_func=None,
                                     is_master_in_dp=self.is_master_in_dp,
-                                    pd_prefill_chunked_handle_func=None,
                                 )
         return
 
@@ -805,8 +819,8 @@ class ModeBackend:
         run_reqs: List[InferReq],
         next_token_ids: List[int],
         next_token_logprobs: List[float],
+        next_token_ranks: List[int],
         run_reqs_update_packs: List[InferReqUpdatePack],
-        next_token_ranks: Optional[List[int]] = None,
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
     ):
@@ -814,20 +828,19 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        for row, (req_obj, next_token_id, next_token_logprob, pack) in enumerate(
-            zip(run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs)
+        for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
+            run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
-            next_token_rank = None if next_token_ranks is None else next_token_ranks[row]
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
+                next_token_rank=int(next_token_rank),
                 eos_ids=self.eos_id,
-                extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
+                extra_post_req_handle_func=extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
-                next_token_rank=next_token_rank,
             )
 
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
