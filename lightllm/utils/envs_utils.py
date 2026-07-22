@@ -160,6 +160,15 @@ def get_redundancy_expert_update_max_load_count():
     return int(os.getenv("LIGHTLLM_REDUNDANCY_EXPERT_UPDATE_MAX_LOAD_COUNT", 1))
 
 
+@lru_cache(maxsize=None)
+def get_ep_balance_log_interval():
+    """Return the EP balance statistics window in seconds; 0 disables it."""
+    interval = int(os.getenv("LIGHTLLM_EP_BALANCE_LOG_INTERVAL", 30))
+    if interval < 0:
+        raise ValueError("LIGHTLLM_EP_BALANCE_LOG_INTERVAL must be greater than or equal to 0")
+    return interval
+
+
 def _get_force_balanced_routing_ratio(env_name: str) -> float:
     ratio = float(os.getenv(env_name, 0.0))
     if not 0.0 <= ratio <= 1.0:

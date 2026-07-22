@@ -18,6 +18,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.common.basemodel.triton_kernel.fused_moe.ep_balance import accumulate_ep_balance
 from lightllm.common.basemodel.triton_kernel.fused_moe.force_balanced_routing import force_balanced_routing
 
 
@@ -98,6 +99,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
+            ep_balance_counters=self.ep_balance_counters,
         )
         return output
 
@@ -138,7 +140,12 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             async_finish=False,
             return_recv_hook=True,
         )
-        return recv_x, masked_m, topk_idx, topk_weights, handle, hook
+
+        def hook_with_stats():
+            hook()
+            accumulate_ep_balance(masked_m, self.ep_balance_counters, is_prefill=False)
+
+        return recv_x, masked_m, topk_idx, topk_weights, handle, hook_with_stats
 
     def select_experts_and_quant_input(
         self,
@@ -196,6 +203,11 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
 
         def hook():
             event.current_stream_wait()
+            accumulate_ep_balance(
+                handle.num_unaligned_recv_tokens_per_expert,
+                self.ep_balance_counters,
+                is_prefill=True,
+            )
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 

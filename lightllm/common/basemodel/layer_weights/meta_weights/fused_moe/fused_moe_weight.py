@@ -57,6 +57,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self._init_config(network_config)
         self._init_redundancy_expert_params()
         self._init_parallel_params()
+        self.ep_balance_counters = torch.zeros((2, 2), dtype=torch.int64, device="cuda") if self.enable_ep_moe else None
         self.fuse_moe_impl = select_fuse_moe_impl(self.quant_method, self.enable_ep_moe)(
             n_routed_experts=self.n_routed_experts,
             num_fused_shared_experts=self.num_fused_shared_experts,
@@ -67,6 +68,7 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
+        self.fuse_moe_impl.ep_balance_counters = self.ep_balance_counters
         self.lock = threading.Lock()
         self._create_weight()
 
