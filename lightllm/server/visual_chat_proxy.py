@@ -40,6 +40,7 @@ from lightllm.utils.error_utils import ClientDisconnected
 from lightllm.utils.log_utils import init_logger
 
 from .api_models import (
+    ChatCompletionMessageGenericParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -56,6 +57,11 @@ MAX_AGENT_STEPS = 12
 MAX_REASONING_CONTEXT_BYTES = 256 * 1024
 BUILTIN_TRACE_FORMATS = {"xml", "natural"}
 THINKING_POLICIES = {"request", "force_on", "force_off"}
+NOVA_FORCE_ON_SYSTEM_PROMPT = (
+    "After receiving tool results, carefully reflect on their quality and determine optimal next steps "
+    "before proceeding. Use your thinking to plan and iterate based on this new information, and then "
+    "take the best next action."
+)
 NOVA_ACCURACY_TEMPLATE_PATH = (
     Path(__file__).resolve().parent / "templates" / "nova_vision_proxy.jinja"
 )
@@ -796,8 +802,22 @@ def apply_visual_thinking_policy(
     template_kwargs["enable_thinking"] = enable_thinking
     template_kwargs["thinking"] = enable_thinking
     reasoning_effort = (request.reasoning_effort or "high") if enable_thinking else None
+    messages = list(request.messages)
+    if settings.thinking_policy == "force_on" and not any(
+        getattr(message, "role", None) == "system"
+        and getattr(message, "content", None) == NOVA_FORCE_ON_SYSTEM_PROMPT
+        for message in messages
+    ):
+        messages.insert(
+            0,
+            ChatCompletionMessageGenericParam(
+                role="system",
+                content=NOVA_FORCE_ON_SYSTEM_PROMPT,
+            ),
+        )
     return request.model_copy(
         update={
+            "messages": messages,
             "chat_template_kwargs": template_kwargs,
             "reasoning_effort": reasoning_effort,
         }

@@ -289,6 +289,32 @@ def test_visual_thinking_policy(
     assert resolved.chat_template_kwargs["enable_thinking"] is expected_enabled
     assert resolved.chat_template_kwargs["thinking"] is expected_enabled
     assert resolved.reasoning_effort == expected_effort
+    force_on_prompts = [
+        message
+        for message in resolved.messages
+        if message.role == "system"
+        and message.content == visual_chat_proxy.NOVA_FORCE_ON_SYSTEM_PROMPT
+    ]
+    assert len(force_on_prompts) == (1 if policy == "force_on" else 0)
+
+
+def test_force_on_system_prompt_is_idempotent_and_preserves_user_system():
+    request = _multimodal_request(
+        messages=[
+            {"role": "system", "content": "User-provided system prompt."},
+            {"role": "user", "content": "What is shown?"},
+        ]
+    )
+    settings = replace(_runtime().settings, thinking_policy="force_on")
+
+    resolved = apply_visual_thinking_policy(request, settings)
+    resolved = apply_visual_thinking_policy(resolved, settings)
+
+    system_contents = [message.content for message in resolved.messages if message.role == "system"]
+    assert system_contents == [
+        visual_chat_proxy.NOVA_FORCE_ON_SYSTEM_PROMPT,
+        "User-provided system prompt.",
+    ]
 
 
 def test_nova_accuracy_mode_uses_exact_generate_prompt_and_parameters():
