@@ -18,6 +18,17 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def find_fused_moe_weights(model):
+    return sorted(
+        (
+            layer.experts
+            for layer in model.trans_layers_weight
+            if isinstance(getattr(layer, "experts", None), FusedMoeWeight) and layer.experts.enable_ep_moe
+        ),
+        key=lambda weight: weight.layer_num_,
+    )
+
+
 class FusedMoeWeight(BaseWeightTpl):
     def __init__(
         self,
