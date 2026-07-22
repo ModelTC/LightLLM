@@ -5,7 +5,7 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from typing import Dict, List, Optional, Union
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-from .mm_slicer import get_row_slice_mixin
+from .mm_slicer import BMMRowSliceMixin, get_row_slice_mixin
 
 
 class ROWMMWeight(MMWeightTpl):
@@ -193,6 +193,8 @@ class ROWBMMWeight(BMMWeightTpl):
             tp_rank=self.tp_rank_,
             tp_world_size=self.tp_world_size_,
         )
-        self.param_slicer = get_row_slice_mixin(
-            quant_method_name="none", tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_
-        )
+        # BMM is (heads, dim1, dim2); split heads on dim0, not the linear out-dim (-2).
+        # Quantized weight loading is not supported: BMMRowSliceMixin only slices the
+        # dense weight tensor (no weight_scale / zero_point path).
+        assert quant_method is None, "ROWBMMWeight does not support quantized weight loading"
+        self.param_slicer = BMMRowSliceMixin(tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_)

@@ -154,6 +154,39 @@ class AwqQuantizedColSliceMixin(QuantizedRowSliceMixin):
         return bias / self.tp_world_size_ * self.repeat_times_
 
 
+class BMMRowSliceMixin(SliceMixinTpl):
+    """BMM weight is (heads, dim1, dim2); TP splits along heads (dim0).
+
+    Unlike RowSliceMixin (for 2D linear / MoE (experts, out, in) which slice -2),
+    BMM must not slice the middle dim.
+
+    BMM currently only supports unquantized float/bf16 weights (see BMMWeightTpl:
+    quant_method must be None). Bias / weight_scale / zero_point are unsupported.
+    """
+
+    def __init__(self, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1):
+        super().__init__(tp_rank, tp_world_size, repeat_times)
+
+    def _slice_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        assert weight.dim() == 3, f"BMM weight expect 3D, got shape {tuple(weight.shape)}"
+        assert (
+            weight.shape[0] * self.repeat_times_ % self.tp_world_size_ == 0
+        ), f"tp slice error {weight.shape[0] * self.repeat_times_} % {self.tp_world_size_}"
+        start, end = self._get_slice_start_end(weight.shape[0])
+        return weight[start:end]
+
+    def _slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError("BMM does not support bias")
+
+    def _slice_weight_scale(self, weight_scale: torch.Tensor) -> torch.Tensor:
+        # BMMWeightTpl rejects quant_method; quantized weight load is not supported.
+        raise NotImplementedError("BMM does not support quantized weight loading (weight_scale)")
+
+    def _slice_weight_zero_point(self, weight_zero_point: torch.Tensor) -> torch.Tensor:
+        # BMMWeightTpl rejects quant_method; quantized weight load is not supported.
+        raise NotImplementedError("BMM does not support quantized weight loading (zero_point)")
+
+
 def get_row_slice_mixin(
     quant_method_name: str, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1
 ) -> SliceMixinTpl:
