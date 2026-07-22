@@ -337,6 +337,68 @@ def test_anthropic_messages_impl_runs_translation_in_thread(monkeypatch):
     assert response.body == b"ok"
 
 
+def test_anthropic_messages_with_image_uses_visual_proxy(monkeypatch):
+    called = {}
+
+    def fake_translate(_body):
+        return {
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,YWJjZA=="},
+                        },
+                        {"type": "text", "text": "What is shown?"},
+                    ],
+                }
+            ],
+            "max_tokens": 1,
+        }, {}
+
+    async def main_handler(_request, _raw_request):
+        raise AssertionError("image-bearing Anthropic request must not bypass the visual proxy")
+
+    async def fake_visual_proxy(**kwargs):
+        from fastapi.responses import Response
+
+        called["request"] = kwargs["request"]
+        called["main_chat_handler"] = kwargs["main_chat_handler"]
+        return Response("proxied")
+
+    class FakeRequestSlot:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeRuntime:
+        def request_slot(self):
+            return FakeRequestSlot()
+
+    class FakeRequest:
+        async def json(self):
+            return {"model": "test-model", "max_tokens": 1, "messages": []}
+
+    import lightllm.server.api_http as api_http
+    import lightllm.server.api_openai as api_openai
+
+    monkeypatch.setattr(api_anthropic, "_anthropic_to_chat_request", fake_translate)
+    monkeypatch.setattr(api_anthropic, "visual_chat_completions_impl", fake_visual_proxy)
+    monkeypatch.setattr(api_openai, "chat_completions_impl", main_handler)
+    monkeypatch.setattr(api_http.g_objs, "args", type("Args", (), {"visual_remote_url": "https://vision.test"})())
+    monkeypatch.setattr(api_http.g_objs, "visual_proxy_runtime", FakeRuntime())
+
+    response = asyncio.run(api_anthropic.anthropic_messages_impl(FakeRequest()))
+
+    assert response.body == b"proxied"
+    assert called["main_chat_handler"] is main_handler
+    assert called["request"].messages[0].content[0].type == "image_url"
+
+
 def test_tool_result_image_blocks_survive_as_image_url_parts():
     body = _tool_result_body(
         [

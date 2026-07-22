@@ -18,6 +18,14 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from lightllm.server.visual_chat_proxy import (
+    VisualChatProxyError,
+    VisualProxyCapacityError,
+    VisualProxyTimeoutError,
+    VisualProxyUpstreamError,
+    should_use_visual_proxy,
+    visual_chat_completions_impl,
+)
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -548,6 +556,27 @@ async def _openai_sse_to_responses_events(
 # ---------------------------------------------------------------------------
 
 
+async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_chat_handler: Any) -> Any:
+    """Route translated Responses API requests through the visual proxy when needed."""
+    # Imported lazily to avoid an api_http -> api_responses -> api_http import cycle.
+    from .api_http import g_objs
+
+    visual_remote_url = getattr(getattr(g_objs, "args", None), "visual_remote_url", None)
+    if not should_use_visual_proxy(visual_remote_url, chat_request):
+        return await main_chat_handler(chat_request, raw_request)
+
+    runtime = g_objs.visual_proxy_runtime
+    if runtime is None:
+        raise VisualChatProxyError("Visual proxy runtime is not initialized")
+    async with runtime.request_slot():
+        return await visual_chat_completions_impl(
+            request=chat_request,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=main_chat_handler,
+        )
+
+
 async def responses_impl(raw_request: Request) -> Response:
     # Lazy imports to avoid pulling heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
@@ -581,7 +610,19 @@ async def responses_impl(raw_request: Request) -> Response:
         logger.exception("Failed to translate Responses API request")
         return create_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request: {exc}")
 
-    downstream = await chat_completions_impl(chat_request, raw_request)
+    try:
+        downstream = await _dispatch_chat_request(chat_request, raw_request, chat_completions_impl)
+    except VisualProxyCapacityError as exc:
+        logger.warning("%s", str(exc))
+        return create_error_response(HTTPStatus.TOO_MANY_REQUESTS, str(exc), err_type="RateLimitError")
+    except VisualProxyTimeoutError as exc:
+        logger.warning("%s", str(exc))
+        return create_error_response(HTTPStatus.GATEWAY_TIMEOUT, str(exc), err_type="UpstreamTimeoutError")
+    except (VisualProxyUpstreamError, VisualChatProxyError) as exc:
+        logger.warning("%s", str(exc))
+        return create_error_response(HTTPStatus.BAD_GATEWAY, str(exc), err_type="UpstreamError")
+    except ValueError as exc:
+        return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
     if chat_request.stream:
         if not isinstance(downstream, StreamingResponse):

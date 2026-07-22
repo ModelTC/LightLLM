@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -31,3 +32,33 @@ def test_tokens_rejects_oversized_text_prompt_before_tokenization(manager_cls):
 
     with pytest.raises(ValueError, match="prompt text length 33 exceeds the character limit 32"):
         manager_cls.tokens(_fake_manager(), prompt, _empty_multimodal_params(), SimpleNamespace())
+
+
+@pytest.mark.parametrize(
+    ("params", "disable_vision", "disable_audio", "message"),
+    [
+        (SimpleNamespace(images=[object()], audios=[]), True, True, "vision is disabled"),
+        (SimpleNamespace(images=[], audios=[object()]), True, True, "audio is disabled"),
+    ],
+)
+def test_generate_rejects_disabled_modalities_before_inference(
+    params, disable_vision, disable_audio, message
+):
+    manager = SimpleNamespace(
+        max_req_total_len=32,
+        alloc_req_id=lambda _sampling_params: 1,
+        args=SimpleNamespace(disable_vision=disable_vision, disable_audio=disable_audio),
+    )
+    generator = HttpServerManager.generate(
+        manager,
+        "hello",
+        SimpleNamespace(),
+        params,
+        request=None,
+    )
+
+    async def advance():
+        await generator.__anext__()
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(advance())

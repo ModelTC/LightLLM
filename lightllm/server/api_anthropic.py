@@ -28,6 +28,14 @@ from typing import Any, Dict, Tuple
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
+from lightllm.server.visual_chat_proxy import (
+    VisualChatProxyError,
+    VisualProxyCapacityError,
+    VisualProxyTimeoutError,
+    VisualProxyUpstreamError,
+    should_use_visual_proxy,
+    visual_chat_completions_impl,
+)
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
@@ -870,6 +878,27 @@ def _rewrap_openai_error_as_anthropic(resp: JSONResponse) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
+async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_chat_handler: Any) -> Any:
+    """Route translated Anthropic requests through the same visual proxy as OpenAI chat requests."""
+    # Imported lazily to avoid an api_http -> api_anthropic -> api_http import cycle.
+    from .api_http import g_objs
+
+    visual_remote_url = getattr(getattr(g_objs, "args", None), "visual_remote_url", None)
+    if not should_use_visual_proxy(visual_remote_url, chat_request):
+        return await main_chat_handler(chat_request, raw_request)
+
+    runtime = g_objs.visual_proxy_runtime
+    if runtime is None:
+        raise VisualChatProxyError("Visual proxy runtime is not initialized")
+    async with runtime.request_slot():
+        return await visual_chat_completions_impl(
+            request=chat_request,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=main_chat_handler,
+        )
+
+
 async def anthropic_messages_impl(raw_request: Request) -> Response:
     # Lazy imports to avoid pulling in heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
@@ -901,7 +930,19 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
         logger.exception("Failed to build ChatCompletionRequest")
         return _anthropic_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request after translation: {exc}")
 
-    downstream = await chat_completions_impl(chat_request, raw_request)
+    try:
+        downstream = await _dispatch_chat_request(chat_request, raw_request, chat_completions_impl)
+    except VisualProxyCapacityError as exc:
+        logger.warning("%s", str(exc))
+        return _anthropic_error_response(HTTPStatus.TOO_MANY_REQUESTS, str(exc))
+    except VisualProxyTimeoutError as exc:
+        logger.warning("%s", str(exc))
+        return _anthropic_error_response(HTTPStatus.GATEWAY_TIMEOUT, str(exc))
+    except (VisualProxyUpstreamError, VisualChatProxyError) as exc:
+        logger.warning("%s", str(exc))
+        return _anthropic_error_response(HTTPStatus.BAD_GATEWAY, str(exc))
+    except ValueError as exc:
+        return _anthropic_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
     if is_stream:
         from fastapi.responses import StreamingResponse

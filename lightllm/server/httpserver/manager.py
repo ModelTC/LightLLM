@@ -324,9 +324,13 @@ class HttpServerManager:
 
         start_time = time.time()
         request_headers = request.headers if request is not None else {}
-        group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
         image_count = len(multimodal_params.images) if multimodal_params is not None else 0
+        if image_count and self.args.disable_vision:
+            raise ValueError("image input rejected: vision is disabled")
+        if audio_count and self.args.disable_audio:
+            raise ValueError("audio input rejected: audio is disabled")
+        group_request_id = self.alloc_req_id(sampling_params)
         self._log_stage_timing(
             group_request_id,
             start_time,
