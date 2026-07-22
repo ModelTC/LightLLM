@@ -46,6 +46,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.local_logics_expert_ids_list = (
             list(range(first_local_expert_id, first_local_expert_id + self.ep_n_routed_experts)) + redundancy_ids
         )
+        self.ep_balance_counters = None
 
     def _select_experts(
         self,
@@ -133,6 +134,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
             shared_expert_func=shared_expert_func,
+            ep_balance_counters=self.ep_balance_counters,
         )
 
     def select_experts_and_quant_input(
@@ -338,8 +340,20 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             handle.channel_linked_list,
         )
 
-        def hook():
-            event.current_stream_wait()
+        counters = self.ep_balance_counters
+        if counters is None:
+
+            def hook():
+                event.current_stream_wait()
+
+        else:
+            # Sent routes are globally conserved by all-to-all; recv_x[0] is the alignment-expanded compute load.
+            route_load = topk_idx.numel()
+            compute_load = recv_x[0].shape[0]
+
+            def hook():
+                event.current_stream_wait()
+                counters.accumulate(route_load=route_load, compute_load=compute_load)
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 

@@ -3,6 +3,7 @@ import triton
 from typing import Any, Callable, Optional
 
 from lightllm.distributed import dist_group_manager
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_balance import PrefillEPBalanceCounters
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
@@ -40,6 +41,7 @@ def fused_experts(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
+    ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     check_ep_expert_dtype(quant_method)
@@ -71,6 +73,7 @@ def fused_experts(
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
         shared_expert_func=shared_expert_func,
+        ep_balance_counters=ep_balance_counters,
     )
 
 
@@ -94,6 +97,7 @@ def fused_experts_impl(
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
     shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
+    ep_balance_counters: Optional[PrefillEPBalanceCounters] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -145,6 +149,8 @@ def fused_experts_impl(
             do_expand=True,
             use_tma_aligned_col_major_sf=True,
         )
+        if ep_balance_counters is not None:
+            ep_balance_counters.accumulate(route_load=topk_idx.numel(), compute_load=recv_x[0].shape[0])
         # Dispatch is synchronous in this path.  Its FP8 source is no longer
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
