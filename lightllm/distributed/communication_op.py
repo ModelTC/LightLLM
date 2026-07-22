@@ -107,6 +107,7 @@ class CustomProcessGroup:
 class DistributeGroupManager:
     def __init__(self):
         self.groups = []
+        self.ep_balance_monitor_group = None
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
@@ -124,6 +125,14 @@ class DistributeGroupManager:
             if not args.disable_flashinfer_allreduce:
                 group.init_flashinfer_reduce()
             self.groups.append(group)
+        if (
+            getattr(args, "enable_ep_moe", False)
+            and not getattr(args, "disable_ep_balance_monitor", False)
+            and getattr(args, "run_mode", "normal") != "decode"
+            and not getattr(args, "enable_prefill_cudagraph", False)
+            and not is_sm100_gpu()
+        ):
+            self.ep_balance_monitor_group = dist.new_group(ranks=list(range(get_global_world_size())), backend="gloo")
         return
 
     def get_default_group(self) -> CustomProcessGroup:
