@@ -62,7 +62,7 @@ def hc_head(streams, hc_fn, hc_scale, hc_base, hc_mult, dim, rms_eps, hc_eps, al
     """Final stream collapse before the lm_head. streams:[N, hc*dim] -> [N, dim]."""
     out = alloc_func((streams.shape[0], dim), dtype=streams.dtype, device=streams.device)
     torch.ops.vllm.hc_head_fused_kernel_tilelang(
-        streams.view(-1, hc_mult, dim).contiguous(),
+        streams.view(-1, hc_mult, dim),
         hc_fn,
         hc_scale,
         hc_base,

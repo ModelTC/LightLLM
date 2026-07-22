@@ -302,7 +302,7 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         # out_buffer (the kernel's OUTPUT_BF16 path); the fp8 pack into c4_indexer_pool is done
         # afterwards by pack_indexer_k_to_cache.
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
-        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
+        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
         state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
         state_ring = mem_manager.c4_state_ring
         out_buffer = torch.empty(
@@ -313,30 +313,19 @@ def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int,
         out_page_size = 1  # unused under OUTPUT_BF16 (token-indexed dense scratch, not paged)
     else:
         if compress_ratio == 4:
-            out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.long().reshape(-1)]
+            out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
             state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
             state_ring = mem_manager.c4_state_ring
             out_pool = mem_manager.c4_pool
         elif compress_ratio == 128:
-            out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.long().reshape(-1)]
+            out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.reshape(-1)]
             state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
             state_ring = mem_manager.c128_state_ring
             out_pool = mem_manager.c128_pool
-        else:
-            raise AssertionError(f"invalid DeepSeek-V4 compress ratio {compress_ratio}")
         out_buffer = mem_manager.get_compressed_kv_buffer(layer_idx)
         out_page_size = out_pool.page_size
 
-    token_to_batch_idx = infer_state.b_req_idx
-    if infer_state.is_prefill:
-        token_to_batch_idx = getattr(infer_state, "_dsv4_token_to_batch_idx", None)
-        if token_to_batch_idx is None or token_to_batch_idx.numel() != infer_state.position_ids.numel():
-            q_lens = (infer_state.b_seq_len - infer_state.b_ready_cache_len).to(torch.long)
-            batch_idx = torch.arange(infer_state.b_req_idx.shape[0], device=infer_state.b_req_idx.device)
-            token_to_batch_idx = torch.repeat_interleave(
-                batch_idx, q_lens, output_size=infer_state.position_ids.numel()
-            ).to(torch.int32)
-            infer_state._dsv4_token_to_batch_idx = token_to_batch_idx
+    token_to_batch_idx = infer_state._dsv4_token_to_batch_idx if infer_state.is_prefill else infer_state.b_req_idx
 
     return CoreCompressorMetadata(
         layer_idx=layer_idx,

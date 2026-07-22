@@ -2,6 +2,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.v1.attention.ops import flashmla
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
@@ -27,12 +28,6 @@ def _view_cache(buffer: torch.Tensor, page_size: int) -> torch.Tensor:
     return buffer[:, :byte_num].view(buffer.shape[0], page_size, 1, DSV4_MLA_BYTES_PER_TOKEN)
 
 
-def _get_vllm_flashmla():
-    from vllm.v1.attention.ops import flashmla
-
-    return flashmla
-
-
 class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
@@ -47,7 +42,6 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         mem_manager,
         nsa_dict: dict,
         sched_meta,
-        flash_mla,
         flashmla_out: torch.Tensor = None,
     ) -> torch.Tensor:
         from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
@@ -88,7 +82,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         )
         if flashmla_out is not None:
             kwargs["out"] = flashmla_out
-        full_out, _ = flash_mla.flash_mla_with_kvcache(**kwargs)
+        full_out, _ = flashmla.flash_mla_with_kvcache(**kwargs)
         return full_out[:, 0, : self.real_q_head_num, :]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
@@ -101,15 +95,13 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
 @dataclasses.dataclass
 class _PrefillAttState(BasePrefillAttState):
     flashmla_sched_meta: dict = None
-    flash_mla: object = None
 
     def init_state(self):
-        self.flash_mla = _get_vllm_flashmla()
         self.flashmla_sched_meta = {}
 
     def _get_sched_meta(self, compress_ratio: int):
         if compress_ratio not in self.flashmla_sched_meta:
-            self.flashmla_sched_meta[compress_ratio] = self.flash_mla.get_mla_metadata()[0]
+            self.flashmla_sched_meta[compress_ratio] = flashmla.get_mla_metadata()[0]
         return self.flashmla_sched_meta[compress_ratio]
 
     def prefill_att(
@@ -139,7 +131,6 @@ class _PrefillAttState(BasePrefillAttState):
                 self.infer_state.mem_manager,
                 nsa_dict,
                 self._get_sched_meta(nsa_dict["compress_ratio"]),
-                self.flash_mla,
                 flashmla_out=full_out,
             )
         )
@@ -149,17 +140,13 @@ class _PrefillAttState(BasePrefillAttState):
 @dataclasses.dataclass
 class _DecodeAttState(BaseDecodeAttState):
     flashmla_sched_meta: dict = None
-    flash_mla: object = None
 
     def init_state(self):
         self.reset_sched_meta_for_capture()
 
     def reset_sched_meta_for_capture(self):
         # FlashMLA lazily binds extra-cache geometry, so ratios cannot share one sched-meta object.
-        self.flash_mla = _get_vllm_flashmla()
-        self.flashmla_sched_meta = {
-            ratio: self.flash_mla.get_mla_metadata()[0] for ratio in self.backend.compress_ratios
-        }
+        self.flashmla_sched_meta = {ratio: flashmla.get_mla_metadata()[0] for ratio in self.backend.compress_ratios}
 
     def decode_att(
         self,
@@ -178,7 +165,6 @@ class _DecodeAttState(BaseDecodeAttState):
             self.infer_state.mem_manager,
             nsa_dict,
             self.flashmla_sched_meta[nsa_dict["compress_ratio"]],
-            self.flash_mla,
         )
         return real_out.contiguous()
 

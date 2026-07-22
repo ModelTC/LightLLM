@@ -53,12 +53,12 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # Per-token request id (decode: one token per req; prefill: ragged -> repeat by q-len).
         # Layer-independent; the swa kernel + build_metadata's c4/c128 readers all reuse it.
         if self.is_prefill:
-            self.dsv4_sparse_req_idx = torch.repeat_interleave(self.b_req_idx, self.b_q_seq_len.long())
+            self.dsv4_sparse_req_idx = torch.repeat_interleave(self.b_req_idx, self.b_q_seq_len)
             self._dsv4_token_to_batch_idx = torch.repeat_interleave(
-                torch.arange(self.b_req_idx.shape[0], device=self.b_req_idx.device),
-                self.b_q_seq_len.long(),
+                torch.arange(self.b_req_idx.shape[0], dtype=torch.int32, device=self.b_req_idx.device),
+                self.b_q_seq_len,
                 output_size=pos.numel(),
-            ).to(torch.int32)
+            )
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
