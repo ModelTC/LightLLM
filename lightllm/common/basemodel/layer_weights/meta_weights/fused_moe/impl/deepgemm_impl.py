@@ -6,6 +6,7 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_force_balanced_prefill_routing_ratio,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
@@ -16,6 +17,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
+from lightllm.common.basemodel.triton_kernel.fused_moe.force_balanced_routing import force_balanced_routing
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
 
 
@@ -77,6 +79,16 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
+        if is_prefill is True:
+            routing_ratio = get_force_balanced_prefill_routing_ratio()
+            if routing_ratio > 0.0:
+                force_balanced_routing(
+                    topk_ids,
+                    routing_ratio,
+                    expert_num=self.n_routed_experts,
+                    global_rank=self.global_rank_,
+                    world_size=self.global_world_size_,
+                )
         origin_topk_ids = topk_ids
         if is_prefill is True and self.eplb_experts_logical_to_physical_map is not None:
             if preserve_logical_ids:

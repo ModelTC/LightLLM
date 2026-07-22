@@ -7,7 +7,12 @@ from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import (
+    get_force_balanced_prefill_routing_ratio,
+    get_unique_server_name,
+    set_env_start_args,
+    set_unique_server_name,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -146,6 +151,18 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    force_balanced_prefill_ratio = get_force_balanced_prefill_routing_ratio()
+    if force_balanced_prefill_ratio > 0.0:
+        assert args.enable_ep_moe, "force-balanced routing requires --enable_ep_moe"
+        assert (
+            not args.enable_prefill_eplb
+        ), "force-balanced prefill routing cannot be enabled with --enable_prefill_eplb"
+        logger.warning(
+            "Force-balanced EP prefill routing is benchmark-only and unsafe: it replaces router-selected expert IDs, "
+            "so output correctness is invalid. prefill_ratio=%s",
+            force_balanced_prefill_ratio,
+        )
 
     if args.enable_prefill_eplb:
         assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
