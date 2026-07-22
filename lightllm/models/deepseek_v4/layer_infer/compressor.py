@@ -1,36 +1,9 @@
-from dataclasses import dataclass
-from typing import Optional
-
 import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
-from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_SWA_PAGE_SIZE
-
-
-@dataclass
-class CoreCompressorMetadata:
-    layer_idx: int
-    compress_ratio: int
-    out_slots: torch.Tensor
-    mem_index: torch.Tensor
-    state_buffer: torch.Tensor
-    state_ring: int
-    out_buffer: torch.Tensor
-    out_page_size: int
-    position_ids: torch.Tensor
-    b_req_idx: torch.Tensor
-    b_mtp_index: torch.Tensor
-    b_seq_len: torch.Tensor
-    b_ready_cache_len: Optional[torch.Tensor]
-    b_q_start_loc: Optional[torch.Tensor]
-    req_to_token_indexs: torch.Tensor
-    full_to_swa_indexs: torch.Tensor
-    token_to_batch_idx: Optional[torch.Tensor]
-    kv_score: Optional[torch.Tensor]
-    is_prefill: bool
 
 
 @triton.jit
@@ -291,73 +264,14 @@ def _fused_compress_norm_rope_insert_kernel(
     return
 
 
-def prepare_compress_states(*, infer_state, layer_idx: int, compress_ratio: int, is_in_indexer: bool = False):
-    if compress_ratio == 0:
-        return None
-
-    mem_manager: DeepseekV4MemoryManager = infer_state.mem_manager
-    if is_in_indexer:
-        # c4 Lightning-Indexer key compression: same window/state machinery as the c4 latent
-        # compressor but with index_head_dim, a separate state pool, and a DENSE bf16 scratch
-        # out_buffer (the kernel's OUTPUT_BF16 path); the fp8 pack into c4_indexer_pool is done
-        # afterwards by pack_indexer_k_to_cache.
-        assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
-        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
-        state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
-        state_ring = mem_manager.c4_state_ring
-        out_buffer = torch.empty(
-            (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
-            dtype=torch.bfloat16,
-            device=infer_state.mem_index.device,
-        )
-        out_page_size = 1  # unused under OUTPUT_BF16 (token-indexed dense scratch, not paged)
-    else:
-        if compress_ratio == 4:
-            out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
-            state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
-            state_ring = mem_manager.c4_state_ring
-            out_pool = mem_manager.c4_pool
-        elif compress_ratio == 128:
-            out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.reshape(-1)]
-            state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
-            state_ring = mem_manager.c128_state_ring
-            out_pool = mem_manager.c128_pool
-        out_buffer = mem_manager.get_compressed_kv_buffer(layer_idx)
-        out_page_size = out_pool.page_size
-
-    token_to_batch_idx = infer_state._dsv4_token_to_batch_idx if infer_state.is_prefill else infer_state.b_req_idx
-
-    return CoreCompressorMetadata(
-        layer_idx=layer_idx,
-        compress_ratio=compress_ratio,
-        out_slots=out_slots,
-        mem_index=infer_state.mem_index,
-        state_buffer=state_buffer,
-        state_ring=state_ring,
-        out_buffer=out_buffer,
-        out_page_size=out_page_size,
-        position_ids=infer_state.position_ids,
-        b_req_idx=infer_state.b_req_idx,
-        b_mtp_index=infer_state.b_mtp_index,
-        b_seq_len=infer_state.b_seq_len,
-        b_ready_cache_len=infer_state.b_ready_cache_len,
-        b_q_start_loc=infer_state.b_q_start_loc,
-        req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,
-        full_to_swa_indexs=mem_manager.full_to_swa_indexs,
-        token_to_batch_idx=token_to_batch_idx,
-        kv_score=None,
-        is_prefill=infer_state.is_prefill,
-    )
-
-
 def prepare_partial_states(
     *,
     kv_score: torch.Tensor,
-    metadata: Optional[CoreCompressorMetadata],
+    position_ids: torch.Tensor,
     ape: torch.Tensor,
     compress_ratio: int,
 ):
-    if metadata is None or kv_score.shape[0] == 0:
+    if kv_score.shape[0] == 0:
         return
     state_width = kv_score.shape[-1] // 2
     _add_ape_to_kv_score_kernel[(kv_score.shape[0],)](
@@ -366,7 +280,7 @@ def prepare_partial_states(
         kv_score.stride(1),
         ape,
         ape.stride(0),
-        metadata.position_ids,
+        position_ids,
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
         BLOCK=triton.next_power_of_2(state_width),
@@ -378,9 +292,9 @@ def prepare_partial_states(
 def fused_compress(
     *,
     kv_score: torch.Tensor,
-    metadata: Optional[CoreCompressorMetadata],
+    infer_state,
+    layer_idx: int,
     norm_weight: torch.Tensor,
-    ape: torch.Tensor,
     eps: float,
     head_dim: int,
     qk_rope_head_dim: int,
@@ -389,32 +303,62 @@ def fused_compress(
     sin_table: torch.Tensor,
     output_bf16: bool = False,
 ):
-    if metadata is None or kv_score.shape[0] == 0:
-        return
+    mem_manager = infer_state.mem_manager
+    if output_bf16:
+        assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
+        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
+        state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
+        state_ring = mem_manager.c4_state_ring
+        out_buffer = torch.empty(
+            (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
+            dtype=torch.bfloat16,
+            device=infer_state.mem_index.device,
+        )
+        out_page_size = 1
+    else:
+        if compress_ratio == 4:
+            out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
+            state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
+            state_ring = mem_manager.c4_state_ring
+            out_page_size = mem_manager.c4_pool.page_size
+        elif compress_ratio == 128:
+            out_slots = mem_manager.full_to_c128_indexs[infer_state.mem_index.reshape(-1)]
+            state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
+            state_ring = mem_manager.c128_state_ring
+            out_page_size = mem_manager.c128_pool.page_size
+        out_buffer = mem_manager.get_compressed_kv_buffer(layer_idx)
+
+    if kv_score.shape[0] == 0:
+        return out_buffer
 
     state_width = kv_score.shape[-1] // 2
-    state_last_dim = metadata.state_buffer.shape[-1]
+    state_last_dim = state_buffer.shape[-1]
     is_c4 = compress_ratio == 4
-    state_ring = metadata.state_ring
     block_state = triton.next_power_of_2(state_width)
     block_head = triton.next_power_of_2(head_dim)
+    token_to_batch_idx = infer_state._dsv4_token_to_batch_idx if infer_state.is_prefill else infer_state.b_req_idx
+    ready_cache_len = (
+        infer_state.b_ready_cache_len if infer_state.b_ready_cache_len is not None else infer_state.b_seq_len
+    )
+    q_start_loc = infer_state.b_q_start_loc if infer_state.b_q_start_loc is not None else infer_state.b_seq_len
+    req_to_token_indexs = infer_state.req_manager.req_to_token_indexs
 
     _fused_compress_norm_rope_insert_kernel[(kv_score.shape[0],)](
         kv_score,
         kv_score.stride(0),
         kv_score.stride(1),
-        metadata.state_buffer,
-        metadata.position_ids,
-        metadata.token_to_batch_idx,
-        metadata.b_req_idx,
-        metadata.b_mtp_index,
-        metadata.b_seq_len,
-        metadata.b_ready_cache_len if metadata.b_ready_cache_len is not None else metadata.b_seq_len,
-        metadata.b_q_start_loc if metadata.b_q_start_loc is not None else metadata.b_seq_len,
-        metadata.req_to_token_indexs,
-        metadata.req_to_token_indexs.stride(0),
-        metadata.full_to_swa_indexs,
-        metadata.out_slots,
+        state_buffer,
+        infer_state.position_ids,
+        token_to_batch_idx,
+        infer_state.b_req_idx,
+        infer_state.b_mtp_index,
+        infer_state.b_seq_len,
+        ready_cache_len,
+        q_start_loc,
+        req_to_token_indexs,
+        req_to_token_indexs.stride(0),
+        mem_manager.full_to_swa_indexs,
+        out_slots,
         norm_weight,
         eps,
         cos_table,
@@ -423,14 +367,14 @@ def fused_compress(
         sin_table,
         sin_table.stride(0),
         sin_table.stride(1),
-        metadata.out_buffer,
+        out_buffer,
         HEAD_DIM=head_dim,
         STATE_WIDTH=state_width,
         STATE_LAST_DIM=state_last_dim,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
         IS_C4=is_c4,
-        IS_PREFILL=metadata.is_prefill,
+        IS_PREFILL=infer_state.is_prefill,
         SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
         STATE_RING=state_ring,
         ROPE_HEAD_DIM=qk_rope_head_dim,
@@ -439,8 +383,8 @@ def fused_compress(
         NOPE_DIM=head_dim - qk_rope_head_dim,
         QUANT_BLOCK=64,
         SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
-        PAGE_SIZE=metadata.out_page_size,
-        BYTES_PER_PAGE=metadata.out_buffer.shape[-1],
+        PAGE_SIZE=out_page_size,
+        BYTES_PER_PAGE=out_buffer.shape[-1],
         BLOCK=block_head,
         OUTPUT_BF16=output_bf16,
         num_warps=4,
@@ -450,21 +394,21 @@ def fused_compress(
         kv_score,
         kv_score.stride(0),
         kv_score.stride(1),
-        metadata.position_ids,
-        metadata.token_to_batch_idx,
-        metadata.b_req_idx,
-        metadata.b_seq_len,
-        metadata.mem_index,
-        metadata.full_to_swa_indexs,
-        metadata.state_buffer,
+        infer_state.position_ids,
+        token_to_batch_idx,
+        infer_state.b_req_idx,
+        infer_state.b_seq_len,
+        infer_state.mem_index,
+        mem_manager.full_to_swa_indexs,
+        state_buffer,
         STATE_WIDTH=state_width,
         STATE_LAST_DIM=state_last_dim,
         COMPRESS_RATIO=compress_ratio,
         IS_C4=is_c4,
-        IS_PREFILL=metadata.is_prefill,
+        IS_PREFILL=infer_state.is_prefill,
         SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
         STATE_RING=state_ring,
         BLOCK=block_state,
         num_warps=4,
     )
-    return
+    return out_buffer
