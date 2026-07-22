@@ -25,6 +25,7 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 
@@ -146,6 +147,16 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    if args.enable_prefill_eplb:
+        assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
+        assert not args.enable_prefill_cudagraph, "--enable_prefill_eplb does not support --enable_prefill_cudagraph"
+        # EPLB updates expert weights in place, but SM100 Mega-MoE caches transformed weights by tensor data_ptr.
+        assert not is_sm100_gpu(), "--enable_prefill_eplb does not support SM100"
+        assert (
+            args.eplb_num_redundant_experts_per_rank > 0
+        ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
+        assert args.mtp_mode is None, "--enable_prefill_eplb does not support MTP modes"
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
