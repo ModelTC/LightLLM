@@ -17,12 +17,31 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.eplb_experts_logical_to_physical_map = None
+        self.eplb_experts_logical_replica_count = None
+        self.eplb_experts_record_load_tensor = None
+        # These host-side values select ring-buffer rows.  The CUDA flag remains
+        # the ordering-safe source of truth for whether the kernel records.
+        self.eplb_recorded_sample_count = 0
+        self.eplb_recording = False
         self.ep_balance_counters = None
+        self._primary_weight_pack_cache = {}
+
+    def configure_eplb(
+        self,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        record_load_tensor: torch.Tensor,
+    ) -> None:
+        self.eplb_experts_logical_to_physical_map = logical_to_physical_map
+        self.eplb_experts_logical_replica_count = logical_replica_count
+        self.eplb_experts_record_load_tensor = record_load_tensor
 
     def _select_experts(
         self,
@@ -37,6 +56,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        is_prefill: Optional[bool] = None,
+        preserve_logical_ids: bool = False,
     ):
         """Select experts and return topk weights and ids."""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
@@ -58,8 +79,23 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         origin_topk_ids = topk_ids
-        if self.redundancy_expert_num > 0:
-            # 因为 redundancy_topk_ids_repair 会修改 topk_ids，所以需要先复制一份
+        if self.eplb_experts_logical_to_physical_map is not None:
+            if is_prefill is True:
+                if preserve_logical_ids:
+                    origin_topk_ids = topk_ids.clone()
+                sample_index = 0
+                if self.eplb_recording:
+                    sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
+                    self.eplb_recorded_sample_count += 1
+                eplb_map(
+                    topk_ids,
+                    self.eplb_experts_logical_to_physical_map,
+                    self.eplb_experts_logical_replica_count,
+                    self.routed_expert_counter_tensor,
+                    self.eplb_experts_record_load_tensor,
+                    sample_index,
+                )
+        elif self.redundancy_expert_num > 0:
             origin_topk_ids = topk_ids.clone()
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,
@@ -81,19 +117,51 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
+        if is_prefill is False and self.eplb_experts_logical_to_physical_map is not None:
+            w13 = self._primary_weight_pack(w13)
+            w2 = self._primary_weight_pack(w2)
+            num_experts = self.n_routed_experts
+        else:
+            num_experts = self.total_expert_num_contain_redundancy
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
-            num_experts=self.total_expert_num_contain_redundancy,  # number of all experts contain redundancy
+            num_experts=num_experts,
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
             ep_balance_counters=self.ep_balance_counters,
         )
         return output
+
+    def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
+        """Return the cached local-primary view used by all decode paths."""
+        if self.eplb_experts_logical_to_physical_map is None:
+            return weight_pack
+        cache = getattr(self, "_primary_weight_pack_cache", None)
+        if cache is None:
+            cache = self._primary_weight_pack_cache = {}
+        cache_key = id(weight_pack)
+        primary = cache.get(cache_key)
+        if primary is None:
+            primary = WeightPack(
+                weight=weight_pack.weight[: self.ep_n_routed_experts],
+                weight_scale=(
+                    weight_pack.weight_scale[: self.ep_n_routed_experts]
+                    if weight_pack.weight_scale is not None
+                    else None
+                ),
+                weight_zero_point=(
+                    getattr(weight_pack, "weight_zero_point", None)[: self.ep_n_routed_experts]
+                    if getattr(weight_pack, "weight_zero_point", None) is not None
+                    else None
+                ),
+            )
+            cache[cache_key] = primary
+        return primary
 
     def low_latency_dispatch(
         self,
@@ -117,6 +185,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_group=topk_group,
             num_expert_group=n_group,
             scoring_func=scoring_func,
+            is_prefill=False,
         )
 
         topk_idx = topk_idx.to(torch.long)
@@ -126,7 +195,11 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            num_experts=self.total_expert_num_contain_redundancy,
+            num_experts=(
+                self.n_routed_experts
+                if self.eplb_experts_logical_to_physical_map is not None
+                else self.total_expert_num_contain_redundancy
+            ),
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -156,6 +229,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_group=topk_group,
             num_expert_group=n_group,
             scoring_func=scoring_func,
+            is_prefill=True,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
@@ -215,6 +289,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         dtype: torch.dtype,
         expected_m: int,
     ):
+        if self.eplb_experts_logical_to_physical_map is not None:
+            w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         return masked_group_gemm(

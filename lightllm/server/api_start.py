@@ -147,6 +147,19 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    if args.enable_prefill_eplb:
+        assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
+        assert (
+            args.ep_redundancy_expert_config_path is None
+        ), "--enable_prefill_eplb cannot be enabled with --ep_redundancy_expert_config_path"
+        assert (
+            not args.auto_update_redundancy_expert
+        ), "--enable_prefill_eplb and --auto_update_redundancy_expert cannot be enabled together"
+        assert (
+            args.eplb_num_redundant_experts_per_rank > 0
+        ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
+        assert args.mtp_mode is None, "--enable_prefill_eplb does not support MTP modes"
+
     if args.enable_ep_moe:
         allowed_ep_att_backends = {"auto", "fa3", "triton"}
         for backend in args.llm_prefill_att_backend:

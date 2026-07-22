@@ -32,6 +32,9 @@ from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import (
     EPBalanceMonitor,
     should_enable_ep_balance_monitor,
 )
+from lightllm.server.router.model_infer.mode_backend.eplb_manager import (
+    EPLBManager,
+)
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -106,8 +109,11 @@ class ModelRpcServer(rpyc.Service):
         self.backend.init_model(kvargs)
         self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
 
-        # only deepseekv3 can support auto_update_redundancy_expert
-        if self.args.auto_update_redundancy_expert:
+        if self.args.enable_prefill_eplb:
+            self.backend.model.eplb_manager = EPLBManager(self.backend.model)
+            self.redundancy_expert_manager = None
+            logger.info("init eplb_manager")
+        elif self.args.auto_update_redundancy_expert:
             self.redundancy_expert_manager = RedundancyExpertManager(self.backend.model)
             logger.info("init redundancy_expert_manager")
         else:
