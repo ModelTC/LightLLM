@@ -236,8 +236,9 @@ def _launch_subprocesses(args: StartArgs):
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
-    # automatically set visual_dp based on visual_tp and tp
-    if args.visual_tp < args.tp and args.tp % args.visual_tp == 0:
+    # automatically set visual_dp based on visual_tp and tp.
+    # In visual proxy mode keep the caller-provided visual_dp / visual_tp.
+    if not args.visual_use_proxy_mode and args.visual_tp < args.tp and args.tp % args.visual_tp == 0:
         args.visual_dp = args.tp // args.visual_tp
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)

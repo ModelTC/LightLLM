@@ -148,12 +148,14 @@ class ShmPortArgs:
     # [dynamic] visual vit nccl ports (list, len=visual_dp)
     @property
     def visual_nccl_ports(self) -> List[int]:
-        return self._get_from_args_or_alloc("visual_nccl_ports", count=int(get_env_start_args().visual_dp))
+        ports = self._get_from_args_or_alloc("visual_nccl_ports", count=int(get_env_start_args().visual_dp))
+        return [ports] if isinstance(ports, int) else ports
 
     # [dynamic] audio encoder nccl ports (list, len=audio_dp)
     @property
     def audio_nccl_ports(self) -> List[int]:
-        return self._get_from_args_or_alloc("audio_nccl_ports", count=int(get_env_start_args().audio_dp))
+        ports = self._get_from_args_or_alloc("audio_nccl_ports", count=int(get_env_start_args().audio_dp))
+        return [ports] if isinstance(ports, int) else ports
 
     # [dynamic] router zmq port
     @property
