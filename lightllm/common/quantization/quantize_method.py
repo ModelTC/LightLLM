@@ -76,13 +76,24 @@ class QuantizationMethod(ABC):
     def create_moe_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int
     ) -> Tuple[WeightPack, List[WeightPack]]:
-        return self._create_weight(
+        weight_pack, weight_pack_list = self._create_weight(
             out_dims=out_dims,
             in_dim=in_dim,
             dtype=dtype,
             device_id=device_id,
             num_experts=num_experts,
         )
+        if num_experts == 1:
+            # Dense factories omit the singleton expert axis. Restore it on
+            # the fused pack and its loading views without copying storage.
+            for pack in [weight_pack, *weight_pack_list]:
+                if pack.weight.ndim == 2:
+                    pack.weight = pack.weight.unsqueeze(0)
+                    if pack.weight_scale is not None:
+                        pack.weight_scale = pack.weight_scale.unsqueeze(0)
+                    if pack.weight_zero_point is not None:
+                        pack.weight_zero_point = pack.weight_zero_point.unsqueeze(0)
+        return weight_pack, weight_pack_list
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
         if self._check_weight_need_quanted(weight):

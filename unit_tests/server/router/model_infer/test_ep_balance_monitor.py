@@ -1,12 +1,16 @@
 import threading
 from array import array
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from prometheus_client import generate_latest
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_balance import PrefillEPBalanceCounters
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import fused_moe_weight as fused_weight_module
 from lightllm.distributed import communication_op as communication_op_module
 from lightllm.server.metrics.metrics import Monitor
 from lightllm.server.router.model_infer.mode_backend import ep_balance_monitor as monitor_module
@@ -217,7 +221,7 @@ def test_monitor_reuses_manager_precreated_dedicated_gloo_group(monkeypatch):
     )
     model = SimpleNamespace(args=SimpleNamespace(enable_tpsp_mix_mode=True), tp_world_size_=1)
 
-    monkeypatch.setattr(monitor_module, "_find_fused_moe_weights", lambda _: [weight])
+    monkeypatch.setattr(monitor_module, "find_ep_moe_weights", lambda _: [weight])
     monkeypatch.setattr(monitor_module, "get_global_rank", lambda: 0)
     monkeypatch.setattr(monitor_module, "get_global_world_size", lambda: 2)
     metric_ports = []
@@ -250,7 +254,7 @@ def test_nonzero_rank_monitor_does_not_create_metric_client(monkeypatch):
     )
     model = SimpleNamespace(args=SimpleNamespace(enable_tpsp_mix_mode=True), tp_world_size_=1)
     metric_client_calls = []
-    monkeypatch.setattr(monitor_module, "_find_fused_moe_weights", lambda _: [weight])
+    monkeypatch.setattr(monitor_module, "find_ep_moe_weights", lambda _: [weight])
     monkeypatch.setattr(monitor_module, "get_global_rank", lambda: 1)
     monkeypatch.setattr(monitor_module, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(monitor_module, "dist_group_manager", SimpleNamespace(ep_balance_monitor_group=sentinel_group))
@@ -485,7 +489,7 @@ def test_find_fused_moe_weights_discovers_any_layer_member_once_and_sorts(monkey
             self.layer_num_ = layer_num
             self.enable_ep_moe = enabled
 
-    monkeypatch.setattr(monitor_module, "FusedMoeWeight", FakeFusedMoeWeight)
+    monkeypatch.setattr(fused_weight_module, "FusedMoeWeight", FakeFusedMoeWeight)
     first = FakeFusedMoeWeight(3)
     second = FakeFusedMoeWeight(1)
     disabled = FakeFusedMoeWeight(0, enabled=False)
@@ -496,7 +500,7 @@ def test_find_fused_moe_weights_discovers_any_layer_member_once_and_sorts(monkey
         ]
     )
 
-    assert monitor_module._find_fused_moe_weights(model) == [second, first]
+    assert monitor_module.find_ep_moe_weights(model) == [second, first]
 
 
 def test_monitor_disable_detaches_counters_from_all_impls():
@@ -544,3 +548,63 @@ def test_prefill_cudagraph_silently_disables_monitor():
 def test_sm100_silently_disables_monitor(monkeypatch):
     monkeypatch.setattr(monitor_module, "is_sm100_gpu", lambda: True)
     assert not should_enable_ep_balance_monitor(_monitor_args())
+
+
+def _monitor_failure_worker(rank, rendezvous, failure):
+    torch.set_num_threads(1)
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=15))
+    control_group = dist.new_group(backend="gloo", timeout=timedelta(seconds=15))
+    monitor = monitor_module.EPBalanceMonitor.__new__(monitor_module.EPBalanceMonitor)
+    monitor.global_rank = rank
+    monitor.world_size = 2
+    monitor.gloo_group = dist.group.WORLD
+    monitor._common_round_end = torch.zeros((), dtype=torch.int64)
+    monitor._monitor_error = torch.zeros((), dtype=torch.int32)
+    monitor._round_buffer = torch.ones((monitor_module.EP_BALANCE_ROUND_BUFFER_CAPACITY, 1, 2), dtype=torch.int64)
+    monitor._written_round_count = 200
+    monitor._processed_round_count = 0
+    monitor._overflowed = failure == "overflow" and rank == 1
+    monitor._round_ready = threading.Event()
+    monitor._round_ready.set()
+    monitor.enabled = True
+    impl = SimpleNamespace(ep_balance_counters=object())
+    monitor.weights = [SimpleNamespace(fuse_moe_impl=impl)]
+    errors = []
+    monitor_module.logger.exception = lambda message: errors.append(str(message))
+
+    def fail(*args):
+        raise RuntimeError(f"injected {failure} failure")
+
+    if failure == "copy" and rank == 1:
+        monitor._copy_local_rounds = fail
+    if failure == "after_copy" and rank == 1:
+        copy_rounds = monitor._copy_local_rounds
+
+        def overflow_after_copy(start, end):
+            result = copy_rounds(start, end)
+            monitor._overflowed = True
+            return result
+
+        monitor._copy_local_rounds = overflow_after_copy
+    monitor._log_stats = fail if failure == "log" else lambda stats: None
+    thread = threading.Thread(target=monitor._monitor_loop, daemon=True)
+    thread.start()
+    thread.join(timeout=5)
+    stuck = thread.is_alive()
+    # Keep the group alive until both ranks have measured the worker's exit.
+    dist.barrier(group=control_group)
+    dist.destroy_process_group()
+    assert not stuck, f"rank {rank}: monitor was left waiting in a collective ({errors})"
+    assert not monitor.enabled and impl.ep_balance_counters is None
+    if rank == (0 if failure == "log" else 1):
+        assert any(
+            ("overflow" if failure in ("overflow", "after_copy") else f"injected {failure}") in error
+            for error in errors
+        )
+    else:
+        assert any("another rank" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("failure", ["overflow", "copy", "after_copy", "log"])
+def test_monitor_failure_stops_all_ranks(tmp_path, failure):
+    mp.spawn(_monitor_failure_worker, args=((tmp_path / "gloo-init").as_uri(), failure), nprocs=2, join=True)

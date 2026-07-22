@@ -1,0 +1,63 @@
+"""Bind optional EP services at initialization, outside the inference loop."""
+
+from functools import wraps
+
+import torch.distributed as dist
+
+from .ep_balance_monitor import EPBalanceMonitor, should_enable_ep_balance_monitor
+
+
+def install_ep_runtime(backend):
+    """Install on the target model only, before either inference thread starts."""
+    manager = None
+    if backend.args.enable_prefill_eplb:
+        from .eplb_manager import EPLBManager
+
+        manager = EPLBManager(backend.model)
+
+    monitor = EPBalanceMonitor(backend.model) if should_enable_ep_balance_monitor(backend.args) else None
+    if monitor is not None and not monitor.enabled:
+        monitor = None
+
+    if manager is None and monitor is None:
+        return
+
+    def record_prefill(prefill):
+        @wraps(prefill)
+        def run(*args, **kwargs):
+            output = prefill(*args, **kwargs)
+            if monitor is not None:
+                monitor.record_prefill_round()
+            if manager is not None:
+                manager.step()
+            return output
+
+        return run
+
+    # These are the two completed-prefill boundaries; decode and draft models
+    # retain their original methods. Failed forwards never publish a sample.
+    model = backend.model
+    model._prefill = record_prefill(model._prefill)
+    model._microbatch_overlap_prefill_cuda = record_prefill(model._microbatch_overlap_prefill_cuda)
+
+    if manager is not None:
+        get_event_pack = backend.overlap_event_manager.get_overlap_event_pack
+
+        @wraps(get_event_pack)
+        def get_overlap_event_pack():
+            event_pack = get_event_pack()
+            # Capture the event rather than a bound pack method: storing the
+            # latter back on the pack would create a cycle on every batch.
+            wait_to_forward = event_pack.wait_forward_event.wait
+
+            def wait_and_poll():
+                wait_to_forward()
+                # The existing event serializes both inference threads. Poll
+                # here even on idle rounds, before request/DP collectives.
+                manager.poll()
+
+            event_pack.wait_to_forward = wait_and_poll
+            return event_pack
+
+        backend.overlap_event_manager.get_overlap_event_pack = get_overlap_event_pack
+        dist.barrier()
