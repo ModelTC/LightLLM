@@ -206,7 +206,15 @@ class DistributeGroupManager:
         )
         self.ll_num_tokens = num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        self.ll_num_experts = n_routed_experts
+        total_redundant_experts = (
+            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
+            if get_env_start_args().enable_prefill_eplb
+            else 0
+        )
+        self.ll_prefill_num_experts = n_routed_experts + total_redundant_experts
+        # EPLB's redundant rows are a prefill-only physical layout; decode
+        # always routes the logical expert space.
+        self.ll_decode_num_experts = n_routed_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -232,7 +240,7 @@ class DistributeGroupManager:
 
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
-                self.ll_num_experts,
+                self.ll_decode_num_experts,
                 self.ll_num_tokens,
                 num_experts_per_tok,
                 self.ll_hidden,
@@ -243,10 +251,10 @@ class DistributeGroupManager:
             "num_max_dispatch_tokens_per_rank=%s, ll_num_experts=%s, expert_quant_method_names=%s",
             enable_mega_moe_buffer,
             self.ll_num_tokens,
-            self.ll_num_experts,
+            self.ll_prefill_num_experts,
             sorted(expert_quant_method_names),
         )
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(theoretical_sms)
 
         # 串行路径会在通信后立即等待，不需要为并行计算预留大部分 SM。
