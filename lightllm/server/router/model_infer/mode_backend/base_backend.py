@@ -51,6 +51,10 @@ from lightllm.server.multi_level_kv_cache import (
 from .prefill_queue_strategy import create_prefill_queue_strategy
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
+from .ep_runtime import install_ep_runtime
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    disable_eplb_model_init,
+)
 
 
 class ModeBackend:
@@ -261,13 +265,17 @@ class ModeBackend:
         # 策略可能读取模型、缓存管理器和 rank 等全局调度状态，因此在 backend 完成初始化后再创建。
         self.prefill_queue_strategy = create_prefill_queue_strategy(self)
 
+        install_ep_runtime(self)
+        self.start_infer_loops()
+        return
+
+    def start_infer_loops(self):
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread.start()
         self.infer_loop_thread1 = threading.Thread(target=self.infer_loop, daemon=True)
         self.infer_loop_thread1.start()
-        return
 
     def init_custom(self):
         pass
@@ -346,7 +354,9 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            self.draft_models.append(draft_model_class(draft_model_kvargs))
+            with disable_eplb_model_init():
+                draft_model = draft_model_class(draft_model_kvargs)
+            self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return

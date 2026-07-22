@@ -807,6 +807,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Disable the prefill expert balance monitor enabled by default for EP-MoE.""",
     )
     parser.add_argument(
+        "--enable_prefill_eplb",
+        action="store_true",
+        help="""Enable online expert load balancing with complete physical layouts; requires --run_mode prefill.""",
+    )
+    parser.add_argument(
+        "--eplb_num_redundant_experts_per_rank",
+        type=int,
+        default=2,
+        help="""Number of redundant physical experts per EP rank for each MoE layer used by prefill EPLB.
+            The value must be nonnegative; zero enables rearrangement without extra replicas.""",
+    )
+    parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",

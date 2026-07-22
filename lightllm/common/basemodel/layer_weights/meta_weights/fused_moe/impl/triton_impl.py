@@ -1,13 +1,10 @@
 import torch
-from typing import Callable, Optional
+from typing import Optional
 from lightllm.common.quantization.no_quant import WeightPack
 from .base_impl import FuseMoeBaseImpl
 
 
 class FuseMoeTriton(FuseMoeBaseImpl):
-    def create_workspace(self):
-        return None
-
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -21,6 +18,8 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        is_prefill: Optional[bool] = None,
+        preserve_logical_ids: bool = False,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -89,56 +88,3 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             clamp_up_add_one=clamp_up_add_one,
         )
         return input_tensor
-
-    def __call__(
-        self,
-        input_tensor: torch.Tensor,
-        router_logits: torch.Tensor,
-        w13: WeightPack,
-        w2: WeightPack,
-        correction_bias: Optional[torch.Tensor],
-        scoring_func: str,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool,
-        topk_group: int,
-        num_expert_group: int,
-        is_prefill: Optional[bool] = None,
-        # Callback to capture MoE topk expert ids (routed experts metadata).
-        moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
-        per_expert_scale: Optional[torch.Tensor] = None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
-        alpha: Optional[float] = None,
-        limit: Optional[float] = None,
-        clamp_up_add_one: bool = True,
-    ):
-        topk_weights, topk_ids, origin_topk_ids = self._select_experts(
-            input_tensor=input_tensor,
-            router_logits=router_logits,
-            correction_bias=correction_bias,
-            top_k=top_k,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            scoring_func=scoring_func,
-            per_expert_scale=per_expert_scale,
-            shared_expert_gate=shared_expert_gate,
-        )
-
-        if moe_capture_callback is not None:
-            moe_capture_callback(origin_topk_ids)
-
-        output = self._fused_experts(
-            input_tensor=input_tensor,
-            w13=w13,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            router_logits=router_logits,
-            is_prefill=is_prefill,
-            alpha=alpha,
-            limit=limit,
-            clamp_up_add_one=clamp_up_add_one,
-        )
-        return output

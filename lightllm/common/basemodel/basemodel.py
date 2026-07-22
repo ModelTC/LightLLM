@@ -15,6 +15,8 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.eplb_utils import get_eplb_memory_reservations
+from lightllm.common.kv_cache_mem_manager.mem_manager import memory_reservation_scope
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
@@ -73,7 +75,6 @@ class TpPartBaseModel:
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
-        self.ep_balance_monitor = None
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
@@ -115,7 +116,8 @@ class TpPartBaseModel:
                 self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
-            self._init_mem_manager()
+            with memory_reservation_scope(get_eplb_memory_reservations(self)):
+                self._init_mem_manager()
 
         # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
         # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
@@ -326,14 +328,9 @@ class TpPartBaseModel:
         model_input.to_cuda()
 
         if model_input.is_prefill:
-            model_output = self._prefill(model_input=model_input)
-            self._record_prefill_ep_balance()
-            return model_output
-        return self._decode(model_input)
-
-    def _record_prefill_ep_balance(self):
-        if self.ep_balance_monitor is not None:
-            self.ep_balance_monitor.record_prefill_round()
+            return self._prefill(model_input=model_input)
+        else:
+            return self._decode(model_input)
 
     def _select_mem_indexes(self, model_input: ModelInput):
         if model_input.is_prefill:
@@ -637,7 +634,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -796,7 +792,6 @@ class TpPartBaseModel:
         dist_group_manager.clear_deepep_buffer()
         model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
         model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
-        self._record_prefill_ep_balance()
         return model_output0, model_output1
 
     @torch.no_grad()

@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+from lightllm.common.eplb_utils import find_ep_moe_weights
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_balance import PrefillEPBalanceCounters
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.server.metrics.manager import MetricClient
@@ -148,22 +148,13 @@ def classify_prefill_placement_pressure_drift(drift: float) -> str:
     return "dynamic"
 
 
-def _find_fused_moe_weights(model):
-    weights_by_id = {}
-    for layer in model.trans_layers_weight:
-        for value in getattr(layer, "__dict__", {}).values():
-            if isinstance(value, FusedMoeWeight) and value.enable_ep_moe:
-                weights_by_id[id(value)] = value
-    return sorted(weights_by_id.values(), key=lambda weight: weight.layer_num_)
-
-
 class EPBalanceMonitor:
     """Report cross-rank imbalance for non-overlapping blocks of complete prefill rounds."""
 
     def __init__(self, model: TpPartBaseModel):
         self.global_rank = get_global_rank()
         self.world_size = get_global_world_size()
-        self.weights = _find_fused_moe_weights(model)
+        self.weights = find_ep_moe_weights(model)
         self.enabled = bool(self.weights)
 
         if not self.enabled:
@@ -198,6 +189,7 @@ class EPBalanceMonitor:
         self._overflowed = False
         self._previous_pressure_signature: Optional[torch.Tensor] = None
         self._common_round_end = torch.zeros((), dtype=torch.int64)
+        self._monitor_error = torch.zeros((), dtype=torch.int32)
 
         self.gloo_group = dist_group_manager.ep_balance_monitor_group
         if self.gloo_group is None:
@@ -309,28 +301,52 @@ class EPBalanceMonitor:
         )
         self.metric_client.gauge_set("lightllm_prefill_ep_placement_pressure_drift", drift)
 
+    def _sync_monitor_error(self, error: Optional[Exception], phase: str):
+        """Stop every rank at the same boundary if one rank cannot continue."""
+        self._monitor_error.fill_(int(error is not None))
+        dist.all_reduce(self._monitor_error, op=dist.ReduceOp.MAX, group=self.gloo_group)
+        if self._monitor_error.item():
+            if error is not None:
+                raise RuntimeError(f"EP balance monitor failed phase={phase}: {error}") from error
+            raise RuntimeError(f"EP balance monitor failed on another rank phase={phase}")
+
     def _monitor_loop(self):
         """Consume commonly completed rounds in background report-sized windows."""
         try:
             while True:
                 self._round_ready.wait()
                 self._round_ready.clear()
-                if self._overflowed:
-                    self._raise_buffer_overflow("before_sync")
+                error = None
+                try:
+                    if self._overflowed:
+                        self._raise_buffer_overflow("before_sync")
+                except Exception as exc:
+                    error = exc
+                self._sync_monitor_error(error, "before_sync")
                 common_round_end = self._get_common_round_end()
-                if common_round_end - self._processed_round_count > EP_BALANCE_ROUND_BUFFER_CAPACITY:
-                    self._raise_buffer_overflow("common_round_lag", common_round_end=common_round_end)
 
                 while common_round_end - self._processed_round_count >= EP_BALANCE_PREFILL_ROUNDS_PER_REPORT:
                     round_start = self._processed_round_count
                     round_end = round_start + EP_BALANCE_PREFILL_ROUNDS_PER_REPORT
-                    local_round_stats = self._copy_local_rounds(round_start, round_end)
-                    if self._overflowed:
-                        self._raise_buffer_overflow("after_copy")
-                    round_stats = self._gather_round_stats(local_round_stats)
-                    self._processed_round_count = round_end
-                    if self.global_rank == 0:
-                        self._log_stats(round_stats)
+                    error = None
+                    try:
+                        if common_round_end - round_start > EP_BALANCE_ROUND_BUFFER_CAPACITY:
+                            self._raise_buffer_overflow("common_round_lag", common_round_end=common_round_end)
+                        local_round_stats = self._copy_local_rounds(round_start, round_end)
+                        if self._overflowed:
+                            self._raise_buffer_overflow("after_copy")
+                    except Exception as exc:
+                        error = exc
+                    self._sync_monitor_error(error, "copy")
+                    error = None
+                    try:
+                        round_stats = self._gather_round_stats(local_round_stats)
+                        self._processed_round_count = round_end
+                        if self.global_rank == 0:
+                            self._log_stats(round_stats)
+                    except Exception as exc:
+                        error = exc
+                    self._sync_monitor_error(error, "report")
 
                 if self._written_round_count - self._processed_round_count >= EP_BALANCE_PREFILL_ROUNDS_PER_REPORT:
                     self._round_ready.set()
