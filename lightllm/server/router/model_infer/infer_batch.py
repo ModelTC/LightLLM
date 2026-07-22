@@ -865,42 +865,16 @@ class InferReq:
     def mark_shm_aborted_finished(self):
         """仅写 shm：abort 释放前保证 finish token / finish_status 可用。
 
-        - 本地 ``finish_status`` 已是正常结束：不再改写成 ABORTED。
-        - 尚未结束：补齐 finish token 并标记 FINISHED_ABORTED。
-          - 已有生成：以最后一个输出 token 为 finish token。
-          - 尚无生成：模拟写入 EOS 占位输出。
-        可读本地状态；不回写本地状态。仅应在 DP master 写 shm 路径调用。
+        以本地 ``finish_status`` 为准：已正常结束则不覆盖；否则委托
+        ``Req.mark_simulated_finished``。不回写本地状态。
         """
-        shm_req = self.shm_req
-
-        # 已由正常路径（stop / eos / length 等）正确结束，保留原 finish_status。
+        # 本地已由 stop / eos / length 等正确结束，保留原 shm finish_status。
         if self.finish_status.is_finished():
             return
-
-        input_len = shm_req.input_len
-        output_len = self.cur_output_len
-        if output_len > 0:
-            finish_token_index = input_len + output_len - 1
-        else:
-            eos_ids = self.args.eos_id
-            if eos_ids is None:
-                eos_id = 0
-            elif isinstance(eos_ids, (list, tuple)):
-                eos_id = eos_ids[0]
-            else:
-                eos_id = int(eos_ids)
-            finish_token_index = input_len
-            output_len = 1
-            shm_req.shm_prompt_ids.arr[finish_token_index] = eos_id
-            shm_req.shm_logprobs.arr["logprob"][finish_token_index] = 0.0
-            shm_req.shm_logprobs.arr["rank"][finish_token_index] = -1
-
-        shm_req.finish_token_index = finish_token_index
-        shm_req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
-
-        shm_req.shm_cur_output_len = output_len
-        # candetoken_out_len 最后写，避免 detoken 提前读到不完整状态
-        shm_req.candetoken_out_len = output_len
+        self.shm_req.mark_simulated_finished(
+            FinishStatus.FINISHED_ABORTED,
+            output_len=self.cur_output_len,
+        )
         return
 
     def update_finish_status(self, eos_ids, output_len: int):

@@ -66,7 +66,6 @@ class PDDecodeNode(ChunkedPrefillBackend):
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
 
             if self.is_master_in_dp and req_obj.infer_aborted and req_obj.pd_task_num != 0:
-                # 传输未收尾前每个调度循环都可再投一次，作为幂等补刀
                 self.info_queue.put(PDAbortReq(request_id=req_obj.req_id, device_id=req_obj.pd_trans_device_id))
 
             if req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
@@ -79,16 +78,13 @@ class PDDecodeNode(ChunkedPrefillBackend):
                     finish_status = (
                         FinishStatus.FINISHED_ABORTED if req_obj.infer_aborted else FinishStatus.FINISHED_ERROR
                     )
-                    req_obj.cur_output_len += 1
-                    req_obj.set_next_gen_token_id(next_token_id=0, logprob=0.0, output_len=req_obj.cur_output_len)
                     req_obj.finish_status.set_status(finish_status)
-
                     if self.is_master_in_dp:
-                        req_obj.shm_req.shm_cur_output_len = req_obj.cur_output_len
-                        req_obj.shm_req.finish_token_index = req_obj.get_cur_total_len() - 1
-                        req_obj.shm_req.finish_status.set_status(finish_status)
-                        req_obj.shm_req.candetoken_out_len = req_obj.cur_output_len
-
+                        # output_len==0 时内部写 EOS 占位；>0 时用已有最后 token，不再额外 set_next。
+                        req_obj.shm_req.mark_simulated_finished(
+                            finish_status,
+                            output_len=req_obj.cur_output_len,
+                        )
                         logger.error(
                             f"req_id: {req_obj.req_id} forced to finished "
                             f"(reason={req_obj.finish_status.get_finish_reason()}), kv transfer error"

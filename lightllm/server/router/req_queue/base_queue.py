@@ -41,28 +41,12 @@ class BaseQueue:
         # 不能在各节点本地调度队列里提前按各自 shm 状态释放。
         return req.is_aborted and not self.router.is_multinode_tp
 
-    def mark_aborted_req_finished(self, req: Req):
-        # 未开始推理的请求没有生成 token；这里写入一个 EOS 位置和 aborted 状态，
-        # 让 httpserver recycle loop 能正常结束请求并返回空字符串。
-        input_len = req.input_len
-        req.link_prompt_ids_shm_array()
-        req.link_logprobs_shm_array()
-        req.finish_token_index = input_len
-        req.shm_prompt_ids.arr[input_len] = self.args.eos_id[0]
-        # shm_logprobs 为 structured array: [("logprob", f32), ("rank", i32)]
-        req.shm_logprobs.arr["logprob"][input_len] = 0.0
-        req.shm_logprobs.arr["rank"][input_len] = -1
-        req.finish_status.set_status(FinishStatus.FINISHED_ABORTED)
-
-        # 所有数据准备完后再通知 detokenizer
-        req.candetoken_out_len = 1
-        # 未进 Infer，无 final_token_metadata 可写；置位以免 HTTP 空等
-        req.shm_infer_released = True
-
     def release_aborted_req(self, req: Req):
         logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
         self.free_aborted_req_cpu_cache_pages(req)
-        self.mark_aborted_req_finished(req)
+        # 未进 Infer：模拟 EOS + ABORTED；自行置 released，以免 HTTP 空等 metadata。
+        req.mark_simulated_finished(FinishStatus.FINISHED_ABORTED, output_len=0)
+        req.shm_infer_released = True
         self.router.shm_req_manager.put_back_req_obj(req)
         return
 

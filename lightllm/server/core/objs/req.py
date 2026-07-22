@@ -368,6 +368,51 @@ class Req(ctypes.Structure):
             self.sample_params.suggested_dp_index,
         )
 
+    def mark_simulated_finished(
+        self,
+        finish_status: int = FinishStatus.FINISHED_ABORTED,
+        output_len: int = 0,
+    ) -> bool:
+        """模拟/强制结束：补齐 finish token 与 finish_status，供 detoken / HTTP 收尾。
+
+        用于 waiting abort、Infer abort 释放兜底、PD KV 失败强制结束等路径。
+
+        注意：会写 ``finish_status`` / ``candetoken_out_len`` 等 shm 字段，Infer 侧仅
+        ``is_master_in_dp`` 节点可调用；router waiting abort 由调度进程独占写，同理。
+
+        - ``output_len > 0``：以最后一个已生成 token 为 finish token（不改写 token 内容）。
+        - ``output_len == 0``：在 ``input_len`` 处写入 EOS 占位，并视作输出长度 1。
+        - ``candetoken_out_len`` 最后写，避免 detoken 读到不完整状态。
+
+        Returns:
+            是否实际写入了结束状态；shm 已 finished 时不覆盖，返回 False。
+        """
+        if self.finish_status.is_finished():
+            return False
+
+        if not hasattr(self, "shm_prompt_ids"):
+            self.link_prompt_ids_shm_array()
+        if not hasattr(self, "shm_logprobs"):
+            self.link_logprobs_shm_array()
+
+        if output_len > 0:
+            finish_token_index = self.input_len + output_len - 1
+        else:
+            finish_token_index = self.input_len
+            output_len = 1
+            eos_ids = get_env_start_args().eos_id
+            token_id = eos_ids[0] if eos_ids else 0
+            self.shm_prompt_ids.arr[finish_token_index] = token_id
+            self.shm_logprobs.arr["logprob"][finish_token_index] = 0.0
+            self.shm_logprobs.arr["rank"][finish_token_index] = -1
+
+        self.finish_token_index = finish_token_index
+        self.finish_status.set_status(finish_status)
+        self.shm_cur_output_len = output_len
+        # candetoken_out_len 最后写，避免 detoken 提前读到不完整状态
+        self.candetoken_out_len = output_len
+        return True
+
     def can_release(self):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
