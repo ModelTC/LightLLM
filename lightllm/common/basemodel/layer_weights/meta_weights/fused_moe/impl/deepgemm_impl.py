@@ -20,6 +20,10 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ep_balance_counters = None
+
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -91,6 +95,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             previous_event=None,  # for overlap
             clamp_limit=clamp_limit,
             alloc_tensor_func=alloc_tensor_func,
+            ep_balance_counters=self.ep_balance_counters,
         )
         return output
 
@@ -200,8 +205,23 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             use_tma_aligned_col_major_sf=True,
         )
 
-        def hook():
-            event.current_stream_wait()
+        counters = self.ep_balance_counters
+        if counters is None:
+
+            def hook():
+                event.current_stream_wait()
+
+        else:
+            # Sent routes are globally conserved by all-to-all; recv_x[0] is the 128-aligned expanded compute load.
+            route_load = topk_idx.numel()
+            compute_load = recv_x[0].shape[0]
+
+            def hook():
+                event.current_stream_wait()
+                counters.accumulate(
+                    route_load=route_load,
+                    compute_load=compute_load,
+                )
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
