@@ -945,7 +945,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 )
 
                                 if finished_token_index != src_index:
-                                    finish_status = FinishStatus()
+                                    finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
                                     if req.stop_str_matched:
                                         finish_status = FinishStatus(FinishStatus.FINISHED_STOP)

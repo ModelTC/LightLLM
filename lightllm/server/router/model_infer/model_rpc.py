@@ -217,6 +217,10 @@ async def start_model_process(
             success_event,
         ),
     )
+    # 若开启 --enable_torch_memory_saver：必须在 configure_subprocess() 内
+    # 调用 proc.start()，以便子进程继承/完成 torch_memory_saver 的初始化钩子；
+    # 后续 Infer 才能对 KV / weight / cudagraph 等显存做 pause/resume。
+    # 未开启时 Wrapper 为空实现，with 块无额外开销。
     from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
 
     torch_memory_saver = TorchMemorySaverWrapper(args.enable_torch_memory_saver)
