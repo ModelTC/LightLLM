@@ -44,6 +44,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        is_prefill: Optional[bool] = None,
     ):
         """Select experts and return topk weights and ids."""
         from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -135,6 +136,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             scoring_func=scoring_func,
             per_expert_scale=per_expert_scale,
             shared_expert_gate=shared_expert_gate,
+            is_prefill=is_prefill,
         )
         output = self._fused_experts(
             input_tensor=input_tensor,

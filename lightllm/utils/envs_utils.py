@@ -160,6 +160,25 @@ def get_redundancy_expert_update_max_load_count():
     return int(os.getenv("LIGHTLLM_REDUNDANCY_EXPERT_UPDATE_MAX_LOAD_COUNT", 1))
 
 
+def _get_force_balanced_routing_ratio(env_name: str) -> float:
+    ratio = float(os.getenv(env_name, 0.0))
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(f"{env_name} must be between 0.0 and 1.0, got {ratio}")
+    return ratio
+
+
+@lru_cache(maxsize=None)
+def get_force_balanced_prefill_routing_ratio() -> float:
+    """Return the fraction of prefill token rows whose expert IDs are replaced by a balanced assignment."""
+    return _get_force_balanced_routing_ratio("LIGHTLLM_EP_FORCE_BALANCED_PREFILL_ROUTING_RATIO")
+
+
+@lru_cache(maxsize=None)
+def get_force_balanced_decode_routing_ratio() -> float:
+    """Return the fraction of decode token rows whose expert IDs are replaced by a balanced assignment."""
+    return _get_force_balanced_routing_ratio("LIGHTLLM_EP_FORCE_BALANCED_DECODE_ROUTING_RATIO")
+
+
 @lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))

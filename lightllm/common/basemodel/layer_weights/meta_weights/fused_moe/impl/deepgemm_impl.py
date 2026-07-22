@@ -6,6 +6,8 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_force_balanced_prefill_routing_ratio,
+    get_force_balanced_decode_routing_ratio,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
@@ -16,6 +18,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
 )
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
+from lightllm.common.basemodel.triton_kernel.fused_moe.force_balanced_routing import force_balanced_routing
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -32,6 +35,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         scoring_func: str,
         per_expert_scale: Optional[torch.Tensor] = None,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        is_prefill: Optional[bool] = None,
     ):
         """Select experts and return topk weights and ids."""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
@@ -52,6 +56,17 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
+        if is_prefill is not None:
+            ratio = (
+                get_force_balanced_prefill_routing_ratio() if is_prefill else get_force_balanced_decode_routing_ratio()
+            )
+            force_balanced_routing(
+                topk_ids,
+                ratio,
+                expert_num=self.n_routed_experts,
+                global_rank=self.global_rank_,
+                world_size=self.global_world_size_,
+            )
         if self.redundancy_expert_num > 0:
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,
@@ -108,6 +123,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_group=topk_group,
             num_expert_group=n_group,
             scoring_func=scoring_func,
+            is_prefill=False,
         )
 
         topk_idx = topk_idx.to(torch.long)
@@ -147,6 +163,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_group=topk_group,
             num_expert_group=n_group,
             scoring_func=scoring_func,
+            is_prefill=True,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
