@@ -177,6 +177,8 @@ class StartArgs:
     )
     enable_ep_moe: bool = field(default=False)
     disable_ep_balance_monitor: bool = field(default=False)
+    enable_prefill_eplb: bool = field(default=False)
+    eplb_num_redundant_experts_per_rank: int = field(default=2)
     enable_fused_shared_experts: bool = field(default=False)
     mtp_mode: Optional[str] = field(
         default=None,
