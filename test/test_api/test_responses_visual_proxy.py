@@ -24,6 +24,8 @@ def test_responses_with_image_uses_visual_proxy(monkeypatch):
             return False
 
     class FakeRuntime:
+        settings = type("Settings", (), {"thinking_policy": "request"})()
+
         def request_slot(self):
             return FakeRequestSlot()
 

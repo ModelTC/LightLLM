@@ -19,6 +19,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from lightllm.server.visual_chat_proxy import (
+    apply_visual_thinking_policy,
     VisualChatProxyError,
     VisualProxyCapacityError,
     VisualProxyTimeoutError,
@@ -562,6 +563,8 @@ async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_c
     from .api_http import g_objs
 
     visual_remote_url = getattr(getattr(g_objs, "args", None), "visual_remote_url", None)
+    if visual_remote_url and g_objs.visual_proxy_runtime is not None:
+        chat_request = apply_visual_thinking_policy(chat_request, g_objs.visual_proxy_runtime.settings)
     if not should_use_visual_proxy(visual_remote_url, chat_request):
         return await main_chat_handler(chat_request, raw_request)
 

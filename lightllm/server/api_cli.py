@@ -120,6 +120,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--visual_thinking_policy",
+        choices=("request", "force_on", "force_off"),
+        default=None,
+        help=(
+            "Thinking policy for requests handled by the visual proxy. Defaults to the THINKING_POLICY "
+            "environment variable, or 'request' when unset. Request mode defaults thinking off."
+        ),
+    )
+    parser.add_argument(
         "--visual_remote_model",
         type=str,
         default=None,

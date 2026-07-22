@@ -24,6 +24,7 @@ from lightllm.server.api_models import (
 from lightllm.server import visual_chat_proxy
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.visual_chat_proxy import (
+    apply_visual_thinking_policy,
     ImageRegistry,
     RegisteredImage,
     VisualProxyCapacityError,
@@ -264,6 +265,32 @@ def test_visual_remote_receives_openai_multimodal_payload(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("policy", "template_kwargs", "effort", "expected_enabled", "expected_effort"),
+    [
+        ("request", None, None, False, None),
+        ("request", {"enable_thinking": True}, None, True, "high"),
+        ("request", {"enable_thinking": True}, "low", True, "low"),
+        ("force_on", {"enable_thinking": False}, None, True, "high"),
+        ("force_off", {"enable_thinking": True}, "low", False, None),
+    ],
+)
+def test_visual_thinking_policy(
+    policy, template_kwargs, effort, expected_enabled, expected_effort
+):
+    request = _multimodal_request(
+        chat_template_kwargs=template_kwargs,
+        reasoning_effort=effort,
+    )
+    settings = replace(_runtime().settings, thinking_policy=policy)
+
+    resolved = apply_visual_thinking_policy(request, settings)
+
+    assert resolved.chat_template_kwargs["enable_thinking"] is expected_enabled
+    assert resolved.chat_template_kwargs["thinking"] is expected_enabled
+    assert resolved.reasoning_effort == expected_effort
+
+
 def test_nova_accuracy_mode_uses_exact_generate_prompt_and_parameters():
     recorded = {}
 
@@ -333,8 +360,8 @@ def test_nova_accuracy_mode_keeps_model_facing_visual_result_unmodified(
         assert payload["chat_template_kwargs"] == {
             "enable_builtin_vision_reader": True,
             "render_vision_placeholders": False,
-            "enable_thinking": True,
-            "thinking": True,
+            "enable_thinking": False,
+            "thinking": False,
         }
         if len(main_requests) == 1:
             return _response(
@@ -675,9 +702,11 @@ def test_startup_settings_load_upstream_auth_and_headers(monkeypatch):
     args = SimpleNamespace(visual_remote_url="https://vision.test/v1")
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_API_KEY", "upstream-token")
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_HEADERS", '{"X-Tenant":"tenant-a"}')
+    monkeypatch.setenv("THINKING_POLICY", "force_on")
     settings = VisualProxySettings.from_args(args)
     assert settings.remote_url == "https://vision.test/v1/chat/completions"
     assert settings.builtin_trace_format == "xml"
+    assert settings.thinking_policy == "force_on"
     assert not settings.allow_local_files
     assert not settings.allow_remote_image_urls
     runtime = VisualProxyRuntime(settings)
@@ -740,6 +769,13 @@ def test_builtin_trace_format_cli_default_and_aliases():
     parser = make_argument_parser()
     assert parser.parse_args([]).visual_builtin_trace_format == "xml"
     assert parser.parse_args([]).visual_nova_accuracy_compat is False
+    assert parser.parse_args([]).visual_thinking_policy is None
+    assert (
+        parser.parse_args(
+            ["--visual_thinking_policy", "force_off"]
+        ).visual_thinking_policy
+        == "force_off"
+    )
     assert (
         parser.parse_args(["--visual_nova_accuracy_compat"]).visual_nova_accuracy_compat
         is True

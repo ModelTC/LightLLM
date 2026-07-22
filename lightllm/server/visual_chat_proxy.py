@@ -55,6 +55,7 @@ VISION_READER_NAME = "vision_reader"
 MAX_AGENT_STEPS = 12
 MAX_REASONING_CONTEXT_BYTES = 256 * 1024
 BUILTIN_TRACE_FORMATS = {"xml", "natural"}
+THINKING_POLICIES = {"request", "force_on", "force_off"}
 NOVA_ACCURACY_TEMPLATE_PATH = (
     Path(__file__).resolve().parent / "templates" / "nova_vision_proxy.jinja"
 )
@@ -186,6 +187,7 @@ class VisualProxySettings:
     remote_url: str
     builtin_trace_format: str = "xml"
     nova_accuracy_compat: bool = False
+    thinking_policy: str = "request"
     remote_model: Optional[str] = None
     remote_api_key: Optional[str] = None
     remote_headers: tuple[tuple[str, str], ...] = ()
@@ -282,6 +284,10 @@ class VisualProxySettings:
                 getattr(args, "visual_builtin_trace_format", "xml")
             ),
             nova_accuracy_compat=nova_accuracy_compat,
+            thinking_policy=str(
+                getattr(args, "visual_thinking_policy", None)
+                or os.getenv("THINKING_POLICY", "request")
+            ),
             remote_model=getattr(args, "visual_remote_model", None),
             remote_api_key=remote_api_key,
             remote_headers=remote_headers,
@@ -346,6 +352,10 @@ class VisualProxySettings:
         if self.builtin_trace_format not in BUILTIN_TRACE_FORMATS:
             raise ValueError(
                 "--builtin-trace-format/--visual_builtin_trace_format must be 'xml' or 'natural'"
+            )
+        if self.thinking_policy not in THINKING_POLICIES:
+            raise ValueError(
+                "--visual_thinking_policy/THINKING_POLICY must be 'request', 'force_on', or 'force_off'"
             )
         positive_values = {
             "visual_remote_timeout": self.remote_timeout,
@@ -762,6 +772,35 @@ def should_use_visual_proxy(
 
     return bool(visual_remote_url and visual_remote_url.strip()) and request_has_images(
         request
+    )
+
+
+def apply_visual_thinking_policy(
+    request: ChatCompletionRequest, settings: VisualProxySettings
+) -> ChatCompletionRequest:
+    """Apply the proxy thinking policy without mutating the caller's request."""
+    template_kwargs = copy.deepcopy(request.chat_template_kwargs or {})
+    requested = template_kwargs.get("enable_thinking")
+    if requested is not None and not isinstance(requested, bool):
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+
+    if settings.thinking_policy == "force_on":
+        enable_thinking = True
+    elif settings.thinking_policy == "force_off":
+        enable_thinking = False
+    elif settings.thinking_policy == "request":
+        enable_thinking = requested if requested is not None else False
+    else:  # Settings validation normally catches this; keep request-time behavior safe.
+        raise ValueError(f"Unsupported visual thinking policy: {settings.thinking_policy!r}")
+
+    template_kwargs["enable_thinking"] = enable_thinking
+    template_kwargs["thinking"] = enable_thinking
+    reasoning_effort = (request.reasoning_effort or "high") if enable_thinking else None
+    return request.model_copy(
+        update={
+            "chat_template_kwargs": template_kwargs,
+            "reasoning_effort": reasoning_effort,
+        }
     )
 
 
@@ -1627,8 +1666,6 @@ async def _run_agent_choice(
             {
                 "enable_builtin_vision_reader": builtin_enabled,
                 "render_vision_placeholders": False,
-                "enable_thinking": True,
-                "thinking": True,
             }
         )
         payload["chat_template_kwargs"] = template_kwargs
@@ -2014,6 +2051,7 @@ async def visual_chat_completions_impl(
 
     if runtime is None:
         raise VisualChatProxyError("Visual proxy runtime is not initialized")
+    request = apply_visual_thinking_policy(request, runtime.settings)
     request_payload = _request_dict(request)
     temperature_was_provided = "temperature" in request.model_fields_set
     if runtime.settings.nova_accuracy_compat:

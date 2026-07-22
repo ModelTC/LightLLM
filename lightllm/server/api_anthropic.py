@@ -29,6 +29,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from lightllm.server.visual_chat_proxy import (
+    apply_visual_thinking_policy,
     VisualChatProxyError,
     VisualProxyCapacityError,
     VisualProxyTimeoutError,
@@ -95,7 +96,12 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     adapter = get_anthropic_messages_adapter()
 
     _replace_anthropic_pdf_documents(anthropic_body)
-    openai_request, tool_name_mapping = adapter.translate_anthropic_to_openai(anthropic_body)
+    adapter_body = {
+        key: value
+        for key, value in anthropic_body.items()
+        if key not in {"chat_template_kwargs", "thinking", "output_config"}
+    }
+    openai_request, tool_name_mapping = adapter.translate_anthropic_to_openai(adapter_body)
 
     if hasattr(openai_request, "model_dump"):
         openai_dict = openai_request.model_dump(exclude_none=True)
@@ -118,6 +124,44 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
     if isinstance(extra_body, dict):
         for k, v in extra_body.items():
             openai_dict.setdefault(k, v)
+
+    top_level_template_kwargs = anthropic_body.get("chat_template_kwargs")
+    if top_level_template_kwargs is not None:
+        if not isinstance(top_level_template_kwargs, dict):
+            raise ValueError("chat_template_kwargs must be an object when provided")
+        openai_dict["chat_template_kwargs"] = top_level_template_kwargs
+
+    template_kwargs = openai_dict.get("chat_template_kwargs")
+    if template_kwargs is not None and not isinstance(template_kwargs, dict):
+        raise ValueError("chat_template_kwargs must be an object when provided")
+    template_kwargs = dict(template_kwargs or {})
+    explicit_enable = template_kwargs.get("enable_thinking")
+    if explicit_enable is not None and not isinstance(explicit_enable, bool):
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+
+    thinking = anthropic_body.get("thinking")
+    if thinking is not None and not isinstance(thinking, dict):
+        raise ValueError("thinking must be an object when provided")
+    if explicit_enable is None and thinking is not None:
+        thinking_type = thinking.get("type")
+        if thinking_type in {"adaptive", "enabled"}:
+            explicit_enable = True
+        elif thinking_type == "disabled":
+            explicit_enable = False
+        else:
+            raise ValueError(f"Unsupported thinking.type: {thinking_type!r}")
+        template_kwargs["enable_thinking"] = explicit_enable
+
+    output_config = anthropic_body.get("output_config")
+    if output_config is not None and not isinstance(output_config, dict):
+        raise ValueError("output_config must be an object when provided")
+    if explicit_enable is True:
+        effort = (output_config or {}).get("effort", "high")
+        if effort not in {"low", "medium", "high"}:
+            raise ValueError("output_config.effort must be 'low', 'medium', or 'high'")
+        openai_dict["reasoning_effort"] = effort
+    if template_kwargs:
+        openai_dict["chat_template_kwargs"] = template_kwargs
 
     _UNKNOWN_FIELDS = {"extra_body", "metadata", "anthropic_version", "cache_control"}
     dropped = [k for k in anthropic_body if k in _UNKNOWN_FIELDS]
@@ -884,6 +928,8 @@ async def _dispatch_chat_request(chat_request: Any, raw_request: Request, main_c
     from .api_http import g_objs
 
     visual_remote_url = getattr(getattr(g_objs, "args", None), "visual_remote_url", None)
+    if visual_remote_url and g_objs.visual_proxy_runtime is not None:
+        chat_request = apply_visual_thinking_policy(chat_request, g_objs.visual_proxy_runtime.settings)
     if not should_use_visual_proxy(visual_remote_url, chat_request):
         return await main_chat_handler(chat_request, raw_request)
 

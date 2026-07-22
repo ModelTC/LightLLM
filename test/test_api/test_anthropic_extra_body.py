@@ -140,6 +140,31 @@ def test_top_level_openai_field_beats_extra_body_duplicate():
     assert chat_dict.get("temperature") == 0.1
 
 
+@pytest.mark.parametrize(
+    ("thinking", "output_config", "template_kwargs", "expected_enabled", "expected_effort"),
+    [
+        ({"type": "adaptive"}, None, None, True, "high"),
+        ({"type": "enabled"}, {"effort": "low"}, None, True, "low"),
+        ({"type": "disabled"}, None, None, False, None),
+        ({"type": "adaptive"}, {"effort": "low"}, {"enable_thinking": False}, False, None),
+    ],
+)
+def test_anthropic_thinking_controls(
+    thinking, output_config, template_kwargs, expected_enabled, expected_effort
+):
+    body = _base_body()
+    body["thinking"] = thinking
+    if output_config is not None:
+        body["output_config"] = output_config
+    if template_kwargs is not None:
+        body["chat_template_kwargs"] = template_kwargs
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["chat_template_kwargs"]["enable_thinking"] is expected_enabled
+    assert chat_dict.get("reasoning_effort") == expected_effort
+
+
 def test_missing_extra_body_is_noop():
     body = _base_body()
     chat_dict, _ = _anthropic_to_chat_request(body)
@@ -376,6 +401,8 @@ def test_anthropic_messages_with_image_uses_visual_proxy(monkeypatch):
             return False
 
     class FakeRuntime:
+        settings = type("Settings", (), {"thinking_policy": "request"})()
+
         def request_slot(self):
             return FakeRequestSlot()
 

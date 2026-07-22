@@ -56,6 +56,7 @@ from dataclasses import dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
 from .visual_chat_proxy import (
+    apply_visual_thinking_policy,
     VisualChatProxyError,
     VisualProxyCapacityError,
     VisualProxyRuntime,
@@ -293,6 +294,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     try:
         visual_remote_url = getattr(g_objs.args, "visual_remote_url", None)
+        if visual_remote_url and g_objs.visual_proxy_runtime is not None:
+            request = apply_visual_thinking_policy(request, g_objs.visual_proxy_runtime.settings)
         if should_use_visual_proxy(visual_remote_url, request):
             logger.info(
                 "[visual-chat-proxy][external_request] method=POST path=/v1/chat/completions "
