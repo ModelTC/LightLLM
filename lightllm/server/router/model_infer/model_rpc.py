@@ -28,6 +28,7 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
+from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import EPBalanceMonitor
 from lightllm.server.router.model_infer.mode_backend.prefill_eplb_manager import (
     PrefillEPLBManager,
 )
@@ -115,6 +116,9 @@ class ModelRpcServer(rpyc.Service):
         else:
             self.redundancy_expert_manager = None
             self.prefill_eplb_manager = None
+        self.ep_balance_monitor = EPBalanceMonitor(self.backend.model) if self.args.enable_ep_moe else None
+        if self.ep_balance_monitor is not None and self.ep_balance_monitor.enabled:
+            self.backend.model.ep_balance_monitor = self.ep_balance_monitor
         return
 
     def exposed_get_max_total_token_num(self):

@@ -62,6 +62,7 @@ class TpPartBaseModel:
         self.args = get_env_start_args()
         self._expert_update_lock = threading.RLock()
         self.prefill_eplb_manager = None
+        self.ep_balance_monitor = None
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
@@ -350,9 +351,14 @@ class TpPartBaseModel:
 
             if model_input.is_prefill:
                 model_output = self._prefill(model_input)
+                self._record_prefill_ep_balance()
                 self._step_prefill_eplb()
                 return model_output
             return self._decode(model_input)
+
+    def _record_prefill_ep_balance(self):
+        if self.ep_balance_monitor is not None:
+            self.ep_balance_monitor.record_prefill_round()
 
     def _step_prefill_eplb(self):
         if self.prefill_eplb_manager is not None:
@@ -760,6 +766,7 @@ class TpPartBaseModel:
                 model_input0,
                 model_input1,
             )
+            self._record_prefill_ep_balance()
             self._step_prefill_eplb()
             return model_output
 

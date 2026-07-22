@@ -18,6 +18,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
     ep_gather_chunk,
     ep_zero_padding,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.ep_balance import accumulate_ep_balance
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
@@ -197,6 +198,7 @@ def fused_experts(
     quant_method: Any,
     is_prefill: Optional[bool],
     previous_event: Optional[Any] = None,
+    ep_balance_counters: Optional[torch.Tensor] = None,
 ):
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
@@ -218,6 +220,7 @@ def fused_experts(
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
         previous_event=previous_event,
+        ep_balance_counters=ep_balance_counters,
     )
 
 
@@ -236,6 +239,7 @@ def fused_experts_impl(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     previous_event: Optional[Any] = None,
+    ep_balance_counters: Optional[torch.Tensor] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -286,6 +290,12 @@ def fused_experts_impl(
             do_expand=True,
             use_tma_aligned_col_major_sf=True,
         )
+        if ep_balance_counters is not None:
+            accumulate_ep_balance(
+                handle.num_unaligned_recv_tokens_per_expert,
+                ep_balance_counters,
+                is_prefill=True,
+            )
         # Dispatch is synchronous in this path.  Its FP8 source is no longer
         # needed once the received tensors have been produced.
         del qinput_tensor, input_scale
@@ -327,6 +337,8 @@ def fused_experts_impl(
             async_finish=False,
             return_recv_hook=False,
         )
+        if ep_balance_counters is not None:
+            accumulate_ep_balance(masked_m, ep_balance_counters, is_prefill=False)
         # deepgemm
         gemm_out_b = masked_group_gemm(recv_x, masked_m, hidden_states.dtype, w1, w1_scale, w2, w2_scale, expected_m)
         # low latency combine
