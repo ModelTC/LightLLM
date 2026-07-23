@@ -129,6 +129,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--visual_empty_output_retries",
+        type=int,
+        default=None,
+        help=(
+            "Retry a visual-agent turn that returns neither visible content nor a tool call. "
+            "Defaults to EMPTY_OUTPUT_RETRIES, or 2 when unset, matching nova_vision_demo."
+        ),
+    )
+    parser.add_argument(
         "--visual_remote_model",
         type=str,
         default=None,

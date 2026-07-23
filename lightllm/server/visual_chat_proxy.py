@@ -194,6 +194,7 @@ class VisualProxySettings:
     builtin_trace_format: str = "xml"
     nova_accuracy_compat: bool = False
     thinking_policy: str = "request"
+    empty_output_retries: int = 2
     remote_model: Optional[str] = None
     remote_api_key: Optional[str] = None
     remote_headers: tuple[tuple[str, str], ...] = ()
@@ -294,6 +295,11 @@ class VisualProxySettings:
                 getattr(args, "visual_thinking_policy", None)
                 or os.getenv("THINKING_POLICY", "request")
             ),
+            empty_output_retries=int(
+                os.getenv("EMPTY_OUTPUT_RETRIES", "2")
+                if getattr(args, "visual_empty_output_retries", None) is None
+                else getattr(args, "visual_empty_output_retries")
+            ),
             remote_model=getattr(args, "visual_remote_model", None),
             remote_api_key=remote_api_key,
             remote_headers=remote_headers,
@@ -363,6 +369,8 @@ class VisualProxySettings:
             raise ValueError(
                 "--visual_thinking_policy/THINKING_POLICY must be 'request', 'force_on', or 'force_off'"
             )
+        if self.empty_output_retries < 0:
+            raise ValueError("--visual_empty_output_retries must be non-negative")
         positive_values = {
             "visual_remote_timeout": self.remote_timeout,
             "visual_remote_connect_timeout": self.remote_connect_timeout,
@@ -1255,6 +1263,18 @@ def _build_output_guardrail_feedback(
     }
 
 
+def _build_empty_output_retry_feedback() -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": (
+            "The previous generation ended with no user-visible answer and no tool call. "
+            "Continue from the conversation and any available tool results now. Either call the next "
+            "necessary tool or provide a non-empty final answer. Keep the answer concise and do not stop "
+            "after reasoning alone."
+        ),
+    }
+
+
 def _is_loopback_host(host: str) -> bool:
     normalized = host.lower().rstrip(".")
     if normalized == "localhost":
@@ -1703,6 +1723,7 @@ async def _run_agent_choice(
     aggregate_usage = UsageInfo(prompt_tokens_details=PromptTokensDetails())
     prior_builtin_evidence = messages_have_builtin_vision_evidence(payload["messages"])
     successful_builtin_calls = 0
+    empty_output_retry_count = 0
     nova_xml_trace_message_index: Optional[int] = None
 
     for step in range(1, MAX_AGENT_STEPS + 1):
@@ -1914,6 +1935,23 @@ async def _run_agent_choice(
             )
 
         answer = message.content or ""
+        if not answer.strip():
+            if empty_output_retry_count < runtime.settings.empty_output_retries:
+                empty_output_retry_count += 1
+                payload["messages"].append(_build_empty_output_retry_feedback())
+                logger.warning(
+                    "[visual-chat-proxy][output_guardrail] trace_id=%s step=%d "
+                    "reason=empty_output_without_tool_call attempt=%d max_retries=%d",
+                    trace_id,
+                    step,
+                    empty_output_retry_count,
+                    runtime.settings.empty_output_retries,
+                )
+                continue
+            raise VisualChatProxyError(
+                "Main model returned no visible answer and no tool call after "
+                f"{empty_output_retry_count} empty-output retries"
+            )
         visual_claim_without_evidence = (
             builtin_enabled
             and bool(registry.tags())

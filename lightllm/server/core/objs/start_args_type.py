@@ -39,6 +39,7 @@ class StartArgs:
     visual_remote_url: Optional[str] = field(default=None)
     visual_nova_accuracy_compat: bool = field(default=False)
     visual_thinking_policy: Optional[str] = field(default=None)
+    visual_empty_output_retries: Optional[int] = field(default=None)
     visual_remote_model: Optional[str] = field(default=None)
     visual_remote_api_key_env: str = field(default="LIGHTLLM_VISUAL_REMOTE_API_KEY")
     visual_remote_headers_env: str = field(default="LIGHTLLM_VISUAL_REMOTE_HEADERS")

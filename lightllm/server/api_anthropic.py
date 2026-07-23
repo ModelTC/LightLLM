@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import uuid
 import ujson as json
+import httpx
 from collections import OrderedDict
 from http import HTTPStatus
 from threading import Lock
@@ -29,6 +30,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from lightllm.server.visual_chat_proxy import (
+    _remote_image_url,
     apply_visual_thinking_policy,
     VisualChatProxyError,
     VisualProxyCapacityError,
@@ -107,6 +109,7 @@ def _anthropic_to_chat_request(anthropic_body: Dict[str, Any]) -> Tuple[Dict[str
         openai_dict = openai_request.model_dump(exclude_none=True)
     else:
         openai_dict = dict(openai_request)
+    _drop_provider_thinking_blocks(openai_dict)
 
     if "max_tokens" not in openai_dict and "max_completion_tokens" not in openai_dict:
         if "max_tokens" in anthropic_body:
@@ -191,18 +194,97 @@ def _restore_tool_result_image_urls(openai_dict: Dict[str, Any]) -> None:
         msg["content"] = [{"type": "image_url", "image_url": {"url": content}}]
 
 
-def _pdf_data_url_to_anthropic_parts(data_url: str) -> list[Dict[str, Any]]:
+def _drop_provider_thinking_blocks(openai_dict: Dict[str, Any]) -> None:
+    """Keep signed Anthropic thinking metadata out of Nova's hidden tool trace."""
+    for message in openai_dict.get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        if message.pop("thinking_blocks", None) is not None:
+            message.pop("reasoning", None)
+            message.pop("reasoning_content", None)
+
+
+def _pdf_data_url_to_anthropic_parts(
+    data_url: str, title: str | None = None
+) -> list[Dict[str, Any]]:
     _ensure_pdf_parsing_supported()
     pdf_bytes = _decode_pdf_data_url(data_url)
-    _ensure_pdf_page_limit(pdf_bytes)
+    return _pdf_bytes_to_anthropic_parts(pdf_bytes, title)
+
+
+def _pdf_bytes_to_anthropic_parts(
+    pdf_bytes: bytes, title: str | None = None
+) -> list[Dict[str, Any]]:
+    page_count = _ensure_pdf_page_limit(pdf_bytes)
+    display_name = title.strip() if isinstance(title, str) and title.strip() else "attached PDF"
+    text_part = _pdf_bytes_to_text_part(pdf_bytes)
+    text_part["text"] = (
+        f"[PDF document: {display_name}; {page_count} page(s)]\n"
+        f"{text_part['text']}\n[Rendered PDF pages follow when vision is enabled]"
+    )
+    parts: list[Dict[str, Any]] = [text_part]
     if _is_vision_enabled():
         pages = _render_pdf_pages_to_png_b64(pdf_bytes)
-        if pages:
-            return [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": page}}
-                for page in pages
-            ]
-    return [_pdf_bytes_to_text_part(pdf_bytes)]
+        for page_number, page in enumerate(pages, start=1):
+            parts.append({"type": "text", "text": f"[PDF page {page_number}]"})
+            parts.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": page,
+                    },
+                }
+            )
+    return parts
+
+
+def _download_pdf_url(url: str) -> bytes:
+    # Reuse the visual proxy's explicit host allowlist and HTTP policy instead
+    # of inheriting nova_vision_demo's unrestricted server-side URL fetch.
+    from .api_http import g_objs
+
+    runtime = g_objs.visual_proxy_runtime
+    if runtime is None:
+        raise ValueError("Remote PDF URLs require an initialized visual proxy")
+    normalized = _remote_image_url(url, runtime.settings)
+    try:
+        with httpx.stream(
+            "GET", normalized, follow_redirects=False, timeout=60.0
+        ) as response:
+            if response.is_redirect:
+                raise ValueError("Remote PDF URL redirects are not allowed")
+            response.raise_for_status()
+            chunks = []
+            size = 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > _PDF_MAX_BYTES:
+                    raise ValueError("PDF document block exceeds configured size limit")
+                chunks.append(chunk)
+    except httpx.HTTPError as exc:
+        raise ValueError(f"Could not download Anthropic PDF document: {exc}") from exc
+    return b"".join(chunks)
+
+
+def _pdf_document_to_anthropic_parts(block: Dict[str, Any]) -> list[Dict[str, Any]]:
+    _ensure_pdf_parsing_supported()
+    source = block.get("source")
+    if not isinstance(source, dict):
+        raise ValueError("Anthropic document.source must be an object")
+    source_type = source.get("type")
+    if source_type == "base64":
+        data_url = f"data:application/pdf;base64,{source.get('data', '')}"
+        return _pdf_data_url_to_anthropic_parts(data_url, block.get("title"))
+    if source_type == "url":
+        url = source.get("url")
+        if not isinstance(url, str) or not url:
+            raise ValueError("Anthropic document URL source requires a URL")
+        return _pdf_bytes_to_anthropic_parts(
+            _download_pdf_url(url), block.get("title")
+        )
+    raise ValueError("Anthropic PDF source must use base64 data or an HTTP(S) URL")
 
 
 def check_pdf_parsing_supported_at_startup() -> None:
@@ -232,7 +314,7 @@ def _ensure_pdf_tools_installed() -> None:
         )
 
 
-def _ensure_pdf_page_limit(pdf_bytes: bytes) -> None:
+def _ensure_pdf_page_limit(pdf_bytes: bytes) -> int:
     page_count = _pdf_page_count(pdf_bytes)
     if page_count is None:
         raise ValueError("Unable to determine PDF page count")
@@ -241,6 +323,7 @@ def _ensure_pdf_page_limit(pdf_bytes: bytes) -> None:
             f"PDF document has {page_count} pages and exceeds configured page limit "
             f"of {_PDF_MAX_RENDER_PAGES}"
         )
+    return page_count
 
 
 def _pdf_page_count(pdf_bytes: bytes) -> int | None:
@@ -294,7 +377,13 @@ def _is_vision_enabled() -> bool:
         args = get_env_start_args()
     except Exception:
         return False
-    return bool(getattr(args, "enable_multimodal", False) and not getattr(args, "disable_vision", True))
+    return bool(
+        getattr(args, "visual_remote_url", None)
+        or (
+            getattr(args, "enable_multimodal", False)
+            and not getattr(args, "disable_vision", True)
+        )
+    )
 
 
 def _decode_pdf_data_url(data_url: str) -> bytes:
@@ -458,8 +547,7 @@ def _replace_anthropic_pdf_documents(value: Any) -> None:
         changed = False
         for item in value:
             if _is_anthropic_pdf_document(item):
-                source = item["source"]
-                new_items.extend(_pdf_data_url_to_anthropic_parts(f"data:application/pdf;base64,{source['data']}"))
+                new_items.extend(_pdf_document_to_anthropic_parts(item))
                 changed = True
             else:
                 _replace_anthropic_pdf_documents(item)
@@ -476,12 +564,14 @@ def _is_anthropic_pdf_document(value: Any) -> bool:
     if not isinstance(value, dict) or value.get("type") != "document":
         return False
     source = value.get("source")
-    return (
-        isinstance(source, dict)
-        and source.get("type") == "base64"
-        and source.get("media_type") == "application/pdf"
-        and isinstance(source.get("data"), str)
-    )
+    if not isinstance(source, dict):
+        return False
+    if source.get("type") == "base64":
+        return (
+            source.get("media_type") == "application/pdf"
+            and isinstance(source.get("data"), str)
+        )
+    return source.get("type") == "url" and isinstance(source.get("url"), str)
 
 
 # ---------------------------------------------------------------------------

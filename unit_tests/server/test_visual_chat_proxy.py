@@ -8,6 +8,7 @@ import pytest
 import httpx
 from fastapi import Request
 from fastapi.responses import StreamingResponse
+from jinja2 import Environment
 from lightllm.utils.error_utils import ClientDisconnected
 
 from lightllm.server.api_models import (
@@ -27,6 +28,7 @@ from lightllm.server.visual_chat_proxy import (
     apply_visual_thinking_policy,
     ImageRegistry,
     RegisteredImage,
+    VisualChatProxyError,
     VisualProxyCapacityError,
     VisualProxySettings,
     VisualProxyRuntime,
@@ -729,10 +731,12 @@ def test_startup_settings_load_upstream_auth_and_headers(monkeypatch):
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_API_KEY", "upstream-token")
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_HEADERS", '{"X-Tenant":"tenant-a"}')
     monkeypatch.setenv("THINKING_POLICY", "force_on")
+    monkeypatch.setenv("EMPTY_OUTPUT_RETRIES", "3")
     settings = VisualProxySettings.from_args(args)
     assert settings.remote_url == "https://vision.test/v1/chat/completions"
     assert settings.builtin_trace_format == "xml"
     assert settings.thinking_policy == "force_on"
+    assert settings.empty_output_retries == 3
     assert not settings.allow_local_files
     assert not settings.allow_remote_image_urls
     runtime = VisualProxyRuntime(settings)
@@ -774,6 +778,50 @@ def test_nova_accuracy_startup_selects_bundled_template_and_generate_protocol():
     assert "SensenNova-v6.7-Flash" in template
 
 
+def test_nova_template_deduplicates_external_tool_xml_from_reasoning():
+    template = visual_chat_proxy.NOVA_ACCURACY_TEMPLATE_PATH.read_text(encoding="utf-8")
+    env = Environment()
+    env.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(
+        RuntimeError(message)
+    )
+    rendered = env.from_string(template).render(
+        messages=[
+            {"role": "user", "content": "查天气"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": (
+                    "先调用天气工具。\n<tool_call>\n<function=weather>\n"
+                    "</function>\n</tool_call>"
+                ),
+                "tool_calls": [
+                    {"function": {"name": "weather", "arguments": {"city": "上海"}}}
+                ],
+            },
+            {"role": "tool", "content": "上海今天多云。"},
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+        enable_builtin_vision_reader=True,
+        add_generation_prompt=True,
+    )
+
+    assert "先调用天气工具。" in rendered
+    assert rendered.count("<function=weather>") == 1
+    assert "<tool_response>\n上海今天多云。\n</tool_response>" in rendered
+
+
 def test_nova_accuracy_startup_rejects_incompatible_parsers():
     args = SimpleNamespace(
         visual_remote_url="http://127.0.0.1:18180",
@@ -796,6 +844,7 @@ def test_builtin_trace_format_cli_default_and_aliases():
     assert parser.parse_args([]).visual_builtin_trace_format == "xml"
     assert parser.parse_args([]).visual_nova_accuracy_compat is False
     assert parser.parse_args([]).visual_thinking_policy is None
+    assert parser.parse_args([]).visual_empty_output_retries is None
     assert (
         parser.parse_args(
             ["--visual_thinking_policy", "force_off"]
@@ -1226,6 +1275,53 @@ def test_output_guardrail_forces_builtin_evidence_before_visual_answer(monkeypat
     assert "I must inspect it first." in reasoning
     assert "读图结果：" in reasoning
     assert "The visual evidence supports green." in reasoning
+
+
+def test_empty_output_is_retried_before_returning_final_answer():
+    main_requests = []
+
+    async def fake_main(request, raw_request):
+        main_requests.append(request.model_dump(by_alias=True, exclude_none=True))
+        if len(main_requests) == 1:
+            return _response(
+                ChatMessage(role="assistant", content="", reasoning="reasoning only")
+            )
+        assert (
+            "previous generation ended with no user-visible answer"
+            in main_requests[-1]["messages"][-1]["content"]
+        )
+        return _response(ChatMessage(role="assistant", content="final answer after retry"))
+
+    response = asyncio.run(
+        visual_chat_completions_impl(
+            request=_multimodal_request(
+                messages=[{"role": "user", "content": "Give me a final answer."}]
+            ),
+            raw_request=_raw_request(),
+            runtime=_runtime(client=object(), empty_output_retries=2),
+            main_chat_handler=fake_main,
+        )
+    )
+
+    assert len(main_requests) == 2
+    assert response.choices[0].message.content == "final answer after retry"
+
+
+def test_empty_output_retry_limit_fails_explicitly():
+    async def fake_main(request, raw_request):
+        return _response(ChatMessage(role="assistant", content=""))
+
+    with pytest.raises(VisualChatProxyError, match="after 1 empty-output retries"):
+        asyncio.run(
+            visual_chat_completions_impl(
+                request=_multimodal_request(
+                    messages=[{"role": "user", "content": "Give me a final answer."}]
+                ),
+                raw_request=_raw_request(),
+                runtime=_runtime(client=object(), empty_output_retries=1),
+                main_chat_handler=fake_main,
+            )
+        )
 
 
 def test_streaming_returns_openai_sse_chunks():

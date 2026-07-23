@@ -142,11 +142,11 @@
         {%- if normalized_tool.name is defined and normalized_tool.name == 'vision_reader' %}
             {%- set effective_tools.has_vision_reader = true %}
         {%- endif %}
-        {%- set effective_tools.value = effective_tools.value + [input_tool] %}
+        {%- set _ = effective_tools.value.append(input_tool) %}
     {%- endfor %}
 {%- endif %}
 {%- if builtin_vision_reader_enabled and not effective_tools.has_vision_reader %}
-    {%- set effective_tools.value = effective_tools.value + [builtin_vision_reader_tool] %}
+    {%- set _ = effective_tools.value.append(builtin_vision_reader_tool) %}
 {%- endif %}
 {%- if effective_tools.value %}
     {{- '<|im_start|>system\n' ~ default_system_prompt }}
@@ -156,7 +156,7 @@
         {{- render_tool(tool) }}
     {%- endfor %}
     {{- "\n</tools>" }}
-    {{- '\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- The builtin vision_reader can only read XML image tags that are visible in the conversation history, for example <image_1/>. If no <image_n/> tag appears in the conversation history, do not call builtin vision_reader.\n- If any visible <image_n/> tag is relevant to the user question, call builtin vision_reader before giving a final answer. This is mandatory for image, screenshot, chart, table, UI state, visual layout, OCR, object counting, color, position, or PDF page appearance questions. Never answer visual-content questions from memory or assumptions.\n- Image addressing has two different modes. The builtin vision_reader reads conversation images by XML tag. External/user-provided image tools that ask for image_path, path, url, or image_url require a real file path or URL; never pass an XML tag to those external tools unless their schema explicitly asks for an XML tag.\n- If a user-provided external tool is also named vision_reader, treat it as the external tool described by its schema; the builtin tag-based vision_reader is not injected under a duplicate name.\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>' }}
+    {{- '\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- The builtin vision_reader can only read XML image tags that are visible in the conversation history, for example <image_1/>. If no <image_n/> tag appears in the conversation history, do not call builtin vision_reader.\n- If any visible <image_n/> tag is relevant to the user question, call builtin vision_reader before giving a final answer. This is mandatory for image, screenshot, chart, table, UI state, visual layout, OCR, object counting, color, position, or PDF page appearance questions. Never answer visual-content questions from memory or assumptions.\n- Image addressing has two different modes. The builtin vision_reader reads conversation images by XML tag. External/user-provided image tools that ask for image_path, path, url, or image_url require a real file path or URL; never pass an XML tag to those external tools unless their schema explicitly asks for an XML tag.\n- If a user-provided external tool is also named vision_reader, treat it as the external tool described by its schema; the builtin tag-based vision_reader is not injected under a duplicate name.\n- After receiving tool results, carefully reflect on their quality and determine the best next action before proceeding.\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>' }}
     {%- if sys.content %}
         {{- '\n\n' + sys.content }}
     {%- endif %}
@@ -201,7 +201,15 @@
             {%- endif %}
         {%- endif %}
         {%- set reasoning_content = reasoning_content|trim %}
-        {%- set has_hidden_tool_trace = '<tool_call>' in reasoning_content or '</tool_call>' in reasoning_content or '<tool_response>' in reasoning_content or '</tool_response>' in reasoning_content %}
+        {#- Only proxy-owned builtin vision traces use paired call/response XML.
+            Provider thinking may legitimately mention a standalone <tool_call>. -#}
+        {%- set has_hidden_tool_trace = '<function=vision_reader>' in reasoning_content and '<tool_call>' in reasoning_content and '<tool_response>' in reasoning_content %}
+        {%- set has_normal_tool_calls = message.tool_calls is defined and message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}
+        {%- if has_normal_tool_calls and not has_hidden_tool_trace and '<tool_call>' in reasoning_content %}
+            {#- The structured message.tool_calls field is authoritative. Some
+                reasoning backends also copy its XML into reasoning_content. -#}
+            {%- set reasoning_content = reasoning_content.split('<tool_call>', 1)[0]|trim %}
+        {%- endif %}
         {%- if has_hidden_tool_trace %}
             {%- if reasoning_content.count('<tool_call>') != reasoning_content.count('</tool_call>') %}
                 {{- raise_exception('Malformed reasoning_content tool trace: unmatched tool_call tags.') }}
@@ -238,7 +246,7 @@
                 {%- if response_close_parts|length != 2 %}
                     {{- raise_exception('Malformed reasoning_content tool trace: missing tool_response close tag.') }}
                 {%- endif %}
-                {%- set trace.segments = trace.segments + [{'reasoning': reasoning_before_call, 'tool_call': tool_call_block, 'tool_response': response_close_parts[0]}] %}
+                {%- set _ = trace.segments.append({'reasoning': reasoning_before_call, 'tool_call': tool_call_block, 'tool_response': response_close_parts[0]}) %}
                 {%- set trace.remaining = response_close_parts[1] %}
             {%- endfor %}
             {%- if '<tool_call>' in trace.remaining or '</tool_call>' in trace.remaining or '<tool_response>' in trace.remaining or '</tool_response>' in trace.remaining %}
@@ -257,7 +265,6 @@
             {%- endfor %}
             {%- set final_reasoning = trace.remaining|trim %}
             {%- set final_content = content|trim %}
-            {%- set has_normal_tool_calls = message.tool_calls is defined and message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}
             {%- if final_reasoning or final_content or has_normal_tool_calls %}
                 {{- '<|im_start|>' + message.role + '\n' }}
                 {%- if final_reasoning %}

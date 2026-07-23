@@ -165,6 +165,26 @@ def test_anthropic_thinking_controls(
     assert chat_dict.get("reasoning_effort") == expected_effort
 
 
+def test_signed_thinking_history_is_not_reparsed_as_hidden_tool_trace():
+    body = _tool_result_body("done")
+    body["messages"][1]["content"].insert(
+        0,
+        {
+            "type": "thinking",
+            "thinking": "I may mention <tool_call> while planning.",
+            "signature": "s" * 64,
+        },
+    )
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assistant = chat_dict["messages"][1]
+    assert "thinking_blocks" not in assistant
+    assert "reasoning" not in assistant
+    assert "reasoning_content" not in assistant
+    assert assistant["tool_calls"][0]["function"]["name"] == "Read"
+
+
 def test_missing_extra_body_is_noop():
     body = _base_body()
     chat_dict, _ = _anthropic_to_chat_request(body)
@@ -196,19 +216,19 @@ def test_pdf_document_block_becomes_text_not_pdf_image_url(monkeypatch):
 def test_pdf_document_block_becomes_images_when_vision_enabled(monkeypatch):
     _enable_pdf_parsing(monkeypatch)
     monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: True)
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text", lambda _: "PDF_SENTINEL_DIRECT")
     monkeypatch.setattr(api_anthropic, "_render_pdf_pages_to_png_b64", lambda _: ["UE5HMQ==", "UE5HMg=="])
     body = _user_pdf_body()
 
     chat_dict, _ = _anthropic_to_chat_request(body)
 
     content = chat_dict["messages"][0]["content"]
-    assert [p["type"] for p in content[:2]] == ["image_url", "image_url"]
-    assert [p["image_url"]["url"] for p in content[:2]] == [
+    assert "PDF_SENTINEL_DIRECT" in json.dumps(content)
+    assert [p["image_url"]["url"] for p in content if p["type"] == "image_url"] == [
         "data:image/png;base64,UE5HMQ==",
         "data:image/png;base64,UE5HMg==",
     ]
     assert "data:application/pdf" not in json.dumps(chat_dict)
-    assert "PDF extracted text" not in json.dumps(chat_dict)
 
 
 def test_pdf_document_block_with_invalid_base64_fails_cleanly(monkeypatch):
@@ -245,6 +265,26 @@ def test_pdf_document_block_over_size_fails_cleanly(monkeypatch):
         _anthropic_to_chat_request(_user_pdf_body())
 
 
+def test_pdf_document_url_uses_bounded_downloader(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_download_pdf_url", lambda _: b"%PDF-1.4\n")
+    monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: False)
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text", lambda _: "PDF_URL_SENTINEL")
+    body = _base_body()
+    body["messages"][0]["content"] = [
+        {
+            "type": "document",
+            "title": "remote.pdf",
+            "source": {"type": "url", "url": "https://files.test/remote.pdf"},
+        }
+    ]
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert "remote.pdf" in json.dumps(chat_dict["messages"])
+    assert "PDF_URL_SENTINEL" in json.dumps(chat_dict["messages"])
+
+
 def test_tool_result_pdf_document_block_becomes_text_not_pdf_image_url(monkeypatch):
     _enable_pdf_parsing(monkeypatch)
     monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: False)
@@ -261,18 +301,19 @@ def test_tool_result_pdf_document_block_becomes_text_not_pdf_image_url(monkeypat
 def test_tool_result_pdf_document_block_becomes_images_when_vision_enabled(monkeypatch):
     _enable_pdf_parsing(monkeypatch)
     monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: True)
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text", lambda _: "PDF_SENTINEL_TOOL")
     monkeypatch.setattr(api_anthropic, "_render_pdf_pages_to_png_b64", lambda _: ["UE5HMQ=="])
     body = _tool_result_body([_pdf_document_block()])
 
     chat_dict, _ = _anthropic_to_chat_request(body)
 
     assert chat_dict["messages"][2]["role"] == "tool"
-    assert chat_dict["messages"][2]["content"] == [
-        {
-            "type": "image_url",
-            "image_url": {"url": "data:image/png;base64,UE5HMQ=="},
-        }
-    ]
+    assert "PDF_SENTINEL_TOOL" in json.dumps(chat_dict["messages"][2]["content"])
+    assert [
+        part["image_url"]["url"]
+        for part in chat_dict["messages"][2]["content"]
+        if part["type"] == "image_url"
+    ] == ["data:image/png;base64,UE5HMQ=="]
     assert "data:application/pdf" not in json.dumps(chat_dict)
 
 
