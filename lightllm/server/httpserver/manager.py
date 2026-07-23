@@ -958,6 +958,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                         enable_return_routed_experts=self.args.enable_return_routed_experts,
                                     )
 
+                                    # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
+                                    # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None
+                                    # 跳过 token/logprob，同时仍可读取 finish status 和路由信息。
+                                    if finish_status.status == FinishStatus.FINISHED_ABORTED:
+                                        text = ""
+                                        metadata["id"] = None
+                                        metadata["logprob"] = None
+                                        metadata["logprobs"] = {}
+
                                 req.out_tokens_queue.pop_no_ret()
                                 token_list.append((req_id, text, metadata, finish_status))
                             else:

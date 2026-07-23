@@ -127,18 +127,29 @@ class HttpRlController:
         await self._generation_gate.unregister_pending_request(request_id)
 
     def build_aborted_generation_outputs(self, group_request_id: int, sampling_params: SamplingParams):
-        """构造被 pause/abort 拦截请求的空结果，供 HTTP generate 流正常收尾。
+        """构造被 pause/abort 拦截请求的 finish marker，供 HTTP generate 流正常收尾。
 
         场景：RL ``pause_generation`` / ``abort_request`` 期间，新请求会在
         admission gate 处被标记 abort，此时请求尚未进入 router 队列，也没有
-        真实生成 token。为了让 stream / non-stream API 仍能按统一协议收到
-        ``FINISHED_ABORTED`` 并结束生成循环（而不是挂起或抛错），这里合成
-        n 路空输出。
+        真实生成 token。这里为每一路合成一个 ``id=None`` 的 finish marker，
+        让调用方收到 ``FINISHED_ABORTED``，但不会把 marker 加入 rollout tokens。
+
+        metadata 必须逐路新建：non-stream API 会 pop 其中的 logprobs 等字段，
+        多路复用同一个 dict 会导致后续子请求缺字段。
         """
         finish_status = FinishStatus()
         finish_status.set_status(FinishStatus.FINISHED_ABORTED)
-        metadata = {"prompt_tokens": 0, "count_output_tokens": 0}
+
         for i in range(sampling_params.n):
+            metadata = {
+                "id": None,
+                "logprob": None,
+                "cumlogprob": 0.0,
+                "special": True,
+                "count_output_tokens": 0,
+                "prompt_tokens": 0,
+                "logprobs": {},
+            }
             yield group_request_id + i, "", metadata, finish_status
 
     async def _wait_for_abort_released(
