@@ -142,11 +142,11 @@
         {%- if normalized_tool.name is defined and normalized_tool.name == 'vision_reader' %}
             {%- set effective_tools.has_vision_reader = true %}
         {%- endif %}
-        {%- set _ = effective_tools.value.append(input_tool) %}
+        {%- set effective_tools.value = effective_tools.value + [input_tool] %}
     {%- endfor %}
 {%- endif %}
 {%- if builtin_vision_reader_enabled and not effective_tools.has_vision_reader %}
-    {%- set _ = effective_tools.value.append(builtin_vision_reader_tool) %}
+    {%- set effective_tools.value = effective_tools.value + [builtin_vision_reader_tool] %}
 {%- endif %}
 {%- if effective_tools.value %}
     {{- '<|im_start|>system\n' ~ default_system_prompt }}
@@ -246,7 +246,7 @@
                 {%- if response_close_parts|length != 2 %}
                     {{- raise_exception('Malformed reasoning_content tool trace: missing tool_response close tag.') }}
                 {%- endif %}
-                {%- set _ = trace.segments.append({'reasoning': reasoning_before_call, 'tool_call': tool_call_block, 'tool_response': response_close_parts[0]}) %}
+                {%- set trace.segments = trace.segments + [{'reasoning': reasoning_before_call, 'tool_call': tool_call_block, 'tool_response': response_close_parts[0]}] %}
                 {%- set trace.remaining = response_close_parts[1] %}
             {%- endfor %}
             {%- if '<tool_call>' in trace.remaining or '</tool_call>' in trace.remaining or '<tool_response>' in trace.remaining or '</tool_response>' in trace.remaining %}

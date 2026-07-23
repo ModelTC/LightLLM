@@ -8,7 +8,7 @@ import pytest
 import httpx
 from fastapi import Request
 from fastapi.responses import StreamingResponse
-from jinja2 import Environment
+from transformers.utils.chat_template_utils import _compile_jinja_template
 from lightllm.utils.error_utils import ClientDisconnected
 
 from lightllm.server.api_models import (
@@ -780,11 +780,7 @@ def test_nova_accuracy_startup_selects_bundled_template_and_generate_protocol():
 
 def test_nova_template_deduplicates_external_tool_xml_from_reasoning():
     template = visual_chat_proxy.NOVA_ACCURACY_TEMPLATE_PATH.read_text(encoding="utf-8")
-    env = Environment()
-    env.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(
-        RuntimeError(message)
-    )
-    rendered = env.from_string(template).render(
+    rendered = _compile_jinja_template(template).render(
         messages=[
             {"role": "user", "content": "查天气"},
             {
