@@ -23,6 +23,7 @@ from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
+from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
 
 logger = init_logger(__name__)
 
@@ -264,9 +265,11 @@ class InferenceContext:
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
 
     @torch.no_grad()
-    def _filter(self, finished_request_ids: List[int]):
+    def _filter(self, finished_request_ids: List[int], modify_shm_finish_state: bool = True):
         if len(finished_request_ids) == 0:
             return
+
+        should_modify_shm = modify_shm_finish_state and self.backend.is_master_in_dp
 
         free_req_index = []
         free_token_index = []
@@ -274,11 +277,18 @@ class InferenceContext:
             req: InferReq = self.requests_mapping.pop(request_id)
             if self.args.diverse_mode:
                 req.clear_master_slave_state()
+
+            if should_modify_shm:
+                req.final_token_metadata.dump()
+
             self.free_a_req_mem(free_token_index, req)
 
             free_req_index.append(req.req_idx)
             # logger.info(f"infer release req id {req.shm_req.request_id}")
-            req.shm_req.shm_infer_released = True
+            if should_modify_shm:
+                # 释放前兜底：已正常 finished 则 no-op；否则补 finish token 并标 ABORTED。
+                req.mark_shm_aborted_finished()
+                req.shm_req.shm_infer_released = True
             self.shm_req_manager.put_back_req_obj(req.shm_req)
 
         if free_token_index:
@@ -594,6 +604,8 @@ class InferReq:
 
         self.cur_kv_len = 0
         self.cur_output_len = 0
+        self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
+        self.final_token_metadata = FinalTokenMetadataExt(self)
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
@@ -711,6 +723,11 @@ class InferReq:
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
                                 value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
+                            )
+                            # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
+                            self.prompt_selected_logprobs.copy_capture_slots_if_needed(
+                                source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
+                                destination_indexes=tail_mems,
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 copy_small_page_buffer_to_linear_att_state 正确调用
@@ -830,10 +847,12 @@ class InferReq:
             end = self.linear_att_cache_len
         return end
 
-    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int):
+    def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):
         index = self.shm_req.input_len + output_len
         self.shm_req.shm_prompt_ids.arr[index - 1] = next_token_id
-        self.shm_req.shm_logprobs.arr[index - 1] = logprob
+        # structured dtype 整行赋值比分字段 arr["logprob"][i] / arr["rank"][i] 更快
+        # （少两次 field view 查找；bench 约 196ns vs 327ns/次）
+        self.shm_req.shm_logprobs.arr[index - 1] = (logprob, rank)
         return
 
     def update_mtp_accepted_token_num(self, accept_token_num: int):
@@ -842,6 +861,22 @@ class InferReq:
 
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]
+
+    def mark_shm_aborted_finished(self):
+        """仅写 shm：abort 释放前保证 finish token / finish_status 可用。
+
+        以本地 ``finish_status`` 为准：已正常结束则不覆盖；否则委托
+        ``Req.mark_simulated_finished``（在已有输出末尾追加 EOS）。不回写本地
+        ``cur_output_len`` / ``finish_status``（本 InferReq 即将释放）。
+        """
+        # 本地已由 stop / eos / length 等正确结束，保留原 shm finish_status。
+        if self.finish_status.is_finished():
+            return
+        self.shm_req.mark_simulated_finished(
+            FinishStatus.FINISHED_ABORTED,
+            output_len=self.cur_output_len,
+        )
+        return
 
     def update_finish_status(self, eos_ids, output_len: int):
         if self._stop_sequences_matched(output_len=output_len):
@@ -901,9 +936,10 @@ class InferReqUpdatePack:
         self,
         next_token_id: int,
         next_token_logprob: float,
+        next_token_rank: int,
         eos_ids: List[int],
-        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]],
         is_master_in_dp: bool,
+        extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
     ):
         # pd_prefill_chunked_handle_func 主要是为了处理 pd prefill 模式下
@@ -917,7 +953,12 @@ class InferReqUpdatePack:
         req_obj = self.req_obj
         shm_req = req_obj.shm_req
         finish_status = req_obj.finish_status
-        req_obj.set_next_gen_token_id(next_token_id, next_token_logprob, self.output_len)
+        req_obj.set_next_gen_token_id(
+            next_token_id,
+            next_token_logprob,
+            self.output_len,
+            rank=next_token_rank,
+        )
 
         # 这里提前判定的主要作用是：
         # 在 mtp mode 下，可以存在同一个 req 对象的多次处理，

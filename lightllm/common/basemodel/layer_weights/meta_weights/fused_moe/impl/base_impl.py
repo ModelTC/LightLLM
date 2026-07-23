@@ -1,10 +1,10 @@
 import torch
 from abc import abstractmethod
+from typing import Callable, Optional
 from lightllm.common.quantization.quantize_method import (
     WeightPack,
     QuantizationMethod,
 )
-from typing import Optional
 from lightllm.utils.dist_utils import (
     get_global_rank,
     get_global_world_size,
@@ -62,6 +62,8 @@ class FuseMoeBaseImpl:
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        # Callback to capture MoE topk expert ids (routed experts metadata).
+        moe_capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
         per_expert_scale: Optional[torch.Tensor] = None,
         # Qwen3.5 uses this gate to control fused shared expert aggregation weights.
         shared_expert_gate: Optional[torch.Tensor] = None,

@@ -293,6 +293,10 @@ Multimodal Parameters
 
     If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
 
+.. option:: --disable_image_resize
+
+    Disable automatic resize for images exceeding ``--max_image_pixels``. Resize is enabled by default.
+
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``
@@ -308,10 +312,6 @@ Multimodal Parameters
 .. option:: --visual_dp
 
     Number of data parallel instances for ViT, default is ``1``
-
-.. option:: --visual_nccl_ports
-
-    List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
 
 .. option:: --vit_att_backend
 
@@ -497,9 +497,9 @@ Sampling and Generation Parameters
     * ``triton``: Use torch and triton kernel (default)
     * ``sglang_kernel``: Use sglang_kernel implementation
 
-.. option:: --return_all_prompt_logprobs
+.. option:: --enable_prompt_logprobs
 
-    Return logprobs for all prompt tokens
+    Enable prompt top-k logprobs capture
 
 .. option:: --use_reward_model
 
@@ -549,14 +549,6 @@ DeepSeek Redundant Expert Parameters
 
 Monitoring and Logging Parameters
 ---------------------------------
-
-.. option:: --disable_log_stats
-
-    Disable throughput statistics logging
-
-.. option:: --log_stats_interval
-
-    Interval for recording statistics (seconds), default is ``10``
 
 .. option:: --health_monitor
 

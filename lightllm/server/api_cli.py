@@ -1,8 +1,7 @@
 import argparse
 
 
-def make_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--run_mode",
@@ -269,8 +268,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
     parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
-    parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
-    parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
     parser.add_argument(
         "--disable_shm_warning",
         action="store_true",
@@ -454,6 +451,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="maximum allowed pixel count for one image before resize preprocessing",
     )
     parser.add_argument(
+        "--disable_image_resize",
+        action="store_true",
+        help="disable automatic resize for images exceeding --max_image_pixels (enabled by default)",
+    )
+    parser.add_argument(
         "--embed_cache_storage_size",
         type=float,
         default=4,
@@ -466,7 +468,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="the data type of the model weight",
     )
-    parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
+    parser.add_argument(
+        "--enable_prompt_logprobs",
+        action="store_true",
+        help="enable prompt top-k logprobs capture",
+    )
 
     parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
 
@@ -498,13 +504,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
     parser.add_argument(
-        "--visual_nccl_ports",
-        nargs="+",
-        type=int,
-        default=None,
-        help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
-    )
-    parser.add_argument(
         "--visual_rpyc_port",
         type=int,
         default=None,
@@ -523,13 +522,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Tensor parallel size for audio encoder (only 1 is supported; use audio_dp to scale)",
     )
     parser.add_argument("--audio_dp", type=int, default=1, help="Data parallel replicas for audio encoder")
-    parser.add_argument(
-        "--audio_nccl_ports",
-        nargs="+",
-        type=int,
-        default=None,
-        help="NCCL ports per audio DP group; if omitted, auto-allocated in api_start (reserved until audio_tp>1)",
-    )
     parser.add_argument(
         "--audio_infer_batch_size",
         type=int,
@@ -770,6 +762,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
     parser.add_argument(
+        "--enable_rl",
+        action="store_true",
+        default=False,
+        help="""enable RL control plane (HTTP APIs, router rl_rpyc, model RlBackendOps).
+        When disabled (default), RL routes/services are not started.""",
+    )
+    parser.add_argument(
+        "--enable_torch_memory_saver",
+        action="store_true",
+        help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",
+    )
+    parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
+    parser.add_argument(
         "--disk_cache_dir",
         type=str,
         default=None,
@@ -843,6 +848,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         it will use triton implementation.""",
     )
     parser.add_argument(
+        "--enable_return_routed_experts",
+        action="store_true",
+        default=False,
+        help="Enable returning routed expert indices for MoE models (R3 feature).",
+    )
+    parser.add_argument(
         "--enable_profiling",
         type=str,
         choices=["torch_profiler", "nvtx"],
@@ -858,3 +869,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
     return parser
+
+
+def make_argument_parser() -> argparse.ArgumentParser:
+    return add_cli_args(argparse.ArgumentParser())

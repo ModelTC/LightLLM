@@ -4,6 +4,7 @@ import threading
 from typing import Optional, Tuple, List, Dict, Any
 
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
+from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.quantize_method import QuantizationMethod
@@ -144,11 +145,17 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         topk_group: int,
         num_expert_group: int,
         is_prefill: Optional[bool] = None,
+        infer_state=None,
         shared_expert_gate: Optional[torch.Tensor] = None,
     ):
         assert shared_expert_gate is None, "shared_expert_gate is not supported by GPT-OSS fused MoE"
 
         topk_weights, topk_ids = self._router(router_logits, top_k)
+
+        # Captures MoE topk expert ids for routed-experts metadata when enabled.
+        moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
+        if moe_capture_callback is not None:
+            moe_capture_callback(topk_ids)
 
         w1, w1_scale = self.w1
         w2, w2_scale = self.w2

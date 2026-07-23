@@ -34,7 +34,7 @@ from http import HTTPStatus
 import uuid
 from PIL import Image
 import multiprocessing as mp
-from typing import AsyncGenerator, Union
+from typing import Any, AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -50,6 +50,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 from dataclasses import dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
@@ -94,7 +95,7 @@ class G_Objs:
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
         if args.run_mode == "pd_master":
-            self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
                 args=args,
             )
@@ -103,7 +104,7 @@ class G_Objs:
             SamplingParams.load_generation_cfg(args.model_dir)
             CompletionRequest.load_generation_cfg(args.model_dir)
             ChatCompletionRequest.load_generation_cfg(args.model_dir)
-            self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
             self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
@@ -185,6 +186,22 @@ def readiness():
 @app.post("/get_model_name")
 def get_model_name():
     return {"model_name": g_objs.args.model_name}
+
+
+@app.get("/get_server_info")
+@app.post("/get_server_info")
+def get_server_info():
+    # 将 StartArgs 转换为字典格式
+    from dataclasses import asdict
+
+    server_info: dict[str, Any] = asdict(g_objs.args)
+    return {**server_info}
+
+
+@app.get("/get_weight_version")
+@app.post("/get_weight_version")
+def get_weight_version():
+    return {"weight_version": g_objs.args.weight_version}
 
 
 @app.get("/healthz", summary="Check server health")
@@ -408,6 +425,12 @@ async def metrics() -> Response:
     response = Response(data)
     response.mimetype = "text/plain"
     return response
+
+
+# RL 控制面接口（abort / pause / flush / memory / weight update），见 api_http_rl.py
+from .api_http_rl import router as rl_router
+
+app.include_router(rl_router)
 
 
 @app.websocket("/pd_register")

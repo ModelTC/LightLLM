@@ -8,6 +8,10 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.utils.torch_memory_saver_utils import (
+    TorchMemorySaverWrapper,
+    MemoryTag,
+)
 from .infer_struct import InferStateInfo
 
 
@@ -54,6 +58,7 @@ class CudaGraph:
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
 
         self.cuda_graph_batch_sizes = self.gen_cuda_graph_batch_sizes(
             max_batch_size=max_batch_size,
@@ -105,7 +110,7 @@ class CudaGraph:
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
-        with torch.cuda.graph(graph_obj, pool=self.mempool):
+        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
@@ -139,7 +144,7 @@ class CudaGraph:
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
 
-        with torch.cuda.graph(graph_obj, pool=self.mempool):
+        with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output, model_output1 = decode_func(infer_state, infer_state1)
         self.graph[batch_size] = (
             graph_obj,

@@ -34,6 +34,9 @@ class ReqIDGenerator:
         logger.info("ReqIDGenerator init finished")
 
     def _wait_all_workers_ready(self):
+        if self.args.httpserver_workers == 1:
+            return
+
         from lightllm.utils.envs_utils import get_unique_server_name
         from lightllm.server.core.objs.shm_array import ShmArray
 
@@ -78,7 +81,11 @@ class ReqIDGenerator:
             else:
                 while True:
                     try:
-                        config_server_ip_port = f"{self.args.config_server_host}:{self.args.config_server_port}"
+                        from lightllm.utils.shm_port_args import get_shm_port_args
+
+                        config_server_ip_port = (
+                            f"{self.args.config_server_host}:{get_shm_port_args().config_server_port}"
+                        )
                         url = f"http://{config_server_ip_port}/allocate_global_unique_id_range"
                         response = requests.get(url)
                         if response.status_code == 200:

@@ -63,6 +63,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
             next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+            next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
 
             scatter_token(
                 next_token_ids=next_token_ids,
@@ -72,8 +73,14 @@ class DiversehBackend(ChunkedPrefillBackend):
                 b_has_out=b_has_out,
             )
 
-            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-                next_token_ids=next_token_ids, next_token_logprobs=next_token_logprobs
+            (
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids=next_token_ids,
+                next_token_logprobs=next_token_logprobs,
+                next_token_ranks=next_token_ranks,
             )
 
             sync_event = torch.cuda.Event()
@@ -90,6 +97,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
+            next_token_ranks=next_token_ranks_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )

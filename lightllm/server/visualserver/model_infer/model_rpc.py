@@ -24,6 +24,7 @@ from lightllm.models.qwen3_omni_moe_thinker.qwen3_omni_visual import Qwen3OmniMo
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_vision_distributed_env
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
@@ -128,7 +129,7 @@ class VisualModelRpcServer(rpyc.Service):
                     self.afs_handler = SepEmbedHandler(
                         afs_embed_dir=self.args.afs_image_embed_dir,
                         redis_host=self.args.config_server_host,
-                        redis_port=self.args.config_server_visual_redis_port,
+                        redis_port=get_shm_port_args().config_server_visual_redis_port,
                         capacity=self.args.afs_embed_capacity,
                     )
 

@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -5,19 +6,21 @@ import uuid
 import subprocess
 import signal
 import math
-from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
 from lightllm.utils.start_utils import process_manager, kill_recursive
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
 from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
+from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
+from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.config_utils import (
     has_audio_module,
     has_vision_module,
@@ -61,9 +64,31 @@ def setup_signal_handlers(http_server_process, process_manager):
             process_manager.terminate_all_processes()
             logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
+        elif sig == signal.SIGHUP:
+            logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
+            if http_server_process and http_server_process.poll() is None:
+                http_server_process.send_signal(signal.SIGTERM)
+
+                start_time = time.time()
+                while (time.time() - start_time) < 60:
+                    if not is_process_active(http_server_process.pid):
+                        logger.info("httpserver exit")
+                        break
+                    time.sleep(1)
+
+                if time.time() - start_time < 60:
+                    logger.info("HTTP server has exited gracefully")
+                else:
+                    logger.warning("HTTP server did not exit in time, killing it...")
+                    kill_recursive(http_server_process)
+
+            process_manager.terminate_all_processes()
+            logger.info("All processes have been terminated gracefully due to terminal closure.")
+            sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGHUP, signal_handler)
 
     logger.info(f"start process pid {os.getpid()}")
     if http_server_process:
@@ -71,10 +96,12 @@ def setup_signal_handlers(http_server_process, process_manager):
     return
 
 
-def normal_or_p_d_start(args):
-    from lightllm.server.core.objs.start_args_type import StartArgs
+def _set_envs_and_config(args: StartArgs):
+    mp.set_start_method("spawn", force=True)
 
-    args: StartArgs = args
+
+def _launch_subprocesses(args: StartArgs):
+    _set_envs_and_config(args)
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -145,12 +172,6 @@ def normal_or_p_d_start(args):
         check_recommended_shm_size(args)
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
-    # 确保单机上多实列不冲突
-    if args.zmq_mode == "ipc:///tmp/":
-        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
-        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
-        args.zmq_mode = zmq_mode
-        logger.info(f"zmq mode head: {args.zmq_mode}")
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
@@ -178,10 +199,6 @@ def normal_or_p_d_start(args):
     if args.use_reward_model:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-    if args.return_all_prompt_logprobs:
-        assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
-        assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-
     # FP8 KV cache mode checks
     if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
         assert (
@@ -212,12 +229,17 @@ def normal_or_p_d_start(args):
 
     # mtp params check
     if args.mtp_mode is not None:
-        assert args.mtp_draft_model_dir is not None
+        if args.mtp_draft_model_dir is None:
+            args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
         assert args.mtp_step > 0
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    # automatically set visual_dp based on visual_tp and tp.
+    # In visual proxy mode keep the caller-provided visual_dp / visual_tp.
+    if not args.visual_use_proxy_mode and args.visual_tp < args.tp and args.tp % args.visual_tp == 0:
+        args.visual_dp = args.tp // args.visual_tp
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
@@ -339,72 +361,21 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = [args.port]
-    if args.nccl_port is not None:
-        already_uesd_ports.append(args.nccl_port)
-    if args.visual_nccl_ports is not None:
-        already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
-    if not args.disable_audio and args.audio_nccl_ports is not None:
-        already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
+    set_unique_server_name(args)
 
-    # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
-    # 捕获到端口设置冲突的问题
-    ports_locker = PortLocker(already_uesd_ports)
-    ports_locker.lock_port()
+    # 确保单机上多实列不冲突
+    if args.zmq_mode == "ipc:///tmp/":
+        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
+        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
+        args.zmq_mode = zmq_mode
+        logger.info(f"zmq mode head: {args.zmq_mode}")
 
-    node_world_size = args.tp // args.nnodes
-    can_use_ports = alloc_can_use_network_port(
-        num=10 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
-        used_ports=already_uesd_ports,
-    )
-    logger.info(f"alloced ports: {can_use_ports}")
-    (
-        nccl_port,
-        router_port,
-        router_profiler_port,
-        detokenization_port,
-        http_server_port,
-        visual_port,
-        audio_port,
-        cache_port,
-        metric_port,
-        multi_level_kv_cache_port,
-    ) = can_use_ports[0:10]
-    can_use_ports = can_use_ports[10:]
-
-    if args.visual_nccl_ports is None:
-        args.visual_nccl_ports = can_use_ports[: args.visual_dp]
-        can_use_ports = can_use_ports[args.visual_dp :]
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
-
-    if args.audio_nccl_ports is None:
-        args.audio_nccl_ports = can_use_ports[: args.audio_dp]
-        can_use_ports = can_use_ports[args.audio_dp :]
-    else:
-        args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
-
-    # 将申请好的端口放入args参数中
-    if args.nccl_port is None:
-        args.nccl_port = nccl_port
-    args.router_port = router_port
-    args.router_profiler_port = router_profiler_port
-    args.detokenization_port = detokenization_port
-    args.http_server_port = http_server_port
-    args.visual_port = visual_port
-    args.audio_port = audio_port
-    args.cache_port = cache_port
-    args.metric_port = metric_port
-    args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    # 申请在 p d 分离模式下，会用的端口
-    args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
 
-    send_and_receive_node_ip(args)  # 多机用于收发node ip
     # dp 必须 > 1
     if args.enable_dp_prompt_cache_fetch and args.dp <= 1:
         args.enable_dp_prompt_cache_fetch = False
@@ -415,10 +386,18 @@ def normal_or_p_d_start(args):
 
     auto_configure_allreduce_flags_from_args(args)
 
+    # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
+    ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
+    if args.node_rank == 0 and args.nccl_port is not None:
+        ports_to_check.append(args.nccl_port)
+    validate_ports(ports_to_check)
+
+    set_env_start_args(args)
+    get_shm_port_args(create=True)
+    # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
+    send_and_receive_node_ip(args)
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
-
-    ports_locker.release_port()
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -429,7 +408,6 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
-
         if not args.visual_use_proxy_mode:
             from .visualserver.manager import start_visual_process
 
@@ -490,13 +468,19 @@ def normal_or_p_d_start(args):
         ],
     )
 
+    return process_manager
+
+
+def normal_or_p_d_start(args: StartArgs):
+    process_manager = _launch_subprocesses(args)
+
     # 启动 Hypercorn
     command = [
         "hypercorn",
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
-        f"{args.host}:{args.port}",
+        f"{args.host}:{get_shm_port_args().port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -525,7 +509,8 @@ def normal_or_p_d_start(args):
     return
 
 
-def pd_master_start(args):
+def pd_master_start(args: StartArgs):
+    _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
@@ -541,19 +526,11 @@ def pd_master_start(args):
         args.pd_node_id = 0
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
-    logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(
-        num=1,
-        used_ports=[
-            args.port,
-        ],
-    )
-    metric_port = can_use_ports[0]
-
-    args.metric_port = metric_port
-
+    validate_ports([args.port])
     set_env_start_args(args)
+    get_shm_port_args(create=True)
+    logger.info(f"all start args:{args}")
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -567,7 +544,7 @@ def pd_master_start(args):
         "--workers",
         "1",
         "--bind",
-        f"{args.host}:{args.port}",
+        f"{args.host}:{get_shm_port_args().port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -594,16 +571,12 @@ def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+    _set_envs_and_config(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
 
-    already_uesd_ports = []
-    already_uesd_ports.append(args.visual_rpyc_port)
-    can_use_ports = alloc_can_use_network_port(
-        num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
-        used_ports=already_uesd_ports,
-    )
+    set_unique_server_name(args)
 
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -615,15 +588,15 @@ def visual_only_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    logger.info(f"alloced ports: {can_use_ports}")
-
-    args.visual_nccl_ports = can_use_ports[: args.visual_dp]
-    can_use_ports = can_use_ports[args.visual_dp :]
     args.visual_node_id = uuid.uuid4().int
 
-    logger.info(f"all start args:{args}")
-
+    ports_to_check = []
+    if args.visual_rpyc_port is not None:
+        ports_to_check.append(args.visual_rpyc_port)
+    validate_ports(ports_to_check)
     set_env_start_args(args)
+    get_shm_port_args(create=True)
+    logger.info(f"all start args:{args}")
 
     from .visualserver.visual_only_manager import start_visual_process
 
@@ -651,19 +624,23 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    ports_to_check = [args.config_server_port]
+    if args.config_server_visual_redis_port is not None:
+        ports_to_check.append(args.config_server_visual_redis_port)
+    validate_ports(ports_to_check)
+    set_env_start_args(args)
+    get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
     if args.config_server_visual_redis_port is not None:
         start_redis_service(args)
-
-    set_env_start_args(args)
 
     command = [
         "hypercorn",
         "--workers",
         "1",
         "--bind",
-        f"{args.config_server_host}:{args.config_server_port}",
+        f"{args.config_server_host}:{get_shm_port_args().config_server_port}",
         "--log-level",
         "info",
         "--access-logfile",

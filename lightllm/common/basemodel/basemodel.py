@@ -36,6 +36,10 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.torch_memory_saver_utils import (
+    TorchMemorySaverWrapper,
+    MemoryTag,
+)
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
 
@@ -93,6 +97,7 @@ class TpPartBaseModel:
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.is_mtp_mode = self.args.mtp_mode in [
             "vanilla_with_att",
             "eagle_with_att",
@@ -106,18 +111,21 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
-        self._init_weights()
-        self._init_req_manager()
-        self._init_mem_manager()
+        enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
+        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
+            self._init_weights()
+        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            self._init_req_manager()
+            self._init_mem_manager()
+
         # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
         self.req_manager.mem_manager = self.mem_manager
-
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._load_hf_weights()
+        self.load_weights(self.weight_dict)
 
         self._init_att_backend()
         self._init_att_backend1()
@@ -176,13 +184,14 @@ class TpPartBaseModel:
         ]
         return
 
-    def _load_hf_weights(self):
+    def load_weights(self, weight_dict: dict):
+        assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
-            self.data_type,
+            data_type=self.data_type,
             weight_dir=self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
+            weight_dict=weight_dict,
         )
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
@@ -520,13 +529,13 @@ class TpPartBaseModel:
     def _create_unpad_prefill_model_output(
         self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
     ):
-        if self.return_all_prompt_logics:
-            new_model_output = copy.copy(padded_model_output)
-            new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
-        else:
-            new_model_output = copy.copy(padded_model_output)
-            # 移除多余的pad 的那个 req 对应的 logics
-            new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output = copy.copy(padded_model_output)
+        # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
+        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
+        # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
+        if new_model_output.prompt_logics is not None:
+            new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
@@ -701,7 +710,7 @@ class TpPartBaseModel:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
 
         predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        model_output = ModelOutput(logits=predict_logits)
+        model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
@@ -974,8 +983,8 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        model_output = ModelOutput(logits=predict_logits.contiguous())
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
+        model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
+        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
 
         if self.is_mtp_mode:
             input_embs = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
@@ -1087,6 +1096,7 @@ class TpPartBaseModel:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
+        torch.cuda.empty_cache()
         return
 
     def autotune_layers(self):
@@ -1221,6 +1231,9 @@ class TpPartBaseModel:
         del b_seq_len
         del b_ready_cache_len
         del model_output
+        del b_mtp_index
+        del b_prefill_start_loc
+        del b_q_seq_len
         torch.cuda.empty_cache()
         return
 

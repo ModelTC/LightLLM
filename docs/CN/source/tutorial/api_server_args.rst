@@ -294,6 +294,10 @@ PD 分离模式参数
 
     当输入图片超过该阈值时，LightLLM 会先自动将其缩放到该像素预算内，再继续后续流程。
 
+.. option:: --disable_image_resize
+
+    禁用对超过 ``--max_image_pixels`` 的图片的自动缩放。默认开启自动缩放。
+
 .. option:: --visual_infer_batch_size
 
     每次推理批次中处理的图像数量，默认为 ``1``
@@ -309,10 +313,6 @@ PD 分离模式参数
 .. option:: --visual_dp
 
     ViT 的数据并行实例数量，默认为 ``1``
-
-.. option:: --visual_nccl_ports
-
-    为 ViT 构建分布式环境的 NCCL 端口列表，例如 29500 29501 29502，默认为 [29500]
 
 .. option:: --vit_att_backend
 
@@ -496,9 +496,9 @@ PD 分离模式参数
     * ``triton``: 使用 torch 和 triton kernel（默认）
     * ``sglang_kernel``: 使用 sglang_kernel 实现
 
-.. option:: --return_all_prompt_logprobs
+.. option:: --enable_prompt_logprobs
 
-    返回所有提示 token 的 logprobs
+    启用 prompt top-k logprobs 捕获
 
 .. option:: --use_reward_model
 
@@ -548,14 +548,6 @@ DeepSeek 冗余专家参数
 
 监控和日志参数
 --------------
-
-.. option:: --disable_log_stats
-
-    禁用吞吐量统计日志记录
-
-.. option:: --log_stats_interval
-
-    记录统计信息的间隔（秒），默认为 ``10``
 
 .. option:: --health_monitor
 

@@ -3,6 +3,7 @@ import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
@@ -18,6 +19,7 @@ REGULAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_REGULAR_CONSTRAINT_MAX_L
 GRAMMAR_CONSTRAINT_MAX_LENGTH = int(os.getenv("LIGHTLLM_GRAMMAR_CONSTRAINT_MAX_LENGTH", 2048))
 JSON_SCHEMA_MAX_LENGTH = int(os.getenv("LIGHTLLM_JSON_SCHEMA_MAX_LENGTH", 2048))
 INVALID_TOKEN_IDS_MAX_LENGTH = int(os.getenv("LIGHTLLM_INVALID_TOKEN_IDS_MAX_LENGTH", 10))
+MAX_PROMPT_LOGPROBS = int(os.getenv("LIGHTLLM_MAX_PROMPT_LOGPROBS", 1024))
 
 
 class StopSequence(ctypes.Structure):
@@ -305,6 +307,8 @@ class SamplingParams(ctypes.Structure):
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
         ("seed", ctypes.c_int64),  # random seed
+        # -1 disables prompt logprobs; K >= 0 returns only the top-K prompt tokens.
+        ("prompt_logprobs", ctypes.c_int),
     ]
 
     _do_sample: bool = False
@@ -341,6 +345,8 @@ class SamplingParams(ctypes.Structure):
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
         self.print_eos_token = kwargs.get("print_eos_token", False)
         self.seed = kwargs.get("seed", -1)
+        prompt_logprobs = kwargs.get("prompt_logprobs", None)
+        self.prompt_logprobs = -1 if prompt_logprobs is None else int(prompt_logprobs)
 
         self.exponential_decay_length_penalty = ExponentialDecayLengthPenalty()
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
@@ -396,15 +402,18 @@ class SamplingParams(ctypes.Structure):
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            if cls._repetition_penalty is None:
-                cls._repetition_penalty = 1.0
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            def _cfg(key, default):
+                v = generation_cfg.get(key)
+                return v if v is not None else default
+
+            cls._do_sample = _cfg("do_sample", False)
+            cls._presence_penalty = _cfg("presence_penalty", 0.0)
+            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
+            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
+            cls._temperature = _cfg("temperature", 1.0)
+            cls._top_p = _cfg("top_p", 1.0)
+            cls._top_k = _cfg("top_k", -1)
         except:
             pass
 
@@ -435,6 +444,10 @@ class SamplingParams(ctypes.Structure):
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
+        if self.prompt_logprobs < -1 or self.prompt_logprobs > MAX_PROMPT_LOGPROBS:
+            raise ValueError(f"prompt_logprobs must be in [-1, {MAX_PROMPT_LOGPROBS}], got {self.prompt_logprobs}")
+        if self.prompt_logprobs >= 0 and not get_env_start_args().enable_prompt_logprobs:
+            raise ValueError("prompt_logprobs requires --enable_prompt_logprobs")
         self._verify_allowed_token_ids()
         self._verify_grammar_constraint()
 
@@ -487,6 +500,7 @@ class SamplingParams(ctypes.Structure):
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
             "seed": self.seed,
+            "prompt_logprobs": self.prompt_logprobs,
         }
 
     def to_origin_dict(self):

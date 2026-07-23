@@ -31,24 +31,28 @@ from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, Asyn
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
+from .rl_controller import HttpRlController
+from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import ClientDisconnected, PDPrefillNodeStopGenToken
 from rpyc.utils.classic import obtain
 
 logger = init_logger(__name__)
 
 
-class HttpServerManager:
+class HttpServerManager(HttpRlManagerHelper, object):
     def __init__(
         self,
         args: StartArgs,
     ):
         self.args: StartArgs = args
+        ports = get_shm_port_args()
         context = zmq.asyncio.Context(2)
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
 
         self.multinode_req_manager = None
         self.nnodes = args.nnodes
@@ -56,7 +60,6 @@ class HttpServerManager:
         self._resource_lock = AsyncLock(self._shm_lock_pool.get_lock_context(0))
         self._run_reqs_count_lock = AsyncLock(self._shm_lock_pool.get_lock_context(1))
         self.node_rank = args.node_rank
-        self.disable_abort = args.nnodes > 1 and args.dp == 1  # mulitnode dp=1 mode, disable abort
         self.is_multinode_tp = args.dp == 1 and args.nnodes > 1
         self.is_multinode_tp_master = args.dp == 1 and args.nnodes > 1 and args.node_rank == 0
         self.is_multinode_tp_slave = args.dp == 1 and args.nnodes > 1 and args.node_rank > 0
@@ -66,41 +69,41 @@ class HttpServerManager:
                 for child_ip in args.child_ips:
                     context = zmq.asyncio.Context(2)
                     self.multinode_req_manager.append(context.socket(zmq.PUSH))
-                    self.multinode_req_manager[-1].connect(f"tcp://{child_ip}:{args.multinode_httpmanager_port}")
+                    self.multinode_req_manager[-1].connect(f"tcp://{child_ip}:{ports.multinode_httpmanager_port}")
                     logger.info(
-                        f"HttpServerManager connected to child node at {child_ip}:{args.multinode_httpmanager_port}"
+                        f"HttpServerManager connected to child node at {child_ip}:{ports.multinode_httpmanager_port}"
                     )
             else:
                 context = zmq.asyncio.Context(2)
                 self.multinode_req_manager = context.socket(zmq.PULL)
-                self.multinode_req_manager.bind(f"tcp://*:{args.multinode_httpmanager_port}")
+                self.multinode_req_manager.bind(f"tcp://*:{ports.multinode_httpmanager_port}")
                 logger.info(
-                    f"HttpServerManager listening for child node requests on *:{args.multinode_httpmanager_port}"
+                    f"HttpServerManager listening for master node requests on *:{ports.multinode_httpmanager_port}"
                 )
 
         self.enable_multimodal = args.enable_multimodal
 
         if self.enable_multimodal:
-            self.cache_client = rpyc.connect("localhost", args.cache_port, config={"allow_pickle": True})
+            self.cache_client = rpyc.connect("localhost", ports.cache_port, config={"allow_pickle": True})
             self.cache_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         if not self.args.disable_vision:
             self.send_to_visual = context.socket(zmq.PUSH)
-            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{args.visual_port}")
+            self.send_to_visual.connect(f"{args.zmq_mode}127.0.0.1:{ports.visual_port}")
 
         if not self.args.disable_audio:
             self.send_to_audio = context.socket(zmq.PUSH)
-            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{args.audio_port}")
+            self.send_to_audio.connect(f"{args.zmq_mode}127.0.0.1:{ports.audio_port}")
 
         if args.enable_cpu_cache and not self.args.enable_multimodal:
             self.send_to_multi_level_kv_cache = context.socket(zmq.PUSH)
-            self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+            self.send_to_multi_level_kv_cache.connect(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
 
         self.shm_req_manager = ShmReqManager()
 
         # recv from detokenization
         self.zmq_recv_socket = context.socket(zmq.SUB)
-        self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port}")
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
@@ -109,7 +112,7 @@ class HttpServerManager:
         self.forwarding_queue: AsyncQueue = None  # p d 分离模式使用的转发队列, 需要延迟初始化
 
         self.max_req_total_len = args.max_req_total_len
-        self.metric_client = MetricClient(args.metric_port)
+        self.metric_client = MetricClient(ports.metric_port)
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
@@ -122,6 +125,8 @@ class HttpServerManager:
         # Timemark of the latest successful inference, used by passive /health checks.
         self.latest_success_infer_time_mark = SharedInt(f"{get_unique_server_name()}_latest_success_infer_time_mark")
         self.latest_success_infer_time_mark.set_value(int(time.time()))
+
+        self.rl_controller: Optional[HttpRlController] = HttpRlController(self) if args.enable_rl else None
 
         self.run_reqs_count_mark = SharedInt(f"{get_unique_server_name()}_run_reqs_count_mark")
         self.run_reqs_count_mark.set_value(0)
@@ -335,6 +340,18 @@ class HttpServerManager:
             self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() + 1)
 
         try:
+            # RL：进入 generation admission。若当前处于 pause_generation / abort，
+            # 在此阻塞等待恢复；若被标记 abort，则直接返回 FINISHED_ABORTED 空结果，
+            # 不进入后续 encode / 调度（请求尚未占用 router 资源）。
+            if self.rl_controller is not None:
+                should_abort = await self.rl_controller.wait_if_generation_paused(group_request_id)
+                if should_abort:
+                    for output in self.rl_controller.build_aborted_generation_outputs(
+                        group_request_id, sampling_params
+                    ):
+                        yield output
+                    return
+
             original_multimodal_params = None
             if self.is_multinode_tp_master:
                 original_multimodal_params = copy.deepcopy(multimodal_params)
@@ -430,6 +447,10 @@ class HttpServerManager:
 
             req_status = ReqStatus(group_request_id, multimodal_params, req_objs, start_time)
             self.req_id_to_out_inf[group_request_id] = req_status
+            # RL：请求已登记到 req_id_to_out_inf 并即将转发下游，从 admission gate
+            # 注销，避免 pause 统计里仍把它算作“等待准入”的 pending 请求。
+            if self.rl_controller is not None:
+                await self.rl_controller.unregister_generation_admission(group_request_id)
 
             await self.transfer_to_next_module_or_node(
                 prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
@@ -467,11 +488,13 @@ class HttpServerManager:
 
                 yield sub_req_id, request_output, metadata, finish_status
 
-        except (ClientDisconnected, Exception) as e:
-            logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
-
+        except (asyncio.CancelledError, BaseException) as e:
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {group_request_id} {e.reason}")
+            elif isinstance(e, asyncio.CancelledError):
+                logger.warning(f"group_request_id: {group_request_id} has been cancelled")
+            else:
+                logger.warning(f"group_request_id: {group_request_id} has exception {str(e)}")
 
             # error need to release multimodel resources.
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
@@ -482,6 +505,10 @@ class HttpServerManager:
             await self.abort(group_request_id)
             raise e
         finally:
+            # RL：兜底注销 generation admission（含中途异常 / abort 提前 return），
+            # 防止 pending 请求泄漏导致 pause 无法正确结束。
+            if self.rl_controller is not None:
+                await self.rl_controller.unregister_generation_admission(group_request_id)
             async with self._run_reqs_count_lock:
                 self.run_reqs_count_mark.set_value(self.run_reqs_count_mark.get_value() - 1)
         return
@@ -501,7 +528,6 @@ class HttpServerManager:
         return image_tokens, audio_tokens
 
     async def _log_req_header(self, request_headers, group_request_id: int):
-
         x_request_id = request_headers.get("X-Request-Id", "")
         x_session_id = request_headers.get("X-Session-Id", "")
 
@@ -527,11 +553,7 @@ class HttpServerManager:
                     f"the request is rejected before tokenization."
                 )
             if self.enable_multimodal:
-                assert (
-                    len(multimodal_params.images + multimodal_params.audios) <= self.args.cache_capacity
-                ), "too many multimodal items!"
-                if multimodal_params.audios:
-                    assert not self.args.disable_audio, "audio multimodal not enabled"
+                multimodal_params.verify_resource_limits()
                 await self._alloc_multimodal_resources(multimodal_params, sampling_params)
                 prompt_ids = await asyncio.to_thread(
                     self.tokenizer.encode,
@@ -556,12 +578,24 @@ class HttpServerManager:
 
         # 这里的校验对多模态不是很充分, to do
         if all(isinstance(e, int) for e in prompt):
-            if not self.enable_multimodal and not self.pd_mode.is_D():
+            if not self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
                 else:
                     raise ValueError("prompt List[int] format contain id > vocab_size")
             else:
+                if self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
+                    multimodal_params.verify_resource_limits()
+                    await self._alloc_multimodal_resources(multimodal_params, sampling_params)
+                    # prompt 已是 List[int]（预分词），但仍可能携带 images/audios。
+                    # 多模态 tokenizer.encode 不会对 int 再做文本分词，而是在已有 ids 上
+                    # 展开 image/audio 占位 token（如 <img></img> -> 连续 token_id）。
+                    # 因此，这里需要再次调用 tokenizer.encode 来展开 image/audio 占位 token。
+                    return self.tokenizer.encode(
+                        prompt,
+                        multimodal_params,
+                        add_special_tokens=sampling_params.add_special_tokens,
+                    )
                 return prompt
         else:
             raise ValueError(f"prompt format error, get type{type(prompt)}")
@@ -579,7 +613,6 @@ class HttpServerManager:
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
 
         if prompt_tokens + sampling_params.max_new_tokens > real_supported_max_req_total_len:
-
             # 修改默认逻辑，如果 prompt_tokens + max_new_tokens 长度超过总的允许长度，则将
             # 修改 max_new_tokens 的值，使其满足合法约束。
             new_max_new_tokens = real_supported_max_req_total_len - prompt_tokens
@@ -685,10 +718,7 @@ class HttpServerManager:
             except asyncio.TimeoutError:
                 pass
 
-            if req_status.aborted:
-                raise Exception(f"req_id {group_request_id} aborted notifyed by other module")
-
-            if not self.disable_abort and request is not None and await request.is_disconnected():
+            if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise ClientDisconnected(
                     group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
@@ -807,7 +837,7 @@ class HttpServerManager:
 
             self.router_profiler_client = retry(max_attempts=20, wait_time=0.5)(rpyc.connect)(
                 "localhost",
-                self.args.router_profiler_port,
+                get_shm_port_args().router_profiler_port,
                 config={"allow_pickle": True},
             )
             self.router_profiler_client._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -821,7 +851,6 @@ class HttpServerManager:
         pre_time_mark = time.time()
 
         while True:
-
             try:
                 await asyncio.wait_for(self.recycle_event.wait(), timeout=0.02)
             except asyncio.TimeoutError:
@@ -837,16 +866,11 @@ class HttpServerManager:
 
             for req_status in release_req_status:
                 self.req_id_to_out_inf.pop(req_status.group_req_objs.group_req_id, None)
-                _is_aborted = False
                 for req in req_status.group_req_objs.shm_req_objs:
-                    _is_aborted = _is_aborted or req.is_aborted
                     logger.debug(f"httpserver release req_id {req.request_id}, index {req.index_in_shm_mem}")
                     await self.shm_req_manager.async_put_back_req_obj(req)
                     await self.shm_req_manager.async_release_req_index(req.index_in_shm_mem)
                 await self._release_multimodal_resources(req_status.group_req_objs.multimodal_params)
-                if _is_aborted:
-                    req_status.aborted = True
-                    logger.debug(f"mark req_id {req_status.group_req_objs.group_req_id} aborted in recycle loop")
 
             # 先保留这个关键得日志，用于方便定位重构中的问题。
             if time.time() - pre_time_mark > 120:
@@ -898,12 +922,12 @@ class HttpServerManager:
 
                         for _ in range(read_token_count):
                             if not req.out_tokens_queue.is_empty():
-
                                 text, src_index, special, count_output_tokens = req.out_tokens_queue.peek()
-                                req.cumlogprob += float(req.shm_logprobs.arr[src_index])
+                                token_logprob = float(req.shm_logprobs.arr["logprob"][src_index])
+                                req.cumlogprob += token_logprob
                                 metadata = {
                                     "id": int(req.shm_prompt_ids.arr[src_index]),
-                                    "logprob": float(req.shm_logprobs.arr[src_index]),
+                                    "logprob": token_logprob,
                                     "cumlogprob": float(req.cumlogprob) / count_output_tokens,
                                     "special": special,
                                     "count_output_tokens": count_output_tokens,
@@ -912,26 +936,39 @@ class HttpServerManager:
                                     "disk_prompt_cache_len": req.disk_prompt_cache_len,
                                     "mtp_accepted_token_num": req.mtp_accepted_token_num,
                                 }
-                                if self.args.return_all_prompt_logprobs:
-                                    metadata.update(req.get_all_prompt_metadata())
+                                metadata["logprobs"] = req.get_output_logprobs_metadata(src_index, self.tokenizer)
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
-
-                                req.out_tokens_queue.pop_no_ret()
 
                                 finished_token_index = (
                                     req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
                                 )
 
                                 if finished_token_index != src_index:
-                                    token_list.append((req_id, text, metadata, FinishStatus()))
+                                    finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
                                     if req.stop_str_matched:
                                         finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
                                     else:
                                         finish_status = FinishStatus(req.finish_status.status)
 
-                                    token_list.append((req_id, text, metadata, finish_status))
+                                    await req.merge_final_token_metadata(
+                                        metadata,
+                                        self.tokenizer,
+                                        enable_return_routed_experts=self.args.enable_return_routed_experts,
+                                    )
+
+                                    # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
+                                    # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None
+                                    # 跳过 token/logprob，同时仍可读取 finish status 和路由信息。
+                                    if finish_status.status == FinishStatus.FINISHED_ABORTED:
+                                        text = ""
+                                        metadata["id"] = None
+                                        metadata["logprob"] = None
+                                        metadata["logprobs"] = {}
+
+                                req.out_tokens_queue.pop_no_ret()
+                                token_list.append((req_id, text, metadata, finish_status))
                             else:
                                 break
 
@@ -957,7 +994,6 @@ class ReqStatus:
             time_mark=start_time,
         )
         self.out_token_info_list = []
-        self.aborted = False
 
     def can_release(self):
         for req in self.group_req_objs.shm_req_objs:

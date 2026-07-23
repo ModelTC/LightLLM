@@ -58,7 +58,10 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights.mul_(self.routed_scaling_factor)
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
+        origin_topk_ids = topk_ids
         if self.redundancy_expert_num > 0:
+            # 因为 redundancy_topk_ids_repair 会修改 topk_ids，所以需要先复制一份
+            origin_topk_ids = topk_ids.clone()
             redundancy_topk_ids_repair(
                 topk_ids=topk_ids,
                 redundancy_expert_ids=self.redundancy_expert_ids_tensor,
@@ -67,7 +70,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 expert_counter=self.routed_expert_counter_tensor,
                 enable_counter=self.auto_update_redundancy_expert,
             )
-        return topk_weights, topk_ids
+        return topk_weights, topk_ids, origin_topk_ids
 
     def _fused_experts(
         self,
@@ -104,7 +107,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx = self._select_experts(
+        topk_weights, topk_idx, _ = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,

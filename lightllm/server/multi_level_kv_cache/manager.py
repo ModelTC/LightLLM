@@ -18,6 +18,7 @@ from .cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -28,12 +29,13 @@ class MultiLevelKVCacheManager:
         args: StartArgs,
     ):
         self.args: StartArgs = args
+        ports = get_shm_port_args()
         context = zmq.Context(2)
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.multi_level_kv_cache_port}")
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.multi_level_kv_cache_port}")
 
         self.send_to_router = context.socket(zmq.PUSH)
-        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{args.router_port}")
+        self.send_to_router.connect(f"{args.zmq_mode}127.0.0.1:{ports.router_port}")
         logger.info(f"send_to_router sendhwm {self.send_to_router.getsockopt(zmq.SNDHWM)}")
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
         self.shm_req_manager = ShmReqManager()
@@ -162,6 +164,9 @@ class MultiLevelKVCacheManager:
                 continue
 
             req: Req = req
+            if req.sample_params.prompt_logprobs >= 0:
+                continue
+
             token_hash_list = req.token_hash_list.get_all()
             if len(token_hash_list) == 0:
                 continue

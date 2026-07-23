@@ -4,7 +4,7 @@ import torch
 import time
 import threading
 import torch.distributed as dist
-from typing import List, Tuple, Callable, Optional
+from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
@@ -12,11 +12,13 @@ from lightllm.models import get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
+from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.common.basemodel.batch_objs import ModelOutput
+from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.common.basemodel.triton_kernel.mtp_utils import mtp_verify
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -33,8 +35,8 @@ from lightllm.utils.envs_utils import (
     enable_radix_tree_timer_merge,
     get_radix_tree_merge_update_delta,
 )
+from lightllm.distributed import dist_group_manager
 from lightllm.distributed.communication_op import (
-    dist_group_manager,
     all_gather_into_tensor,
     all_reduce,
     broadcast,
@@ -99,7 +101,6 @@ class ModeBackend:
         self.load_way = kvargs["load_way"]
         self.disable_chunked_prefill = self.args.disable_chunked_prefill
         self.chunked_prefill_size = self.args.chunked_prefill_size
-        self.return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
         self.batch_max_tokens = self.args.batch_max_tokens
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
@@ -111,8 +112,6 @@ class ModeBackend:
         self.logger = init_logger(__name__)
 
         self.weight_dir = kvargs["weight_dir"]
-        # p d 分离模式，decode节点才会使用的参数
-        self.pd_rpyc_ports = kvargs.get("pd_rpyc_ports", None)
         max_total_token_num = kvargs["max_total_token_num"]
 
         init_distributed_env(kvargs)
@@ -136,7 +135,7 @@ class ModeBackend:
             "max_req_num": kvargs.get("max_req_num", 1000),
             "max_seq_length": kvargs.get("max_seq_length", 1024 * 5),
             "is_token_healing": kvargs.get("is_token_healing", False),
-            "return_all_prompt_logics": self.return_all_prompt_logprobs,
+            "return_all_prompt_logics": self.args.enable_prompt_logprobs,
             "disable_chunked_prefill": self.disable_chunked_prefill,
             "data_type": kvargs.get("data_type", "float16"),
             "graph_max_batch_size": kvargs.get("graph_max_batch_size", 16),
@@ -196,7 +195,6 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
         )
-
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
@@ -224,6 +222,19 @@ class ModeBackend:
             # 读取
             self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
             dist.barrier(group=self.node_nccl_group)
+
+        # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
+        # 非主 rank 不需要分配 buffer，避免重复占用内存。
+        if self.is_master_in_dp:
+            kv_cache_size = self.model.mem_manager.size + 1
+            if self.args.enable_prompt_logprobs:
+                mgr = PromptLogprobsCaptureManager.get_instance()
+                if mgr is not None:
+                    mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
+            if self.args.enable_return_routed_experts:
+                mgr = MoeRouteInfoManager.get_instance()
+                if mgr is not None:
+                    mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
 
         self.init_custom()
 
@@ -357,10 +368,15 @@ class ModeBackend:
             self.logger.info(f"loaded mtp model class {self.draft_models[i].__class__}")
         return
 
-    def _async_copy_next_token_infos_to_pin_mem(self, next_token_ids: torch.Tensor, next_token_logprobs: torch.Tensor):
+    def _async_copy_next_token_infos_to_pin_mem(
+        self,
+        next_token_ids: torch.Tensor,
+        next_token_logprobs: torch.Tensor,
+        next_token_ranks: torch.Tensor,
+    ):
         """
-        这个函数会把next token id和logprobs保存到pinned memory中
-        这样可以保障post_handle 函数可以读取到正常的输出结果。
+        把 next token id / logprobs / ranks 异步拷到 pinned memory，
+        供后续 post_handle 读取。ranks 始终有值（不需要时为常量 -1）。
         """
         next_token_ids_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
             key="next_token_ids",
@@ -370,7 +386,89 @@ class ModeBackend:
             key="next_token_logprobs",
             gpu_tensor=next_token_logprobs,
         )
-        return next_token_ids_cpu, next_token_logprobs_cpu
+        # 仅 enable_rl 需要真实 rank；否则跳过 D2H，返回常量 -1。
+        if self.args.enable_rl:
+            next_token_ranks_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
+                key="next_token_ranks",
+                gpu_tensor=next_token_ranks,
+            )
+        else:
+            next_token_ranks_cpu = g_pin_mem_manager.get_const_cpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids_cpu.shape,
+                fill_value=-1,
+                dtype=torch.int32,
+            )
+        return next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
+
+    def _get_next_token_ranks(self, logits: torch.Tensor, next_token_ids: torch.Tensor) -> torch.Tensor:
+        """计算（或占位）每个 next token 在 vocab 上的 1-based rank（GPU tensor）。
+
+        仅 ``--enable_rl`` 时做真实 rank；否则返回 GPU 常量 ``-1``，避免 O(batch * vocab) 比较。
+        下游 async_copy 在同样条件下会忽略该返回值。
+        """
+        if not self.args.enable_rl:
+            return g_pin_mem_manager.get_const_gpu_tensor(
+                key="next_token_ranks",
+                shape=next_token_ids.shape,
+                fill_value=-1,
+                dtype=torch.int32,
+            )
+        selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
+        return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
+
+    def _capture_prompt_logprobs_if_needed(
+        self,
+        model_input: ModelInput,
+        run_reqs: List[InferReq],
+        prompt_logits: Optional[torch.Tensor],
+    ) -> None:
+        # 仅在开启 return_all_prompt_logics（如 enable_prompt_logprobs）且存在完整的
+        # prefill logits 时，才需要捕获每个 prompt token 的 logprobs 信息。此时用于采样
+        # 的 logits 已经只对应每个请求最后一个位置，无需再处理。
+        if not self.model.return_all_prompt_logics or prompt_logits is None:
+            return
+
+        mgr = PromptLogprobsCaptureManager.get_instance()
+
+        start_loc = 0
+        for req_obj in run_reqs:
+            q_len = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
+            topk = req_obj.sampling_param.shm_param.prompt_logprobs
+            capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
+            if capture_count > 0 and topk == 0 and self.is_master_in_dp:
+                # prompt_logprobs=0 返回真实命中的 prompt token，
+                # rank 必须基于全 vocab 计算，不能用 top-k 列表位置替代。
+                logit_rows = prompt_logits[start_loc : start_loc + capture_count]
+                target_start = req_obj.cur_kv_len + 1
+                target_end = target_start + capture_count
+                target_token_ids = torch.tensor(
+                    req_obj.shm_req.shm_prompt_ids.arr[target_start:target_end].copy(),
+                    dtype=torch.long,
+                    device=logit_rows.device,
+                )
+                target_logits = logit_rows.gather(1, target_token_ids.long().view(-1, 1)).view(-1)
+                logprobs = target_logits.float() - torch.logsumexp(logit_rows.float(), dim=-1)
+                ranks = (logit_rows > target_logits.view(-1, 1)).sum(dim=-1, dtype=torch.int32) + 1
+                req_obj.prompt_selected_logprobs.add_chunk(target_start, target_end, logprobs, ranks)
+            elif capture_count > 0 and topk > 0 and mgr is not None and mgr.is_buffer_initialized():
+                logit_rows = prompt_logits[start_loc : start_loc + capture_count]
+                log_normalizer = torch.logsumexp(logit_rows.float(), dim=-1)
+                valid_topk = min(topk, logit_rows.shape[-1])
+                top_logits, top_token_ids = logit_rows.topk(valid_topk, dim=-1)
+                top_token_ids = top_token_ids.to(torch.int32)
+                top_logprobs = top_logits.float() - log_normalizer.view(-1, 1)
+                if valid_topk < topk:
+                    padding = (0, topk - valid_topk)
+                    top_token_ids = torch.nn.functional.pad(top_token_ids, padding, value=-1)
+                    top_logprobs = torch.nn.functional.pad(top_logprobs, padding, value=float("-inf"))
+                mgr.capture(
+                    mem_indexes=model_input.mem_indexes[start_loc : start_loc + capture_count],
+                    top_token_ids=top_token_ids,
+                    top_logprobs=top_logprobs,
+                )
+            start_loc += q_len
+        return
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
@@ -481,10 +579,9 @@ class ModeBackend:
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
+                                    next_token_rank=-1,
                                     eos_ids=self.eos_id,
-                                    extra_post_req_handle_func=None,
                                     is_master_in_dp=self.is_master_in_dp,
-                                    pd_prefill_chunked_handle_func=None,
                                 )
         return
 
@@ -722,6 +819,7 @@ class ModeBackend:
         run_reqs: List[InferReq],
         next_token_ids: List[int],
         next_token_logprobs: List[float],
+        next_token_ranks: List[int],
         run_reqs_update_packs: List[InferReqUpdatePack],
         extra_post_req_handle_func: Optional[Callable[[InferReq, int, float], None]] = None,
         pd_prefill_chunked_handle_func: Optional[Callable[[InferReq, int, float, int], None]] = None,
@@ -730,17 +828,18 @@ class ModeBackend:
         extra_post_req_handle_func 用于提供在一个请求确定输出的时候，给出额外的后处理操作，主要是用于
         约束输出等模式，设置自己请求内部的状态机的状态，并添加额外的停止判定条件等。
         """
-        for req_obj, next_token_id, next_token_logprob, pack in zip(
-            run_reqs, next_token_ids, next_token_logprobs, run_reqs_update_packs
+        for req_obj, next_token_id, next_token_logprob, next_token_rank, pack in zip(
+            run_reqs, next_token_ids, next_token_logprobs, next_token_ranks, run_reqs_update_packs
         ):
             req_obj: InferReq = req_obj
             pack: InferReqUpdatePack = pack
             pack.handle(
                 next_token_id=next_token_id,
                 next_token_logprob=next_token_logprob,
+                next_token_rank=int(next_token_rank),
                 eos_ids=self.eos_id,
-                extra_post_req_handle_func=extra_post_req_handle_func,
                 is_master_in_dp=self.is_master_in_dp,
+                extra_post_req_handle_func=extra_post_req_handle_func,
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
             )
 
@@ -801,6 +900,7 @@ class ModeBackend:
             mask_func(run_reqs, logits)
 
         next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+        next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
         b_has_out = None
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
@@ -819,10 +919,16 @@ class ModeBackend:
             next_token_ids=next_token_ids,
             mask=b_has_out,
         )
-        next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-            next_token_ids, next_token_logprobs
+        (
+            next_token_ids_cpu,
+            next_token_logprobs_cpu,
+            next_token_ranks_cpu,
+        ) = self._async_copy_next_token_infos_to_pin_mem(
+            next_token_ids,
+            next_token_logprobs,
+            next_token_ranks,
         )
-        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu
+        return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
     def _dp_all_gather_prefill_and_decode_req_num(
         self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]

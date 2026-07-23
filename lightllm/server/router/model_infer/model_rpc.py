@@ -16,7 +16,6 @@ from lightllm.server.router.model_infer.mode_backend import (
     ChunkedPrefillBackend,
     FirstTokenConstraintBackend,
     OutlinesConstraintBackend,
-    ReturnPromptLogProbBackend,
     RewardModelBackend,
     TokenHealingBackend,
     XgrammarBackend,
@@ -28,11 +27,14 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDPForDecodeNode,
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
+from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.torch_memory_saver_utils import MemoryTag
+from lightllm.server.io_struct import RlOpReq, RlOpRsp
 
 logger = init_logger(__name__)
 
@@ -46,6 +48,8 @@ class ModelRpcServer(rpyc.Service):
 
         self.rank = rank
         self.rank_in_node = rank_in_node
+        self.backend = None
+        self.rl_backend_ops = None
         logger.info(f"Initialized RPC server for rank {self.rank}.")
         return
 
@@ -54,7 +58,6 @@ class ModelRpcServer(rpyc.Service):
         kvargs = obtain(kvargs)
         kvargs["rank_id"] = self.rank
         self.world_size = kvargs["world_size"]
-        return_all_prompt_logprobs = self.args.return_all_prompt_logprobs
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
         is_token_healing = self.args.token_healing_mode
@@ -82,8 +85,6 @@ class ModelRpcServer(rpyc.Service):
             self.backend = DPChunkedPrefillBackend()
         elif use_reward_model:
             self.backend = RewardModelBackend()
-        elif return_all_prompt_logprobs:
-            self.backend = ReturnPromptLogProbBackend()
         elif diverse_mode:
             self.backend = DiversehBackend()
         elif is_token_healing:
@@ -99,6 +100,7 @@ class ModelRpcServer(rpyc.Service):
 
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
+        self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
 
         # only deepseekv3 can support auto_update_redundancy_expert
         if self.args.auto_update_redundancy_expert:
@@ -110,6 +112,19 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
+
+    def exposed_rl_op(self, req: RlOpReq) -> RlOpRsp:
+        try:
+            req = obtain(req)
+            if self.rl_backend_ops is None:
+                raise ValueError("RL backend ops is not initialized")
+            if not RlBackendOps.supports(req.op_name):
+                raise ValueError(f"Unsupported RL op {req.op_name}. Supported ops: {sorted(RlBackendOps.SUPPORTED)}")
+            success, ret = self.rl_backend_ops.dispatch(req.op_name, req.op_args)
+            return RlOpRsp(success=success, msg=str(ret), op_name=req.op_name, op_result=ret)
+        except BaseException as e:
+            logger.exception(f"rl op failed: {str(e)}")
+            return RlOpRsp(success=False, msg=f"rl op failed: {str(e)}", op_name=req.op_name)
 
 
 class ModelRpcClient:
@@ -134,6 +149,7 @@ class ModelRpcClient:
 
         self._init_model = async_wrap(self.conn.root.init_model)
         self._get_max_total_token_num = async_wrap(self.conn.root.get_max_total_token_num)
+        self._rl_op = async_wrap(self.conn.root.rl_op)
         return
 
     async def init_model(self, kvargs):
@@ -143,6 +159,10 @@ class ModelRpcClient:
 
     async def get_max_total_token_num(self):
         ans = self._get_max_total_token_num()
+        return obtain(await ans)
+
+    async def rl_op(self, req: RlOpReq) -> RlOpRsp:
+        ans = self._rl_op(req)
         return obtain(await ans)
 
 
@@ -197,7 +217,15 @@ async def start_model_process(
             success_event,
         ),
     )
-    proc.start()
+    # 若开启 --enable_torch_memory_saver：必须在 configure_subprocess() 内
+    # 调用 proc.start()，以便子进程继承/完成 torch_memory_saver 的初始化钩子；
+    # 后续 Infer 才能对 KV / weight / cudagraph 等显存做 pause/resume。
+    # 未开启时 Wrapper 为空实现，with 块无额外开销。
+    from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
+
+    torch_memory_saver = TorchMemorySaverWrapper(args.enable_torch_memory_saver)
+    with torch_memory_saver.configure_subprocess():
+        proc.start()
 
     # Use asyncio.to_thread to make the blocking wait non-blocking
     await asyncio.to_thread(success_event.wait, timeout=40)

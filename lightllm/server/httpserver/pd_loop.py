@@ -21,6 +21,7 @@ from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -96,7 +97,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 发送注册信息
                 regist_json = {
                     "node_id": manager.args.pd_node_id,
-                    "client_ip_port": f"{manager.host_ip}:{manager.args.port}",
+                    "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
                     "mode": manager.pd_mode.value,
                     "start_args": args_dict,
                 }
@@ -180,11 +181,11 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
     # node_id 为 0
     if not use_config_server:
         ans = dict()
-        ans[0] = PD_Master_Obj(node_id=0, host_ip_port=f"{args.pd_master_ip}:{args.pd_master_port}")
+        ans[0] = PD_Master_Obj(node_id=0, host_ip_port=f"{args.pd_master_ip}:{get_shm_port_args().pd_master_port}")
         return ans
 
     # 使用 config_server 服务来发现所有的 pd_master 节点。
-    uri = f"ws://{args.config_server_host}:{args.config_server_port}/registered_objects"
+    uri = f"ws://{args.config_server_host}:{get_shm_port_args().config_server_port}/registered_objects"
 
     try:
         async with httpx.AsyncClient() as client:
@@ -256,6 +257,6 @@ def _get_load_info() -> dict:
     mean_node_load = sum(current_load) / len(current_load)
     load_info = {
         "total_token_usage_rate": mean_node_load,
-        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}",
+        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}",
     }
     return load_info

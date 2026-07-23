@@ -133,7 +133,9 @@ class ImageItem:
 
     async def preload(self, request: Request):
 
-        max_image_pixels = get_env_start_args().max_image_pixels
+        start_args = get_env_start_args()
+        max_image_pixels = start_args.max_image_pixels
+        disable_image_resize = start_args.disable_image_resize
 
         try:
             if self._type == "url":
@@ -147,12 +149,15 @@ class ImageItem:
                 # 的 token 计数判断, 所以只需要图片长宽信息，不需要具体图片的内容信息
                 src_w = self._data[0]
                 src_h = self._data[1]
-                self.image_w, self.image_h = _resize_image_dimensions_if_needed(src_w, src_h, max_image_pixels)
-                if (self.image_w, self.image_h) != (src_w, src_h):
-                    logger.warning(
-                        f"image_size pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels}, "
-                        f"resized to {self.image_w}x{self.image_h}"
-                    )
+                if disable_image_resize:
+                    self.image_w, self.image_h = src_w, src_h
+                else:
+                    self.image_w, self.image_h = _resize_image_dimensions_if_needed(src_w, src_h, max_image_pixels)
+                    if (self.image_w, self.image_h) != (src_w, src_h):
+                        logger.warning(
+                            f"image_size pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels}, "
+                            f"resized to {self.image_w}x{self.image_h}"
+                        )
                 return
             else:
                 raise ValueError(f"cannot read image which type is {self._type}!")
@@ -163,22 +168,24 @@ class ImageItem:
             loop = asyncio.get_running_loop()
             # 1) Verify original input bytes first.
             src_w, src_h = await loop.run_in_executor(_IMAGE_VERIFY_POOL, _verify_image_bytes, img_data)
-            # 2) Resize (or no-op) after verification.
-            img_data, resized_w, resized_h = await loop.run_in_executor(
-                _IMAGE_VERIFY_POOL,
-                _resize_image_bytes_if_needed,
-                img_data,
-                src_w,
-                src_h,
-                max_image_pixels,
-            )
-            self.image_w, self.image_h = resized_w, resized_h
-
-            if (resized_w, resized_h) != (src_w, src_h):
-                logger.warning(
-                    f"image pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels},"
-                    f" resized to {self.image_w}x{self.image_h}"
+            # 2) Resize after verification unless --disable_image_resize is set.
+            if disable_image_resize:
+                self.image_w, self.image_h = src_w, src_h
+            else:
+                img_data, resized_w, resized_h = await loop.run_in_executor(
+                    _IMAGE_VERIFY_POOL,
+                    _resize_image_bytes_if_needed,
+                    img_data,
+                    src_w,
+                    src_h,
+                    max_image_pixels,
                 )
+                self.image_w, self.image_h = resized_w, resized_h
+                if (resized_w, resized_h) != (src_w, src_h):
+                    logger.warning(
+                        f"image pixels {src_w * src_h} exceed max_image_pixels={max_image_pixels},"
+                        f" resized to {self.image_w}x{self.image_h}"
+                    )
 
             self._preload_data = img_data
             return
@@ -234,6 +241,25 @@ class MultimodalParams:
 
         if tasks:
             await asyncio.gather(*tasks)
+        return
+
+    def verify_resource_limits(self):
+        """校验多模态资源数量与 vision/audio 开关是否满足启动配置。
+
+        - images + audios 总数不能超过 ``--cache_capacity``
+        - 若携带 image，则不能处于 ``--disable_vision``
+        - 若携带 audio，则不能处于 ``--disable_audio``
+        """
+        args = get_env_start_args()
+        if len(self.images) + len(self.audios) > args.cache_capacity:
+            raise ValueError(
+                f"too many multimodal items: {len(self.images) + len(self.audios)}"
+                f" > cache_capacity={args.cache_capacity}"
+            )
+        if self.images and args.disable_vision:
+            raise ValueError("vision multimodal not enabled")
+        if self.audios and args.disable_audio:
+            raise ValueError("audio multimodal not enabled")
         return
 
     def to_dict(self):
