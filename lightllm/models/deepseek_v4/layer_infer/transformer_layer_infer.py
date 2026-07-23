@@ -1,9 +1,7 @@
 import torch
-import torch.distributed as dist
 from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
-from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
@@ -357,8 +355,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
-        if not self.enable_ep_moe:
-            x = self._tpsp_allgather(input=x, infer_state=infer_state)
+        x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         logits = layer_weight.gate_weight_.mm(x, out_dtype=torch.float32)
         weights, indices = self._select_experts(logits, infer_state, layer_weight)
@@ -369,13 +366,6 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = self._routed_experts(x, weights, indices, infer_state, layer_weight)
         if self.enable_ep_moe:
-            if self.tp_world_size_ > 1:
-                all_reduce(
-                    shared,
-                    op=dist.ReduceOp.SUM,
-                    group=infer_state.dist_group,
-                    async_op=False,
-                )
             return routed + shared
         out = routed + shared
         return self._tpsp_reduce(input=out, infer_state=infer_state)

@@ -1,5 +1,6 @@
 import torch
 from lightllm.common.basemodel import TransformerLayerWeight
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
     COLMMWeight,
@@ -217,12 +218,18 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # silu_and_mul triton kernel, no swiglu clamp) drives it directly. Order [w1, w3] = [gate, up]
         # matches silu_and_mul_fwd's blocked layout (first half gate, second half up).
         sp = f"{p}.shared_experts"
+        # EP keeps a complete shared expert per rank, so its output needs no per-layer all-reduce.
+        enable_ep_moe = get_env_start_args().enable_ep_moe
+        shared_tp_rank = 0 if enable_ep_moe else None
+        shared_tp_world_size = 1 if enable_ep_moe else None
         self.gate_up_proj = ROWMMWeight(
             in_dim=self.hidden,
             out_dims=[self.moe_inter, self.moe_inter],
             weight_names=[f"{sp}.w1.weight", f"{sp}.w3.weight"],
             data_type=self.data_type_,
             quant_method=self.get_quant_method("shared_gate"),
+            tp_rank=shared_tp_rank,
+            tp_world_size=shared_tp_world_size,
         )
         self.down_proj = COLMMWeight(
             in_dim=self.moe_inter,
@@ -230,6 +237,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             weight_names=f"{sp}.w2.weight",
             data_type=self.data_type_,
             quant_method=self.get_quant_method("shared_down"),
+            tp_rank=shared_tp_rank,
+            tp_world_size=shared_tp_world_size,
         )
         self.experts_ = FusedMoeWeight(
             gate_proj_name="w1",
