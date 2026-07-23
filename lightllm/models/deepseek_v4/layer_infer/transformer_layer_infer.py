@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.distributed.communication_op import all_reduce
@@ -412,7 +412,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         return weights, indices
 
 
-class CompressorInfer:
+class CompressorInfer(BaseLayerInfer):
     """Window-softmax compressor. is_in_indexer=False compresses the c4/c128 latent KV into the
     paged fp8 slab (attention extra_k); is_in_indexer=True reuses the SAME machinery (mirroring
     sglang's Compressor(is_in_indexer=...)) with the indexer weights/dims/state pool to produce the
@@ -462,6 +462,13 @@ class CompressorInfer:
             ape=ape,
             compress_ratio=self.compress_ratio,
         )
+        out_buffer = None
+        if self.is_in_indexer and use_custom_tensor_manager:
+            out_buffer = self.alloc_tensor(
+                (infer_state.mem_index.numel(), self.index_head_dim),
+                torch.bfloat16,
+                device=infer_state.mem_index.device,
+            )
         return fused_compress_op(
             kv_score=kv_score,
             infer_state=infer_state,
@@ -474,10 +481,11 @@ class CompressorInfer:
             cos_table=cos_table,
             sin_table=sin_table,
             is_in_indexer=self.is_in_indexer,
+            out_buffer=out_buffer,
         )
 
 
-class DeepseekV4IndexInfer:
+class DeepseekV4IndexInfer(BaseLayerInfer):
     """Model-side builder for the FlashMLA sparse-index metadata. Mirrors deepseek3_2's NsaInfer
     boundary (the model owns ALL index construction; the attention backend only forwards final
     tensors to flash_mla.flash_mla_with_kvcache) AND its c4 implementation: hadamard'd fp8 q/K, a
@@ -532,7 +540,10 @@ class DeepseekV4IndexInfer:
         # (Hq)·(Hk)=q·k (H orthogonal) and the fp8 quant of K stays accurate.
         from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
 
-        scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5)
+        hadamard_out = None
+        if use_custom_tensor_manager:
+            hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
+        scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
         mem_manager = infer_state.mem_manager
         mem_manager.pack_indexer_k_to_cache(
             self.layer_idx_,
@@ -544,10 +555,6 @@ class DeepseekV4IndexInfer:
     def build_metadata(
         self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
     ):
-        """Return the final flash_mla index tensors for this layer's compress variant. swa indices and
-        the per-token req_idx are layer-independent and precomputed once in init_some_extra_state
-        (read here); only the c4 scorer is per-layer. The backend pairs these with the
-        (data-independent, layer-keyed) fp8 cache-byte views it owns."""
         swa_indices = infer_state.dsv4_swa_indices.unsqueeze(1)
         swa_lengths = infer_state.dsv4_swa_lengths
         positions = infer_state.position_ids
@@ -589,12 +596,18 @@ class DeepseekV4IndexInfer:
         raw_w = layer_weight.idx_weights_proj_.mm(x, use_custom_tensor_mananger=use_custom_tensor_manager).view(
             token_num, self.index_n_heads
         )  # [T, H] raw
+        idx_q_fp8_out = weights_out = None
+        if use_custom_tensor_manager:
+            idx_q_fp8_out = self.alloc_tensor(idx_q.shape, torch.float8_e4m3fn, device=idx_q.device)
+            weights_out = self.alloc_tensor((*idx_q.shape[:-1], 1), torch.float32, device=idx_q.device)
         idx_q_fp8, weights = fused_q_indexer_rope_hadamard_quant(
             idx_q,
             raw_w,
             self.indexer_weight_scale,
             self.freqs_cis,
             infer_state.position_ids,
+            q_fp8=idx_q_fp8_out,
+            weights_out=weights_out,
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1)
 
@@ -608,9 +621,6 @@ class DeepseekV4IndexInfer:
         max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
         c4_cap = ((max_entries + 63) // 64) * 64
 
-        # entry space fits the budget -> every causal entry is selected; no scoring needed. The
-        # captured decode graph (graph_max_len -> max_entries > topk) always takes the scorer branch
-        # below, so this only shortcuts tiny eager contexts.
         if max_entries <= index_topk:
             from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
 
@@ -626,23 +636,16 @@ class DeepseekV4IndexInfer:
             )
             return slots.unsqueeze(1), lengths
 
-        c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)  # entries/req
-
         device = positions.device
         page_size = mem_manager.c4_indexer_pool.page_size
 
-        # The page table / row_page_table / valid_len / ctx_lens / paged-logits metadata / topk_lengths
-        # are LAYER-INDEPENDENT (depend on request layout + c4_cap, not on weights/layer). Build them on
-        # the first c4 layer of the forward and reuse on the other ~20 c4 layers (was rebuilt per layer:
-        # build_c4_indexer_page_table + a [T,npages] gather + clamp/reshape + get_paged_mqa_logits_metadata
-        # each, i.e. ~20x redundant index/copy/clamp launches). Lazy (not init_some_extra_state) so it is
-        # computed inside the decode cuda graph with the capture-forced shapes -> no graph-cap mismatch.
         cached = getattr(infer_state, "_c4_paged_meta", None)
         if cached is None:
             from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
 
             b_req_idx = infer_state.b_req_idx
             batch = b_req_idx.shape[0]
+            c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)  # entries/req
             page_table = build_c4_indexer_page_table(
                 mem_manager,
                 b_req_idx,
@@ -664,50 +667,71 @@ class DeepseekV4IndexInfer:
 
             valid_len = ((positions + 1) // 4).to(torch.int32)
             ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1)
-            metadata = deep_gemm.get_paged_mqa_logits_metadata(
-                ctx_lens,
-                page_size,
-                deep_gemm.get_num_sms(),
+            rows_per_chunk = None
+            chunk_metadata = None
+            if infer_state.is_prefill:
+                rows_per_chunk = max(1, _C4_PREFILL_LOGITS_BUDGET_BYTES // (c4_cap * 4))
+                if positions.numel() > rows_per_chunk:
+                    chunk_metadata = tuple(
+                        deep_gemm.get_paged_mqa_logits_metadata(
+                            ctx_lens[start : start + rows_per_chunk],
+                            page_size,
+                            deep_gemm.get_num_sms(),
+                        )
+                        for start in range(0, positions.numel(), rows_per_chunk)
+                    )
+
+            metadata = (
+                deep_gemm.get_paged_mqa_logits_metadata(
+                    ctx_lens,
+                    page_size,
+                    deep_gemm.get_num_sms(),
+                )
+                if chunk_metadata is None
+                else None
             )
             topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, index_topk)), min=1)
-            cached = (row_page_table, valid_len, ctx_lens, metadata, topk_lengths)
+            cached = (
+                row_page_table,
+                valid_len,
+                ctx_lens,
+                metadata,
+                topk_lengths,
+                rows_per_chunk,
+                chunk_metadata,
+            )
             infer_state._c4_paged_meta = cached
 
-        row_page_table, valid_len, ctx_lens, metadata, topk_lengths = cached
-        kv_cache = mem_manager.c4_indexer_pool.get_layer_buffer(mem_manager.layer_to_c4_idx[self.layer_idx_]).view(
+        row_page_table, valid_len, ctx_lens, metadata, topk_lengths, rows_per_chunk, chunk_metadata = cached
+        indexer_k_cache = mem_manager.c4_indexer_pool.get_layer_buffer(
+            mem_manager.layer_to_c4_idx[self.layer_idx_]
+        ).view(
             mem_manager.c4_indexer_pool.num_pages,
             page_size,
             1,
             self.index_head_dim + 4,
         )
         top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
-        if infer_state.is_prefill:
-            rows_per_chunk = max(1, _C4_PREFILL_LOGITS_BUDGET_BYTES // (c4_cap * 4))
-            if idx_q_fp8.shape[0] > rows_per_chunk:
-                for start in range(0, idx_q_fp8.shape[0], rows_per_chunk):
-                    end = min(start + rows_per_chunk, idx_q_fp8.shape[0])
-                    chunk_ctx_lens = ctx_lens[start:end]
-                    self._c4_score_topk(
-                        idx_q_fp8[start:end],
-                        kv_cache,
-                        weights[start:end],
-                        chunk_ctx_lens,
-                        row_page_table[start:end],
-                        deep_gemm.get_paged_mqa_logits_metadata(
-                            chunk_ctx_lens,
-                            page_size,
-                            deep_gemm.get_num_sms(),
-                        ),
-                        c4_cap,
-                        valid_len[start:end],
-                        top_slots[start:end],
-                        page_size,
-                    )
-                return top_slots.unsqueeze(1), topk_lengths
+        if chunk_metadata is not None:
+            for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], rows_per_chunk)):
+                end = min(start + rows_per_chunk, idx_q_fp8.shape[0])
+                self._c4_score_topk(
+                    idx_q_fp8[start:end],
+                    indexer_k_cache,
+                    weights[start:end],
+                    ctx_lens[start:end],
+                    row_page_table[start:end],
+                    chunk_metadata[chunk_idx],
+                    c4_cap,
+                    valid_len[start:end],
+                    top_slots[start:end],
+                    page_size,
+                )
+            return top_slots.unsqueeze(1), topk_lengths
 
         self._c4_score_topk(
             idx_q_fp8,
-            kv_cache,
+            indexer_k_cache,
             weights,
             ctx_lens,
             row_page_table,
@@ -722,7 +746,7 @@ class DeepseekV4IndexInfer:
     @staticmethod
     def _c4_score_topk(
         idx_q_fp8,
-        kv_cache,
+        indexer_k_cache,
         weights,
         ctx_lens,
         row_page_table,
@@ -734,7 +758,7 @@ class DeepseekV4IndexInfer:
     ):
         logits = deep_gemm.fp8_paged_mqa_logits(
             idx_q_fp8.unsqueeze(1),
-            kv_cache,
+            indexer_k_cache,
             weights,
             ctx_lens,
             row_page_table,

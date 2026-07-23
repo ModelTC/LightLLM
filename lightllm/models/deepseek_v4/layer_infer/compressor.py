@@ -316,6 +316,7 @@ def fused_compress(
     cos_table: torch.Tensor,
     sin_table: torch.Tensor,
     is_in_indexer: bool = False,
+    out_buffer: torch.Tensor = None,
 ):
     mem_manager = infer_state.mem_manager
     if is_in_indexer:
@@ -323,11 +324,12 @@ def fused_compress(
         out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
         state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
         state_ring = mem_manager.c4_state_ring
-        out_buffer = torch.empty(
-            (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
-            dtype=torch.bfloat16,
-            device=infer_state.mem_index.device,
-        )
+        if out_buffer is None:
+            out_buffer = torch.empty(
+                (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
+                dtype=torch.bfloat16,
+                device=infer_state.mem_index.device,
+            )
         out_page_size = 1
     else:
         if compress_ratio == 4:

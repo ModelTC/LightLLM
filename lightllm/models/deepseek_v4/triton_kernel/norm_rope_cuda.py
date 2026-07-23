@@ -83,9 +83,13 @@ def fused_q_indexer_rope_hadamard_quant(
     weight_scale: float,
     freqs_cis: torch.Tensor,
     positions: torch.Tensor,
+    q_fp8: torch.Tensor = None,
+    weights_out: torch.Tensor = None,
 ):
-    q_fp8 = torch.empty(q_input.shape, dtype=torch.float8_e4m3fn, device=q_input.device)
-    weights_out = torch.empty((*q_input.shape[:-1], 1), dtype=torch.float32, device=q_input.device)
+    if q_fp8 is None:
+        q_fp8 = torch.empty(q_input.shape, dtype=torch.float8_e4m3fn, device=q_input.device)
+    if weights_out is None:
+        weights_out = torch.empty((*q_input.shape[:-1], 1), dtype=torch.float32, device=q_input.device)
     _load_cuda().fused_q_indexer_rope_hadamard_quant(
         q_input,
         q_fp8,
