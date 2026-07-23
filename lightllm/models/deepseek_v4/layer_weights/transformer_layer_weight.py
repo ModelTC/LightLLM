@@ -331,7 +331,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             if woa in weights and weights[woa].dim() == 2:
                 w = weights[woa]
                 per_group_in = self.n_heads * self.head_dim // self.o_groups
-                weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2).contiguous()
+                weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2)
         # Keep c4 overlap APE in checkpoint layout [4, 2*head_dim]. SGLang reorders it
         # because its compressor consumes ape.view(8, head_dim) by window offset. LightLLM
         # adds APE into each token's two score halves before compression using position % 4,

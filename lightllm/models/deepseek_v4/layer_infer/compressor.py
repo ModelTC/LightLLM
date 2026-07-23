@@ -125,14 +125,14 @@ def _fused_compress_norm_rope_insert_kernel(
     STATE_RING: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     FP8_MAX: tl.constexpr,
-    SCALE_MIN: tl.constexpr,
+    AMAX_MIN: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     QUANT_BLOCK: tl.constexpr,
     SCALE_BYTES: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     BYTES_PER_PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
-    OUTPUT_BF16: tl.constexpr,
+    IS_IN_INDEXER: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     out_slot = tl.load(out_slots + token_idx).to(tl.int64)
@@ -155,25 +155,33 @@ def _fused_compress_norm_rope_insert_kernel(
         q_start = token_idx - mtp_index
 
     token_offsets = tl.arange(0, WINDOW_SIZE)
+    # position 11, start 4
     start = position - WINDOW_SIZE + 1
+    # 最近的window个索引 [4, 5, 6, 7, 8, 9, 10, 11]
     gather_pos = start + token_offsets
+    # 都在[0, 12)之间，valid [1, 1, 1, 1, 1, 1, 1, 1]
     valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
+    # 新计算的mask ready_len=8 [0, 0, 0, 0, 1, 1, 1, 1]
     use_current = (gather_pos >= ready_len) & valid_pos
+    # 现在的kvscore的索引 [-4, -3, -2, -1, 0, 1, 2, 3]
     current_idx = q_start + (gather_pos - ready_len)
+    # cache的mask [1, 1, 1, 1, 0, 0, 0, 0]
+    valid_pos = valid_pos & (~use_current)
+    cache_pos = valid_pos
 
     if IS_C4:
         full_slot = tl.load(
             req_to_token + req_idx * req_to_token_stride0 + gather_pos,
-            mask=valid_pos & (~use_current),
+            mask=cache_pos,
             other=0,
         ).to(tl.int64)
-        swa_slot = tl.load(full_to_swa + full_slot, mask=valid_pos & (~use_current), other=-1).to(tl.int64)
+        swa_slot = tl.load(full_to_swa + full_slot, mask=cache_pos, other=-1).to(tl.int64)
         state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-        state_valid = valid_pos & (~use_current) & (swa_slot >= 0)
+        state_valid = cache_pos & (swa_slot >= 0)
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
     else:
         state_row = req_idx * STATE_RING + gather_pos % STATE_RING
-        state_valid = valid_pos & (~use_current)
+        state_valid = cache_pos
         head_offset = token_offsets * 0
 
     offs = tl.arange(0, BLOCK)
@@ -181,25 +189,28 @@ def _fused_compress_norm_rope_insert_kernel(
     current_mask = use_current[:, None] & dim_mask[None, :]
     state_mask = state_valid[:, None] & dim_mask[None, :]
 
+    cur_ptrs = (
+        kv_score + current_idx[:, None] * kv_score_stride0 + (head_offset[:, None] + offs[None, :]) * kv_score_stride1
+    )
     cur_kv = tl.load(
-        kv_score + current_idx[:, None] * kv_score_stride0 + (head_offset[:, None] + offs[None, :]) * kv_score_stride1,
+        cur_ptrs,
         mask=current_mask,
         other=0.0,
     )
     cur_score = tl.load(
-        kv_score
-        + current_idx[:, None] * kv_score_stride0
-        + (STATE_WIDTH + head_offset[:, None] + offs[None, :]) * kv_score_stride1,
+        cur_ptrs + STATE_WIDTH * kv_score_stride1,
         mask=current_mask,
         other=float("-inf"),
     )
+
+    state_ptrs = state_buffer + state_row[:, None] * STATE_LAST_DIM + head_offset[:, None] + offs[None, :]
     state_kv = tl.load(
-        state_buffer + state_row[:, None] * STATE_LAST_DIM + head_offset[:, None] + offs[None, :],
+        state_ptrs,
         mask=state_mask,
         other=0.0,
     )
     state_score = tl.load(
-        state_buffer + state_row[:, None] * STATE_LAST_DIM + STATE_WIDTH + head_offset[:, None] + offs[None, :],
+        state_ptrs + STATE_WIDTH,
         mask=state_mask,
         other=float("-inf"),
     )
@@ -208,12 +219,15 @@ def _fused_compress_norm_rope_insert_kernel(
     score = tl.where(current_mask, cur_score, state_score)
     score = tl.softmax(score, dim=0)
     compressed_kv = tl.sum(kv * score, axis=0)
+    # 以上得到compressed_kv
 
+    # rms_norm
     rms_w = tl.load(norm_weight + offs, mask=dim_mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_DIM
     rrms = tl.rsqrt(variance + rms_eps)
     normed = compressed_kv * rrms * rms_w
 
+    # rope
     num_pairs: tl.constexpr = BLOCK // 2
     nope_pairs: tl.constexpr = NOPE_DIM // 2
     pair_2d = tl.reshape(normed, (num_pairs, 2))
@@ -229,7 +243,7 @@ def _fused_compress_norm_rope_insert_kernel(
     new_odd = odd * cos_v + even * sin_v
     rotated = tl.interleave(new_even, new_odd)
 
-    if OUTPUT_BF16:
+    if IS_IN_INDEXER:
         # indexer-K path: emit the post-rope full HEAD_DIM vector as dense bf16 (token-indexed),
         # leaving the fp8 single-amax pack to destindex_copy_indexer_k_dsv4 (the c4_indexer_pool
         # ABI differs from the latent slab: whole-vector fp8 + one fp32 scale, no bf16 rope tail).
@@ -243,16 +257,18 @@ def _fused_compress_norm_rope_insert_kernel(
 
     n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
     n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
+    # 有待检验是否有必要
     quant_input = normed.to(tl.bfloat16).to(tl.float32)
     quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
     abs_2d = tl.abs(quant_2d)
-    block_absmax = tl.max(abs_2d, axis=1)
-    scale_exp = tl.ceil(libdevice.log2(tl.maximum(block_absmax / FP8_MAX, SCALE_MIN))).to(tl.int32)
+    block_absmax = tl.maximum(tl.max(abs_2d, axis=1), AMAX_MIN)
+    scale_exp = tl.ceil(libdevice.log2(block_absmax / FP8_MAX)).to(tl.int32)
     scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
     kv_fp8 = tl.clamp(quant_2d / scale[:, None], -FP8_MAX, FP8_MAX).to(tl.float8e4nv)
     kv_u8 = tl.reshape(kv_fp8.to(tl.uint8, bitcast=True), (BLOCK,))
     tl.store(out_buffer + data_base + offs, kv_u8, mask=offs < NOPE_DIM)
 
+    # ue8m0
     scale_idx = tl.arange(0, SCALE_BYTES)
     scale_bytes = tl.where(scale_idx < n_nope_blocks, scale_exp + 127, 0).to(tl.uint8)
     tl.store(out_buffer + scale_base + scale_idx, scale_bytes)
@@ -264,15 +280,13 @@ def _fused_compress_norm_rope_insert_kernel(
     return
 
 
-def prepare_partial_states(
+def apply_ape(
     *,
     kv_score: torch.Tensor,
     position_ids: torch.Tensor,
     ape: torch.Tensor,
     compress_ratio: int,
 ):
-    if kv_score.shape[0] == 0:
-        return
     state_width = kv_score.shape[-1] // 2
     _add_ape_to_kv_score_kernel[(kv_score.shape[0],)](
         kv_score,
@@ -301,10 +315,10 @@ def fused_compress(
     compress_ratio: int,
     cos_table: torch.Tensor,
     sin_table: torch.Tensor,
-    output_bf16: bool = False,
+    is_in_indexer: bool = False,
 ):
     mem_manager = infer_state.mem_manager
-    if output_bf16:
+    if is_in_indexer:
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
         out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
         state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
@@ -379,14 +393,14 @@ def fused_compress(
         STATE_RING=state_ring,
         ROPE_HEAD_DIM=qk_rope_head_dim,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
-        SCALE_MIN=1e-4,
+        AMAX_MIN=1e-4,
         NOPE_DIM=head_dim - qk_rope_head_dim,
         QUANT_BLOCK=64,
         SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
         PAGE_SIZE=out_page_size,
         BYTES_PER_PAGE=out_buffer.shape[-1],
         BLOCK=block_head,
-        OUTPUT_BF16=output_bf16,
+        IS_IN_INDEXER=is_in_indexer,
         num_warps=4,
     )
 

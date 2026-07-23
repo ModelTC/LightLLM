@@ -16,7 +16,7 @@ def _fwd_kernel_destindex_copy_kv_flashmla_dsv4(
     stride_kv_d,
     FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
-    SCALE_MIN: tl.constexpr,
+    AMAX_MIN: tl.constexpr,
     NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
@@ -46,8 +46,8 @@ def _fwd_kernel_destindex_copy_kv_flashmla_dsv4(
     group_mask = offs_g < NUM_GROUPS
     kv_ptrs = KV + cur_index * stride_kv_bs + (offs_g[:, None] * GROUP_SIZE + offs_e[None, :]) * stride_kv_d
     vals = tl.load(kv_ptrs, mask=group_mask[:, None], other=0.0).to(tl.float32)
-    amax = tl.max(tl.abs(vals), axis=1)
-    scale_exp = tl.ceil(libdevice.log2(tl.maximum(amax / FP8_MAX, SCALE_MIN))).to(tl.int32)
+    amax = tl.maximum(tl.max(tl.abs(vals), axis=1), AMAX_MIN)
+    scale_exp = tl.ceil(libdevice.log2(amax / FP8_MAX)).to(tl.int32)
     scale = ((scale_exp + 127) << 23).to(tl.float32, bitcast=True)
     kv_fp8 = tl.clamp(vals / scale[:, None], min=FP8_MIN, max=FP8_MAX).to(tl.float8e4nv)
     tl.store(O_fp8 + data_base + offs_g[:, None] * GROUP_SIZE + offs_e[None, :], kv_fp8, mask=group_mask[:, None])
@@ -107,7 +107,7 @@ def destindex_copy_kv_flashmla_dsv4(
         KV.stride(1),
         FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
-        SCALE_MIN=1e-4,
+        AMAX_MIN=1e-4,
         NOPE_DIM=nope_dim,
         ROPE_DIM=rope_dim,
         GROUP_SIZE=group_size,

@@ -25,7 +25,7 @@ DSV4_INDEXER_HEAD_DIM = 128  # 128
 DSV4_INDEXER_SCALE_BYTES = 4  # 4B fp32 scale
 DSV4_INDEXER_BYTES_PER_TOKEN = DSV4_INDEXER_HEAD_DIM + DSV4_INDEXER_SCALE_BYTES  # 132
 DSV4_FP8_E4M3_MAX = 448.0  # 448.0
-DSV4_FP8_SCALE_MIN = 1e-4  # 1e-4
+DSV4_FP8_AMAX_MIN = 1e-4  # 1e-4
 DSV4_SWA_PAGE_SIZE = 128  # 128 slots/page
 DSV4_C4_PAGE_SIZE = 64  # 64 slots/page
 DSV4_C128_PAGE_SIZE = 2  # 2 slots/page
@@ -89,7 +89,7 @@ class PackedPagePool:
         if loc.numel() == 0:
             return
         loc = loc.reshape(-1)
-        packed = packed.reshape(-1, self.bytes_per_token).contiguous()
+        packed = packed.reshape(-1, self.bytes_per_token)
         flat = self.buffer[layer_index].view(-1)
         data_offsets, scale_offsets = self._loc_offsets(loc)
         data_range = torch.arange(self.data_bytes_per_token, device=loc.device)
@@ -108,7 +108,7 @@ class PackedPagePool:
         scale_range = torch.arange(self.scale_bytes_per_token, device=loc.device)
         data = flat[data_offsets.unsqueeze(1) + data_range.unsqueeze(0)]
         scale = flat[scale_offsets.unsqueeze(1) + scale_range.unsqueeze(0)]
-        return torch.cat([data, scale], dim=1).contiguous()
+        return torch.cat([data, scale], dim=1)
 
 
 class DeepseekV4MemoryManager(MemoryManager):
@@ -591,11 +591,13 @@ class DeepseekV4MemoryManager(MemoryManager):
     # ------------------------------------------------------------------ packed codecs (torch reference)
     # 与 sglang/vllm 的 fp8_ds_mla 字节布局逐位对齐(ue8m0 幂次 scale)。这些 torch 实现是该 ABI 的
     # 可执行规格(单测 oracle，triton writer 与其逐字节对拍)，不可删除。
+    # torch参考，未使用
     def _pack_mla_kv(self, kv: torch.Tensor) -> torch.Tensor:
         kv = kv.reshape(-1, self.mla_head_dim)
         out = torch.empty((kv.shape[0], self.mla_bytes_per_token), dtype=torch.uint8, device=kv.device)
         nope = kv[:, : self.mla_nope_dim].float().reshape(-1, self.mla_scale_bytes - 1, self.mla_quant_group_size)
-        scale = torch.clamp(nope.abs().amax(dim=-1) / DSV4_FP8_E4M3_MAX, min=DSV4_FP8_SCALE_MIN)
+        amax = torch.clamp(nope.abs().amax(dim=-1), min=DSV4_FP8_AMAX_MIN)
+        scale = amax / DSV4_FP8_E4M3_MAX
         scale_exp = torch.ceil(torch.log2(scale)).to(torch.int32)
         scale = torch.exp2(scale_exp.float())
         nope_fp8 = torch.clamp(nope / scale.unsqueeze(-1), -DSV4_FP8_E4M3_MAX, DSV4_FP8_E4M3_MAX).to(
@@ -604,7 +606,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         out[:, : self.mla_nope_dim].copy_(nope_fp8.reshape(-1, self.mla_nope_dim).view(dtype=torch.uint8))
         rope_start = self.mla_nope_dim
         rope_end = rope_start + self.mla_rope_dim * 2
-        rope = kv[:, self.mla_nope_dim : self.mla_head_dim].contiguous().to(torch.bfloat16)
+        rope = kv[:, self.mla_nope_dim : self.mla_head_dim].to(torch.bfloat16)
         out[:, rope_start:rope_end].copy_(rope.view(dtype=torch.uint8).reshape(-1, self.mla_rope_dim * 2))
         scale_start = rope_end
         scale_end = scale_start + self.mla_scale_bytes - 1
@@ -636,10 +638,8 @@ class DeepseekV4MemoryManager(MemoryManager):
             device=indexer_k.device,
         )
         k_float = indexer_k.float()
-        scale = torch.clamp(
-            k_float.abs().amax(dim=-1, keepdim=True) / DSV4_FP8_E4M3_MAX,
-            min=DSV4_FP8_SCALE_MIN,
-        )
+        amax = torch.clamp(k_float.abs().amax(dim=-1, keepdim=True), min=DSV4_FP8_AMAX_MIN)
+        scale = amax / DSV4_FP8_E4M3_MAX
         k_fp8 = torch.clamp(k_float / scale, -DSV4_FP8_E4M3_MAX, DSV4_FP8_E4M3_MAX).to(torch.float8_e4m3fn)
         out[:, : self.indexer_head_dim].copy_(k_fp8.view(dtype=torch.uint8))
         out[:, self.indexer_head_dim :].copy_(scale.view(dtype=torch.uint8).reshape(-1, DSV4_INDEXER_SCALE_BYTES))
@@ -684,13 +684,11 @@ class DeepseekV4MemoryManager(MemoryManager):
     ):
         """同 pack_mla_kv_to_cache，但 rmsnorm + 尾部交错 rope 融合进写入 kernel
         并省掉 bf16 kv 中间量。kv 为 wkv 投影原始输出 [T, head_dim+rope_dim]。"""
-        if kv.shape[0] == 0:
-            return
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope_cuda import (
             fused_k_norm_rope_flashmla,
         )
 
-        swa_slots = self.full_to_swa_indexs[mem_index.cuda().long().reshape(-1)]
+        swa_slots = self.full_to_swa_indexs[mem_index.reshape(-1)]
         swa_slots = torch.where(swa_slots < 0, torch.full_like(swa_slots, self.swa_pool.HOLD_TOKEN_MEMINDEX), swa_slots)
         fused_k_norm_rope_flashmla(
             kv=kv,
@@ -719,7 +717,13 @@ class DeepseekV4MemoryManager(MemoryManager):
             pool.page_size,
         )
 
-    def pack_indexer_k_to_cache(self, layer_index: int, slots: torch.Tensor, indexer_k: torch.Tensor):
+    def pack_indexer_k_to_cache(
+        self,
+        layer_index: int,
+        mem_index: torch.Tensor,
+        positions: torch.Tensor,
+        indexer_k: torch.Tensor,
+    ):
         if indexer_k.shape[0] == 0:
             return
         assert self.compress_rates[layer_index] == 4, "只有 c4(CSA) 层有 indexer-K"
@@ -729,7 +733,9 @@ class DeepseekV4MemoryManager(MemoryManager):
 
         destindex_copy_indexer_k_dsv4(
             indexer_k.reshape(-1, self.indexer_head_dim),
-            slots.to(indexer_k.device),
+            mem_index.reshape(-1),
+            positions.reshape(-1),
+            self.full_to_c4_indexs,
             self.c4_indexer_pool.get_layer_buffer(self.layer_to_c4_idx[layer_index]),
             self.c4_indexer_pool.page_size,
         )

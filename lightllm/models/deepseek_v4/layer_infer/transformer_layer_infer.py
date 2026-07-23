@@ -11,7 +11,7 @@ from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.utils.vllm_utils import vllm_ops
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
 from .compressor import fused_compress as fused_compress_op
-from .compressor import prepare_partial_states
+from .compressor import apply_ape
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from ..infer_struct import DeepseekV4InferStateInfo
 import deep_gemm
@@ -456,7 +456,7 @@ class CompressorInfer:
             norm_weight = layer_weight.compressor_norm_.weight
             ape = layer_weight.compressor_ape_.weight
             head_dim = self.head_dim
-        prepare_partial_states(
+        apply_ape(
             kv_score=kv_score,
             position_ids=infer_state.position_ids,
             ape=ape,
@@ -473,7 +473,7 @@ class CompressorInfer:
             compress_ratio=self.compress_ratio,
             cos_table=cos_table,
             sin_table=sin_table,
-            output_bf16=self.is_in_indexer,
+            is_in_indexer=self.is_in_indexer,
         )
 
 
@@ -517,10 +517,6 @@ class DeepseekV4IndexInfer:
         sin_table,
         use_custom_tensor_manager=True,
     ):
-        """c4-only: compress this step's tokens into per-c4-entry indexer keys and pack them into
-        c4_indexer_pool. MUST run before build_metadata so the scorer (gather + deep_gemm.fp8_mqa_logits)
-        reads the finished entries; runs every step (incl. in the decode graph) so keys accumulate for
-        later long-context scoring. No-op on c128 / dense layers."""
         if self.compress_ratio != 4:
             return
         # Only group-end rows in this dense bf16 scratch are valid indexer keys.
@@ -538,13 +534,12 @@ class DeepseekV4IndexInfer:
 
         scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5)
         mem_manager = infer_state.mem_manager
-        positions = infer_state.position_ids
-        out_slots = mem_manager.full_to_c4_indexs[infer_state.mem_index.reshape(-1)]
-        # only group-end tokens finish a c4 entry; mask the rest to -1 so the packer skips them
-        # (mid-group tokens share the group's c4 slot -> avoids racing a finished slot).
-        completed = ((positions + 1) % 4 == 0) & (out_slots >= 0)
-        masked_slots = torch.where(completed, out_slots, torch.full_like(out_slots, -1)).to(torch.int32)
-        mem_manager.pack_indexer_k_to_cache(self.layer_idx_, masked_slots, scratch)
+        mem_manager.pack_indexer_k_to_cache(
+            self.layer_idx_,
+            infer_state.mem_index.reshape(-1),
+            infer_state.position_ids,
+            scratch,
+        )
 
     def build_metadata(
         self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
@@ -575,10 +570,6 @@ class DeepseekV4IndexInfer:
     def _indexer_q_weight(
         self, x, q_lora, infer_state: DeepseekV4InferStateInfo, layer_weight, use_custom_tensor_manager=True
     ):
-        """fp8 indexer q (mirrors deepseek3_2 NsaInfer): wq_b -> rope(last rope dims) -> 1/sqrt(d)
-        Hadamard -> per-token fp8 quant. Returns (idx_q_fp8 [T,H,d], weights [T,H]); the per-token q
-        fp8 scale and the head_dim^-0.5 * n_heads^-0.5 score scale are folded into weights -- the
-        deep_gemm.fp8_mqa_logits contract (fp8 q carries no companion scale). Replicated -> full heads."""
         # Fused: wq_b mm -> rope(last rope dims) -> 1/sqrt(d) Hadamard -> per-token fp8 quant, with the
         # per-token q scale + indexer_weight_scale folded into weights, all in ONE kernel (was 4 kernels:
         # rotary_emb_fwd + hadamard_transform + act_quant + weights mul). freqs_cis is the compress rope

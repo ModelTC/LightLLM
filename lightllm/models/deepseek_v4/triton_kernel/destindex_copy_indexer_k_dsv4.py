@@ -7,21 +7,28 @@ import triton.language as tl
 @triton.jit
 def _fwd_kernel_destindex_copy_indexer_k_dsv4(
     K,
-    Dest_loc,
+    Mem_index,
+    Positions,
+    Full_to_c4,
     O_fp8,
     O_f32,
     stride_k_bs,
     stride_k_d,
     FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
-    SCALE_MIN: tl.constexpr,
+    AMAX_MIN: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     BYTES_PER_PAGE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
-    dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
-    # negative dest (unmapped slot) is a no-op, not an OOB write into a neighboring page.
+    position = tl.load(Positions + cur_index)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        return
+
+    full_slot = tl.load(Mem_index + cur_index).to(tl.int64)
+    dest_index = tl.load(Full_to_c4 + full_slot).to(tl.int64)
     if dest_index < 0:
         return
 
@@ -30,9 +37,9 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
 
     offs_d = tl.arange(0, HEAD_DIM)
     vals = tl.load(K + cur_index * stride_k_bs + offs_d * stride_k_d).to(tl.float32)
-    amax = tl.max(tl.abs(vals), axis=0)
+    amax = tl.maximum(tl.max(tl.abs(vals), axis=0), AMAX_MIN)
     # per-token plain fp32 scale (not ue8m0), matching DeepseekV4MemoryManager._pack_indexer_k
-    scale = tl.maximum(amax / FP8_MAX, SCALE_MIN)
+    scale = amax / FP8_MAX
     k_fp8 = tl.clamp(vals / scale, min=FP8_MIN, max=FP8_MAX).to(tl.float8e4nv)
 
     data_base = page * BYTES_PER_PAGE + token_in_page * HEAD_DIM
@@ -45,27 +52,32 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
 @torch.no_grad()
 def destindex_copy_indexer_k_dsv4(
     K: torch.Tensor,
-    DestLoc: torch.Tensor,
+    MemIndex: torch.Tensor,
+    Positions: torch.Tensor,
+    FullToC4: torch.Tensor,
     O_buffer: torch.Tensor,
     page_size: int,
 ):
     """Packed indexer-K page-slab writer (DeepSeek-V4 c4/CSA layers).
 
     K: [T, 128] bf16 unquantized indexer keys.
-    DestLoc: [T] int — c4-pool-local token slots; must already be allocated by the caller.
-        Negative slots (unmapped) are skipped.
+    MemIndex: [T] int — full-token slots for the current rows.
+    Positions: [T] int — logical token positions; only c4 group-end rows are written.
+    FullToC4: [full_pool_size + 1] int — full-token slot to c4-pool slot mapping.
+        Negative mappings are skipped.
     O_buffer: [num_pages, bytes_per_page] uint8 — one layer's slab from the c4 indexer
         PackedPagePool (128B fp8 data region + 4B fp32 scale tail per token).
 
     Bit-compatible with DeepseekV4MemoryManager._pack_indexer_k + PackedPagePool.write.
     """
-    seq_len = DestLoc.shape[0]
+    seq_len = MemIndex.shape[0]
     if seq_len == 0:
         return
     head_dim, scale_bytes = 128, 4
 
     K = K.reshape(-1, head_dim)
     assert K.shape[0] == seq_len, f"Expected K shape[0]={seq_len}, got {K.shape[0]}"
+    assert Positions.numel() == seq_len, f"Expected {seq_len} positions, got {Positions.numel()}"
     assert K.dtype == torch.bfloat16, f"Expected bf16 indexer K, got {K.dtype}"
     bytes_per_page = O_buffer.shape[-1]
     assert O_buffer.dtype == torch.uint8 and O_buffer.is_contiguous()
@@ -75,15 +87,18 @@ def destindex_copy_indexer_k_dsv4(
     flat = O_buffer.view(-1)
     _fwd_kernel_destindex_copy_indexer_k_dsv4[(seq_len,)](
         K,
-        DestLoc,
+        MemIndex,
+        Positions,
+        FullToC4,
         flat.view(torch.float8_e4m3fn),
         flat.view(torch.float32),
         K.stride(0),
         K.stride(1),
         FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
-        SCALE_MIN=1e-4,
+        AMAX_MIN=1e-4,
         HEAD_DIM=head_dim,
+        COMPRESS_RATIO=4,
         PAGE_SIZE=page_size,
         BYTES_PER_PAGE=bytes_per_page,
         num_warps=1,
