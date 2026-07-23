@@ -866,7 +866,8 @@ class InferReq:
         """仅写 shm：abort 释放前保证 finish token / finish_status 可用。
 
         以本地 ``finish_status`` 为准：已正常结束则不覆盖；否则委托
-        ``Req.mark_simulated_finished``。不回写本地状态。
+        ``Req.mark_simulated_finished``（在已有输出末尾追加 EOS）。不回写本地
+        ``cur_output_len`` / ``finish_status``（本 InferReq 即将释放）。
         """
         # 本地已由 stop / eos / length 等正确结束，保留原 shm finish_status。
         if self.finish_status.is_finished():

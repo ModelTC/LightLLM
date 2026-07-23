@@ -380,9 +380,9 @@ class Req(ctypes.Structure):
         注意：会写 ``finish_status`` / ``candetoken_out_len`` 等 shm 字段，Infer 侧仅
         ``is_master_in_dp`` 节点可调用；router waiting abort 由调度进程独占写，同理。
 
-        - ``output_len > 0``：以最后一个已生成 token 为 finish token（不改写 token 内容）。
-        - ``output_len == 0``：在 ``input_len`` 处写入 EOS 占位，并视作输出长度 1。
-        - ``candetoken_out_len`` 最后写，避免 detoken 读到不完整状态。
+        无论当前 ``output_len`` 为多少，都在已有输出末尾再追加一个 EOS 作为 finish token，
+        最终输出长度变为 ``output_len + 1``。``candetoken_out_len`` 最后写，避免 detoken
+        读到不完整状态。
 
         Returns:
             是否实际写入了结束状态；shm 已 finished 时不覆盖，返回 False。
@@ -395,22 +395,20 @@ class Req(ctypes.Structure):
         if not hasattr(self, "shm_logprobs"):
             self.link_logprobs_shm_array()
 
-        if output_len > 0:
-            finish_token_index = self.input_len + output_len - 1
-        else:
-            finish_token_index = self.input_len
-            output_len = 1
-            eos_ids = get_env_start_args().eos_id
-            token_id = eos_ids[0] if eos_ids else 0
-            self.shm_prompt_ids.arr[finish_token_index] = token_id
-            self.shm_logprobs.arr["logprob"][finish_token_index] = 0.0
-            self.shm_logprobs.arr["rank"][finish_token_index] = -1
+        # Append one EOS after existing outputs: [...prompt][...gen][eos]
+        new_output_len = output_len + 1
+        finish_token_index = self.input_len + new_output_len - 1
+        eos_ids = get_env_start_args().eos_id
+        token_id = eos_ids[0] if eos_ids else 0
+        self.shm_prompt_ids.arr[finish_token_index] = token_id
+        self.shm_logprobs.arr["logprob"][finish_token_index] = 0.0
+        self.shm_logprobs.arr["rank"][finish_token_index] = -1
 
         self.finish_token_index = finish_token_index
         self.finish_status.set_status(finish_status)
-        self.shm_cur_output_len = output_len
+        self.shm_cur_output_len = new_output_len
         # candetoken_out_len 最后写，避免 detoken 提前读到不完整状态
-        self.candetoken_out_len = output_len
+        self.candetoken_out_len = new_output_len
         return True
 
     def can_release(self):

@@ -80,7 +80,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                     )
                     req_obj.finish_status.set_status(finish_status)
                     if self.is_master_in_dp:
-                        # output_len==0 时内部写 EOS 占位；>0 时用已有最后 token，不再额外 set_next。
+                        # 内部统一在已有输出末尾追加 EOS 作为 finish token。
                         req_obj.shm_req.mark_simulated_finished(
                             finish_status,
                             output_len=req_obj.cur_output_len,
