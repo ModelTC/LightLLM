@@ -108,8 +108,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
     def init_state(self):
         backend: LinearAttBackend = self.backend
         mtp_step = backend.mtp_step
-        if getattr(backend.model, "is_mtp_draft_model", False):
-            return
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
@@ -203,8 +201,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     def init_state(self):
         backend: LinearAttBackend = self.backend
         mtp_step = backend.mtp_step
-        if getattr(backend.model, "is_mtp_draft_model", False):
-            return
 
         # decode 模式下
         if mtp_step == 0:
