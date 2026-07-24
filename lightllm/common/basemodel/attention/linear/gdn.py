@@ -140,7 +140,9 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight)
+        core_attn_out = self._gdn_prefill_kernel(
+            mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight
+        )
         return core_attn_out, z
 
     def _gdn_prefill_kernel(
@@ -220,9 +222,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             device = self.infer_state.b_req_idx.device
 
             # shape 为 [att_batch_size + 1]
-            self.b1_mtp_cu_q_seq_len = torch.arange(
-                0, batch_size + 1, mtp_step + 1, dtype=torch.int32, device=device
-            )
+            self.b1_mtp_cu_q_seq_len = torch.arange(0, batch_size + 1, mtp_step + 1, dtype=torch.int32, device=device)
             # shape 为 [att_batch_size]
             self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_step + 1)[:, 0].contiguous()
             self.b_ssm_buffer_idx = (self.b_conv_buffer_idx * (mtp_step + 1)).view(att_batch_size, 1) + torch.arange(
