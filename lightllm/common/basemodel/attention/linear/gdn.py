@@ -132,8 +132,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         mixed_qkvzba: torch.Tensor = linear_att_dict["mixed_qkvzba"]
         layer_weight = linear_att_dict["layer_weight"]
         layer_num = linear_att_dict["layer_num"]
-        z_out = linear_att_dict["z_out"]
-
         backend: LinearAttBackend = self.backend
 
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
@@ -142,10 +140,8 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         if backend.mtp_step > 0:
             conv_states = conv_states[:, :, : -backend.mtp_step]
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        z_out["z"] = z
-
         core_attn_out = self._gdn_prefill_kernel(mixed_qkv, conv_states, ssm_states, a, b, self.infer_state, layer_weight)
-        return core_attn_out
+        return core_attn_out, z
 
     def _gdn_prefill_kernel(
         self,
@@ -254,8 +250,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkvzba = linear_att_dict["mixed_qkvzba"]
         layer_weight = linear_att_dict["layer_weight"]
         layer_num = linear_att_dict["layer_num"]
-        z_out = linear_att_dict["z_out"]
-
         backend: LinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
@@ -284,8 +278,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
                 self.infer_state,
                 layer_weight,
             )
-        z_out["z"] = z
-        return core_attn_out
+        return core_attn_out, z
 
     def _gdn_decode_kernel(
         self,

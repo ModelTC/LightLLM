@@ -38,34 +38,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         num_full_attention_layers = network_config["full_attention_interval"]
         self.is_linear_attention_layer = (layer_num + 1) % num_full_attention_layers != 0
-        if self.is_linear_attention_layer:
-            self._init_linear_att_control()
-        return
-
-    def _init_linear_att_control(self):
-        self._linear_z_out = {}
-
-        self._linear_prefill_dict = {
-            "mixed_qkvzba": None,
-            "layer_weight": None,
-            "layer_num": self.layer_num_,
-            "z_out": self._linear_z_out,
-        }
-        self._linear_decode_dict = {
-            "mixed_qkvzba": None,
-            "layer_weight": None,
-            "layer_num": self.layer_num_,
-            "z_out": self._linear_z_out,
-        }
-
-        self._linear_prefill_att_control = AttControl(
-            linear_att_prefill=True,
-            linear_att_prefill_dict=self._linear_prefill_dict,
-        )
-        self._linear_decode_att_control = AttControl(
-            linear_att_decode=True,
-            linear_att_decode_dict=self._linear_decode_dict,
-        )
         return
 
     def _bind_func(self):
@@ -211,7 +183,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         mixed_qkvzba: torch.Tensor,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         backend = infer_state.prefill_att_state1.backend
 
@@ -241,26 +213,20 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
             # 与 Llama/FA3 一致：通过 new_infer_state.prefill_att_state1 进入，
             # 使用 runtime 上 init_att_state() 更新过的 buffer idx，而不是
             # capture 时闭包住的 graph prefill_att_state1。
-            self._linear_prefill_dict["mixed_qkvzba"] = _mixed_qkvzba
-            self._linear_prefill_dict["layer_weight"] = layer_weight
-            tmp_o = new_infer_state.prefill_att_state1.prefill_att(
+            tmp_o, tmp_z = new_infer_state.prefill_att_state1.prefill_att(
                 q=None,
                 k=None,
                 v=None,
-                att_control=self._linear_prefill_att_control,
+                att_control=AttControl(linear_att_prefill=True, linear_att_prefill_dict={"mixed_qkvzba": _mixed_qkvzba, "layer_weight": layer_weight, "layer_num": self.layer_num_}),
                 alloc_func=self.alloc_tensor,
             )
-            # prefill_att 会把 z_out["z"] 写成新 tensor；拷回 graph buffer 后恢复引用，
-            # 供后续 graph 段里的 _linear_post 使用。
-            _z.copy_(self._linear_z_out["z"])
-            self._linear_z_out["z"] = z
             tmp_o = tmp_o.view(_o.shape)
             _o.copy_(tmp_o)
+            _z.copy_(tmp_z)
             return
 
         infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=gdn_prefill_func, after_graph=pre_capture_graph)
-        self._linear_z_out["z"] = z
-        return o
+        return o, z
 
     def context_attention_forward(
         self,
@@ -276,17 +242,15 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
 
         if torch.cuda.is_current_stream_capturing():
-            core_attn_out = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
+            core_attn_out, z = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
         else:
-            self._linear_prefill_dict["mixed_qkvzba"] = mixed_qkvzba
-            self._linear_prefill_dict["layer_weight"] = layer_weight
-            core_attn_out = infer_state.prefill_att_state1.prefill_att(
+            core_attn_out, z = infer_state.prefill_att_state1.prefill_att(
                 q=None, k=None, v=None,
-                att_control=self._linear_prefill_att_control,
+                att_control=AttControl(linear_att_prefill=True, linear_att_prefill_dict={"mixed_qkvzba": mixed_qkvzba, "layer_weight": layer_weight, "layer_num": self.layer_num_}),
                 alloc_func=self.alloc_tensor,
             )
 
-        gdn_out = self._linear_post(core_attn_out, self._linear_z_out["z"], layer_weight)
+        gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
         if self.tp_world_size_ > 1:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
@@ -303,14 +267,12 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
-        self._linear_decode_dict["mixed_qkvzba"] = mixed_qkvzba
-        self._linear_decode_dict["layer_weight"] = layer_weight
-        core_attn_out = infer_state.decode_att_state1.decode_att(
+        core_attn_out, z = infer_state.decode_att_state1.decode_att(
             q=None, k=None, v=None,
-            att_control=self._linear_decode_att_control,
+            att_control=AttControl(linear_att_decode=True, linear_att_decode_dict={"mixed_qkvzba": mixed_qkvzba, "layer_weight": layer_weight, "layer_num": self.layer_num_}),
             alloc_func=self.alloc_tensor,
         )
-        gdn_out = self._linear_post(core_attn_out, self._linear_z_out["z"], layer_weight)
+        gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
         if self.tp_world_size_ > 1:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
