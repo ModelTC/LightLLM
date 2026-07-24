@@ -336,11 +336,11 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
 
         weight_scale = torch.empty(expert_prefix or (1,), dtype=torch.float32, device=f"cuda:{device_id}")
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
+        weight_splits = torch.split(weight, out_dims, dim=-2)
+        mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
 
         if len(out_dims) > 1:
             staged_weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype, device="cpu")
-            weight_splits = torch.split(weight, out_dims, dim=-2)
-            mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
             mm_param._per_tensor_staged_weight = staged_weight
             mm_param._per_tensor_staged_loaded = [[False] * len(mm_param_list) for _ in range(num_experts)]
             mm_param._per_tensor_child_packs = mm_param_list
@@ -350,9 +350,6 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
             for idx, child_pack in enumerate(mm_param_list):
                 child_pack.per_tensor_parent_pack = mm_param
                 child_pack.per_tensor_child_index = idx
-        else:
-            weight_splits = torch.split(weight, out_dims, dim=-2)
-            mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
         return mm_param, mm_param_list
 
 
