@@ -91,11 +91,3 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-
-    def _init_att_backend1(self):
-        if getattr(self, "is_mtp_draft_model", False):
-            self.prefill_att_backend1 = None
-            self.decode_att_backend1 = None
-        else:
-            super()._init_att_backend1()
-        return
