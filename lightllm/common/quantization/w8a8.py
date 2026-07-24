@@ -36,7 +36,6 @@ LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM
 class BaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
-        # assert HAS_VLLM, "vllm are not installed, you can't use quant api of them."
         from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
         self.cache_manager = g_cache_manager
