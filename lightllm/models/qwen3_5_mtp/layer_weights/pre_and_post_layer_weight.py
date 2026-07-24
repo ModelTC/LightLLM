@@ -42,4 +42,5 @@ class Qwen3_5MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
         # Shared with the main Qwen3.5 model, injected by the model class (not loaded here).
         self.wte_weight_: EmbeddingWeight = None
         self.lm_head_weight_: LMHeadWeight = None
+        self.main_norm_weight_: NoTpGEMMANormWeight = None
         return
