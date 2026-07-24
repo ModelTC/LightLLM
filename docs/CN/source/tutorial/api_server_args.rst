@@ -447,13 +447,13 @@ PD 分离模式参数
 
     量化方法，可选值：
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
-    * ``vllm-fp8w8a8-b128``
+    * ``w8a8``
+    * ``fp8w8a8``
+    * ``fp8w8a8-pertensor``
+    * ``fp8w8a8-b128``
     * ``deepgemm-fp8w8a8-b128``
-    * ``triton-fp8w8a8-block128``
-    * ``triton-fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化
-    * ``triton-fp8w8a8g64``: 权重 per-channel 量化, group size 64
+    * ``fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化
+    * ``fp8w8a8g64``: 权重 per-channel 量化, group size 64
     * ``awq``
     * ``awq_marlin``
     * ``none`` (默认)
@@ -476,8 +476,8 @@ PD 分离模式参数
 
     ViT 量化方法，可选值：
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
+    * ``w8a8``
+    * ``fp8w8a8``
     * ``none`` (默认)
 
 .. option:: --vit_quant_cfg

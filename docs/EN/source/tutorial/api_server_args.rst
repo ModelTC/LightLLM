@@ -448,13 +448,13 @@ Quantization Parameters
 
     Quantization method, optional values:
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
-    * ``vllm-fp8w8a8-b128``
+    * ``w8a8``
+    * ``fp8w8a8``
+    * ``fp8w8a8-pertensor``
+    * ``fp8w8a8-b128``
     * ``deepgemm-fp8w8a8-b128``
-    * ``triton-fp8w8a8-block128``
-    * ``triton-fp8w8a8g128``: weight per-channel quant and activation per-group 128 quant
-    * ``triton-fp8w8a8g64``: weight per-channel quantization with group size 64
+    * ``fp8w8a8g128``: weight per-channel quant and activation per-group 128 quant
+    * ``fp8w8a8g64``: weight per-channel quantization with group size 64
     * ``awq``
     * ``awq_marlin``
     * ``none`` (default)
@@ -477,8 +477,8 @@ Quantization Parameters
 
     ViT quantization method, optional values:
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
+    * ``w8a8``
+    * ``fp8w8a8``
     * ``none`` (default)
 
 .. option:: --vit_quant_cfg
