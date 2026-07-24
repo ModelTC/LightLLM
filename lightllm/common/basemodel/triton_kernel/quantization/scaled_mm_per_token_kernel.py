@@ -148,12 +148,17 @@ def get_test_configs():
 def _get_static_key(A, B, Bscale, out_dtype):
     M, K = A.shape
     _, N = B.shape
-    return {
+    # Only extend the key for the per-tensor case so the existing per-channel configs
+    # (keyed {N, K, out_dtype}) still match their shipped cache files. Per-tensor is new
+    # and gets its own, separately-tuned cache.
+    key = {
         "N": N,
         "K": K,
-        "b_scale_kind": "tensor" if Bscale.numel() == 1 else "channel",
         "out_dtype": str(out_dtype),
     }
+    if Bscale.numel() == 1:
+        key["b_scale_kind"] = "tensor"
+    return key
 
 
 @autotune(

@@ -16,11 +16,19 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 
 # fp8 GEMM backend: LIGHTLLM_FP8_GEMM = auto | cutlass | sgl | triton (auto: cutlass > sgl > triton).
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
+_FP8_GEMM_AVAIL = {"cutlass": HAS_VLLM, "sgl": _HAS_SGL_FP8, "triton": True}
 _FP8_GEMM_BACKEND = os.getenv("LIGHTLLM_FP8_GEMM", "auto").lower()
-if _FP8_GEMM_BACKEND in ("cutlass", "sgl", "triton"):
+if _FP8_GEMM_BACKEND == "auto":
+    _FP8_BACKEND = next(b for b in ("cutlass", "sgl", "triton") if _FP8_GEMM_AVAIL[b])
+elif _FP8_GEMM_BACKEND in _FP8_GEMM_AVAIL:
+    if not _FP8_GEMM_AVAIL[_FP8_GEMM_BACKEND]:
+        raise RuntimeError(
+            f"LIGHTLLM_FP8_GEMM={_FP8_GEMM_BACKEND} requested, but its kernel is not available "
+            f"(cutlass needs vllm, sgl needs sgl_kernel.fp8_scaled_mm). Use 'auto' to fall back."
+        )
     _FP8_BACKEND = _FP8_GEMM_BACKEND
-else:  # auto: Cutlass > sgl_kernel > triton, by availability
-    _FP8_BACKEND = "cutlass" if HAS_VLLM else ("sgl" if _HAS_SGL_FP8 else "triton")
+else:
+    raise ValueError(f"LIGHTLLM_FP8_GEMM={_FP8_GEMM_BACKEND!r} unsupported; use auto|cutlass|sgl|triton")
 
 
 if HAS_VLLM:
