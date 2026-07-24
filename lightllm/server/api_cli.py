@@ -681,6 +681,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
     )
     parser.add_argument(
+        "--enable_prefill_eplb",
+        action="store_true",
+        help="""Enable online expert load balancing for prefill only.""",
+    )
+    parser.add_argument(
+        "--prefill_eplb_num_redundant_experts",
+        type=int,
+        default=0,
+        help="""Total redundant physical experts per MoE layer used by prefill EPLB.
+            The value must be positive and divisible by the EP world size.""",
+    )
+    parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
         help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",
