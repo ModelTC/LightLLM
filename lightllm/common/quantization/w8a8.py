@@ -228,7 +228,7 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
         parent_pack = weight_pack.per_tensor_parent_pack
-        # Single-part weights do not need deferred staging; the base loader will call this class's quantize().
+        # Single-part weights do not need CPU staging; the base loader will call this class's quantize().
         if parent_pack is None:
             super().load_weight(weight, weight_pack)
             return
@@ -238,16 +238,17 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
                 return
             child_idx = weight_pack.per_tensor_child_index
             expert_idx = weight_pack.per_tensor_expert_index
+            # Copy this shard into the full CPU weight before doing per-tensor quantization.
             staged_weight = parent_pack._per_tensor_staged_weight
             if staged_weight.ndim == 3:
                 staged_weight = staged_weight[expert_idx]
             staged_weight = torch.split(staged_weight, parent_pack._per_tensor_out_dims, dim=-2)[child_idx]
             staged_weight.copy_(weight.to(dtype=staged_weight.dtype))
             parent_pack._per_tensor_staged_loaded[expert_idx][child_idx] = True
-            self._try_finalize_deferred_weight(parent_pack)
+            self._try_finalize_staged_weight(parent_pack)
         return
 
-    def _try_finalize_deferred_weight(self, parent_pack: WeightPack) -> bool:
+    def _try_finalize_staged_weight(self, parent_pack: WeightPack) -> bool:
         if parent_pack._per_tensor_finalized:
             return True
         staged_loaded = parent_pack._per_tensor_staged_loaded
@@ -255,14 +256,16 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         if not all_loaded:
             return False
 
+        # Quantize once after all split shards are present, so the scale is computed on the full tensor.
         self.quantize(parent_pack._per_tensor_staged_weight, parent_pack)
         parent_pack.load_ok = [True, True, True]
         parent_pack._per_tensor_finalized = True
-        self._clear_deferred_weight_state(parent_pack)
+        self._clear_staged_weight_state(parent_pack)
         return True
 
-    def _clear_deferred_weight_state(self, parent_pack: WeightPack) -> None:
+    def _clear_staged_weight_state(self, parent_pack: WeightPack) -> None:
         child_packs = parent_pack._per_tensor_child_packs
+        # Drop the temporary CPU tensor and reset child packs to normal GPU views after finalization.
         del parent_pack._per_tensor_staged_weight
         del parent_pack._per_tensor_staged_loaded
         del parent_pack._per_tensor_child_packs
@@ -340,6 +343,7 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
 
         if len(out_dims) > 1:
+            # Split weights share one final GPU tensor, but load into CPU first to get one per-tensor scale.
             staged_weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype, device="cpu")
             mm_param._per_tensor_staged_weight = staged_weight
             mm_param._per_tensor_staged_loaded = [[False] * len(mm_param_list) for _ in range(num_experts)]

@@ -10,8 +10,8 @@ class WeightPack:
     weight: Optional[torch.Tensor] = None
     weight_scale: Optional[torch.Tensor] = None
     weight_zero_point: Optional[torch.Tensor] = None
-    # Optional context for per-tensor quantization of split weights. parent_pack is the final
-    # WeightPack to load, while child_index and expert_index locate this shard in its staged CPU weight.
+    # For split per-tensor weights, child packs write into the parent's CPU staged weight first.
+    # The parent pack is the final GPU weight pack, and the indexes locate each child/expert slice.
     per_tensor_parent_pack: Optional["WeightPack"] = None
     per_tensor_child_index: Optional[int] = None
     per_tensor_expert_index: int = 0
