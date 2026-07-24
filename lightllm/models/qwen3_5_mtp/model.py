@@ -69,6 +69,7 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
         # Shared with the main Qwen3.5 model (mtp_use_dedicated_embeddings: false).
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
+        self.pre_post_weight.main_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         return
 
     def _init_infer_layer(self, start_layer_index=None):
