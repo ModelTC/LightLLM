@@ -603,10 +603,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-pertensor | triton-fp8w8a8-block128 | awq | awq_marlin |
-                        | triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
-                        triton-fp8w8a8g64 (weight perchannel quantization with group size 64)""",
+        help="""Quantization method: w8a8 | fp8w8a8 | fp8w8a8-pertensor |
+                        fp8w8a8-b128 | deepgemm-fp8w8a8-b128 | awq | awq_marlin |
+                        fp8w8a8g128 (weight perchannel quant and act per group quant) |
+                        fp8w8a8g64 (weight perchannel quantization with group size 64)""",
     )
     parser.add_argument(
         "--quant_cfg",
@@ -627,7 +627,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--vit_quant_type",
         type=str,
         default="none",
-        help="""Quantization method for ViT: vllm-w8a8 | vllm-fp8w8a8""",
+        help="""Quantization method for ViT: w8a8 | fp8w8a8""",
     )
     parser.add_argument(
         "--vit_quant_cfg",
