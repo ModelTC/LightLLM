@@ -4,6 +4,7 @@ import os
 import gc
 import copy
 import json
+import threading
 import torch
 import torch.nn.functional as F
 import triton
@@ -59,6 +60,8 @@ class TpPartBaseModel:
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
+        self._expert_update_lock = threading.RLock()
+        self.prefill_eplb_manager = None
         self.run_mode = kvargs["run_mode"]
         self.weight_dir_ = kvargs["weight_dir"]
         self.max_total_token_num = kvargs["max_total_token_num"]
@@ -341,13 +344,19 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
-        model_input.to_cuda()
-        assert model_input.mem_indexes.is_cuda
+        with self._expert_update_lock:
+            model_input.to_cuda()
+            assert model_input.mem_indexes.is_cuda
 
-        if model_input.is_prefill:
-            return self._prefill(model_input)
-        else:
+            if model_input.is_prefill:
+                model_output = self._prefill(model_input)
+                self._step_prefill_eplb()
+                return model_output
             return self._decode(model_input)
+
+    def _step_prefill_eplb(self):
+        if self.prefill_eplb_manager is not None:
+            self.prefill_eplb_manager.step_after_prefill()
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
@@ -746,6 +755,15 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
+        with self._expert_update_lock:
+            model_output = self._microbatch_overlap_prefill(
+                model_input0,
+                model_input1,
+            )
+            self._step_prefill_eplb()
+            return model_output
+
+    def _microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
         model_input0.to_cuda()
         model_input1.to_cuda()
 
@@ -837,6 +855,13 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
+        with self._expert_update_lock:
+            return self._microbatch_overlap_decode(
+                model_input0,
+                model_input1,
+            )
+
+    def _microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
         model_input0.to_cuda()
         model_input1.to_cuda()
         assert self.args.enable_tpsp_mix_mode

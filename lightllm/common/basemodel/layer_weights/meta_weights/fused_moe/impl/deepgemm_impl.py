@@ -20,6 +20,10 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 from lightllm.common.basemodel.triton_kernel.fused_moe.ep_balance import accumulate_ep_balance
 from lightllm.common.basemodel.triton_kernel.fused_moe.force_balanced_routing import force_balanced_routing
+from lightllm.common.basemodel.triton_kernel.fused_moe.prefill_eplb import (
+    logical_to_primary_physical,
+    prefill_eplb_map,
+)
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -69,14 +73,30 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 world_size=self.global_world_size_,
             )
         if self.redundancy_expert_num > 0:
-            redundancy_topk_ids_repair(
-                topk_ids=topk_ids,
-                redundancy_expert_ids=self.redundancy_expert_ids_tensor,
-                ep_expert_num=self.ep_n_routed_experts,
-                global_rank=self.global_rank_,
-                expert_counter=self.routed_expert_counter_tensor,
-                enable_counter=self.auto_update_redundancy_expert,
-            )
+            if self.enable_prefill_eplb:
+                if is_prefill:
+                    prefill_eplb_map(
+                        topk_ids,
+                        self.prefill_eplb_logical_to_physical_map,
+                        self.prefill_eplb_logical_replica_count,
+                        self.routed_expert_counter_tensor,
+                        record_load=True,
+                    )
+                else:
+                    logical_to_primary_physical(
+                        topk_ids,
+                        experts_per_rank=self.ep_n_routed_experts,
+                        redundant_experts_per_rank=self.redundancy_expert_num,
+                    )
+            else:
+                redundancy_topk_ids_repair(
+                    topk_ids=topk_ids,
+                    redundancy_expert_ids=self.redundancy_expert_ids_tensor,
+                    ep_expert_num=self.ep_n_routed_experts,
+                    global_rank=self.global_rank_,
+                    expert_counter=self.routed_expert_counter_tensor,
+                    enable_counter=self.auto_update_redundancy_expert,
+                )
         return topk_weights, topk_ids
 
     def _fused_experts(

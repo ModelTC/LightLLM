@@ -169,6 +169,24 @@ def get_ep_balance_log_interval():
     return interval
 
 
+@lru_cache(maxsize=None)
+def get_prefill_eplb_step_interval():
+    """Return the number of prefill forwards between EPLB attempts."""
+    interval = int(os.getenv("LIGHTLLM_PREFILL_EPLB_STEP_INTERVAL", 20))
+    if interval <= 0:
+        raise ValueError("LIGHTLLM_PREFILL_EPLB_STEP_INTERVAL must be greater than 0")
+    return interval
+
+
+@lru_cache(maxsize=None)
+def get_prefill_eplb_max_rebalances():
+    """Return the maximum number of online prefill expert rearrangements."""
+    count = int(os.getenv("LIGHTLLM_PREFILL_EPLB_MAX_REBALANCES", 1))
+    if count < 0:
+        raise ValueError("LIGHTLLM_PREFILL_EPLB_MAX_REBALANCES must be greater than or equal to 0")
+    return count
+
+
 def _get_force_balanced_routing_ratio(env_name: str) -> float:
     ratio = float(os.getenv(env_name, 0.0))
     if not 0.0 <= ratio <= 1.0:

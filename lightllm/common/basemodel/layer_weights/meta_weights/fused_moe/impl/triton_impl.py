@@ -16,6 +16,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         redundancy_expert_ids_tensor: torch.Tensor,
         routed_expert_counter_tensor: torch.Tensor,
         auto_update_redundancy_expert: bool,
+        enable_prefill_eplb: bool,
+        prefill_eplb_logical_to_physical_map: Optional[torch.Tensor],
+        prefill_eplb_logical_replica_count: Optional[torch.Tensor],
     ):
         super().__init__(
             n_routed_experts=n_routed_experts,
@@ -26,6 +29,9 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             redundancy_expert_ids_tensor=redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=routed_expert_counter_tensor,
             auto_update_redundancy_expert=auto_update_redundancy_expert,
+            enable_prefill_eplb=enable_prefill_eplb,
+            prefill_eplb_logical_to_physical_map=prefill_eplb_logical_to_physical_map,
+            prefill_eplb_logical_replica_count=prefill_eplb_logical_replica_count,
         )
 
     def create_workspace(self):

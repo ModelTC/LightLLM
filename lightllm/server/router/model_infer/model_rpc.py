@@ -29,6 +29,9 @@ from lightllm.server.router.model_infer.mode_backend import (
 )
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import EPBalanceMonitor
+from lightllm.server.router.model_infer.mode_backend.prefill_eplb_manager import (
+    PrefillEPLBManager,
+)
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
@@ -101,12 +104,18 @@ class ModelRpcServer(rpyc.Service):
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
 
-        # only deepseekv3 can support auto_update_redundancy_expert
-        if self.args.auto_update_redundancy_expert:
+        if self.args.enable_prefill_eplb:
+            self.prefill_eplb_manager = PrefillEPLBManager(self.backend.model)
+            self.backend.model.prefill_eplb_manager = self.prefill_eplb_manager
+            self.redundancy_expert_manager = None
+            logger.info("init prefill_eplb_manager")
+        elif self.args.auto_update_redundancy_expert:
             self.redundancy_expert_manager = RedundancyExpertManager(self.backend.model)
             logger.info("init redundancy_expert_manager")
+            self.prefill_eplb_manager = None
         else:
             self.redundancy_expert_manager = None
+            self.prefill_eplb_manager = None
         self.ep_balance_monitor = EPBalanceMonitor(self.backend.model) if self.args.enable_ep_moe else None
         return
 

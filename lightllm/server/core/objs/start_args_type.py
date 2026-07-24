@@ -157,6 +157,8 @@ class StartArgs:
     enable_ep_moe: bool = field(default=False)
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
+    enable_prefill_eplb: bool = field(default=False)
+    prefill_eplb_num_redundant_experts: int = field(default=0)
     enable_fused_shared_experts: bool = field(default=False)
     mtp_mode: Optional[str] = field(
         default=None,

@@ -9,6 +9,10 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
     SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.prefill_eplb import (
+    build_initial_redundant_expert_ids,
+    build_logical_to_physical_map,
+)
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
@@ -67,6 +71,9 @@ class FusedMoeWeight(BaseWeightTpl):
             redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
+            enable_prefill_eplb=self.enable_prefill_eplb,
+            prefill_eplb_logical_to_physical_map=self.prefill_eplb_logical_to_physical_map,
+            prefill_eplb_logical_replica_count=self.prefill_eplb_logical_replica_count,
         )
         self.fuse_moe_impl.ep_balance_counters = self.ep_balance_counters
         self.lock = threading.Lock()
@@ -82,9 +89,40 @@ class FusedMoeWeight(BaseWeightTpl):
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
     def _init_redundancy_expert_params(self):
-        self.redundancy_expert_num = get_redundancy_expert_num()
-        self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
-        self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
+        args = get_env_start_args()
+        self.enable_prefill_eplb = args.enable_prefill_eplb
+        self.auto_update_redundancy_expert: bool = args.auto_update_redundancy_expert
+        self.prefill_eplb_logical_to_physical_map = None
+        self.prefill_eplb_logical_replica_count = None
+
+        if self.enable_prefill_eplb:
+            assert self.enable_ep_moe, "prefill EPLB requires --enable_ep_moe"
+            assert not self.auto_update_redundancy_expert, (
+                "--enable_prefill_eplb and --auto_update_redundancy_expert " "cannot be enabled together"
+            )
+            total_redundant = args.prefill_eplb_num_redundant_experts
+            assert total_redundant > 0, "--prefill_eplb_num_redundant_experts must be greater than 0"
+            assert total_redundant % self.global_world_size == 0, (
+                "--prefill_eplb_num_redundant_experts must be divisible by " "the EP world size"
+            )
+            self.redundancy_expert_num = total_redundant // self.global_world_size
+            all_initial_ids = build_initial_redundant_expert_ids(
+                self.n_routed_experts,
+                self.global_world_size,
+                self.redundancy_expert_num,
+            )
+            self.redundancy_expert_ids = all_initial_ids[self.global_rank_].tolist()
+            (logical_to_physical, logical_replica_count,) = build_logical_to_physical_map(
+                all_initial_ids,
+                self.n_routed_experts,
+            )
+            self.prefill_eplb_logical_to_physical_map = logical_to_physical.cuda()
+            self.prefill_eplb_logical_replica_count = logical_replica_count.cuda()
+        else:
+            self.redundancy_expert_num = get_redundancy_expert_num()
+            self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
+
+        assert len(self.redundancy_expert_ids) == self.redundancy_expert_num
         self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
         self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
         # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
