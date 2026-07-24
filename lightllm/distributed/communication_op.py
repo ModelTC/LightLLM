@@ -109,6 +109,7 @@ class DistributeGroupManager:
         self.groups = []
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
+        self.prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
@@ -145,6 +146,7 @@ class DistributeGroupManager:
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
+            self.prefill_moe_workspace = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             return
@@ -162,22 +164,24 @@ class DistributeGroupManager:
             hidden=self.ll_hidden,
             num_topk=num_experts_per_tok,
             use_fp8_dispatch=True,
-            allow_multiple_reduction=False,
+            allow_multiple_reduction=True,
         )
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
-        if not is_sm100_gpu():
-            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
-            )
-            self.ep_low_latency_buffer = deep_ep.Buffer(
-                deepep_group,
-                int(1e9),
-                num_rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=(self.ll_num_experts // global_world_size),
-            )
-        else:
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+        )
+        self.ep_low_latency_buffer = deep_ep.Buffer(
+            deepep_group,
+            num_rdma_bytes=num_rdma_bytes,
+            low_latency_mode=True,
+            num_qps_per_rank=(self.ll_num_experts // global_world_size),
+        )
+        # 当前rank的low-latency RDMA通信空间在prefill阶段处于空闲状态，将其复用为prefill MoE计算的临时工作区，降低峰值显存占用。
+        self.prefill_moe_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
+            torch.uint8, use_rdma_buffer=True
+        )
+        if is_sm100_gpu():
             if moe_intermediate_size is None:
                 raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
 
@@ -212,7 +216,8 @@ class DistributeGroupManager:
 
     def clear_deepep_buffer(self):
         """
-        Prefill after using ElasticBuffer may leave the legacy low-latency buffer dirty for decode.
+        Prefill MoE compute reuses the low-latency RDMA buffer as workspace.
+        Clean it before the buffer is used by low-latency decode kernels.
         """
         if self.ep_low_latency_buffer is not None:
             self.ep_low_latency_buffer.clean_low_latency_buffer(
