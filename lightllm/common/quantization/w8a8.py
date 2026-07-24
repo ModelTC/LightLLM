@@ -1,4 +1,5 @@
 import os
+import threading
 import torch
 import torch.nn.functional as F
 from typing import Optional, List, Union, Tuple
@@ -30,36 +31,6 @@ LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM
     "TRUE",
     "1",
 ]
-
-FP8_E4M3_MAX = 448.0
-
-
-def _fp8_per_tensor_quant(weight: torch.Tensor, device_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    weight = weight.float().cuda(device_id)
-    if weight.ndim == 3:
-        scale = weight.abs().amax(dim=(-1, -2)) / FP8_E4M3_MAX
-    else:
-        scale = weight.abs().max() / FP8_E4M3_MAX
-    scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
-    scale_view = scale.reshape(-1, 1, 1) if weight.ndim == 3 else scale
-    qweight = _fp8_quant_with_scale(weight, scale_view)
-    return qweight, scale.reshape(-1)
-
-
-def _fp8_quant_with_scale(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    return (weight / scale).clamp(min=-FP8_E4M3_MAX, max=FP8_E4M3_MAX).to(dtype=torch.float8_e4m3fn)
-
-
-def _copy_scale_with_broadcast(dst: torch.Tensor, src: torch.Tensor) -> None:
-    if dst.numel() == src.numel():
-        dst.copy_(src.reshape_as(dst))
-    elif src.numel() == 1:
-        if dst.dim() == 0:
-            dst.copy_(src.reshape(()))
-        else:
-            dst.copy_(src.reshape(1).expand_as(dst))
-    else:
-        raise ValueError(f"can not copy scale with shape {tuple(src.shape)} to {tuple(dst.shape)}")
 
 
 class BaseQuantizationMethod(QuantizationMethod):
@@ -230,56 +201,78 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
+    def _fp8_per_tensor_quant(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        weight = weight.float().cuda(self.device_id_)
+        fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
+        if weight.ndim == 3:
+            scale = weight.abs().amax(dim=(-1, -2)) / fp8_e4m3_max
+        else:
+            scale = weight.abs().max() / fp8_e4m3_max
+        scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
+        scale_view = scale.reshape(-1, 1, 1) if weight.ndim == 3 else scale
+        qweight = (weight / scale_view).clamp(min=-fp8_e4m3_max, max=fp8_e4m3_max).to(dtype=torch.float8_e4m3fn)
+        return qweight, scale.reshape(-1)
+
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
         if weight.ndim == 3 and output.weight_scale is not None and output.weight_scale.numel() == weight.shape[0]:
             for expert_idx in range(weight.shape[0]):
-                qweight, weight_scale = _fp8_per_tensor_quant(weight[expert_idx], self.device_id_)
+                qweight, weight_scale = self._fp8_per_tensor_quant(weight[expert_idx])
                 output.weight[expert_idx].copy_(qweight)
                 output.weight_scale[expert_idx].copy_(weight_scale.reshape(()))
             return
 
-        qweight, weight_scale = _fp8_per_tensor_quant(weight, self.device_id_)
+        qweight, weight_scale = self._fp8_per_tensor_quant(weight)
         output.weight.copy_(qweight)
-        _copy_scale_with_broadcast(output.weight_scale, weight_scale)
+        output.weight_scale.copy_(weight_scale.reshape_as(output.weight_scale))
         return
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
-        parent_pack = getattr(weight_pack, "_fp8_pt_parent_pack", None)
+        parent_pack = weight_pack.per_tensor_parent_pack
+        # Single-part weights do not need deferred staging; the base loader will call this class's quantize().
         if parent_pack is None:
             super().load_weight(weight, weight_pack)
             return
 
-        staged_weight = weight_pack._fp8_pt_staged_weight
-        staged_weight.copy_(weight.to(device=staged_weight.device, dtype=staged_weight.dtype, non_blocking=True))
-        loaded_index = weight_pack._fp8_pt_child_index
-        if hasattr(weight_pack, "_fp8_pt_expert_index"):
-            loaded_index = (weight_pack._fp8_pt_expert_index, loaded_index)
-        parent_pack._fp8_pt_staged_loaded[loaded_index] = True
-        self._try_finalize_deferred_weight(parent_pack)
+        with parent_pack._per_tensor_staged_lock:
+            if parent_pack._per_tensor_finalized:
+                return
+            child_idx = weight_pack.per_tensor_child_index
+            expert_idx = weight_pack.per_tensor_expert_index
+            staged_weight = parent_pack._per_tensor_staged_weight
+            if staged_weight.ndim == 3:
+                staged_weight = staged_weight[expert_idx]
+            staged_weight = torch.split(staged_weight, parent_pack._per_tensor_out_dims, dim=-2)[child_idx]
+            staged_weight.copy_(weight.to(dtype=staged_weight.dtype))
+            parent_pack._per_tensor_staged_loaded[expert_idx][child_idx] = True
+            self._try_finalize_deferred_weight(parent_pack)
         return
 
     def _try_finalize_deferred_weight(self, parent_pack: WeightPack) -> bool:
-        if getattr(parent_pack, "_fp8_pt_finalized", False):
+        if parent_pack._per_tensor_finalized:
             return True
-        staged_loaded = parent_pack._fp8_pt_staged_loaded
-        if isinstance(staged_loaded, torch.Tensor):
-            all_loaded = bool(staged_loaded.all().item())
-        else:
-            all_loaded = all(staged_loaded)
+        staged_loaded = parent_pack._per_tensor_staged_loaded
+        all_loaded = all(all(expert_loaded) for expert_loaded in staged_loaded)
         if not all_loaded:
             return False
 
-        self.quantize(parent_pack._fp8_pt_staged_weight, parent_pack)
+        self.quantize(parent_pack._per_tensor_staged_weight, parent_pack)
         parent_pack.load_ok = [True, True, True]
-        parent_pack._fp8_pt_finalized = True
-        parent_pack._fp8_pt_staged_weight = None
-        for child_pack in parent_pack._fp8_pt_child_packs:
-            child_pack.load_ok = [True, True, True]
-            child_pack._fp8_pt_staged_weight = None
-            for expert_child_pack in getattr(child_pack, "_fp8_pt_expert_child_packs", []):
-                expert_child_pack.load_ok = [True, True, True]
-                expert_child_pack._fp8_pt_staged_weight = None
+        parent_pack._per_tensor_finalized = True
+        self._clear_deferred_weight_state(parent_pack)
         return True
+
+    def _clear_deferred_weight_state(self, parent_pack: WeightPack) -> None:
+        child_packs = parent_pack._per_tensor_child_packs
+        del parent_pack._per_tensor_staged_weight
+        del parent_pack._per_tensor_staged_loaded
+        del parent_pack._per_tensor_child_packs
+        del parent_pack._per_tensor_out_dims
+        for child_pack in child_packs:
+            child_pack.load_ok = [True, True, True]
+            child_pack.per_tensor_parent_pack = None
+            child_pack.per_tensor_child_index = None
+            child_pack.per_tensor_expert_index = 0
+        return
 
     def apply(
         self,
@@ -343,39 +336,23 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
 
         weight_scale = torch.empty(expert_prefix or (1,), dtype=torch.float32, device=f"cuda:{device_id}")
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
-        weight_splits = torch.split(weight, out_dims, dim=-2)
-        mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
 
         if len(out_dims) > 1:
             staged_weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype, device="cpu")
-            staged_splits = torch.split(staged_weight, out_dims, dim=-2)
-            mm_param._fp8_pt_staged_weight = staged_weight
-            if num_experts > 1:
-                mm_param._fp8_pt_staged_loaded = torch.zeros(
-                    (num_experts, len(mm_param_list)), dtype=torch.bool, device="cpu"
-                )
-            else:
-                mm_param._fp8_pt_staged_loaded = [False] * len(mm_param_list)
-            mm_param._fp8_pt_child_packs = mm_param_list
-            mm_param._fp8_pt_finalized = False
-            for idx, (child_pack, staged_split) in enumerate(zip(mm_param_list, staged_splits)):
-                child_pack._fp8_pt_parent_pack = mm_param
-                child_pack._fp8_pt_child_index = idx
-                child_pack._fp8_pt_staged_weight = staged_split
-                if num_experts > 1:
-                    child_pack._fp8_pt_expert_child_packs = []
-                    child_pack._fp8_pt_get_expert = child_pack.get_expert
-
-                    def _get_deferred_expert(expert_idx, _child_pack=child_pack):
-                        expert_child_pack = _child_pack._fp8_pt_get_expert(expert_idx)
-                        expert_child_pack._fp8_pt_parent_pack = _child_pack._fp8_pt_parent_pack
-                        expert_child_pack._fp8_pt_child_index = _child_pack._fp8_pt_child_index
-                        expert_child_pack._fp8_pt_expert_index = expert_idx
-                        expert_child_pack._fp8_pt_staged_weight = _child_pack._fp8_pt_staged_weight[expert_idx]
-                        _child_pack._fp8_pt_expert_child_packs.append(expert_child_pack)
-                        return expert_child_pack
-
-                    child_pack.get_expert = _get_deferred_expert
+            weight_splits = torch.split(weight, out_dims, dim=-2)
+            mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
+            mm_param._per_tensor_staged_weight = staged_weight
+            mm_param._per_tensor_staged_loaded = [[False] * len(mm_param_list) for _ in range(num_experts)]
+            mm_param._per_tensor_child_packs = mm_param_list
+            mm_param._per_tensor_out_dims = out_dims
+            mm_param._per_tensor_finalized = False
+            mm_param._per_tensor_staged_lock = threading.Lock()
+            for idx, child_pack in enumerate(mm_param_list):
+                child_pack.per_tensor_parent_pack = mm_param
+                child_pack.per_tensor_child_index = idx
+        else:
+            weight_splits = torch.split(weight, out_dims, dim=-2)
+            mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
         return mm_param, mm_param_list
 
 
