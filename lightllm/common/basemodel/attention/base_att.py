@@ -70,6 +70,11 @@ class AttControl:
     nsa_prefill_dict: Dict = None
     nsa_decode: bool = False
     nsa_decode_dict: Dict = None
+    # linear attention 专用传参项
+    linear_att_prefill: bool = False
+    linear_att_prefill_dict: Dict = None
+    linear_att_decode: bool = False
+    linear_att_decode_dict: Dict = None
 
 
 @dataclass

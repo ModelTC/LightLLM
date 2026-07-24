@@ -43,7 +43,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             return torch.empty(size, device="cuda", dtype=torch.int8)
 
         # Set Triton allocator for TMA descriptors
-        # This is required for kernels in qwen3next/triton_kernel/fla/ops/solve_tril.py
+        # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py
         triton.set_allocator(_triton_allocator)
         logger.info("Triton allocator set for Qwen3Next model")
         return
@@ -103,4 +103,17 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         self.req_manager = ReqManagerForMamba(
             self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
+        return
+
+    def _init_att_backend1(self):
+        # MTP draft models only keep full-attention layers and reuse the main
+        # model's managers, so they do not need LinearAttBackend.
+        if getattr(self, "is_mtp_draft_model", False):
+            self.prefill_att_backend1 = None
+            self.decode_att_backend1 = None
+            return
+        from lightllm.common.basemodel.attention.linear.gdn import LinearAttBackend
+
+        self.prefill_att_backend1 = LinearAttBackend(model=self)
+        self.decode_att_backend1 = LinearAttBackend(model=self)
         return
