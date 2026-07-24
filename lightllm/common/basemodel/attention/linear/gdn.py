@@ -3,12 +3,14 @@ import torch
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
-from lightllm.models.qwen3next.triton_kernel.causal_conv1d import causal_conv1d_fn
-from lightllm.models.qwen3next.triton_kernel.fused_gdn_gating import fused_gdn_gating
-from lightllm.models.qwen3next.triton_kernel.fla.ops import chunk_gated_delta_rule
-from lightllm.models.qwen3next.triton_kernel.gdn_decode_pack import conv_pack_gdn_decode_inputs
-from lightllm.models.qwen3next.triton_kernel.mtp_fused_recurrent import mtp_fused_recurrent_gated_delta_rule
-from lightllm.models.qwen3next.triton_kernel.fla.ops import fused_recurrent_gated_delta_rule
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
+from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
+from lightllm.common.basemodel.triton_kernel.linear_att.gdn_decode_pack import conv_pack_gdn_decode_inputs
+from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
+    mtp_fused_recurrent_gated_delta_rule,
+)
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -333,7 +335,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
-        from lightllm.models.qwen3next.triton_kernel.causal_conv1d_spec import (
+        from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_spec import (
             causal_conv1d_update as causal_conv1d_update_spec,
         )
 

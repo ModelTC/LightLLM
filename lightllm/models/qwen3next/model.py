@@ -43,7 +43,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             return torch.empty(size, device="cuda", dtype=torch.int8)
 
         # Set Triton allocator for TMA descriptors
-        # This is required for kernels in qwen3next/triton_kernel/fla/ops/solve_tril.py
+        # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py
         triton.set_allocator(_triton_allocator)
         logger.info("Triton allocator set for Qwen3Next model")
         return
