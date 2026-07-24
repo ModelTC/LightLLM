@@ -26,11 +26,13 @@ class NormalMemOperator(BaseMemManagerOperator):
 
     def load_cpu_cache_to_gpu(
         self,
+        move_token_num: int,
         mem_indexes: torch.Tensor,
         page_indexes: torch.Tensor,
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
+        assert move_token_num <= len(mem_indexes)
         assert mem_indexes.is_cuda and page_indexes.is_cuda
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
