@@ -3,7 +3,7 @@ from typing import Optional
 import pytest
 import torch
 
-from lightllm.models.qwen3next.triton_kernel.causal_conv1d_spec import causal_conv1d_update
+from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_spec import causal_conv1d_update
 
 
 def causal_conv1d_ref(

@@ -1,10 +1,10 @@
 import pytest
 import torch
 
-from lightllm.models.qwen3next.triton_kernel.fla.ops.fused_recurrent import (
+from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
-from lightllm.models.qwen3next.triton_kernel.mtp_fused_recurrent import (
+from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
     mtp_fused_recurrent_gated_delta_rule,
 )
 
