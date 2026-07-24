@@ -218,12 +218,12 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
             for expert_idx in range(weight.shape[0]):
                 qweight, weight_scale = self._fp8_per_tensor_quant(weight[expert_idx])
                 output.weight[expert_idx].copy_(qweight)
-                output.weight_scale[expert_idx].copy_(weight_scale.reshape(()))
+                output.weight_scale[expert_idx : expert_idx + 1].copy_(weight_scale.reshape(-1))
             return
 
         qweight, weight_scale = self._fp8_per_tensor_quant(weight)
         output.weight.copy_(qweight)
-        output.weight_scale.copy_(weight_scale.reshape_as(output.weight_scale))
+        output.weight_scale.copy_(weight_scale)
         return
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
