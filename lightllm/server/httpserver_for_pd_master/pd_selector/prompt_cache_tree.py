@@ -26,32 +26,32 @@ def _shared_prefix_count(a: str, b: str) -> int:
     return matched
 
 
-def sample_prompt_key(text: str, sample_stride: int) -> str:
-    """从 prompt 中按固定步长抽字符，作为前缀匹配 key。"""
+def sample_prompt_cache_key(text: str, sample_stride: int) -> str:
+    """从 prompt 中按固定步长抽字符，作为 prompt cache 前缀匹配 key。"""
     if sample_stride <= 1 or not text:
         return text
     return text[::sample_stride]
 
 
 @dataclass(slots=True)
-class PrefixMatchResult:
+class PromptCacheMatchResult:
     tenant: str
     matched_char_count: int
     input_char_count: int
 
 
 @dataclass(slots=True)
-class _Node:
+class _PromptCacheNode:
     text: str
-    children: Dict[str, "_Node"] = field(default_factory=dict)
+    children: Dict[str, "_PromptCacheNode"] = field(default_factory=dict)
     tenant_last_access_time: Dict[str, int] = field(default_factory=dict)
-    parent: Optional["_Node"] = None
+    parent: Optional["_PromptCacheNode"] = None
     last_tenant: Optional[str] = None
 
 
-class Tree:
+class PromptCacheTree:
     """
-    Cache-aware 前缀树（Python）。
+    用于 cache-aware 选点的 prompt 前缀缓存树。
 
     对原始 prompt 按 sample_stride 抽稀后再建树/匹配，key 长度约为
     len(prompt) / sample_stride，从而降低匹配开销与树节点内存。
@@ -63,12 +63,12 @@ class Tree:
         if sample_stride < 1:
             raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
         self.sample_stride = sample_stride
-        self.root = _Node(text="")
+        self.root = _PromptCacheNode(text="")
         self.tenant_char_count: Dict[str, int] = {}
         self._lock = RLock()
 
     def _to_key(self, text: str) -> str:
-        return sample_prompt_key(text, self.sample_stride)
+        return sample_prompt_cache_key(text, self.sample_stride)
 
     def insert(self, text: str, tenant: str) -> None:
         key = self._to_key(text)
@@ -86,7 +86,7 @@ class Tree:
                 if child is None:
                     remaining_char_count = len(remaining)
                     epoch = _get_epoch()
-                    new_node = _Node(
+                    new_node = _PromptCacheNode(
                         text=remaining,
                         tenant_last_access_time={tenant: epoch},
                         parent=prev,
@@ -104,7 +104,7 @@ class Tree:
                     contracted_text = child.text[shared_count:]
                     matched_text_count = shared_count
 
-                    new_node = _Node(
+                    new_node = _PromptCacheNode(
                         text=matched_text,
                         tenant_last_access_time=dict(child.tenant_last_access_time),
                         parent=prev,
@@ -133,7 +133,7 @@ class Tree:
             prev.tenant_last_access_time[tenant] = epoch
             prev.last_tenant = tenant
 
-    def prefix_match_with_counts(self, text: str) -> PrefixMatchResult:
+    def prefix_match_with_counts(self, text: str) -> PromptCacheMatchResult:
         key = self._to_key(text)
         with self._lock:
             remaining = key
@@ -169,7 +169,7 @@ class Tree:
             if tenant != "empty":
                 curr.tenant_last_access_time[tenant] = _get_epoch()
 
-            return PrefixMatchResult(
+            return PromptCacheMatchResult(
                 tenant=tenant,
                 matched_char_count=matched_chars,
                 input_char_count=len(key),
@@ -214,7 +214,7 @@ class Tree:
             return key[:matched_chars]
 
     @staticmethod
-    def _leaf_of(node: _Node) -> List[str]:
+    def _leaf_of(node: _PromptCacheNode) -> List[str]:
         candidates: Dict[str, bool] = {tenant: True for tenant in node.tenant_last_access_time}
         for child in node.children.values():
             for tenant in child.tenant_last_access_time:
@@ -224,7 +224,7 @@ class Tree:
     def evict_tenant_by_size(self, max_size: int) -> None:
         with self._lock:
             stack = [self.root]
-            pq: List[Tuple[int, str, _Node]] = []
+            pq: List[Tuple[int, str, _PromptCacheNode]] = []
 
             while stack:
                 curr = stack.pop()
@@ -272,7 +272,7 @@ class Tree:
     def remove_tenant(self, tenant: str) -> None:
         with self._lock:
             stack = [self.root]
-            queue: List[_Node] = []
+            queue: List[_PromptCacheNode] = []
 
             while stack:
                 curr = stack.pop()

@@ -7,7 +7,7 @@ PD Master 的 cache-aware prefill 选点策略。
   负载均衡，避免热点。
 
 实现要点：
-  - 用前缀树（见 tree.Tree）记录「历史 prompt -> 处理它的 worker」；
+  - 用前缀树（见 PromptCacheTree）记录「历史 prompt -> 处理它的 worker」；
   - 树中的 tenant 对应 worker.client_ip_port；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
   - 用 worker.dispatched_prompt_chars（累计派发的 prompt 字符数）做粗粒度均衡。
@@ -24,7 +24,7 @@ from typing import List, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.log_utils import init_logger
 
-from .tree import DEFAULT_SAMPLE_STRIDE, Tree
+from .prompt_cache_tree import DEFAULT_SAMPLE_STRIDE, PromptCacheTree
 
 
 logger = init_logger(__name__)
@@ -58,7 +58,7 @@ class CacheAwarePolicy:
 
     def __init__(self, config: Optional[CacheAwareConfig] = None) -> None:
         self.config = config or CacheAwareConfig()
-        self.tree: Tree = Tree(sample_stride=self.config.sample_stride)
+        self.prompt_cache_tree: PromptCacheTree = PromptCacheTree(sample_stride=self.config.sample_stride)
         self._stop_eviction = threading.Event()
         self._eviction_thread: Optional[threading.Thread] = None
         if self.config.eviction_interval_secs > 0:
@@ -72,7 +72,7 @@ class CacheAwarePolicy:
         while not self._stop_eviction.wait(self.config.eviction_interval_secs):
             logger.info("Running cache eviction...")
             self.evict_cache(self.config.max_tree_size)
-            logger.info(f"Cache eviction completed.: {self.tree.get_used_size_per_tenant()}")
+            logger.info(f"Cache eviction completed.: {self.prompt_cache_tree.get_used_size_per_tenant()}")
 
     def close(self) -> None:
         """停止后台驱逐线程。"""
@@ -83,23 +83,23 @@ class CacheAwarePolicy:
     def init_workers(self, workers: List[PD_Client_Obj]) -> None:
         """在树中注册一批 worker（插入空前缀，仅建立 tenant）。"""
         for worker in workers:
-            self.tree.insert("", worker.client_ip_port)
+            self.prompt_cache_tree.insert("", worker.client_ip_port)
 
     def add_worker(self, worker: PD_Client_Obj) -> None:
         """注册单个新上线的 worker。"""
-        self.tree.insert("", worker.client_ip_port)
+        self.prompt_cache_tree.insert("", worker.client_ip_port)
 
     def remove_worker(self, worker: PD_Client_Obj) -> None:
         """移除下线 worker 在前缀树中的全部记录。"""
-        self.tree.remove_tenant(worker.client_ip_port)
+        self.prompt_cache_tree.remove_tenant(worker.client_ip_port)
 
     def remove_worker_by_url(self, url: str) -> None:
         """按 client_ip_port 移除 worker 对应 tenant。"""
-        self.tree.remove_tenant(url)
+        self.prompt_cache_tree.remove_tenant(url)
 
     def evict_cache(self, max_size: int) -> None:
         """将各 tenant 占用压缩到 max_size 以下。"""
-        self.tree.evict_tenant_by_size(max_size)
+        self.prompt_cache_tree.evict_tenant_by_size(max_size)
 
     def _select_worker_min_dispatched(
         self,
@@ -114,7 +114,7 @@ class CacheAwarePolicy:
         min_dispatched_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
 
         if request_text is not None:
-            self.tree.insert(request_text, min_dispatched_worker.client_ip_port)
+            self.prompt_cache_tree.insert(request_text, min_dispatched_worker.client_ip_port)
 
         return min_dispatched_worker
 
@@ -159,7 +159,7 @@ class CacheAwarePolicy:
         # ---- 2. 前缀匹配：估计当前请求与历史请求的 cache 复用潜力 ----
         text = request_text or ""
 
-        result = self.tree.prefix_match_with_counts(text)
+        result = self.prompt_cache_tree.prefix_match_with_counts(text)
         # matched/input 均基于抽稀后的 key 长度，比值近似原始前缀重合比例。
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
@@ -180,7 +180,7 @@ class CacheAwarePolicy:
             if selected_worker is None:
                 # 命中了已下线/不在列表中的 tenant，清理脏数据后走派发量兜底。
                 logger.info(f"Evicting tenant: {result.tenant}")
-                self.tree.remove_tenant(result.tenant)
+                self.prompt_cache_tree.remove_tenant(result.tenant)
 
         logger.info(
             f"CacheAwarePolicy: selected_worker="
@@ -190,7 +190,7 @@ class CacheAwarePolicy:
 
         # ---- 3. 命中则更新树；未命中则派发量兜底并写入树 ----
         if selected_worker is not None:
-            self.tree.insert(text, selected_worker.client_ip_port)
+            self.prompt_cache_tree.insert(text, selected_worker.client_ip_port)
             return selected_worker
         else:
             return self._select_worker_min_dispatched(
