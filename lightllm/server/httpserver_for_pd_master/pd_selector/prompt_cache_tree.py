@@ -1,322 +1,203 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
-from heapq import heappop, heappush
-from itertools import count
-from threading import RLock
-from typing import Dict, List, Optional, Tuple
+from threading import Lock, RLock
+from typing import Dict, Optional, Tuple
 
-
-_EPOCH_COUNTER = count()
-
-# 每隔 sample_stride 个字符取 1 个作为前缀树 key，压缩树深度与内存。
-DEFAULT_SAMPLE_STRIDE = 16
-
-
-def _get_epoch() -> int:
-    return next(_EPOCH_COUNTER)
-
-
-def _shared_prefix_count(a: str, b: str) -> int:
-    matched = 0
-    for ca, cb in zip(a, b):
-        if ca != cb:
-            break
-        matched += 1
-    return matched
-
-
-def sample_prompt_cache_key(text: str, sample_stride: int) -> str:
-    """从 prompt 中按固定步长抽字符，作为 prompt cache 前缀匹配 key。"""
-    if sample_stride <= 1 or not text:
-        return text
-    return text[::sample_stride]
+from sortedcontainers import SortedDict
 
 
 @dataclass(slots=True)
 class PromptCacheMatchResult:
-    tenant: str
+    """prefix_match 的返回结果。"""
+
+    # 匹配终点上的 prefill 节点（client_ip_port）；仅当匹配停在 root 时为 None。
+    prefill_node: Optional[str]
+    # 匹配到的原始 prompt 字符数（key 深度 * sample_stride）。
     matched_char_count: int
+    # 输入 prompt 的原始字符数 len(text)。
     input_char_count: int
 
 
 @dataclass(slots=True)
 class _PromptCacheNode:
-    text: str
+    """单字符边的 trie 节点：parent --edge_char--> self。"""
+
     children: Dict[str, "_PromptCacheNode"] = field(default_factory=dict)
-    tenant_last_access_time: Dict[str, int] = field(default_factory=dict)
     parent: Optional["_PromptCacheNode"] = None
-    last_tenant: Optional[str] = None
+    edge_char: Optional[str] = None
+    last_prefill_node: Optional[str] = None
+    last_time_mark: int = 0
 
 
 class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    对原始 prompt 按 sample_stride 抽稀后再建树/匹配，key 长度约为
-    len(prompt) / sample_stride，从而降低匹配开销与树节点内存。
-    matched_char_count / input_char_count 均基于抽稀后的 key 长度计算，
-    比值仍可近似反映原始前缀重合比例。
+    prompt 先按 sample_stride 抽稀成 key，再递归按单字符建树/匹配。
+    recursion_limit 在初始化时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
+    整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
 
-    def __init__(self, sample_stride: int = DEFAULT_SAMPLE_STRIDE) -> None:
+    def __init__(
+        self,
+        sample_stride: int = 256,
+        max_node_count: int = 1_000_000,
+        evict_node_batch: int = 10_000,
+        recursion_limit: int = 4000,
+    ) -> None:
+        """
+        Args:
+            sample_stride: 每隔多少个字符抽 1 个作为 trie key。
+            max_node_count: 树中允许的最大节点数（不含 root）；超限时触发 LRU 驱逐。
+            evict_node_batch: 每次驱逐时在超出量基础上额外腾出的节点缓冲数。
+            recursion_limit: 初始化时通过 sys.setrecursionlimit 设置的调用栈深度上限。
+        """
         if sample_stride < 1:
             raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
+        if max_node_count < 0:
+            raise ValueError(f"max_node_count must be >= 0, got {max_node_count}")
+        if evict_node_batch < 1:
+            raise ValueError(f"evict_node_batch must be >= 1, got {evict_node_batch}")
+        if recursion_limit < 1:
+            raise ValueError(f"recursion_limit must be >= 1, got {recursion_limit}")
         self.sample_stride = sample_stride
-        self.root = _PromptCacheNode(text="")
-        self.tenant_char_count: Dict[str, int] = {}
+        self.max_node_count = max_node_count
+        self.evict_node_batch = evict_node_batch
+        self.recursion_limit = recursion_limit
+        if recursion_limit > sys.getrecursionlimit():
+            sys.setrecursionlimit(recursion_limit)
+        self.root = _PromptCacheNode()
+        self._node_count = 0
+        self._leaf_lru: SortedDict[int, _PromptCacheNode] = SortedDict()
         self._lock = RLock()
+        self._time_mark_lock = Lock()
 
     def _to_key(self, text: str) -> str:
-        return sample_prompt_cache_key(text, self.sample_stride)
+        return text[:: self.sample_stride]
 
-    def insert(self, text: str, tenant: str) -> None:
+    def _is_leaf(self, node: _PromptCacheNode) -> bool:
+        return node is not self.root and not node.children
+
+    def insert(self, text: str, prefill_node: str) -> None:
+        """将 text 的前缀路径写入树，并关联到 prefill_node。
+
+        路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
+        max_node_count 会立即按 LRU 驱逐一批叶节点。
+
+        Args:
+            text: 原始 prompt 文本。
+            prefill_node: 处理该 prompt 的 prefill 节点标识（client_ip_port），不可为 None。
+
+        Raises:
+            ValueError: prefill_node 为 None 时抛出。
+        """
+        if prefill_node is None:
+            raise ValueError("prefill_node must not be None")
         key = self._to_key(text)
         with self._lock:
-            self.root.tenant_last_access_time.setdefault(tenant, 0)
-            self.tenant_char_count.setdefault(tenant, 0)
+            self._insert_at(self.root, key, 0, prefill_node)
+            self._evict_if_needed()
 
-            remaining = key
-            prev = self.root
+    def _insert_at(self, node: _PromptCacheNode, key: str, depth: int, prefill_node: str) -> None:
+        try:
+            if depth >= len(key):
+                return
 
-            while remaining:
-                first_char = remaining[0]
-                child = prev.children.get(first_char)
+            ch = key[depth]
+            child = node.children.get(ch)
+            if child is None:
+                child = _PromptCacheNode(parent=node, edge_char=ch)
+                child.last_time_mark = self._gen_time_mark()
+                node.children[ch] = child
+                self._node_count += 1
 
-                if child is None:
-                    remaining_char_count = len(remaining)
-                    epoch = _get_epoch()
-                    new_node = _PromptCacheNode(
-                        text=remaining,
-                        tenant_last_access_time={tenant: epoch},
-                        parent=prev,
-                        last_tenant=tenant,
-                    )
-                    self.tenant_char_count[tenant] = self.tenant_char_count.get(tenant, 0) + remaining_char_count
-                    prev.children[first_char] = new_node
-                    return
+            self._insert_at(child, key, depth + 1, prefill_node)
+        finally:
+            node.last_prefill_node = prefill_node
+            if node.last_time_mark in self._leaf_lru:
+                self._leaf_lru.pop(node.last_time_mark, None)
+            node.last_time_mark = self._gen_time_mark()
+            if self._is_leaf(node):
+                self._leaf_lru[node.last_time_mark] = node
 
-                shared_count = _shared_prefix_count(remaining, child.text)
-                child_len = len(child.text)
+    def _gen_time_mark(self) -> int:
+        with self._time_mark_lock:
+            time_mark = getattr(self, "_time_mark", -1) + 1
+            self._time_mark = time_mark
+            return time_mark
 
-                if shared_count < child_len:
-                    matched_text = child.text[:shared_count]
-                    contracted_text = child.text[shared_count:]
-                    matched_text_count = shared_count
+    def _evict_if_needed(self) -> None:
+        if self._node_count <= self.max_node_count:
+            return
+        need = self._node_count - self.max_node_count + self.evict_node_batch
+        removed = 0
+        while removed < need and self._leaf_lru:
+            _, node = self._leaf_lru.peekitem(0)
+            self._remove_leaf_node(node)
+            removed += 1
 
-                    new_node = _PromptCacheNode(
-                        text=matched_text,
-                        tenant_last_access_time=dict(child.tenant_last_access_time),
-                        parent=prev,
-                        last_tenant=child.last_tenant,
-                    )
-                    new_node.children[contracted_text[0]] = child
+    def prefix_match(self, text: str) -> PromptCacheMatchResult:
+        """
+        对 text 做前缀匹配。
 
-                    child.text = contracted_text
-                    child.parent = new_node
-                    prev.children[first_char] = new_node
-
-                    if tenant not in new_node.tenant_last_access_time:
-                        self.tenant_char_count[tenant] = self.tenant_char_count.get(tenant, 0) + matched_text_count
-                        new_node.tenant_last_access_time[tenant] = 0
-
-                    prev = new_node
-                    remaining = remaining[shared_count:]
-                else:
-                    if tenant not in child.tenant_last_access_time:
-                        self.tenant_char_count[tenant] = self.tenant_char_count.get(tenant, 0) + child_len
-                        child.tenant_last_access_time[tenant] = 0
-                    prev = child
-                    remaining = remaining[shared_count:]
-
-            epoch = _get_epoch()
-            prev.tenant_last_access_time[tenant] = epoch
-            prev.last_tenant = tenant
-
-    def prefix_match_with_counts(self, text: str) -> PromptCacheMatchResult:
+        返回说明：
+          - matched_char_count：匹配到的 key 深度 * sample_stride；
+          - input_char_count：原始 prompt 字符数 len(text)；
+          - prefill_node 为 None：匹配停在 root（无任何 key 字符命中）；
+          - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node。
+        """
         key = self._to_key(text)
         with self._lock:
-            remaining = key
-            matched_chars = 0
-            prev = self.root
-
-            while remaining:
-                first_char = remaining[0]
-                child = prev.children.get(first_char)
-                if child is None:
-                    break
-
-                shared_count = _shared_prefix_count(remaining, child.text)
-                child_len = len(child.text)
-
-                if shared_count == child_len:
-                    matched_chars += shared_count
-                    remaining = remaining[shared_count:]
-                    prev = child
-                else:
-                    matched_chars += shared_count
-                    prev = child
-                    break
-
-            curr = prev
-
-            if curr.last_tenant and curr.last_tenant in curr.tenant_last_access_time:
-                tenant = curr.last_tenant
+            node, matched = self._match_at(self.root, key, 0)
+            if node is self.root:
+                prefill_node = None
             else:
-                tenant = next(iter(curr.tenant_last_access_time), "empty")
-                curr.last_tenant = tenant
-
-            if tenant != "empty":
-                curr.tenant_last_access_time[tenant] = _get_epoch()
-
+                prefill_node = node.last_prefill_node
             return PromptCacheMatchResult(
-                tenant=tenant,
-                matched_char_count=matched_chars,
-                input_char_count=len(key),
+                prefill_node=prefill_node,
+                matched_char_count=matched * self.sample_stride,
+                input_char_count=len(text),
             )
 
-    def prefix_match(self, text: str) -> Tuple[str, str]:
-        key = self._to_key(text)
-        result = self.prefix_match_with_counts(text)
-        return key[: result.matched_char_count], result.tenant
+    def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
+        if depth >= len(key):
+            return node, depth
 
-    def prefix_match_tenant(self, text: str, tenant: str) -> str:
-        key = self._to_key(text)
+        child = node.children.get(key[depth])
+        if child is None:
+            return node, depth
+
+        return self._match_at(child, key, depth + 1)
+
+    def evict_lru_nodes(self) -> int:
+        """节点数超上限时，按 LRU 从叶节点批量删除。
+
+        删除数量为 ``_node_count - max_node_count + evict_node_batch``，
+        使节点数降到 max_node_count 以下并留出缓冲。
+
+        Returns:
+            实际删除的叶节点数量；未超上限时返回 0。
+        """
         with self._lock:
-            remaining = key
-            matched_chars = 0
-            prev = self.root
+            if self._node_count <= self.max_node_count:
+                return 0
+            need = self._node_count - self.max_node_count + self.evict_node_batch
+            removed = 0
+            while removed < need and self._leaf_lru:
+                _, node = self._leaf_lru.peekitem(0)
+                self._remove_leaf_node(node)
+                removed += 1
+            return removed
 
-            while remaining:
-                first_char = remaining[0]
-                child = prev.children.get(first_char)
-                if child is None:
-                    break
-                if tenant not in child.tenant_last_access_time:
-                    break
+    def _remove_leaf_node(self, node: _PromptCacheNode) -> None:
+        assert self._is_leaf(node)
+        parent = node.parent
+        assert parent is not None and node.edge_char is not None
 
-                shared_count = _shared_prefix_count(remaining, child.text)
-                child_len = len(child.text)
-
-                if shared_count == child_len:
-                    matched_chars += shared_count
-                    remaining = remaining[shared_count:]
-                    prev = child
-                else:
-                    matched_chars += shared_count
-                    prev = child
-                    break
-
-            if tenant in prev.tenant_last_access_time:
-                prev.tenant_last_access_time[tenant] = _get_epoch()
-                prev.last_tenant = tenant
-
-            return key[:matched_chars]
-
-    @staticmethod
-    def _leaf_of(node: _PromptCacheNode) -> List[str]:
-        candidates: Dict[str, bool] = {tenant: True for tenant in node.tenant_last_access_time}
-        for child in node.children.values():
-            for tenant in child.tenant_last_access_time:
-                candidates[tenant] = False
-        return [tenant for tenant, is_leaf in candidates.items() if is_leaf]
-
-    def evict_tenant_by_size(self, max_size: int) -> None:
-        with self._lock:
-            stack = [self.root]
-            pq: List[Tuple[int, str, _PromptCacheNode]] = []
-
-            while stack:
-                curr = stack.pop()
-                stack.extend(curr.children.values())
-                for tenant in self._leaf_of(curr):
-                    ts = curr.tenant_last_access_time.get(tenant)
-                    if ts is not None:
-                        heappush(pq, (ts, tenant, curr))
-
-            while pq:
-                _, tenant, node = heappop(pq)
-                used_size = self.tenant_char_count.get(tenant, 0)
-                if used_size <= max_size:
-                    continue
-
-                if tenant not in node.tenant_last_access_time:
-                    continue
-                if any(tenant in child.tenant_last_access_time for child in node.children.values()):
-                    continue
-
-                node_len = len(node.text)
-                self.tenant_char_count[tenant] = max(0, self.tenant_char_count.get(tenant, 0) - node_len)
-
-                node.tenant_last_access_time.pop(tenant, None)
-                if node.last_tenant == tenant:
-                    node.last_tenant = next(iter(node.tenant_last_access_time), None)
-
-                parent = node.parent
-                if not node.children and not node.tenant_last_access_time and parent is not None:
-                    if node.text:
-                        parent.children.pop(node.text[0], None)
-
-                if parent is not None and tenant in parent.tenant_last_access_time:
-                    has_child_with_tenant = any(
-                        tenant in child.tenant_last_access_time for child in parent.children.values()
-                    )
-                    if not has_child_with_tenant:
-                        ts = parent.tenant_last_access_time.get(tenant)
-                        if ts is not None:
-                            heappush(pq, (ts, tenant, parent))
-
-                if self.tenant_char_count.get(tenant, 0) == 0:
-                    self.tenant_char_count.pop(tenant, None)
-
-    def remove_tenant(self, tenant: str) -> None:
-        with self._lock:
-            stack = [self.root]
-            queue: List[_PromptCacheNode] = []
-
-            while stack:
-                curr = stack.pop()
-                stack.extend(curr.children.values())
-
-                if tenant in curr.tenant_last_access_time:
-                    has_child_with_tenant = any(
-                        tenant in child.tenant_last_access_time for child in curr.children.values()
-                    )
-                    if not has_child_with_tenant:
-                        queue.append(curr)
-
-            while queue:
-                curr = queue.pop(0)
-                curr.tenant_last_access_time.pop(tenant, None)
-                if curr.last_tenant == tenant:
-                    curr.last_tenant = next(iter(curr.tenant_last_access_time), None)
-
-                parent = curr.parent
-                if not curr.children and not curr.tenant_last_access_time and parent is not None:
-                    if curr.text:
-                        parent.children.pop(curr.text[0], None)
-
-                if parent is not None and tenant in parent.tenant_last_access_time:
-                    has_child_with_tenant = any(
-                        tenant in child.tenant_last_access_time for child in parent.children.values()
-                    )
-                    if not has_child_with_tenant:
-                        queue.append(parent)
-
-            self.tenant_char_count.pop(tenant, None)
-
-    def get_tenant_char_count(self) -> Dict[str, int]:
-        with self._lock:
-            return dict(self.tenant_char_count)
-
-    def get_used_size_per_tenant(self) -> Dict[str, int]:
-        with self._lock:
-            used_size_per_tenant: Dict[str, int] = {}
-            stack = [self.root]
-            while stack:
-                curr = stack.pop()
-                text_count = len(curr.text)
-                for tenant in curr.tenant_last_access_time:
-                    used_size_per_tenant[tenant] = used_size_per_tenant.get(tenant, 0) + text_count
-                stack.extend(curr.children.values())
-            return used_size_per_tenant
+        self._leaf_lru.pop(node.last_time_mark, None)
+        parent.children.pop(node.edge_char, None)
+        self._node_count -= 1
+        if self._is_leaf(parent):
+            self._leaf_lru[parent.last_time_mark] = parent
