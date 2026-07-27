@@ -568,7 +568,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 det.prev_tool_call_arr[ti].get("arguments", {}),
                                 ensure_ascii=False,
                             )
-                            actual_call = det.streamed_args_for_tool[ti]
+                            actual_call = det.get_streamed_arguments(ti)
+                            if actual_call is None:
+                                actual_call = ""
                             if latest_delta_len > 0:
                                 actual_call = actual_call[:-latest_delta_len]
                             remaining_call = expected_call.replace(actual_call, "", 1)

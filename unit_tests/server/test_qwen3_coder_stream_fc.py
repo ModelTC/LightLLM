@@ -42,7 +42,7 @@ def _stream_and_reassemble(text, tools, chunk):
                 # Mirror api_openai.py:559-575 (REPLACE semantics).
                 latest_delta_len = len(params)
                 expected = json.dumps(det.prev_tool_call_arr[ti].get("arguments", {}), ensure_ascii=False)
-                actual = det.streamed_args_for_tool[ti]
+                actual = det.get_streamed_arguments(ti) or ""
                 if latest_delta_len > 0:
                     actual = actual[:-latest_delta_len]
                 params = expected.replace(actual, "", 1)
@@ -129,6 +129,11 @@ def test_empty_string_value():
     _assert_tool_calls(text, [_tool("f", {"s": {"type": "string"}})], {0: ("f", {"s": ""})})
 
 
+def test_string_null_matches_non_stream_conversion():
+    text = "<tool_call>\n<function=f>\n<parameter=s>\nnull\n</parameter>\n</function>\n</tool_call>"
+    _assert_tool_calls(text, [_tool("f", {"s": {"type": "string"}})], {0: ("f", {"s": None})})
+
+
 def test_no_param_function():
     text = "<tool_call>\n<function=ping>\n</function>\n</tool_call>"
     _assert_tool_calls(text, [_tool("ping", {})], {0: ("ping", {})})
@@ -174,6 +179,94 @@ def test_truncated_call_missing_function_close():
     # streamed args unterminated (missing closing brace).
     text = "<tool_call>\n<function=calc>\n<parameter=x>\n0.50\n</parameter>\n</tool_call>"
     _assert_tool_calls(text, [_tool("calc", {"x": {"type": "number"}})], {0: ("calc", {"x": 0.5})})
+
+
+def test_parameter_implicitly_closed_by_sibling():
+    text = (
+        "<tool_call>\n<function=f>\n<parameter=city>\nLondon\n"
+        "<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>"
+    )
+    _assert_tool_calls(
+        text,
+        [_tool("f", {"city": {"type": "string"}, "days": {"type": "integer"}})],
+        {0: ("f", {"city": "London", "days": 3})},
+    )
+
+
+def test_parameter_implicitly_closed_by_function_end():
+    text = "<tool_call>\n<function=f>\n<parameter=city>\nLondon\n</function>\n</tool_call>"
+    _assert_tool_calls(text, [_tool("f", {"city": {"type": "string"}})], {0: ("f", {"city": "London"})})
+
+
+def test_large_generic_string_keeps_parser_buffer_bounded():
+    payload = ('def render(x="world"):\n    return f"<div>{x}</div>\\\\path"  # </paraX>\n' * 2_000)[:128_000]
+    text = (
+        "<tool_call>\n<function=process_payload>\n<parameter=language>\npython\n</parameter>\n"
+        f"<parameter=payload>\n{payload}\n</parameter>\n</function>\n</tool_call>"
+    )
+    tools = [
+        _tool(
+            "process_payload",
+            {
+                "language": {"type": "string"},
+                "payload": {"type": "string"},
+            },
+        )
+    ]
+    detector = Qwen3CoderDetector()
+    per_tool = {}
+    max_buffer = 0
+    for start in range(0, len(text), 17):
+        result = detector.parse_streaming_increment(text[start : start + 17], tools)
+        max_buffer = max(max_buffer, len(detector._buffer))
+        for call in result.calls:
+            state = per_tool.setdefault(call.tool_index, {"name": None, "parts": []})
+            if call.name is not None:
+                state["name"] = call.name
+            if call.parameters:
+                state["parts"].append(call.parameters)
+
+    assert max_buffer < 64
+    assert per_tool[0]["name"] == "process_payload"
+    assert json.loads("".join(per_tool[0]["parts"])) == {
+        "language": "python",
+        "payload": payload,
+    }
+
+
+def test_large_generic_array_and_object_match_non_stream_parser():
+    """Large typed values may be buffered, but must be converted exactly once at close."""
+    items = list(range(10_000))
+    metadata = {f"key_{i}": [i, {"even": i % 2 == 0}] for i in range(1_000)}
+    expected = {
+        "items": items,
+        "metadata": metadata,
+        "enabled": True,
+        "ratio": 0.125,
+    }
+    tools = [
+        _tool(
+            "aggregate_data",
+            {
+                "items": {"type": "array"},
+                "metadata": {"type": "object"},
+                "enabled": {"type": "boolean"},
+                "ratio": {"type": "number"},
+            },
+        )
+    ]
+    text = (
+        "<tool_call>\n<function=aggregate_data>\n"
+        + "".join(
+            f"<parameter={name}>\n{json.dumps(value, ensure_ascii=False, separators=(',', ':'))}\n</parameter>\n"
+            for name, value in expected.items()
+        )
+        + "</function>\n</tool_call>"
+    )
+
+    oneshot = Qwen3CoderDetector().detect_and_parse(text, tools)
+    assert json.loads(oneshot.calls[0].parameters) == expected
+    _assert_tool_calls(text, tools, {0: ("aggregate_data", expected)}, [1, 127, len(text)])
 
 
 def test_streaming_matches_non_stream():
