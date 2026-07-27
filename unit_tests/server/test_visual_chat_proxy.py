@@ -39,6 +39,7 @@ from lightllm.server.visual_chat_proxy import (
     should_use_visual_proxy,
     visual_chat_completions_impl,
 )
+from lightllm.server.visual_trace import record_rendered_main_prompt
 
 
 def _runtime(client=None, **overrides):
@@ -59,6 +60,21 @@ def _raw_request():
             "path": "/v1/chat/completions",
             "headers": [],
         }
+    )
+
+
+def _connected_raw_request():
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+        },
+        receive=receive,
     )
 
 
@@ -732,11 +748,16 @@ def test_startup_settings_load_upstream_auth_and_headers(monkeypatch):
     monkeypatch.setenv("LIGHTLLM_VISUAL_REMOTE_HEADERS", '{"X-Tenant":"tenant-a"}')
     monkeypatch.setenv("THINKING_POLICY", "force_on")
     monkeypatch.setenv("EMPTY_OUTPUT_RETRIES", "3")
+    monkeypatch.setenv("LIGHTLLM_VISUAL_TRACE_DUMP", "1")
+    monkeypatch.setenv(
+        "LIGHTLLM_VISUAL_TRACE_DUMP_DIR", "/tmp/lightllm-test-traces"
+    )
     settings = VisualProxySettings.from_args(args)
     assert settings.remote_url == "https://vision.test/v1/chat/completions"
     assert settings.builtin_trace_format == "xml"
     assert settings.thinking_policy == "force_on"
     assert settings.empty_output_retries == 3
+    assert settings.trace_dump_dir == Path("/tmp/lightllm-test-traces")
     assert not settings.allow_local_files
     assert not settings.allow_remote_image_urls
     runtime = VisualProxyRuntime(settings)
@@ -1318,6 +1339,132 @@ def test_empty_output_retry_limit_fails_explicitly():
                 main_chat_handler=fake_main,
             )
         )
+
+
+def test_trace_dump_writes_one_complete_trajectory_per_request(tmp_path):
+    trace_dir = tmp_path / "visual-trajectories"
+    main_calls = 0
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "The square is green.",
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        async def post(self, url, json):
+            return FakeResponse()
+
+    async def fake_main(request, raw_request):
+        nonlocal main_calls
+        main_calls += 1
+        record_rendered_main_prompt(f"rendered-prompt-step-{main_calls}")
+        if main_calls == 1:
+            return _response(
+                ChatMessage(
+                    role="assistant",
+                    reasoning="I should inspect the image.",
+                    tool_calls=[
+                        _call(
+                            "vision_reader",
+                            {
+                                "image": "<image_1/>",
+                                "task": "Identify the square color.",
+                            },
+                            "reader_1",
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        return _response(
+            ChatMessage(role="assistant", content="The square is green.")
+        )
+
+    response = asyncio.run(
+        visual_chat_completions_impl(
+            request=_multimodal_request(),
+            raw_request=_connected_raw_request(),
+            runtime=_runtime(client=FakeClient(), trace_dump_dir=trace_dir),
+            main_chat_handler=fake_main,
+        )
+    )
+
+    assert response.choices[0].message.content == "The square is green."
+    trace_files = list(trace_dir.glob("*.json"))
+    assert len(trace_files) == 1
+    trace = json.loads(trace_files[0].read_text())
+    assert trace["status"] == "success"
+    assert trace["request"]["normalized_openai_payload"]["messages"][0][
+        "content"
+    ][1]["image_url"]["url"] == "data:image/png;base64,AAAA"
+    events = trace["events"]
+    assert [event["type"] for event in events] == [
+        "proxy_agent_request_registered",
+        "main_model_request",
+        "main_model_rendered_prompt",
+        "main_model_response",
+        "visual_model_request",
+        "visual_model_response",
+        "main_model_request",
+        "main_model_rendered_prompt",
+        "main_model_response",
+        "proxy_final_response",
+    ]
+    main_inputs = [event for event in events if event["type"] == "main_model_request"]
+    assert len(main_inputs) == 2
+    assert "data:image/png;base64,AAAA" not in json.dumps(main_inputs)
+    rendered = [
+        event["prompt"]
+        for event in events
+        if event["type"] == "main_model_rendered_prompt"
+    ]
+    assert rendered == ["rendered-prompt-step-1", "rendered-prompt-step-2"]
+    visual_input = next(
+        event for event in events if event["type"] == "visual_model_request"
+    )
+    assert visual_input["request"]["messages"][1]["content"][0] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+    assert trace["response"]["choices"][0]["message"]["content"] == (
+        "The square is green."
+    )
+
+
+def test_trace_dump_records_failed_request(tmp_path):
+    trace_dir = tmp_path / "failed-trajectories"
+
+    async def failing_main(request, raw_request):
+        raise RuntimeError("agent exploded")
+
+    with pytest.raises(RuntimeError, match="agent exploded"):
+        asyncio.run(
+            visual_chat_completions_impl(
+                request=_multimodal_request(),
+                raw_request=_raw_request(),
+                runtime=_runtime(client=object(), trace_dump_dir=trace_dir),
+                main_chat_handler=failing_main,
+            )
+        )
+
+    trace_files = list(trace_dir.glob("*.json"))
+    assert len(trace_files) == 1
+    trace = json.loads(trace_files[0].read_text())
+    assert trace["status"] == "error"
+    assert trace["error"]["type"] == "RuntimeError"
+    assert trace["error"]["message"] == "agent exploded"
+    assert [event["type"] for event in trace["events"]][-1] == "main_model_error"
 
 
 def test_streaming_returns_openai_sse_chunks():

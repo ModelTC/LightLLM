@@ -1,9 +1,12 @@
-import os
 import json
-from lightllm.server.tokenizer import get_tokenizer
-from lightllm.utils.log_utils import init_logger
+import os
 from functools import lru_cache
+
+from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.config_utils import get_model_type_v1
+from lightllm.utils.log_utils import init_logger
+
+from .visual_trace import record_rendered_main_prompt
 
 logger = init_logger(__name__)
 
@@ -177,4 +180,5 @@ async def build_prompt(request, tools) -> str:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except Exception as e:
         raise ValueError(f"Failed to build prompt: {e}") from None
+    record_rendered_main_prompt(input_str)
     return input_str

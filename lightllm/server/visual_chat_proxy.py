@@ -25,6 +25,7 @@ import random
 import re
 import stat
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -47,6 +48,11 @@ from .api_models import (
     ChatMessage,
     PromptTokensDetails,
     UsageInfo,
+)
+from .visual_trace import (
+    VisualTraceRecorder,
+    bind_main_model_trace,
+    visual_trace_dump_dir_from_env,
 )
 
 
@@ -195,6 +201,7 @@ class VisualProxySettings:
     nova_accuracy_compat: bool = False
     thinking_policy: str = "request"
     empty_output_retries: int = 2
+    trace_dump_dir: Optional[Path] = None
     remote_model: Optional[str] = None
     remote_api_key: Optional[str] = None
     remote_headers: tuple[tuple[str, str], ...] = ()
@@ -300,6 +307,7 @@ class VisualProxySettings:
                 if getattr(args, "visual_empty_output_retries", None) is None
                 else getattr(args, "visual_empty_output_retries")
             ),
+            trace_dump_dir=visual_trace_dump_dir_from_env(),
             remote_model=getattr(args, "visual_remote_model", None),
             remote_api_key=remote_api_key,
             remote_headers=remote_headers,
@@ -456,6 +464,11 @@ class VisualProxyRuntime:
         self, settings: VisualProxySettings, client: Optional[httpx.AsyncClient] = None
     ):
         self.settings = settings
+        if settings.trace_dump_dir is not None:
+            logger.warning(
+                "Visual trajectory dump enabled: dir=%s; full prompts and image payloads will be stored",
+                settings.trace_dump_dir,
+            )
         headers = dict(settings.remote_headers)
         if settings.remote_api_key and not any(
             name.lower() == "authorization" for name in headers
@@ -1538,6 +1551,7 @@ async def call_visual_remote(
     task: str,
     trace_id: str,
     raw_request: Optional[Request] = None,
+    trace_recorder: Optional[VisualTraceRecorder] = None,
 ) -> str:
     if len(task) > 16384:
         raise ValueError("vision_reader task exceeds the 16384-character limit")
@@ -1592,7 +1606,31 @@ async def call_visual_remote(
         image.origin,
         len(task),
     )
-    data = await runtime.post_json(payload, raw_request, trace_id)
+    if trace_recorder is not None and trace_recorder.enabled:
+        trace_recorder.event(
+            "visual_model_request",
+            visual_trace_id=trace_id,
+            url=settings.remote_url,
+            image_tag=image.tag,
+            image_origin=image.origin,
+            request=payload,
+        )
+    try:
+        data = await runtime.post_json(payload, raw_request, trace_id)
+    except BaseException as exc:
+        if trace_recorder is not None and trace_recorder.enabled:
+            trace_recorder.event(
+                "visual_model_error",
+                visual_trace_id=trace_id,
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+        raise
+    if trace_recorder is not None and trace_recorder.enabled:
+        trace_recorder.event(
+            "visual_model_response",
+            visual_trace_id=trace_id,
+            response=data,
+        )
     if settings.nova_accuracy_compat:
         content = _clean_nova_vision_reader_output(_generate_content(data))
         if not content:
@@ -1688,6 +1726,7 @@ async def _run_agent_choice(
     runtime: VisualProxyRuntime,
     main_chat_handler: MainChatHandler,
     trace_id: str,
+    trace_recorder: VisualTraceRecorder,
     user_question_depends_on_visual_content: bool,
 ) -> Union[tuple[ChatCompletionResponseChoice, UsageInfo], Response]:
     payload = copy.deepcopy(request_payload)
@@ -1739,7 +1778,41 @@ async def _run_agent_choice(
             step,
             len(registry),
         )
-        response = await main_chat_handler(main_request, raw_request)
+        if trace_recorder.enabled:
+            trace_recorder.event(
+                "main_model_request",
+                choice_trace_id=trace_id,
+                step=step,
+                request=main_request.model_dump(
+                    mode="json", by_alias=True, exclude_none=True
+                ),
+            )
+        try:
+            with bind_main_model_trace(trace_recorder, trace_id, step):
+                response = await main_chat_handler(main_request, raw_request)
+        except BaseException as exc:
+            if trace_recorder.enabled:
+                trace_recorder.event(
+                    "main_model_error",
+                    choice_trace_id=trace_id,
+                    step=step,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                )
+            raise
+        if trace_recorder.enabled and isinstance(response, ChatCompletionResponse):
+            trace_recorder.event(
+                "main_model_response",
+                choice_trace_id=trace_id,
+                step=step,
+                response=response.model_dump(mode="json", exclude_none=True),
+            )
+        elif trace_recorder.enabled:
+            trace_recorder.event(
+                "main_model_response",
+                choice_trace_id=trace_id,
+                step=step,
+                response=_response_for_trace(response),
+            )
         if not isinstance(response, ChatCompletionResponse):
             return response
         _usage_add(aggregate_usage, response.usage)
@@ -1794,6 +1867,7 @@ async def _run_agent_choice(
                     # the same agent choice.
                     trace_id=f"{trace_id}-s{step}-c{builtin_call_index}",
                     raw_request=raw_request,
+                    trace_recorder=trace_recorder,
                 )
                 succeeded = True
                 result = _format_visual_tool_result(
@@ -2098,17 +2172,34 @@ def _stream_response(response: ChatCompletionResponse) -> StreamingResponse:
     return StreamingResponse(chunks(), media_type="text/event-stream")
 
 
-async def visual_chat_completions_impl(
+def _response_for_trace(response: Any) -> Any:
+    if isinstance(response, ChatCompletionResponse):
+        return response.model_dump(mode="json", exclude_none=True)
+    if isinstance(response, Response):
+        body = getattr(response, "body", None)
+        parsed_body: Any = None
+        if isinstance(body, bytes):
+            try:
+                parsed_body = json.loads(body)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                parsed_body = body.decode("utf-8", errors="replace")
+        return {
+            "status_code": response.status_code,
+            "media_type": response.media_type,
+            "body": parsed_body,
+        }
+    return response
+
+
+async def _visual_chat_completions_impl(
     *,
     request: ChatCompletionRequest,
     raw_request: Request,
     runtime: VisualProxyRuntime,
     main_chat_handler: MainChatHandler,
+    trace_id: str,
+    trace_recorder: VisualTraceRecorder,
 ) -> Union[ChatCompletionResponse, Response]:
-    """Run one OpenAI request through the opt-in visual agent adapter."""
-
-    if runtime is None:
-        raise VisualChatProxyError("Visual proxy runtime is not initialized")
     request = apply_visual_thinking_policy(request, runtime.settings)
     request_payload = _request_dict(request)
     temperature_was_provided = "temperature" in request.model_fields_set
@@ -2151,7 +2242,15 @@ async def visual_chat_completions_impl(
         raise ValueError(
             f"Visual proxy accepts at most {runtime.settings.max_choices} choices per request"
         )
-    trace_id = f"visual-{uuid.uuid4().hex[:16]}"
+    if trace_recorder.enabled:
+        trace_recorder.event(
+            "proxy_agent_request_registered",
+            request=request_payload,
+            registered_images=[
+                {"tag": tag, "origin": registry.resolve(tag).origin}
+                for tag in registry.tags()
+            ],
+        )
     logger.info(
         "[visual-chat-proxy][external_request_registered] trace_id=%s image_count=%d tags=%s choices=%d",
         trace_id,
@@ -2173,6 +2272,7 @@ async def visual_chat_completions_impl(
                 runtime=runtime,
                 main_chat_handler=main_chat_handler,
                 trace_id=f"{trace_id}-{index}",
+                trace_recorder=trace_recorder,
                 user_question_depends_on_visual_content=(
                     user_question_depends_on_visual_content
                 ),
@@ -2201,6 +2301,62 @@ async def visual_chat_completions_impl(
         choices=choices,
         usage=aggregate_usage,
     )
+    if trace_recorder.enabled:
+        trace_recorder.event(
+            "proxy_final_response",
+            response=response.model_dump(mode="json", exclude_none=True),
+        )
     if request.stream:
         return _stream_response(response)
     return response
+
+
+async def visual_chat_completions_impl(
+    *,
+    request: ChatCompletionRequest,
+    raw_request: Request,
+    runtime: VisualProxyRuntime,
+    main_chat_handler: MainChatHandler,
+) -> Union[ChatCompletionResponse, Response]:
+    """Run one OpenAI request through the opt-in visual agent adapter."""
+
+    if runtime is None:
+        raise VisualChatProxyError("Visual proxy runtime is not initialized")
+    trace_id = f"visual-{uuid.uuid4().hex[:16]}"
+    trace_request: dict[str, Any] = {}
+    if runtime.settings.trace_dump_dir is not None:
+        try:
+            raw_payload = await raw_request.json()
+        except Exception:
+            raw_payload = None
+        trace_request = {
+            "method": raw_request.method,
+            "path": raw_request.url.path,
+            "payload": raw_payload,
+            "normalized_openai_payload": request.model_dump(
+                mode="json", by_alias=True, exclude_none=True
+            ),
+        }
+    recorder = VisualTraceRecorder(
+        trace_id,
+        runtime.settings.trace_dump_dir,
+        trace_request,
+    )
+    try:
+        response = await _visual_chat_completions_impl(
+            request=request,
+            raw_request=raw_request,
+            runtime=runtime,
+            main_chat_handler=main_chat_handler,
+            trace_id=trace_id,
+            trace_recorder=recorder,
+        )
+        if recorder.enabled:
+            recorder.finish_success(_response_for_trace(response))
+        return response
+    except BaseException as exc:
+        if recorder.enabled:
+            recorder.finish_error(exc, traceback.format_exc())
+        raise
+    finally:
+        await recorder.flush()
