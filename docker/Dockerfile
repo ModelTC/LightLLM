@@ -142,4 +142,3 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir
-
