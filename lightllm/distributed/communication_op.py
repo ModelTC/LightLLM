@@ -118,6 +118,22 @@ class CustomProcessGroup:
             alloc_func=alloc_func,
         )
 
+    def all_reduce_fused_add_rmsnorm(
+        self,
+        input_: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        norm_out: torch.Tensor,
+    ) -> bool:
+        # Fuse all_reduce + residual add + RMSNorm via FlashInfer when the message is
+        # small enough for its oneshot path. Returns True if fused (residual & norm_out
+        # filled), False if the caller must fall back to plain all_reduce + add + norm.
+        if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(input_):
+            self.flashinfer_reduce.all_reduce_fused_add_rmsnorm(input_, residual, weight, eps, norm_out)
+            return True
+        return False
+
     def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
         return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
@@ -272,6 +288,25 @@ def all_reduce_residual_rmsnorm(
             alloc_func=alloc_func,
         )
     return None
+
+
+def all_reduce_fused_add_rmsnorm(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    norm_out: torch.Tensor,
+    group: Optional[Union[ProcessGroup, CustomProcessGroup]] = None,
+) -> bool:
+    """Try the FlashInfer all_reduce + residual add + RMSNorm fusion.
+
+    Returns True on success (``residual`` and ``norm_out`` are filled). Returns
+    False when unavailable (no custom group, message too large, dtype/world-size
+    unsupported); the caller then does plain all_reduce + add + norm itself.
+    """
+    if isinstance(group, CustomProcessGroup):
+        return group.all_reduce_fused_add_rmsnorm(input_, residual, weight, eps, norm_out)
+    return False
 
 
 def all_gather_into_tensor(

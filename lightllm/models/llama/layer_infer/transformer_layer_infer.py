@@ -25,6 +25,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self.tp_o_head_num_ = self.tp_q_head_num_
         self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
         self.embed_dim_ = network_config["hidden_size"]
+        # Llama uses a plain RMSNorm after the post-attention residual add, so the
+        # all_reduce + add + ffn_norm sequence can be fused (see the template).
+        self._enable_fused_ar_add_norm = True
         self._bind_func()
         return
 
@@ -97,7 +100,11 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return q, cache_kv
 
     def _get_o(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
+        self,
+        input,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: LlamaTransformerLayerWeight,
+        defer_reduction=False,
     ) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
@@ -105,6 +112,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
         o_tensor = layer_weight.o_proj.mm(input)
 
+        # When fusing, defer the all-reduce to the fused reduce+add+ffn_norm op in
+        # the template; return the pre-reduce partial here.
+        if defer_reduction:
+            return o_tensor
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
