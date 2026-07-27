@@ -74,7 +74,7 @@ class AdaptiveLoadSelector(PDSelector):
 
 
 class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
-    """refer to: https://github.com/sgl-project/sglang/blob/main/sgl-model-gateway/src/policies/cache_aware.rs"""
+    """Cache-aware prefill 选点：按抽稀后的 prompt 前缀匹配 + 负载均衡。"""
 
     def __init__(self, pd_manager):
         super().__init__(pd_manager)

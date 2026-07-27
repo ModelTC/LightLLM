@@ -6,15 +6,11 @@ from itertools import count
 from threading import RLock
 from typing import Dict, List, Optional, Tuple
 
-try:
-    from ._pd_tree_rust import PrefixMatchResult as RustPrefixMatchResult
-    from ._pd_tree_rust import Tree as RustTree
-except Exception:
-    RustPrefixMatchResult = None
-    RustTree = None
-
 
 _EPOCH_COUNTER = count()
+
+# 每隔 sample_stride 个字符取 1 个作为前缀树 key，压缩树深度与内存。
+DEFAULT_SAMPLE_STRIDE = 16
 
 
 def _get_epoch() -> int:
@@ -30,14 +26,18 @@ def _shared_prefix_count(a: str, b: str) -> int:
     return matched
 
 
+def sample_prompt_key(text: str, sample_stride: int) -> str:
+    """从 prompt 中按固定步长抽字符，作为前缀匹配 key。"""
+    if sample_stride <= 1 or not text:
+        return text
+    return text[::sample_stride]
+
+
 @dataclass(slots=True)
 class PrefixMatchResult:
     tenant: str
     matched_char_count: int
     input_char_count: int
-
-
-PythonPrefixMatchResult = PrefixMatchResult
 
 
 @dataclass(slots=True)
@@ -51,24 +51,32 @@ class _Node:
 
 class Tree:
     """
-    Python translation of the Rust cache-aware radix tree.
+    Cache-aware 前缀树（Python）。
 
-    Notes:
-    - Uses a coarse-grained lock for correctness and simpler behavior parity.
-    - Keeps per-tenant char counts for eviction decisions.
+    对原始 prompt 按 sample_stride 抽稀后再建树/匹配，key 长度约为
+    len(prompt) / sample_stride，从而降低匹配开销与树节点内存。
+    matched_char_count / input_char_count 均基于抽稀后的 key 长度计算，
+    比值仍可近似反映原始前缀重合比例。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sample_stride: int = DEFAULT_SAMPLE_STRIDE) -> None:
+        if sample_stride < 1:
+            raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
+        self.sample_stride = sample_stride
         self.root = _Node(text="")
         self.tenant_char_count: Dict[str, int] = {}
         self._lock = RLock()
 
+    def _to_key(self, text: str) -> str:
+        return sample_prompt_key(text, self.sample_stride)
+
     def insert(self, text: str, tenant: str) -> None:
+        key = self._to_key(text)
         with self._lock:
             self.root.tenant_last_access_time.setdefault(tenant, 0)
             self.tenant_char_count.setdefault(tenant, 0)
 
-            remaining = text
+            remaining = key
             prev = self.root
 
             while remaining:
@@ -126,8 +134,9 @@ class Tree:
             prev.last_tenant = tenant
 
     def prefix_match_with_counts(self, text: str) -> PrefixMatchResult:
+        key = self._to_key(text)
         with self._lock:
-            remaining = text
+            remaining = key
             matched_chars = 0
             prev = self.root
 
@@ -160,19 +169,21 @@ class Tree:
             if tenant != "empty":
                 curr.tenant_last_access_time[tenant] = _get_epoch()
 
-            return PythonPrefixMatchResult(
+            return PrefixMatchResult(
                 tenant=tenant,
                 matched_char_count=matched_chars,
-                input_char_count=len(text),
+                input_char_count=len(key),
             )
 
     def prefix_match(self, text: str) -> Tuple[str, str]:
+        key = self._to_key(text)
         result = self.prefix_match_with_counts(text)
-        return text[: result.matched_char_count], result.tenant
+        return key[: result.matched_char_count], result.tenant
 
     def prefix_match_tenant(self, text: str, tenant: str) -> str:
+        key = self._to_key(text)
         with self._lock:
-            remaining = text
+            remaining = key
             matched_chars = 0
             prev = self.root
 
@@ -200,7 +211,7 @@ class Tree:
                 prev.tenant_last_access_time[tenant] = _get_epoch()
                 prev.last_tenant = tenant
 
-            return text[:matched_chars]
+            return key[:matched_chars]
 
     @staticmethod
     def _leaf_of(node: _Node) -> List[str]:
@@ -309,10 +320,3 @@ class Tree:
                     used_size_per_tenant[tenant] = used_size_per_tenant.get(tenant, 0) + text_count
                 stack.extend(curr.children.values())
             return used_size_per_tenant
-
-
-PythonTree = Tree
-
-if RustTree is not None and RustPrefixMatchResult is not None:
-    PrefixMatchResult = RustPrefixMatchResult
-    Tree = RustTree

@@ -8,4 +8,3 @@ dist
 tmp/
 requirements-musa.txt
 logs/
-target/

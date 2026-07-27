@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import List, Optional, runtime_checkable
+from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.log_utils import init_logger
 
-from .tree import Tree
+from .tree import DEFAULT_SAMPLE_STRIDE, Tree
 
 
 logger = init_logger(__name__)
@@ -19,12 +19,14 @@ class CacheAwareConfig:
     balance_rel_threshold: float = 1.2
     eviction_interval_secs: int = 30
     max_tree_size: int = 1000000
+    # 每隔 sample_stride 字符抽 1 个作为前缀树 key，降低匹配开销与内存。
+    sample_stride: int = DEFAULT_SAMPLE_STRIDE
 
 
 class CacheAwarePolicy:
     def __init__(self, config: Optional[CacheAwareConfig] = None) -> None:
         self.config = config or CacheAwareConfig()
-        self.tree: Tree = Tree()
+        self.tree: Tree = Tree(sample_stride=self.config.sample_stride)
         self._stop_eviction = threading.Event()
         self._eviction_thread: Optional[threading.Thread] = None
         if self.config.eviction_interval_secs > 0:
