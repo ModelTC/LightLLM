@@ -42,7 +42,7 @@ class PromptCacheTree:
 
     def __init__(
         self,
-        sample_stride: int = 256,
+        sample_stride: int = 512,
         max_node_count: int = 1_000_000,
         evict_node_batch: int = 10_000,
         recursion_limit: int = 4000,
