@@ -487,6 +487,9 @@ PD 分离模式参数
        * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - SGL/Triton A quant → CUTLASS GEMM（N 可整除 128）或 Triton GEMM
+       * - ``fp8w8a8-b128-cutlass``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - SGL/Triton A quant → CUTLASS GEMM（要求 N 可整除 128）
        * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - SGL/Triton A quant → DeepGEMM

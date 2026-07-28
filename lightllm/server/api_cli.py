@@ -622,6 +622,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "  fp8w8a8-pt-sgl                 FP8; W per-tensor*, A per-token        Triton quant + SGL\n"
             "  fp8w8a8-b128                   FP8; W block 128x128, A group 128      "
             "SGL/Triton quant + CUTLASS(N%%128=0)/Triton\n"
+            "  fp8w8a8-b128-cutlass           FP8; W block 128x128, A group 128      SGL/Triton quant + CUTLASS\n"
             "  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      SGL/Triton quant + DeepGEMM\n"
             "  awq                            INT4 weight-only; checkpoint group     AWQ GEMM (<256) / dequant+matmul\n"
             "  awq_marlin                     INT4 weight-only; checkpoint group     Marlin\n"

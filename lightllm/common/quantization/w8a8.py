@@ -409,7 +409,6 @@ class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMetho
         return "fp8w8a8-pt-triton"
 
 
-@QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"], platform="cuda")
 class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -448,7 +447,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         return qinput_tensor, qweight, input_scale, weight_scale, out
 
-    def _apply_triton(
+    def _triton_matmul(
         self,
         qinput_tensor: torch.Tensor,
         qweight: torch.Tensor,
@@ -470,27 +469,18 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         assert bias is None, f"Bias addition is not supported in {self.method_name} for now"
         return out
 
-    def apply(
+    def _cutlass_matmul(
         self,
-        input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
-        use_custom_tensor_mananger: bool = True,
+        qinput_tensor: torch.Tensor,
+        qweight: torch.Tensor,
+        input_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
-            input_tensor, weight_pack, out, use_custom_tensor_mananger
-        )
-        if qweight.shape[1] % self.block_size != 0:
-            return self._apply_triton(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
         input_scale = input_scale.t().contiguous().t()
         cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
         return out
-
-    @property
-    def method_name(self):
-        return "vllm-fp8w8a8-b128"
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
@@ -513,6 +503,55 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
+@QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"], platform="cuda")
+class FP8w8a8B128AutoQuantizationMethod(FP8w8a8B128QuantizationMethod):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
+            input_tensor, weight_pack, out, use_custom_tensor_mananger
+        )
+        if qweight.shape[1] % self.block_size != 0:
+            return self._triton_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
+        return self._cutlass_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, bias)
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-b128"
+
+
+@QUANTMETHODS.register("fp8w8a8-b128-cutlass", platform="cuda")
+class FP8w8a8B128CutlassQuantizationMethod(FP8w8a8B128QuantizationMethod):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
+            input_tensor, weight_pack, out, use_custom_tensor_mananger
+        )
+        if qweight.shape[1] % self.block_size != 0:
+            raise ValueError(
+                "fp8w8a8-b128-cutlass requires the output dimension to be divisible by 128; "
+                "use fp8w8a8-b128-triton or fp8w8a8-b128 instead"
+            )
+        return self._cutlass_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, bias)
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-b128-cutlass"
+
+
 @QUANTMETHODS.register("fp8w8a8-b128-triton", platform="cuda")
 class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
@@ -527,7 +566,7 @@ class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
         qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
             input_tensor, weight_pack, out, use_custom_tensor_mananger
         )
-        return self._apply_triton(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
+        return self._triton_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
 
     @property
     def method_name(self):
