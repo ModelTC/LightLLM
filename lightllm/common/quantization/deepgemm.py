@@ -43,7 +43,7 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         return "deepgemm-base"
 
 
-@QUANTMETHODS.register(["deepgemm-fp8w8a8-b128"], platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8-b128-deepgemm", "deepgemm-fp8w8a8-b128"], platform="cuda")
 class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -56,7 +56,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return "deepgemm-fp8w8a8-b128"
+        return "fp8w8a8-b128-deepgemm"
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant

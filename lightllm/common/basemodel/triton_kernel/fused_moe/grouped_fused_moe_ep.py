@@ -22,7 +22,7 @@ from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 _MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
-SUPPORTED_EP_EXPERT_DTYPES = ("deepgemm-fp8w8a8-b128", "deepgemm-fp4fp8-b32")
+SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "deepgemm-fp4fp8-b32")
 
 try:
     from deep_ep import Buffer, EventOverlap

@@ -1,7 +1,47 @@
 import argparse
 
 
+class LightLLMHelpFormatter(argparse.HelpFormatter):
+    def _split_lines(self, text: str, width: int):
+        if text.startswith("\b"):
+            return text[1:].splitlines()
+        return super()._split_lines(text, width)
+
+
+_QUANT_TYPE_ROWS = (
+    ("w8a8", "INT8; W per-channel, A per-token", "CUTLASS"),
+    ("fp8w8a8", "FP8; W per-channel, A per-token", "CUTLASS/Triton"),
+    ("fp8w8a8-pt-cutlass", "FP8; W per-tensor, A per-token", "CUTLASS"),
+    ("fp8w8a8-pt-sgl", "FP8; W per-tensor, A per-token", "SGL Kernel"),
+    ("fp8w8a8-b128", "FP8; W block 128x128, A group 128", "CUTLASS/Triton"),
+    ("fp8w8a8-b128-deepgemm", "FP8; W block 128x128, A group 128", "DeepGEMM"),
+    ("awq", "INT4 weight-only; W4A16", "AWQ CUDA Kernel"),
+    ("awq_marlin", "INT4 weight-only; W4A16", "Marlin"),
+    ("none", "No quantization", "-"),
+    ("fp8w8a8-pt", "FP8; W per-tensor, A per-token", "Triton"),
+    ("fp8w8a8-b128-triton", "FP8; W block 128x128, A group 128", "Triton"),
+    ("fp8w8a8g128", "FP8; W per-channel, A group 128", "Triton"),
+    ("fp8w8a8g64", "FP8; W per-channel, A group 64", "Triton"),
+)
+_QUANT_TYPE_NAME_WIDTH = 29
+_QUANT_TYPE_DESC_WIDTH = 37
+_QUANT_TYPE_TABLE = [
+    f"  {'quant_type':<{_QUANT_TYPE_NAME_WIDTH}}  {'quantization':<{_QUANT_TYPE_DESC_WIDTH}}  operator backend",
+    f"  {'-' * _QUANT_TYPE_NAME_WIDTH}  {'-' * _QUANT_TYPE_DESC_WIDTH}  {'-' * 16}",
+]
+_QUANT_TYPE_TABLE.extend(
+    f"  {name:<{_QUANT_TYPE_NAME_WIDTH}}  {description:<{_QUANT_TYPE_DESC_WIDTH}}  {backend}"
+    for name, description, backend in _QUANT_TYPE_ROWS
+)
+QUANT_TYPE_HELP = (
+    "\bQuantization methods (W = weight, A = activation):\n"
+    + "\n".join(_QUANT_TYPE_TABLE)
+    + "\nLegacy vllm-* and deepgemm-fp8w8a8-b128 aliases are also accepted."
+)
+
+
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.formatter_class = LightLLMHelpFormatter
 
     parser.add_argument(
         "--run_mode",
@@ -611,11 +651,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: w8a8 | fp8w8a8 | fp8w8a8-pt |
-                        fp8w8a8-pt-cutlass | fp8w8a8-pt-sgl | fp8w8a8-pt-triton |
-                        fp8w8a8-b128 | deepgemm-fp8w8a8-b128 | awq | awq_marlin |
-                        fp8w8a8g128 (weight perchannel quant and act per group quant) |
-                        fp8w8a8g64 (weight perchannel quantization with group size 64)""",
+        help=QUANT_TYPE_HELP,
     )
     parser.add_argument(
         "--quant_cfg",

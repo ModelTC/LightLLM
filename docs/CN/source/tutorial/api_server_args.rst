@@ -486,7 +486,7 @@ PD 分离模式参数
        * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - CUTLASS / Triton（按 shape 选择）
-       * - ``deepgemm-fp8w8a8-b128``
+       * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - DeepGEMM
        * - ``fp8w8a8-pt-cutlass``
@@ -506,6 +506,9 @@ PD 分离模式参数
          - —
        * - ``fp8w8a8-pt``（``fp8w8a8-pt-triton``）
          - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
+       * - ``fp8w8a8-b128-triton``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - Triton
        * - ``fp8w8a8g128``（``triton-fp8w8a8g128``）
          - FP8 W8A8；W：per-channel，A：per-token-group 128

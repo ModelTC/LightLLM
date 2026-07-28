@@ -427,15 +427,13 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         output.weight_scale.copy_(scale)
         return
 
-    def apply(
+    def _prepare_apply(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
         out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale.t()
         input_scale = None  # dynamic quantization for input tensor
@@ -448,20 +446,48 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             )
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        if n % 128 != 0:
-            w8a8_block_fp8_matmul(
-                qinput_tensor,
-                qweight,
-                input_scale,
-                weight_scale,
-                out,
-                (self.block_size, self.block_size),
-                dtype=input_tensor.dtype,
+        return qinput_tensor, qweight, input_scale, weight_scale, out
+
+    def _apply_triton(
+        self,
+        qinput_tensor: torch.Tensor,
+        qweight: torch.Tensor,
+        input_scale: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out: torch.Tensor,
+        output_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        w8a8_block_fp8_matmul(
+            qinput_tensor,
+            qweight,
+            input_scale,
+            weight_scale,
+            out,
+            (self.block_size, self.block_size),
+            dtype=output_dtype,
+        )
+        assert bias is None, f"Bias addition is not supported in {self.method_name} for now"
+        return out
+
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qinput_tensor, qweight, input_scale, weight_scale, out = self._prepare_apply(
+            input_tensor, weight_pack, out, use_custom_tensor_mananger
+        )
+        if qweight.shape[1] % self.block_size != 0:
+            return self._apply_triton(
+                qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias
             )
-            assert bias is None, "Bias addition is not supported in fp8w8a8-b128 quantization method for now"
-        else:
-            input_scale = input_scale.t().contiguous().t()
-            cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
+        input_scale = input_scale.t().contiguous().t()
+        cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
         return out
 
     @property
@@ -487,3 +513,24 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             weight_scale_split_dim=-2,
         )
         return mm_param, mm_param_list
+
+
+@QUANTMETHODS.register("fp8w8a8-b128-triton", platform="cuda")
+class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qinput_tensor, qweight, input_scale, weight_scale, out = self._prepare_apply(
+            input_tensor, weight_pack, out, use_custom_tensor_mananger
+        )
+        return self._apply_triton(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-b128-triton"
