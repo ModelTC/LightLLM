@@ -387,7 +387,9 @@ def _launch_subprocesses(args: StartArgs):
     auto_configure_allreduce_flags_from_args(args)
 
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
-    ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
+    ports_to_check = [args.port]
+    if args.dp == 1 and args.nnodes > 1:
+        ports_to_check.extend([args.multinode_httpmanager_port, args.multinode_router_gloo_port])
     if args.node_rank == 0 and args.nccl_port is not None:
         ports_to_check.append(args.nccl_port)
     validate_ports(ports_to_check)

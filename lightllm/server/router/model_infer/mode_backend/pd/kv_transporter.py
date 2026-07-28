@@ -8,8 +8,8 @@ from lightllm.utils.net_utils import get_hostname_ip
 
 logger = init_logger(__name__)
 
-_NCCL_CONTROL_PORT_MIN = 20000
-_NCCL_CONTROL_PORT_MAX = 30000
+_NCCL_CONTROL_PORT_MIN = 30000
+_NCCL_CONTROL_PORT_MAX = 40000
 
 
 def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_buffer: Tensor):

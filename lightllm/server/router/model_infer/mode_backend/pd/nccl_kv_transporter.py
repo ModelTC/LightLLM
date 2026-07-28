@@ -45,8 +45,8 @@ class NcclKVTransporter:
         tp_idx: int,
         kv_move_buffer: Tensor,
         host_ip: Optional[str] = None,
-        control_port_min: int = 20000,
-        control_port_max: int = 30000,
+        control_port_min: int = 30000,
+        control_port_max: int = 40000,
     ):
         self.node_id = node_id
         self.tp_idx = tp_idx

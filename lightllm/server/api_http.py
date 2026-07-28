@@ -25,7 +25,6 @@ import requests
 import base64
 import os
 from io import BytesIO
-import pickle
 import setproctitle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -37,7 +36,7 @@ import multiprocessing as mp
 from typing import Any, AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
-from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
@@ -45,7 +44,7 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
-from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
@@ -331,6 +330,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         resp = await chat_completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -348,6 +350,9 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         resp = await completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -455,49 +460,10 @@ from .api_http_rl import router as rl_router
 
 app.include_router(rl_router)
 
+# PD 分离控制面接口（P/D 注册与 KV 状态上报），见 api_http_pd.py
+from .api_http_pd import router as pd_router
 
-@app.websocket("/pd_register")
-async def register_and_keep_alive(websocket: WebSocket):
-    await websocket.accept()
-    websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
-    client_ip, client_port = websocket.client
-    logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
-    regist_json = json.loads(await websocket.receive_text())
-    logger.info(f"received regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
-
-    try:
-        while True:
-            # 等待接收消息，设置超时为10秒
-            data = await websocket.receive_bytes()
-            obj = pickle.loads(data)
-            await g_objs.httpserver_manager.put_to_handle_queue(obj)
-
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"client {regist_json} has error {str(e)}")
-        logger.exception(str(e))
-    finally:
-        logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(regist_json)
-    return
-
-
-@app.websocket("/kv_move_status")
-async def kv_move_status(websocket: WebSocket):
-    await websocket.accept()
-    client_ip, client_port = websocket.client
-    logger.info(f"kv_move_status Client connected from IP: {client_ip}, Port: {client_port}")
-    try:
-        while True:
-            # 等待接收消息，设置超时为10秒
-            data = await websocket.receive_bytes()
-            upkv_status = pickle.loads(data)
-            logger.info(f"received upkv_status {upkv_status} from {(client_ip, client_port)}")
-            await g_objs.httpserver_manager.update_req_status(upkv_status)
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
-        logger.exception(str(e))
-    return
+app.include_router(pd_router)
 
 
 @app.get("/profiler_start")

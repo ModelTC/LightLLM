@@ -194,6 +194,38 @@ class HttpServerManagerForPDMaster:
             await self.remove_req(block_group_request_id)
         return
 
+    async def _wait_for_event_or_disconnect(
+        self,
+        event: asyncio.Event,
+        request: Request,
+        timeout: float,
+        group_request_id: int,
+        stage: str,
+    ) -> None:
+        """Wait for an asyncio.Event but abort early if the HTTP client disconnects."""
+        deadline = time.time() + timeout
+        disconnect_reason = f"fetch_pd_stream {stage} period check network disconnected"
+
+        async def raise_if_disconnected() -> None:
+            if await request.is_disconnected():
+                logger.warning(f"group_request_id: {group_request_id} {disconnect_reason}")
+                raise ClientDisconnected(
+                    group_request_id=group_request_id,
+                    reason=disconnect_reason,
+                )
+
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise ServerBusyError()
+            await raise_if_disconnected()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=min(1.0, remaining))
+                await raise_if_disconnected()
+                return
+            except asyncio.TimeoutError:
+                continue
+
     async def _log_req_header(self, request: Request, group_request_id: int):
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
@@ -228,15 +260,16 @@ class HttpServerManagerForPDMaster:
         await p_node.websocket.send_bytes(pickle.dumps((ObjType.REQ, (prompt, sampling_params, multimodal_params))))
 
         try:
-            await asyncio.wait_for(prefill_prompt_ids_event.wait(), timeout=60)
-        except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} wait prefill prompt ids time out")
-            raise ServerBusyError()
-
-        if await request.is_disconnected():
-            raise ClientDisconnected(
-                group_request_id=group_request_id, reason="fetch_pd_stream prefill period check network disconnected"
+            await self._wait_for_event_or_disconnect(
+                prefill_prompt_ids_event,
+                request,
+                timeout=60,
+                group_request_id=group_request_id,
+                stage="prefill",
             )
+        except ServerBusyError:
+            logger.warning(f"group_request_id: {group_request_id} wait prefill prompt ids time out")
+            raise
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
         logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
@@ -247,10 +280,16 @@ class HttpServerManagerForPDMaster:
         )
 
         try:
-            await asyncio.wait_for(up_status_event.wait(), timeout=180)
-        except asyncio.TimeoutError:
-            logger.warning(f"group_request_id: {group_request_id} kv move time out err, server is busy now.")
-            raise ServerBusyError()
+            await self._wait_for_event_or_disconnect(
+                up_status_event,
+                request,
+                timeout=180,
+                group_request_id=group_request_id,
+                stage="decode",
+            )
+        except ServerBusyError:
+            logger.warning(f"group_request_id: {group_request_id} wait decode stage time out err, server is busy now.")
+            raise
 
         # 将 decode 节点上报的当前请求使用的decode节点的信息下发给 p 节点，这样 p 节点才知道将 kv 传输给那个 d 节点。
         upkv_status: PDUpKVStatus = up_status_event.upkv_status
