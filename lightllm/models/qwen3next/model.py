@@ -21,7 +21,7 @@ from lightllm.common.linear_att_cache_manager.config_objs import (
     get_mtp_draft_full_att_layer_num,
 )
 from lightllm.common.basemodel.batch_objs import ModelOutput
-from lightllm.distributed import all_reduce
+from lightllm.distributed import all_reduce, all_reduce_residual_rmsnorm
 
 logger = init_logger(__name__)
 
@@ -156,30 +156,33 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 input1 = next_att_normed
                 next_att_normed = None
 
-            use_fused_reduce = layer._should_fuse_ar_add_norm(infer_state)
             if layer.is_linear_attention_layer:
-                o = layer.token_attention_forward(
-                    input1,
-                    infer_state,
-                    layer_weight,
-                    defer_reduction=use_fused_reduce,
-                )
+                o = layer.token_attention_forward(input1, infer_state, layer_weight)
+                input1 = layer._add_residual_ffn_norm(input_embs, o, infer_state, layer_weight)
+                o = None
             else:
                 q, cache_kv = layer._get_qkv(input1, infer_state, layer_weight)
                 layer._post_cache_kv(cache_kv, infer_state, layer_weight)
                 o = layer._token_attention_kernel(q, infer_state, layer_weight)
                 q = None
                 o = layer._get_o_local(o, infer_state, layer_weight)
-
-            if use_fused_reduce:
-                input1 = layer._reduce_add_ffn_norm(o, input_embs, infer_state, layer_weight)
-            else:
-                # Linear attention performs its reduction inside
-                # token_attention_forward unless it is explicitly deferred.
-                if not layer.is_linear_attention_layer and layer.tp_world_size_ > 1:
-                    all_reduce(o, group=infer_state.dist_group)
-                input1 = layer._add_residual_ffn_norm(input_embs, o, infer_state, layer_weight)
-            o = None
+                fused = None
+                if layer.tp_world_size_ > 1:
+                    fused = all_reduce_residual_rmsnorm(
+                        o,
+                        residual=input_embs.view(-1, layer.embed_dim_),
+                        norm_weight=layer_weight.ffn_norm_weight_.weight,
+                        eps=layer.eps_,
+                        group=infer_state.dist_group,
+                        alloc_func=layer.alloc_tensor,
+                    )
+                if fused is None:
+                    if layer.tp_world_size_ > 1:
+                        all_reduce(o, group=infer_state.dist_group)
+                    input1 = layer._add_residual_ffn_norm(input_embs, o, infer_state, layer_weight)
+                else:
+                    input_embs, input1 = fused
+                o = None
 
             ffn_out = layer._ffn(input1, infer_state, layer_weight)
             ffn_out = ffn_out.view(-1, layer.embed_dim_)

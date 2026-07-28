@@ -208,11 +208,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         input,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
-        defer_reduction=False,
     ) -> torch.Tensor:
         o_tensor = self._get_o_local(input=input, infer_state=infer_state, layer_weight=layer_weight)
-        if defer_reduction:
-            return o_tensor
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
@@ -238,16 +235,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
-        defer_reduction=False,
     ):
         # full attention layer
         if not self.is_linear_attention_layer:
-            return super().context_attention_forward(
-                input_embdings, infer_state, layer_weight, defer_reduction=defer_reduction
-            )
+            return super().context_attention_forward(input_embdings, infer_state, layer_weight)
 
         gdn_out = self.gdn_forward(input_embdings, infer_state, layer_weight, is_prefill=True)
-        if self.tp_world_size_ > 1 and not defer_reduction:
+        if self.tp_world_size_ > 1:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return gdn_out
 
@@ -256,15 +250,11 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
-        defer_reduction=False,
     ):
         if not self.is_linear_attention_layer:
-            return super().token_attention_forward(
-                input_embdings, infer_state, layer_weight, defer_reduction=defer_reduction
-            )
-
+            return super().token_attention_forward(input_embdings, infer_state, layer_weight)
         gdn_out = self.gdn_forward(input_embdings, infer_state, layer_weight, is_prefill=False)
-        if self.tp_world_size_ > 1 and not defer_reduction:
+        if self.tp_world_size_ > 1:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return gdn_out
 
