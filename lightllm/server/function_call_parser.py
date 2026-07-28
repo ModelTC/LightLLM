@@ -2059,11 +2059,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
         self._qwen_stream_buffer += new_text
         normal_text = ""
         calls: List[ToolCallItem] = []
-        function_start = "<function="
-        parameter_start = "<parameter="
+        function_start_prefix = "<function="
+        parameter_start_prefix = "<parameter="
         parameter_end = "</parameter>"
         function_end = "</function>"
-        value_markers = (parameter_end, parameter_start, function_end, self.eot_token)
+        value_markers = (parameter_end, parameter_start_prefix, function_end, self.eot_token)
 
         while self._qwen_stream_buffer:
             state = self._qwen_stream_state
@@ -2082,11 +2082,11 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 continue
 
             if state == "inside_tool":
-                match = self._qwen_find_marker((function_start, self.eot_token))
+                match = self._qwen_find_marker((function_start_prefix, self.eot_token))
                 if match is None:
                     self._qwen_stream_buffer = self._qwen_marker_tail(
                         self._qwen_stream_buffer,
-                        (function_start, self.eot_token),
+                        (function_start_prefix, self.eot_token),
                     )
                     break
                 position, marker = match
@@ -2126,18 +2126,20 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 continue
 
             if state == "inside_function":
-                match = self._qwen_find_marker((parameter_start, function_end, function_start, self.eot_token))
+                match = self._qwen_find_marker(
+                    (parameter_start_prefix, function_end, function_start_prefix, self.eot_token)
+                )
                 if match is None:
                     self._qwen_stream_buffer = self._qwen_marker_tail(
                         self._qwen_stream_buffer,
-                        (parameter_start, function_end, function_start, self.eot_token),
+                        (parameter_start_prefix, function_end, function_start_prefix, self.eot_token),
                     )
                     break
                 position, marker = match
                 self._qwen_stream_buffer = self._qwen_stream_buffer[position + len(marker) :]
-                if marker == parameter_start:
+                if marker == parameter_start_prefix:
                     self._qwen_stream_state = "parameter_name"
-                elif marker == function_start:
+                elif marker == function_start_prefix:
                     self._finish_qwen_function(calls)
                     self._qwen_stream_state = "function_name"
                 elif marker == function_end:
@@ -2179,7 +2181,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
                     self._qwen_buffered_value_parts.append(value)
                 self._finish_qwen_parameter(calls, tools)
 
-                if marker == parameter_start:
+                if marker == parameter_start_prefix:
                     self._qwen_stream_state = "parameter_name"
                 elif marker == function_end:
                     self._finish_qwen_function(calls)
