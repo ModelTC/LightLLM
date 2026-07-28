@@ -266,7 +266,7 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
             child_pack.per_tensor_expert_index = 0
         return
 
-    def _prepare_apply(
+    def _dynamic_quant_input(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
@@ -331,7 +331,7 @@ class FP8w8a8PerTensorCutlassQuantizationMethod(FP8w8a8PerTensorQuantizationMeth
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight, weight_scale, x_q, x_scale, _, _ = self._prepare_apply(
+        qweight, weight_scale, x_q, x_scale, _, _ = self._dynamic_quant_input(
             input_tensor, weight_pack, use_custom_tensor_mananger, bias
         )
         result = vllm_ops.cutlass_scaled_mm(
@@ -360,7 +360,7 @@ class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight, weight_scale, x_q, x_scale, _, n = self._prepare_apply(
+        qweight, weight_scale, x_q, x_scale, _, n = self._dynamic_quant_input(
             input_tensor, weight_pack, use_custom_tensor_mananger, bias
         )
         # sgl needs a per-channel weight scale [N]; expand the per-tensor scalar once, cache it.
@@ -387,7 +387,7 @@ class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMetho
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight, weight_scale, x_q, x_scale, m, n = self._prepare_apply(
+        qweight, weight_scale, x_q, x_scale, m, n = self._dynamic_quant_input(
             input_tensor, weight_pack, use_custom_tensor_mananger, bias
         )
         if out is None:
@@ -427,7 +427,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         output.weight_scale.copy_(scale)
         return
 
-    def _prepare_apply(
+    def _dynamic_quant_input(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
@@ -479,7 +479,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qinput_tensor, qweight, input_scale, weight_scale, out = self._prepare_apply(
+        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
             input_tensor, weight_pack, out, use_custom_tensor_mananger
         )
         if qweight.shape[1] % self.block_size != 0:
@@ -524,7 +524,7 @@ class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qinput_tensor, qweight, input_scale, weight_scale, out = self._prepare_apply(
+        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
             input_tensor, weight_pack, out, use_custom_tensor_mananger
         )
         return self._apply_triton(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
