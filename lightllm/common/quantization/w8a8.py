@@ -469,7 +469,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
 
 
 @QUANTMETHODS.register(
-    ["vllm-fp8w8a8-b128", "fp8w8a8-b128", "fp8w8a8-b128-vllm", "fp8w8a8-b128-cutlass"],
+    ["vllm-fp8w8a8-b128", "fp8w8a8-b128-vllm", "fp8w8a8-b128-cutlass"],
     platform="cuda",
 )
 class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
@@ -499,7 +499,7 @@ class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
         return "fp8w8a8-b128-vllm"
 
 
-@QUANTMETHODS.register("fp8w8a8-b128-triton", platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8-b128", "fp8w8a8-b128-triton"], platform="cuda")
 class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
         self,
