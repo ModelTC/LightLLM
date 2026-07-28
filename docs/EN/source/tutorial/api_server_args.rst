@@ -487,18 +487,21 @@ Quantization Parameters
          - FP8 W8A8; W: per-channel, A: per-token
          - vLLM FP8 quant → CUTLASS GEMM (default) or Triton GEMM (controlled by
            ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM``)
-       * - ``fp8w8a8-b128`` (``fp8w8a8-b128-cutlass``, ``vllm-fp8w8a8-b128``)
-         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - SGL/Triton A quant → CUTLASS GEMM (requires N to be divisible by 128)
-       * - ``fp8w8a8-b128-deepgemm`` (``deepgemm-fp8w8a8-b128``)
-         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - SGL/Triton A quant → DeepGEMM
        * - ``fp8w8a8-pt-cutlass``
          - FP8 W8A8; W: per-tensor (per-expert for MoE), A: per-token
          - Triton A quant → CUTLASS GEMM (vLLM)
        * - ``fp8w8a8-pt-sgl``
          - FP8 W8A8; W: per-tensor (per-expert for MoE), A: per-token
          - Triton A quant → SGL ``fp8_scaled_mm``
+       * - ``fp8w8a8-b128`` (``vllm-fp8w8a8-b128``)
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - SGL/Triton A quant → CUTLASS GEMM (default; requires N to be divisible by 128)
+       * - ``fp8w8a8-b128-cutlass``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - SGL/Triton A quant → CUTLASS GEMM (requires N to be divisible by 128)
+       * - ``fp8w8a8-b128-deepgemm`` (``deepgemm-fp8w8a8-b128``)
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - SGL/Triton A quant → DeepGEMM
        * - ``awq``
          - INT4 weight-only; group size comes from the model quantization config, A remains floating point
          - vLLM AWQ GEMM below 256 tokens; otherwise dequantize and use ``torch.matmul``

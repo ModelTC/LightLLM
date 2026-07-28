@@ -484,18 +484,21 @@ PD 分离模式参数
        * - ``fp8w8a8``（``vllm-fp8w8a8``）
          - FP8 W8A8；W：per-channel，A：per-token
          - vLLM FP8 quant → CUTLASS GEMM（默认）或 Triton GEMM（由 ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM`` 控制）
-       * - ``fp8w8a8-b128``（``fp8w8a8-b128-cutlass``、``vllm-fp8w8a8-b128``）
-         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → CUTLASS GEMM（要求 N 可整除 128）
-       * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
-         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → DeepGEMM
        * - ``fp8w8a8-pt-cutlass``
          - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
          - Triton A quant → CUTLASS GEMM（vLLM）
        * - ``fp8w8a8-pt-sgl``
          - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
          - Triton A quant → SGL ``fp8_scaled_mm``
+       * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - SGL/Triton A quant → CUTLASS GEMM（默认，要求 N 可整除 128）
+       * - ``fp8w8a8-b128-cutlass``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - SGL/Triton A quant → CUTLASS GEMM（要求 N 可整除 128）
+       * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - SGL/Triton A quant → DeepGEMM
        * - ``awq``
          - INT4 weight-only；group size 由模型量化配置提供，A 保持浮点
          - token 数小于 256 时使用 vLLM AWQ GEMM；否则反量化后使用 ``torch.matmul``
