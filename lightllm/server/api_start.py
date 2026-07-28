@@ -33,6 +33,12 @@ from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_
 logger = init_logger(__name__)
 
 
+def _get_hypercorn_config_args(args: StartArgs):
+    if args.hypercorn_config is None:
+        return []
+    return ["--config", args.hypercorn_config]
+
+
 def setup_signal_handlers(http_server_process, process_manager):
     def signal_handler(sig, frame):
         if sig == signal.SIGINT:
@@ -477,6 +483,7 @@ def normal_or_p_d_start(args: StartArgs):
     # 启动 Hypercorn
     command = [
         "hypercorn",
+        *_get_hypercorn_config_args(args),
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
@@ -541,6 +548,7 @@ def pd_master_start(args: StartArgs):
 
     command = [
         "hypercorn",
+        *_get_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
@@ -637,6 +645,7 @@ def config_server_start(args):
 
     command = [
         "hypercorn",
+        *_get_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
