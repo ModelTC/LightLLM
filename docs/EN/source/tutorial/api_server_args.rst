@@ -485,7 +485,7 @@ Quantization Parameters
        * - ``fp8w8a8``
          - FP8 W8A8; W: per-channel, A: per-token
          - vLLM
-       * - ``fp8w8a8-pt-cutlass``
+       * - ``fp8w8a8-pt-vllm``
          - FP8 W8A8; W: per-tensor, A: per-token
          - vLLM
        * - ``fp8w8a8-pt-sgl``
@@ -494,7 +494,7 @@ Quantization Parameters
        * - ``fp8w8a8-b128``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - vLLM
-       * - ``fp8w8a8-b128-cutlass``
+       * - ``fp8w8a8-b128-vllm``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - vLLM
        * - ``fp8w8a8-b128-deepgemm``

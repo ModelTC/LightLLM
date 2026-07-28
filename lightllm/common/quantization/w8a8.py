@@ -315,12 +315,12 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("fp8w8a8-pt-cutlass", platform="cuda")
-class FP8w8a8PerTensorCutlassQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
+@QUANTMETHODS.register(["fp8w8a8-pt-vllm", "fp8w8a8-pt-cutlass"], platform="cuda")
+class FP8w8a8PerTensorVllmQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
     def __init__(self):
         super().__init__()
         if not HAS_VLLM:
-            raise RuntimeError("fp8w8a8-pt-cutlass requires vllm with cutlass_scaled_mm support")
+            raise RuntimeError("fp8w8a8-pt-vllm requires vllm with cutlass_scaled_mm support")
 
     def apply(
         self,
@@ -341,7 +341,7 @@ class FP8w8a8PerTensorCutlassQuantizationMethod(FP8w8a8PerTensorQuantizationMeth
 
     @property
     def method_name(self):
-        return "fp8w8a8-pt-cutlass"
+        return "fp8w8a8-pt-vllm"
 
 
 @QUANTMETHODS.register("fp8w8a8-pt-sgl", platform="cuda")
@@ -468,8 +468,11 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128", "fp8w8a8-b128-cutlass"], platform="cuda")
-class FP8w8a8B128CutlassQuantizationMethod(FP8w8a8B128QuantizationMethod):
+@QUANTMETHODS.register(
+    ["vllm-fp8w8a8-b128", "fp8w8a8-b128", "fp8w8a8-b128-vllm", "fp8w8a8-b128-cutlass"],
+    platform="cuda",
+)
+class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
         self,
         input_tensor: torch.Tensor,
@@ -484,7 +487,7 @@ class FP8w8a8B128CutlassQuantizationMethod(FP8w8a8B128QuantizationMethod):
         )
         if qweight.shape[1] % self.block_size != 0:
             raise ValueError(
-                "fp8w8a8-b128-cutlass requires the output dimension to be divisible by 128; "
+                "fp8w8a8-b128-vllm requires the output dimension to be divisible by 128; "
                 "use fp8w8a8-b128-triton instead"
             )
         input_scale = input_scale.t().contiguous().t()
@@ -493,7 +496,7 @@ class FP8w8a8B128CutlassQuantizationMethod(FP8w8a8B128QuantizationMethod):
 
     @property
     def method_name(self):
-        return "fp8w8a8-b128-cutlass"
+        return "fp8w8a8-b128-vllm"
 
 
 @QUANTMETHODS.register("fp8w8a8-b128-triton", platform="cuda")
