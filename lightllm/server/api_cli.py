@@ -56,9 +56,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
-        default="round_robin",
+        default="cache_aware",
         choices=["random", "round_robin", "adaptive_load", "cache_aware"],
-        help="pd master use this strategy to select p d node, can be round_robin, random or adaptive_load",
+        help="pd master use this strategy to select p d node; default cache_aware",
     )
     parser.add_argument(
         "--config_server_host",
