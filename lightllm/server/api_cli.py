@@ -1,24 +1,6 @@
 import argparse
 
 
-QUANT_TYPE_HELP = """Quantization methods (W = weight, A = activation):
-  quant_type                     quantization                           operator backend
-  w8a8                           INT8; W per-channel, A per-token       CUTLASS
-  fp8w8a8                        FP8; W per-channel, A per-token        CUTLASS/Triton
-  fp8w8a8-pt-cutlass             FP8; W per-tensor, A per-token         CUTLASS
-  fp8w8a8-pt-sgl                 FP8; W per-tensor, A per-token         SGL Kernel
-  fp8w8a8-b128                   FP8; W block 128x128, A group 128      CUTLASS/Triton
-  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      DeepGEMM
-  awq                            INT4 weight-only; W4A16                AWQ CUDA Kernel
-  awq_marlin                     INT4 weight-only; W4A16                Marlin
-  none                           No quantization                        -
-  fp8w8a8-pt                     FP8; W per-tensor, A per-token         Triton
-  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      Triton
-  fp8w8a8g128                    FP8; W per-channel, A group 128        Triton
-  fp8w8a8g64                     FP8; W per-channel, A group 64         Triton
-Legacy vllm-* and deepgemm-fp8w8a8-b128 aliases are also accepted."""
-
-
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.formatter_class = argparse.RawTextHelpFormatter
 
@@ -630,7 +612,24 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help=QUANT_TYPE_HELP,
+        help=(
+            "Quantization methods (W = weight, A = activation):\n"
+            "  quant_type                     quantization                           operator backend\n"
+            "  w8a8                           INT8; W per-channel, A per-token       CUTLASS\n"
+            "  fp8w8a8                        FP8; W per-channel, A per-token        CUTLASS/Triton\n"
+            "  fp8w8a8-pt-cutlass             FP8; W per-tensor, A per-token         CUTLASS\n"
+            "  fp8w8a8-pt-sgl                 FP8; W per-tensor, A per-token         SGL Kernel\n"
+            "  fp8w8a8-b128                   FP8; W block 128x128, A group 128      CUTLASS/Triton\n"
+            "  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      DeepGEMM\n"
+            "  awq                            INT4 weight-only; W4A16                AWQ CUDA Kernel\n"
+            "  awq_marlin                     INT4 weight-only; W4A16                Marlin\n"
+            "  none                           No quantization                        -\n"
+            "  fp8w8a8-pt                     FP8; W per-tensor, A per-token         Triton\n"
+            "  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      Triton\n"
+            "  fp8w8a8g128                    FP8; W per-channel, A group 128        Triton\n"
+            "  fp8w8a8g64                     FP8; W per-channel, A group 64         Triton\n"
+            "Legacy vllm-* and deepgemm-fp8w8a8-b128 aliases are also accepted."
+        ),
     )
     parser.add_argument(
         "--quant_cfg",

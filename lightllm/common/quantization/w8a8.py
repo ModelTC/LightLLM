@@ -483,9 +483,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             input_tensor, weight_pack, out, use_custom_tensor_mananger
         )
         if qweight.shape[1] % self.block_size != 0:
-            return self._apply_triton(
-                qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias
-            )
+            return self._apply_triton(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
         input_scale = input_scale.t().contiguous().t()
         cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
         return out
