@@ -469,7 +469,8 @@ Quantization Parameters
 
 .. option:: --quant_type
 
-    ``W`` denotes weights and ``A`` denotes activations. Compatibility aliases are shown in parentheses.
+    ``W`` denotes weights and ``A`` denotes activations. Compatibility aliases are shown in parentheses. The
+    operator path describes regular Linear layers; fused MoE and EP MoE use their own implementations.
 
     .. list-table::
        :header-rows: 1
@@ -478,46 +479,47 @@ Quantization Parameters
 
        * - ``quant_type``
          - Quantization
-         - Operator backend
+         - Runtime operator path
        * - ``w8a8`` (``vllm-w8a8``)
          - INT8 W8A8; W: per-channel, A: per-token
-         - CUTLASS (vLLM)
+         - vLLM INT8 quant → CUTLASS GEMM
        * - ``fp8w8a8`` (``vllm-fp8w8a8``)
          - FP8 W8A8; W: per-channel, A: per-token
-         - CUTLASS (vLLM) / Triton (optional)
+         - vLLM FP8 quant → CUTLASS GEMM (default) or Triton GEMM (controlled by
+           ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM``)
        * - ``fp8w8a8-b128`` (``vllm-fp8w8a8-b128``)
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - CUTLASS / Triton (shape-dependent)
+         - SGL/Triton A quant → CUTLASS GEMM when N is divisible by 128; Triton GEMM otherwise
        * - ``fp8w8a8-b128-deepgemm`` (``deepgemm-fp8w8a8-b128``)
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - DeepGEMM
+         - SGL/Triton A quant → DeepGEMM
        * - ``fp8w8a8-pt-cutlass``
-         - FP8 W8A8; W: per-tensor, A: per-token
-         - CUTLASS
+         - FP8 W8A8; W: per-tensor (per-expert for MoE), A: per-token
+         - Triton A quant → CUTLASS GEMM (vLLM)
        * - ``fp8w8a8-pt-sgl``
-         - FP8 W8A8; W: per-tensor, A: per-token
-         - SGL Kernel
+         - FP8 W8A8; W: per-tensor (per-expert for MoE), A: per-token
+         - Triton A quant → SGL ``fp8_scaled_mm``
        * - ``awq``
-         - INT4 weight-only; W4A16
-         - AWQ CUDA Kernel (vLLM)
+         - INT4 weight-only; group size comes from the model quantization config, A remains floating point
+         - vLLM AWQ GEMM below 256 tokens; otherwise dequantize and use ``torch.matmul``
        * - ``awq_marlin``
-         - INT4 weight-only; W4A16
-         - Marlin (vLLM)
+         - INT4 weight-only; group size comes from the model quantization config, A remains floating point
+         - vLLM Marlin GEMM
        * - ``none`` (default)
          - No quantization
-         - —
+         - Model-selected floating-point operators
        * - ``fp8w8a8-pt`` (``fp8w8a8-pt-triton``)
-         - FP8 W8A8; W: per-tensor, A: per-token
-         - Triton
+         - FP8 W8A8; W: per-tensor (per-expert for MoE), A: per-token
+         - Triton A quant → Triton GEMM
        * - ``fp8w8a8-b128-triton``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - Triton
+         - SGL/Triton A quant → Triton GEMM
        * - ``fp8w8a8g128`` (``triton-fp8w8a8g128``)
          - FP8 W8A8; W: per-channel, A: per-token-group 128
-         - Triton
+         - Triton quant → Triton GEMM
        * - ``fp8w8a8g64`` (``triton-fp8w8a8g64``)
          - FP8 W8A8; W: per-channel, A: per-token-group 64
-         - Triton
+         - Triton quant → Triton GEMM
 
 .. option:: --quant_cfg
 

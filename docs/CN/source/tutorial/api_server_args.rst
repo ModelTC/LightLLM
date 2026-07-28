@@ -467,7 +467,8 @@ PD 分离模式参数
 
 .. option:: --quant_type
 
-    ``W`` 表示权重，``A`` 表示激活。括号内为兼容别名。
+    ``W`` 表示权重，``A`` 表示激活。括号内为兼容别名。算子路径描述普通 Linear 的运行时实现；
+    fused MoE 和 EP MoE 使用各自独立的实现路径。
 
     .. list-table::
        :header-rows: 1
@@ -476,46 +477,46 @@ PD 分离模式参数
 
        * - ``quant_type``
          - 量化介绍
-         - 算子 backend
+         - 运行时算子路径
        * - ``w8a8``（``vllm-w8a8``）
          - INT8 W8A8；W：per-channel，A：per-token
-         - CUTLASS（vLLM）
+         - vLLM INT8 quant → CUTLASS GEMM
        * - ``fp8w8a8``（``vllm-fp8w8a8``）
          - FP8 W8A8；W：per-channel，A：per-token
-         - CUTLASS（vLLM）/ Triton（可选）
+         - vLLM FP8 quant → CUTLASS GEMM（默认）或 Triton GEMM（由 ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM`` 控制）
        * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - CUTLASS / Triton（按 shape 选择）
+         - SGL/Triton A quant → CUTLASS GEMM（N 可整除 128）或 Triton GEMM
        * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - DeepGEMM
+         - SGL/Triton A quant → DeepGEMM
        * - ``fp8w8a8-pt-cutlass``
-         - FP8 W8A8；W：per-tensor，A：per-token
-         - CUTLASS
+         - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
+         - Triton A quant → CUTLASS GEMM（vLLM）
        * - ``fp8w8a8-pt-sgl``
-         - FP8 W8A8；W：per-tensor，A：per-token
-         - SGL Kernel
+         - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
+         - Triton A quant → SGL ``fp8_scaled_mm``
        * - ``awq``
-         - INT4 weight-only；W4A16
-         - AWQ CUDA Kernel（vLLM）
+         - INT4 weight-only；group size 由模型量化配置提供，A 保持浮点
+         - token 数小于 256 时使用 vLLM AWQ GEMM；否则反量化后使用 ``torch.matmul``
        * - ``awq_marlin``
-         - INT4 weight-only；W4A16
-         - Marlin（vLLM）
+         - INT4 weight-only；group size 由模型量化配置提供，A 保持浮点
+         - vLLM Marlin GEMM
        * - ``none``（默认）
          - 不量化
-         - —
+         - 由模型选择浮点算子
        * - ``fp8w8a8-pt``（``fp8w8a8-pt-triton``）
-         - FP8 W8A8；W：per-tensor，A：per-token
-         - Triton
+         - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
+         - Triton A quant → Triton GEMM
        * - ``fp8w8a8-b128-triton``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - Triton
+         - SGL/Triton A quant → Triton GEMM
        * - ``fp8w8a8g128``（``triton-fp8w8a8g128``）
          - FP8 W8A8；W：per-channel，A：per-token-group 128
-         - Triton
+         - Triton quant → Triton GEMM
        * - ``fp8w8a8g64``（``triton-fp8w8a8g64``）
          - FP8 W8A8；W：per-channel，A：per-token-group 64
-         - Triton
+         - Triton quant → Triton GEMM
 
 .. option:: --quant_cfg
 
