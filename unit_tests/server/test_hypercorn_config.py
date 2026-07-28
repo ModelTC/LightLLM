@@ -1,6 +1,6 @@
 from lightllm.server.api_cli import make_argument_parser
-from lightllm.server.api_start import _get_hypercorn_config_args
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.start_utils import _get_hypercorn_config_args
 
 
 def test_hypercorn_config_defaults_to_none():

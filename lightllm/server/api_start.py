@@ -6,7 +6,11 @@ import uuid
 import subprocess
 import signal
 import math
-from lightllm.utils.start_utils import process_manager, kill_recursive
+from lightllm.utils.start_utils import (
+    process_manager,
+    kill_recursive,
+    _get_hypercorn_config_args,
+)
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
@@ -31,12 +35,6 @@ from lightllm.utils.config_utils import (
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
-
-
-def _get_hypercorn_config_args(args: StartArgs):
-    if args.hypercorn_config is None:
-        return []
-    return ["--config", args.hypercorn_config]
 
 
 def setup_signal_handlers(http_server_process, process_manager):
