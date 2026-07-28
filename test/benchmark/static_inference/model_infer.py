@@ -37,7 +37,7 @@ def test_model_inference(args):
             "graph_max_batch_size": args.graph_max_batch_size,
             "mem_fraction": args.mem_fraction,
             "max_req_num": 2048,
-            "batch_max_tokens": 1024,
+            "batch_max_tokens": args.batch_max_tokens or 1024,
             "run_mode": "normal",
             "max_seq_length": args.max_req_total_len,
             "disable_cudagraph": args.disable_cudagraph,
@@ -218,6 +218,7 @@ def decode(
         b_req_idx=b_req_idx,
         b_seq_len=b_seq_len,
         b_mtp_index=b_mtp_index,
+        b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cpu"),
         mem_indexes_cpu=mem_indexes,
         is_prefill=False,
         multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
@@ -406,6 +407,10 @@ def tppart_model_infer(args, model_kvargs, batch_size, input_len, output_len, an
     torch.cuda.empty_cache()
     enable_overlap = args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap
 
+    if args.skip_autotune_warmup:
+        from lightllm.common.basemodel.basemodel import TpPartBaseModel
+
+        TpPartBaseModel._autotune_warmup = lambda self: None
     model_part, _ = get_model(model_cfg, model_kvargs)
 
     rank_id = model_kvargs["rank_id"]

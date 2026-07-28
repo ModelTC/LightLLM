@@ -358,6 +358,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="Disable the default FlashInfer all-reduce fast path and fall back to SymmMem / NCCL.",
     )
     parser.add_argument(
+        "--disable_fused_allreduce_norm",
+        action="store_true",
+        help="Disable the FlashInfer fused all-reduce + residual add + RMSNorm op "
+        "(post-attention), using separate all-reduce + add + norm instead. "
+        "Requires the FlashInfer all-reduce path; no effect under tpsp mix mode.",
+    )
+    parser.add_argument(
         "--enable_tpsp_mix_mode",
         action="store_true",
         help="""inference backend will use TP SP Mixed running mode.

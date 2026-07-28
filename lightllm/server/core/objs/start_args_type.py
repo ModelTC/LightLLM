@@ -105,6 +105,7 @@ class StartArgs:
     visual_use_proxy_mode: bool = field(default=False)
     disable_symm_mem_allreduce: bool = field(default=False)
     disable_flashinfer_allreduce: bool = field(default=False)
+    disable_fused_allreduce_norm: bool = field(default=False)
     enable_tpsp_mix_mode: bool = field(default=False)
     enable_dp_prefill_balance: bool = field(default=False)
     enable_decode_microbatch_overlap: bool = field(default=False)

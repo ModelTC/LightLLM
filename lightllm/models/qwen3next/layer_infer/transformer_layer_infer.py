@@ -167,6 +167,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         input,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
+        defer_reduction=False,
     ) -> torch.Tensor:
         """Output projection with gating (in-place multiply to save one allocation)."""
         if infer_state.need_dp_prefill_balance:
@@ -175,6 +176,8 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         sigmoid_mul_(input, infer_state.gate_logics_value)
         infer_state.gate_logics_value = None
         o_tensor = layer_weight.o_proj.mm(input)
+        if defer_reduction:
+            return o_tensor
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 
@@ -240,10 +243,13 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
+        defer_reduction=False,
     ):
         # full attention layer
         if not self.is_linear_attention_layer:
-            return super().context_attention_forward(input_embdings, infer_state, layer_weight)
+            return super().context_attention_forward(
+                input_embdings, infer_state, layer_weight, defer_reduction=defer_reduction
+            )
 
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
@@ -268,7 +274,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
 
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
-        if self.tp_world_size_ > 1:
+        if self.tp_world_size_ > 1 and not defer_reduction:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return gdn_out
 
@@ -277,9 +283,12 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings,
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
+        defer_reduction=False,
     ):
         if not self.is_linear_attention_layer:
-            return super().token_attention_forward(input_embdings, infer_state, layer_weight)
+            return super().token_attention_forward(
+                input_embdings, infer_state, layer_weight, defer_reduction=defer_reduction
+            )
 
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
@@ -299,7 +308,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         )
         gdn_out = self._linear_post(core_attn_out, z, layer_weight)
 
-        if self.tp_world_size_ > 1:
+        if self.tp_world_size_ > 1 and not defer_reduction:
             all_reduce(gdn_out, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
         return gdn_out
 

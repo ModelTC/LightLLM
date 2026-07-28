@@ -40,6 +40,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable torch profiler to profile the model",
     )
+    parser.add_argument(
+        "--skip_autotune_warmup",
+        action="store_true",
+        help="Skip model initialization autotune warmup for static benchmarks.",
+    )
     args = parser.parse_args()
     set_env_start_args(args)
     torch.multiprocessing.set_start_method("spawn")

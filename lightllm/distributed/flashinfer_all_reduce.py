@@ -134,3 +134,28 @@ class FlashInferAllReduce:
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
             # launch_with_pdl=True, # TODO: learn pdl and ensure no other side effects.
         )
+
+    def all_reduce_fused_add_rmsnorm(
+        self,
+        inp: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+        norm_out: torch.Tensor,
+    ) -> None:
+        """Fused: residual += all_reduce(inp); norm_out = rmsnorm(residual, weight).
+
+        ``residual`` is updated in place (residual_in aliases residual_out). Same
+        size / dtype constraints as ``all_reduce`` -- gate with ``should_use``.
+        """
+        flashinfer_comm.allreduce_fusion(
+            input=inp,
+            workspace=self._workspace,
+            pattern=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+            residual_in=residual,
+            residual_out=residual,
+            norm_out=norm_out,
+            rms_gamma=weight,
+            rms_eps=eps,
+        )
+        return

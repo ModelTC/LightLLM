@@ -9,6 +9,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
+        self._enable_fused_ar_add_norm = False
         self.partial_rotary_factor = self.network_config_.get("partial_rotary_factor", 1)
         return
 
@@ -38,13 +39,19 @@ class StablelmTransformerLayerInfer(LlamaTransformerLayerInfer):
         return q, cache_kv
 
     def _get_o(
-        self, input, infer_state: LlamaInferStateInfo, layer_weight: StablelmTransformerLayerWeight
+        self,
+        input,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: StablelmTransformerLayerWeight,
+        defer_reduction=False,
     ) -> torch.Tensor:
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_balance_get(data=input)
         o_tensor = layer_weight.o_proj.mm(
             input.view(-1, self.tp_o_head_num_ * self.head_dim_),
         )
+        if defer_reduction:
+            return o_tensor
         o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
         return o_tensor
 

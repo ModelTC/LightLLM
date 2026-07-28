@@ -3,8 +3,9 @@ import torch
 import torch.distributed as dist
 from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
-from lightllm.distributed import all_reduce
+from lightllm.distributed import all_reduce, all_reduce_fused_add_rmsnorm
 from typing import Tuple
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -21,7 +22,47 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self.tp_o_head_num_ = -1
         self.head_dim_ = -1
         self.embed_dim_ = -1
+        # Subclasses that use a plain RMSNorm after the post-attention residual add
+        # (gamma tensor at ``layer_weight.ffn_norm_weight_.weight``) can set this True
+        # to fuse all_reduce + residual add + RMSNorm via FlashInfer. See
+        # _should_fuse_ar_add_norm / _reduce_add_ffn_norm.
+        self._enable_fused_ar_add_norm = False
         return
+
+    def _should_fuse_ar_add_norm(self, infer_state: InferStateInfo) -> bool:
+        # Only the plain-TP all-reduce path is fusible: skip under tpsp mix mode
+        # (reduce-scatter) and when the FlashInfer all-reduce backend is absent.
+        if not self._enable_fused_ar_add_norm or self.tp_world_size_ <= 1:
+            return False
+        args = get_env_start_args()
+        if args.enable_tpsp_mix_mode or args.disable_fused_allreduce_norm:
+            return False
+        return getattr(infer_state.dist_group, "flashinfer_reduce", None) is not None
+
+    def _reduce_add_ffn_norm(self, o, input_embdings, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
+        # o is the pre-reduce partial o_proj output (reduce was deferred in _get_o).
+        # Fuse all_reduce + (input_embdings += o) + ffn_norm, else do them separately.
+        # ponytail: only the post-attention reduce+add+norm is fused. The post-ffn
+        # reduce+add is followed by the *next* layer's att_norm, which lives in a
+        # different token_forward call, so it is left unfused. Fusing it too would
+        # need threading a separate residual across the layer loop (vLLM-style) --
+        # a much larger, riskier refactor for the second half of the win.
+        o = o.view(-1, self.embed_dim_)
+        flashinfer_reduce = getattr(infer_state.dist_group, "flashinfer_reduce", None)
+        if flashinfer_reduce is None or not flashinfer_reduce.should_use(o):
+            all_reduce(o, group=infer_state.dist_group)
+            input_embdings.add_(o)
+            return self._ffn_norm(input_embdings, infer_state, layer_weight)
+
+        norm_out = self.alloc_tensor(o.shape, o.dtype)
+        fused = all_reduce_fused_add_rmsnorm(
+            o, input_embdings, layer_weight.ffn_norm_weight_.weight, self.eps_, norm_out, group=infer_state.dist_group
+        )
+        if fused:
+            return norm_out
+        all_reduce(o, group=infer_state.dist_group)
+        input_embdings.add_(o)
+        return self._ffn_norm(input_embdings, infer_state, layer_weight)
 
     def _att_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
@@ -47,52 +88,70 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _token_attention_kernel(self, q, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def _get_o(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
+    def _get_o(self, input, infer_state: InferStateInfo, layer_weight, defer_reduction=False) -> torch.Tensor:
         raise Exception("need to impl")
 
     def _ffn(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
-    def context_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+    def context_attention_forward(
+        self, input_embdings, infer_state: InferStateInfo, layer_weight, defer_reduction=False
+    ):
         q, cache_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._context_attention_wrapper_run(
             q=q, cache_kv=cache_kv, infer_state=infer_state, layer_weight=layer_weight
         )
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        if defer_reduction:
+            o = self._get_o(o, infer_state, layer_weight, defer_reduction=True)
+        else:
+            o = self._get_o(o, infer_state, layer_weight)
 
         return o
 
     def context_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        o = self.context_attention_forward(input1, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
+        use_fused_reduce = self._should_fuse_ar_add_norm(infer_state)
+        if use_fused_reduce:
+            o = self.context_attention_forward(input1, infer_state, layer_weight, defer_reduction=True)
+            input1 = self._reduce_add_ffn_norm(o, input_embdings, infer_state, layer_weight)
+        else:
+            o = self.context_attention_forward(input1, infer_state, layer_weight)
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         o = None
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
         input1 = None
 
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
-    def token_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
+    def token_attention_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight, defer_reduction=False):
         q, cache_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
         self._post_cache_kv(cache_kv, infer_state, layer_weight)
         o = self._token_attention_kernel(q, infer_state, layer_weight)
         q = None
-        o = self._get_o(o, infer_state, layer_weight)
+        if defer_reduction:
+            o = self._get_o(o, infer_state, layer_weight, defer_reduction=True)
+        else:
+            o = self._get_o(o, infer_state, layer_weight)
 
         return o
 
     def token_forward(self, input_embdings, infer_state: InferStateInfo, layer_weight):
         input1 = self._att_norm(input_embdings, infer_state, layer_weight)
-        o = self.token_attention_forward(input1, infer_state, layer_weight)
-        input_embdings.add_(o.view(-1, self.embed_dim_))
+        use_fused_reduce = self._should_fuse_ar_add_norm(infer_state)
+        if use_fused_reduce:
+            o = self.token_attention_forward(input1, infer_state, layer_weight, defer_reduction=True)
+            input1 = self._reduce_add_ffn_norm(o, input_embdings, infer_state, layer_weight)
+        else:
+            o = self.token_attention_forward(input1, infer_state, layer_weight)
+            input_embdings.add_(o.view(-1, self.embed_dim_))
+            input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         o = None
 
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
         ffn_out = self._ffn(input1, infer_state, layer_weight)
 
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
