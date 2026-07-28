@@ -115,7 +115,8 @@ class PromptCacheTree:
 
             self._insert_at(child, key, depth + 1, prefill_node)
         finally:
-            node.last_prefill_node = prefill_node
+            if node is not self.root:
+                node.last_prefill_node = prefill_node
             if node.last_time_mark in self._leaf_lru:
                 self._leaf_lru.pop(node.last_time_mark, None)
             node.last_time_mark = self._gen_time_mark()
