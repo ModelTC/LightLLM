@@ -471,7 +471,10 @@ PD 分离模式参数
 
     * ``w8a8``
     * ``fp8w8a8``
-    * ``fp8w8a8-pertensor``
+    * ``fp8w8a8-pt``: 权重 per-tensor、激活 per-token 量化，使用 Triton backend
+    * ``fp8w8a8-pt-cutlass``: 权重 per-tensor、激活 per-token 量化，使用 Cutlass backend
+    * ``fp8w8a8-pt-sgl``: 权重 per-tensor、激活 per-token 量化，使用 SGL backend
+    * ``fp8w8a8-pt-triton``: 权重 per-tensor、激活 per-token 量化，使用 Triton backend
     * ``fp8w8a8-b128``
     * ``deepgemm-fp8w8a8-b128``
     * ``fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化

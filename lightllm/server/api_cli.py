@@ -611,7 +611,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: w8a8 | fp8w8a8 | fp8w8a8-pertensor |
+        help="""Quantization method: w8a8 | fp8w8a8 | fp8w8a8-pt |
+                        fp8w8a8-pt-cutlass | fp8w8a8-pt-sgl | fp8w8a8-pt-triton |
                         fp8w8a8-b128 | deepgemm-fp8w8a8-b128 | awq | awq_marlin |
                         fp8w8a8g128 (weight perchannel quant and act per group quant) |
                         fp8w8a8g64 (weight perchannel quantization with group size 64)""",

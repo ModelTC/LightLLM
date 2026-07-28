@@ -473,7 +473,10 @@ Quantization Parameters
 
     * ``w8a8``
     * ``fp8w8a8``
-    * ``fp8w8a8-pertensor``
+    * ``fp8w8a8-pt``: per-tensor weight and per-token activation quantization; uses the Triton backend
+    * ``fp8w8a8-pt-cutlass``: per-tensor weight and per-token activation quantization with the Cutlass backend
+    * ``fp8w8a8-pt-sgl``: per-tensor weight and per-token activation quantization with the SGL backend
+    * ``fp8w8a8-pt-triton``: per-tensor weight and per-token activation quantization with the Triton backend
     * ``fp8w8a8-b128``
     * ``deepgemm-fp8w8a8-b128``
     * ``fp8w8a8g128``: weight per-channel quant and activation per-group 128 quant

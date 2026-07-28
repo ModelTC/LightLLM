@@ -14,21 +14,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_ker
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 
-# fp8 GEMM backend: LIGHTLLM_FP8_GEMM = auto | cutlass | sgl | triton (auto: cutlass > sgl > triton).
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
-_FP8_GEMM_AVAIL = {"cutlass": HAS_VLLM, "sgl": _HAS_SGL_FP8, "triton": True}
-_FP8_GEMM_BACKEND = os.getenv("LIGHTLLM_FP8_GEMM", "auto").lower()
-if _FP8_GEMM_BACKEND == "auto":
-    _FP8_BACKEND = next(b for b in ("cutlass", "sgl", "triton") if _FP8_GEMM_AVAIL[b])
-elif _FP8_GEMM_BACKEND in _FP8_GEMM_AVAIL:
-    if not _FP8_GEMM_AVAIL[_FP8_GEMM_BACKEND]:
-        raise RuntimeError(
-            f"LIGHTLLM_FP8_GEMM={_FP8_GEMM_BACKEND} requested, but its kernel is not available "
-            f"(cutlass needs vllm, sgl needs sgl_kernel.fp8_scaled_mm). Use 'auto' to fall back."
-        )
-    _FP8_BACKEND = _FP8_GEMM_BACKEND
-else:
-    raise ValueError(f"LIGHTLLM_FP8_GEMM={_FP8_GEMM_BACKEND!r} unsupported; use auto|cutlass|sgl|triton")
 
 
 if HAS_VLLM:
@@ -198,11 +184,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(
-    ["triton-fp8w8a8-pertensor", "fp8w8a8-pertensor", "triton-fp8w8a8-pt", "fp8w8a8-pt"],
-    platform="cuda",
-)
-class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
+class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.has_weight_scale = True
@@ -284,15 +266,13 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
             child_pack.per_tensor_expert_index = 0
         return
 
-    def apply(
+    def _prepare_apply(
         self,
         input_tensor: torch.Tensor,
         weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
         m = input_tensor.shape[0]
@@ -303,37 +283,8 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         x_q = alloc_func((m, k), dtype=torch.float8_e4m3fn, device=input_tensor.device)
         x_scale = alloc_func((m, 1), dtype=torch.float32, device=input_tensor.device)
         lightllm_per_token_group_quant_fp8(input_tensor, k, x_q, x_scale)
-        assert bias is None, "Bias addition is not supported in triton-fp8w8a8-pertensor for now"
-        if _FP8_BACKEND == "cutlass":
-            cu_out = vllm_ops.cutlass_scaled_mm(
-                x_q, qweight, x_scale, weight_scale.reshape(1, 1).to(torch.float32), input_tensor.dtype
-            )
-            return out.copy_(cu_out) if out is not None else cu_out
-        if _FP8_BACKEND == "sgl":
-            # sgl needs a per-channel weight scale [N]; expand the per-tensor scalar once, cache it.
-            b_scale = getattr(weight_pack, "_fp8_sgl_bscale", None)
-            if b_scale is None or b_scale.numel() != n:
-                b_scale = weight_scale.reshape(1).to(torch.float32).expand(n).contiguous()
-                weight_pack._fp8_sgl_bscale = b_scale
-            sgl_out = sgl_ops.fp8_scaled_mm(x_q, qweight, x_scale, b_scale, input_tensor.dtype)
-            return out.copy_(sgl_out) if out is not None else sgl_out
-        if out is None:
-            if use_custom_tensor_mananger:
-                out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
-            else:
-                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        return fp8_scaled_mm_per_token(
-            x_q,
-            qweight,
-            x_scale,
-            weight_scale,
-            input_tensor.dtype,
-            out,
-        )
-
-    @property
-    def method_name(self):
-        return "triton-fp8w8a8-pertensor"
+        assert bias is None, f"Bias addition is not supported in {self.method_name} for now"
+        return qweight, weight_scale, x_q, x_scale, m, n
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
@@ -362,6 +313,100 @@ class TritonFP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
                 child_pack.per_tensor_parent_pack = mm_param
                 child_pack.per_tensor_child_index = idx
         return mm_param, mm_param_list
+
+
+@QUANTMETHODS.register("fp8w8a8-pt-cutlass", platform="cuda")
+class FP8w8a8PerTensorCutlassQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        if not HAS_VLLM:
+            raise RuntimeError("fp8w8a8-pt-cutlass requires vllm with cutlass_scaled_mm support")
+
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qweight, weight_scale, x_q, x_scale, _, _ = self._prepare_apply(
+            input_tensor, weight_pack, use_custom_tensor_mananger, bias
+        )
+        result = vllm_ops.cutlass_scaled_mm(
+            x_q, qweight, x_scale, weight_scale.reshape(1, 1).to(torch.float32), input_tensor.dtype
+        )
+        return out.copy_(result) if out is not None else result
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-pt-cutlass"
+
+
+@QUANTMETHODS.register("fp8w8a8-pt-sgl", platform="cuda")
+class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        if not _HAS_SGL_FP8:
+            raise RuntimeError("fp8w8a8-pt-sgl requires sgl_kernel.fp8_scaled_mm support")
+
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qweight, weight_scale, x_q, x_scale, _, n = self._prepare_apply(
+            input_tensor, weight_pack, use_custom_tensor_mananger, bias
+        )
+        # sgl needs a per-channel weight scale [N]; expand the per-tensor scalar once, cache it.
+        b_scale = getattr(weight_pack, "_fp8_sgl_bscale", None)
+        if b_scale is None or b_scale.numel() != n:
+            b_scale = weight_scale.reshape(1).to(torch.float32).expand(n).contiguous()
+            weight_pack._fp8_sgl_bscale = b_scale
+        result = sgl_ops.fp8_scaled_mm(x_q, qweight, x_scale, b_scale, input_tensor.dtype)
+        return out.copy_(result) if out is not None else result
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-pt-sgl"
+
+
+@QUANTMETHODS.register(["fp8w8a8-pt", "fp8w8a8-pt-triton"], platform="cuda")
+class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
+    def apply(
+        self,
+        input_tensor: torch.Tensor,
+        weight_pack: WeightPack,
+        out: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
+        use_custom_tensor_mananger: bool = True,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        qweight, weight_scale, x_q, x_scale, m, n = self._prepare_apply(
+            input_tensor, weight_pack, use_custom_tensor_mananger, bias
+        )
+        if out is None:
+            if use_custom_tensor_mananger:
+                out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
+            else:
+                out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
+        return fp8_scaled_mm_per_token(
+            x_q,
+            qweight,
+            x_scale,
+            weight_scale,
+            input_tensor.dtype,
+            out,
+        )
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-pt-triton"
 
 
 @QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"], platform="cuda")
