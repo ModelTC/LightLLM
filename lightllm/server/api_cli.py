@@ -620,8 +620,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "vLLM quant + CUTLASS(default)/Triton(env)\n"
             "  fp8w8a8-pt-cutlass             FP8; W per-tensor*, A per-token        Triton quant + CUTLASS\n"
             "  fp8w8a8-pt-sgl                 FP8; W per-tensor*, A per-token        Triton quant + SGL\n"
-            "  fp8w8a8-b128                   FP8; W block 128x128, A group 128      "
-            "SGL/Triton quant + CUTLASS(N%%128=0)/Triton\n"
+            "  fp8w8a8-b128                   FP8; W block 128x128, A group 128      SGL/Triton quant + CUTLASS\n"
             "  fp8w8a8-b128-cutlass           FP8; W block 128x128, A group 128      SGL/Triton quant + CUTLASS\n"
             "  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      SGL/Triton quant + DeepGEMM\n"
             "  awq                            INT4 weight-only; checkpoint group     AWQ GEMM (<256) / dequant+matmul\n"
@@ -631,7 +630,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      SGL/Triton quant + Triton\n"
             "  fp8w8a8g128                    FP8; W per-channel, A group 128        Triton quant + Triton\n"
             "  fp8w8a8g64                     FP8; W per-channel, A group 64         Triton quant + Triton\n"
-            "Defaults: fp8w8a8=CUTLASS; fp8w8a8-pt=Triton; fp8w8a8-b128=shape-based auto.\n"
+            "Defaults: fp8w8a8=CUTLASS; fp8w8a8-pt=Triton; fp8w8a8-b128=CUTLASS.\n"
             "* MoE weights use one per-tensor scale per expert. Backends describe the Linear path; fused MoE differs.\n"
             "Legacy vllm-* and deepgemm-fp8w8a8-b128 aliases are also accepted."
         ),

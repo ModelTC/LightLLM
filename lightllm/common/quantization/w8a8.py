@@ -447,41 +447,6 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         return qinput_tensor, qweight, input_scale, weight_scale, out
 
-    def _triton_matmul(
-        self,
-        qinput_tensor: torch.Tensor,
-        qweight: torch.Tensor,
-        input_scale: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out: torch.Tensor,
-        output_dtype: torch.dtype,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        w8a8_block_fp8_matmul(
-            qinput_tensor,
-            qweight,
-            input_scale,
-            weight_scale,
-            out,
-            (self.block_size, self.block_size),
-            dtype=output_dtype,
-        )
-        assert bias is None, f"Bias addition is not supported in {self.method_name} for now"
-        return out
-
-    def _cutlass_matmul(
-        self,
-        qinput_tensor: torch.Tensor,
-        qweight: torch.Tensor,
-        input_scale: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        input_scale = input_scale.t().contiguous().t()
-        cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
-        return out
-
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
@@ -503,30 +468,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128"], platform="cuda")
-class FP8w8a8B128AutoQuantizationMethod(FP8w8a8B128QuantizationMethod):
-    def apply(
-        self,
-        input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
-        use_custom_tensor_mananger: bool = True,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
-            input_tensor, weight_pack, out, use_custom_tensor_mananger
-        )
-        if qweight.shape[1] % self.block_size != 0:
-            return self._triton_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
-        return self._cutlass_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, bias)
-
-    @property
-    def method_name(self):
-        return "fp8w8a8-b128"
-
-
-@QUANTMETHODS.register("fp8w8a8-b128-cutlass", platform="cuda")
+@QUANTMETHODS.register(["vllm-fp8w8a8-b128", "fp8w8a8-b128", "fp8w8a8-b128-cutlass"], platform="cuda")
 class FP8w8a8B128CutlassQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
         self,
@@ -543,9 +485,11 @@ class FP8w8a8B128CutlassQuantizationMethod(FP8w8a8B128QuantizationMethod):
         if qweight.shape[1] % self.block_size != 0:
             raise ValueError(
                 "fp8w8a8-b128-cutlass requires the output dimension to be divisible by 128; "
-                "use fp8w8a8-b128-triton or fp8w8a8-b128 instead"
+                "use fp8w8a8-b128-triton instead"
             )
-        return self._cutlass_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, bias)
+        input_scale = input_scale.t().contiguous().t()
+        cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
+        return out
 
     @property
     def method_name(self):
@@ -566,7 +510,17 @@ class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
         qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
             input_tensor, weight_pack, out, use_custom_tensor_mananger
         )
-        return self._triton_matmul(qinput_tensor, qweight, input_scale, weight_scale, out, input_tensor.dtype, bias)
+        w8a8_block_fp8_matmul(
+            qinput_tensor,
+            qweight,
+            input_scale,
+            weight_scale,
+            out,
+            (self.block_size, self.block_size),
+            dtype=input_tensor.dtype,
+        )
+        assert bias is None, f"Bias addition is not supported in {self.method_name} for now"
+        return out
 
     @property
     def method_name(self):

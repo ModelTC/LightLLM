@@ -487,10 +487,7 @@ Quantization Parameters
          - FP8 W8A8; W: per-channel, A: per-token
          - vLLM FP8 quant → CUTLASS GEMM (default) or Triton GEMM (controlled by
            ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM``)
-       * - ``fp8w8a8-b128`` (``vllm-fp8w8a8-b128``)
-         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - SGL/Triton A quant → CUTLASS GEMM when N is divisible by 128; Triton GEMM otherwise
-       * - ``fp8w8a8-b128-cutlass``
+       * - ``fp8w8a8-b128`` (``fp8w8a8-b128-cutlass``, ``vllm-fp8w8a8-b128``)
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - SGL/Triton A quant → CUTLASS GEMM (requires N to be divisible by 128)
        * - ``fp8w8a8-b128-deepgemm`` (``deepgemm-fp8w8a8-b128``)

@@ -484,10 +484,7 @@ PD 分离模式参数
        * - ``fp8w8a8``（``vllm-fp8w8a8``）
          - FP8 W8A8；W：per-channel，A：per-token
          - vLLM FP8 quant → CUTLASS GEMM（默认）或 Triton GEMM（由 ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM`` 控制）
-       * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
-         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → CUTLASS GEMM（N 可整除 128）或 Triton GEMM
-       * - ``fp8w8a8-b128-cutlass``
+       * - ``fp8w8a8-b128``（``fp8w8a8-b128-cutlass``、``vllm-fp8w8a8-b128``）
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - SGL/Triton A quant → CUTLASS GEMM（要求 N 可整除 128）
        * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
