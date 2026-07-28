@@ -14,7 +14,7 @@ class PromptCacheMatchResult:
 
     # 匹配终点上的 prefill 节点（client_ip_port）；仅当匹配停在 root 时为 None。
     prefill_node: Optional[str]
-    # 匹配到的原始 prompt 字符数（key 深度 * sample_stride）。
+    # 匹配到的原始 prompt 字符数：从 text[0] 到最后一个命中采样点（含）的连续前缀长度。
     matched_char_count: int
     # 输入 prompt 的原始字符数 len(text)。
     input_char_count: int
@@ -143,7 +143,7 @@ class PromptCacheTree:
         对 text 做前缀匹配。
 
         返回说明：
-          - matched_char_count：匹配到的 key 深度 * sample_stride；
+          - matched_char_count：匹配到的原始 prompt 字符数；
           - input_char_count：原始 prompt 字符数 len(text)；
           - prefill_node 为 None：匹配停在 root（无任何 key 字符命中）；
           - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node。
@@ -155,9 +155,13 @@ class PromptCacheTree:
                 prefill_node = None
             else:
                 prefill_node = node.last_prefill_node
+            if matched <= 0:
+                matched_char_count = 0
+            else:
+                matched_char_count = min((matched - 1) * self.sample_stride + 1, len(text))
             return PromptCacheMatchResult(
                 prefill_node=prefill_node,
-                matched_char_count=matched * self.sample_stride,
+                matched_char_count=matched_char_count,
                 input_char_count=len(text),
             )
 
