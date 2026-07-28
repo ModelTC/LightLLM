@@ -467,59 +467,61 @@ PD 分离模式参数
 
 .. option:: --quant_type
 
-    ``W`` 表示权重，``A`` 表示激活。括号内为兼容别名。算子路径描述普通 Linear 的运行时实现；
-    fused MoE 和 EP MoE 使用各自独立的实现路径。
+    ``W`` 表示权重，``A`` 表示激活。可选值如下：
 
     .. list-table::
        :header-rows: 1
-       :widths: 35 40 25
+       :widths: 35 45 20
        :align: left
 
        * - ``quant_type``
          - 量化介绍
-         - 运行时算子路径
-       * - ``w8a8``（``vllm-w8a8``）
+         - 算子 backend
+       * - ``w8a8``
          - INT8 W8A8；W：per-channel，A：per-token
-         - vLLM INT8 quant → CUTLASS GEMM
-       * - ``fp8w8a8``（``vllm-fp8w8a8``）
+         - CUTLASS
+       * - ``fp8w8a8``
          - FP8 W8A8；W：per-channel，A：per-token
-         - vLLM FP8 quant → CUTLASS GEMM（默认）或 Triton GEMM（由 ``LIGHTLLM_USE_TRITON_FP8_SCALED_MM`` 控制）
+         - CUTLASS / Triton
        * - ``fp8w8a8-pt-cutlass``
-         - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
-         - Triton A quant → CUTLASS GEMM（vLLM）
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - CUTLASS
        * - ``fp8w8a8-pt-sgl``
-         - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
-         - Triton A quant → SGL ``fp8_scaled_mm``
-       * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - SGL
+       * - ``fp8w8a8-b128``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → CUTLASS GEMM（默认，要求 N 可整除 128）
+         - CUTLASS
        * - ``fp8w8a8-b128-cutlass``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → CUTLASS GEMM（要求 N 可整除 128）
-       * - ``fp8w8a8-b128-deepgemm``（``deepgemm-fp8w8a8-b128``）
+         - CUTLASS
+       * - ``fp8w8a8-b128-deepgemm``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → DeepGEMM
+         - DeepGEMM
        * - ``awq``
-         - INT4 weight-only；group size 由模型量化配置提供，A 保持浮点
-         - token 数小于 256 时使用 vLLM AWQ GEMM；否则反量化后使用 ``torch.matmul``
+         - INT4 weight-only；group size 由 checkpoint 提供
+         - AWQ CUDA Kernel / PyTorch
        * - ``awq_marlin``
-         - INT4 weight-only；group size 由模型量化配置提供，A 保持浮点
-         - vLLM Marlin GEMM
-       * - ``none``（默认）
+         - INT4 weight-only；group size 由 checkpoint 提供
+         - Marlin
+       * - ``none``
          - 不量化
-         - 由模型选择浮点算子
-       * - ``fp8w8a8-pt``（``fp8w8a8-pt-triton``）
-         - FP8 W8A8；W：per-tensor（MoE 为 per-expert），A：per-token
-         - Triton A quant → Triton GEMM
+         - -
+       * - ``fp8w8a8-pt``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
+       * - ``fp8w8a8-pt-triton``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
        * - ``fp8w8a8-b128-triton``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - SGL/Triton A quant → Triton GEMM
-       * - ``fp8w8a8g128``（``triton-fp8w8a8g128``）
+         - Triton
+       * - ``fp8w8a8g128``
          - FP8 W8A8；W：per-channel，A：per-token-group 128
-         - Triton quant → Triton GEMM
-       * - ``fp8w8a8g64``（``triton-fp8w8a8g64``）
+         - Triton
+       * - ``fp8w8a8g64``
          - FP8 W8A8；W：per-channel，A：per-token-group 64
-         - Triton quant → Triton GEMM
+         - Triton
 
 .. option:: --quant_cfg
 
