@@ -193,31 +193,21 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
     def _fp8_per_tensor_quant(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         weight = weight.float().cuda(self.device_id_)
         fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
-        if weight.ndim == 3:
-            scale = weight.abs().amax(dim=(-1, -2)) / fp8_e4m3_max
-        else:
-            scale = weight.abs().max() / fp8_e4m3_max
+        scale = weight.abs().max() / fp8_e4m3_max
         scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
-        scale_view = scale.reshape(-1, 1, 1) if weight.ndim == 3 else scale
-        qweight = (weight / scale_view).clamp(min=-fp8_e4m3_max, max=fp8_e4m3_max).to(dtype=torch.float8_e4m3fn)
+        qweight = (weight / scale).clamp(min=-fp8_e4m3_max, max=fp8_e4m3_max).to(dtype=torch.float8_e4m3fn)
         return qweight, scale.reshape(-1)
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-        if weight.ndim == 3 and output.weight_scale is not None and output.weight_scale.numel() == weight.shape[0]:
-            for expert_idx in range(weight.shape[0]):
-                qweight, weight_scale = self._fp8_per_tensor_quant(weight[expert_idx])
-                output.weight[expert_idx].copy_(qweight)
-                output.weight_scale[expert_idx : expert_idx + 1].copy_(weight_scale.reshape(-1))
-            return
-
         qweight, weight_scale = self._fp8_per_tensor_quant(weight)
         output.weight.copy_(qweight)
+        # Triton stores the scalar directly, while SGL preallocates a per-channel
+        # buffer required by its GEMM API. copy_ broadcasts the same tensor scale.
         output.weight_scale.copy_(weight_scale)
         return
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
-        parent_pack = weight_pack.per_tensor_parent_pack
-        # Single-part weights do not need CPU staging; the base loader will call this class's quantize().
+        parent_pack = getattr(weight_pack, "_per_tensor_parent_pack", None)
         if parent_pack is None:
             super().load_weight(weight, weight_pack)
             return
@@ -225,45 +215,24 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         with parent_pack._per_tensor_staged_lock:
             if parent_pack._per_tensor_finalized:
                 return
-            child_idx = weight_pack.per_tensor_child_index
-            expert_idx = weight_pack.per_tensor_expert_index
-            # Copy this shard into the full CPU weight before doing per-tensor quantization.
-            staged_weight = parent_pack._per_tensor_staged_weight
-            if staged_weight.ndim == 3:
-                staged_weight = staged_weight[expert_idx]
-            staged_weight = torch.split(staged_weight, parent_pack._per_tensor_out_dims, dim=-2)[child_idx]
-            staged_weight.copy_(weight.to(dtype=staged_weight.dtype))
-            parent_pack._per_tensor_staged_loaded[expert_idx][child_idx] = True
-            self._try_finalize_staged_weight(parent_pack)
-        return
-
-    def _try_finalize_staged_weight(self, parent_pack: WeightPack) -> bool:
-        if parent_pack._per_tensor_finalized:
-            return True
-        staged_loaded = parent_pack._per_tensor_staged_loaded
-        all_loaded = all(all(expert_loaded) for expert_loaded in staged_loaded)
-        if not all_loaded:
-            return False
-
-        # Quantize once after all split shards are present, so the scale is computed on the full tensor.
-        self.quantize(parent_pack._per_tensor_staged_weight, parent_pack)
-        parent_pack.load_ok = [True, True, True]
-        parent_pack._per_tensor_finalized = True
-        self._clear_staged_weight_state(parent_pack)
-        return True
-
-    def _clear_staged_weight_state(self, parent_pack: WeightPack) -> None:
-        child_packs = parent_pack._per_tensor_child_packs
-        # Drop the temporary CPU tensor and reset child packs to normal GPU views after finalization.
-        del parent_pack._per_tensor_staged_weight
-        del parent_pack._per_tensor_staged_loaded
-        del parent_pack._per_tensor_child_packs
-        del parent_pack._per_tensor_out_dims
-        for child_pack in child_packs:
-            child_pack.load_ok = [True, True, True]
-            child_pack.per_tensor_parent_pack = None
-            child_pack.per_tensor_child_index = None
-            child_pack.per_tensor_expert_index = 0
+            staged_view = weight_pack._per_tensor_staged_view
+            staged_view.copy_(weight.to(dtype=staged_view.dtype))
+            weight_pack._per_tensor_staged_loaded = True
+            if all(child_pack._per_tensor_staged_loaded for child_pack in parent_pack._per_tensor_child_packs):
+                # Fused dense weights such as gate/up must share one scale, so quantize
+                # only after every source tensor has populated the staging buffer.
+                self.quantize(parent_pack._per_tensor_staging_buffer, parent_pack)
+                parent_pack.load_ok = [True, True, True]
+                for child_pack in parent_pack._per_tensor_child_packs:
+                    child_pack.load_ok = [True, True, True]
+                parent_pack._per_tensor_finalized = True
+                child_packs = parent_pack._per_tensor_child_packs
+                del parent_pack._per_tensor_staging_buffer
+                del parent_pack._per_tensor_child_packs
+                for child_pack in child_packs:
+                    del child_pack._per_tensor_parent_pack
+                    del child_pack._per_tensor_staged_view
+                    del child_pack._per_tensor_staged_loaded
         return
 
     def _dynamic_quant_input(
@@ -289,30 +258,32 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
+        if num_experts != 1:
+            raise NotImplementedError("FP8 per-tensor quantization currently supports dense weights only")
         if isinstance(out_dims, int):
             out_dims = [out_dims]
         out_dim = sum(out_dims)
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-
-        weight_scale = torch.empty(expert_prefix or (1,), dtype=torch.float32, device=f"cuda:{device_id}")
+        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn, device=f"cuda:{device_id}")
+        weight_scale = self._create_weight_scale(out_dim, device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         weight_splits = torch.split(weight, out_dims, dim=-2)
-        mm_param_list = [WeightPack(weight=weight, weight_scale=weight_scale) for weight in weight_splits]
-
-        if len(out_dims) > 1:
-            # Split weights share one final GPU tensor, but load into CPU first to get one per-tensor scale.
-            staged_weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype, device="cpu")
-            mm_param._per_tensor_staged_weight = staged_weight
-            mm_param._per_tensor_staged_loaded = [[False] * len(mm_param_list) for _ in range(num_experts)]
+        mm_param_list = [WeightPack(weight=split_weight, weight_scale=weight_scale) for split_weight in weight_splits]
+        if len(mm_param_list) > 1:
+            staging_buffer = torch.empty((out_dim, in_dim), dtype=dtype, device="cpu")
+            mm_param._per_tensor_staging_buffer = staging_buffer
             mm_param._per_tensor_child_packs = mm_param_list
-            mm_param._per_tensor_out_dims = out_dims
-            mm_param._per_tensor_finalized = False
             mm_param._per_tensor_staged_lock = threading.Lock()
-            for idx, child_pack in enumerate(mm_param_list):
-                child_pack.per_tensor_parent_pack = mm_param
-                child_pack.per_tensor_child_index = idx
+            mm_param._per_tensor_finalized = False
+            staged_views = torch.split(staging_buffer, out_dims, dim=-2)
+            for child_pack, staged_view in zip(mm_param_list, staged_views):
+                child_pack._per_tensor_parent_pack = mm_param
+                child_pack._per_tensor_staged_view = staged_view
+                child_pack._per_tensor_staged_loaded = False
         return mm_param, mm_param_list
+
+    def _create_weight_scale(self, out_dim: int, device_id: int) -> torch.Tensor:
+        # Triton and Cutlass accept a scalar per-tensor weight scale.
+        return torch.empty((1,), dtype=torch.float32, device=f"cuda:{device_id}")
 
 
 @QUANTMETHODS.register(["fp8w8a8-pt-vllm", "fp8w8a8-pt-cutlass"], platform="cuda")
@@ -351,6 +322,10 @@ class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
         if not _HAS_SGL_FP8:
             raise RuntimeError("fp8w8a8-pt-sgl requires sgl_kernel.fp8_scaled_mm support")
 
+    def _create_weight_scale(self, out_dim: int, device_id: int) -> torch.Tensor:
+        # sgl_kernel.fp8_scaled_mm requires a contiguous scale for every output channel.
+        return torch.empty((out_dim,), dtype=torch.float32, device=f"cuda:{device_id}")
+
     def apply(
         self,
         input_tensor: torch.Tensor,
@@ -360,15 +335,10 @@ class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight, weight_scale, x_q, x_scale, _, n = self._dynamic_quant_input(
+        qweight, weight_scale, x_q, x_scale, _, _ = self._dynamic_quant_input(
             input_tensor, weight_pack, use_custom_tensor_mananger, bias
         )
-        # sgl needs a per-channel weight scale [N]; expand the per-tensor scalar once, cache it.
-        b_scale = getattr(weight_pack, "_fp8_sgl_bscale", None)
-        if b_scale is None or b_scale.numel() != n:
-            b_scale = weight_scale.reshape(1).to(torch.float32).expand(n).contiguous()
-            weight_pack._fp8_sgl_bscale = b_scale
-        result = sgl_ops.fp8_scaled_mm(x_q, qweight, x_scale, b_scale, input_tensor.dtype)
+        result = sgl_ops.fp8_scaled_mm(x_q, qweight, x_scale, weight_scale, input_tensor.dtype)
         return out.copy_(result) if out is not None else result
 
     @property

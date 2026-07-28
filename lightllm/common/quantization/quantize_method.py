@@ -10,11 +10,6 @@ class WeightPack:
     weight: Optional[torch.Tensor] = None
     weight_scale: Optional[torch.Tensor] = None
     weight_zero_point: Optional[torch.Tensor] = None
-    # For split per-tensor weights, child packs write into the parent's CPU staged weight first.
-    # The parent pack is the final GPU weight pack, and the indexes locate each child/expert slice.
-    per_tensor_parent_pack: Optional["WeightPack"] = None
-    per_tensor_child_index: Optional[int] = None
-    per_tensor_expert_index: int = 0
 
     def __post_init__(self):
         self.load_ok = [False, self.weight_scale is None, self.weight_zero_point is None]
@@ -24,12 +19,7 @@ class WeightPack:
         weight = self.weight[expert_idx]
         weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
         weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
-        weight_pack = WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
-        if self.per_tensor_parent_pack is not None:
-            weight_pack.per_tensor_parent_pack = self.per_tensor_parent_pack
-            weight_pack.per_tensor_child_index = self.per_tensor_child_index
-            weight_pack.per_tensor_expert_index = expert_idx
-        return weight_pack
+        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
 
 
 class QuantizationMethod(ABC):
