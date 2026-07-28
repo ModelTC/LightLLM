@@ -467,21 +467,51 @@ PD 分离模式参数
 
 .. option:: --quant_type
 
-    量化方法，可选值：
+    量化方法、粒度和实现 backend 的对应关系如下。表格中同一行的 ``quant_type`` 互为别名：
 
-    * ``w8a8``
-    * ``fp8w8a8``
-    * ``fp8w8a8-pt``: 权重 per-tensor、激活 per-token 量化，使用 Triton backend
-    * ``fp8w8a8-pt-cutlass``: 权重 per-tensor、激活 per-token 量化，使用 Cutlass backend
-    * ``fp8w8a8-pt-sgl``: 权重 per-tensor、激活 per-token 量化，使用 SGL backend
-    * ``fp8w8a8-pt-triton``: 权重 per-tensor、激活 per-token 量化，使用 Triton backend
-    * ``fp8w8a8-b128``
-    * ``deepgemm-fp8w8a8-b128``
-    * ``fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化
-    * ``fp8w8a8g64``: 权重 per-channel 量化, group size 64
-    * ``awq``
-    * ``awq_marlin``
-    * ``none`` (默认)
+    .. list-table::
+       :header-rows: 1
+       :widths: 34 41 25
+
+       * - ``quant_type``
+         - 量化方法与粒度
+         - 实现 backend
+       * - ``w8a8``, ``vllm-w8a8``
+         - INT8：权重 per-channel，激活 per-token
+         - vLLM / CUTLASS
+       * - ``fp8w8a8``, ``vllm-fp8w8a8``
+         - FP8：权重 per-channel，激活 per-token
+         - vLLM / CUTLASS；可选 Triton GEMM
+       * - ``fp8w8a8-b128``, ``vllm-fp8w8a8-b128``
+         - FP8：权重 per-block 128×128，激活 per-token-group 128
+         - CUTLASS / Triton
+       * - ``deepgemm-fp8w8a8-b128``
+         - FP8：权重 per-block 128×128，激活 per-token-group 128
+         - DeepGEMM
+       * - ``awq``
+         - INT4 weight-only（W4A16）
+         - vLLM AWQ
+       * - ``awq_marlin``
+         - INT4 weight-only（W4A16）
+         - vLLM Marlin
+       * - ``fp8w8a8-pt-cutlass``
+         - FP8：权重 per-tensor，激活 per-token
+         - CUTLASS
+       * - ``fp8w8a8-pt-sgl``
+         - FP8：权重 per-tensor，激活 per-token
+         - SGL
+       * - ``none``（默认）
+         - 不量化
+         - 默认浮点实现
+       * - ``fp8w8a8-pt``, ``fp8w8a8-pt-triton``
+         - FP8：权重 per-tensor，激活 per-token
+         - Triton
+       * - ``fp8w8a8g128``, ``triton-fp8w8a8g128``
+         - FP8：权重 per-channel，激活 per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64``, ``triton-fp8w8a8g64``
+         - FP8：权重 per-channel，激活 per-token-group 64
+         - Triton
 
 .. option:: --quant_cfg
 
