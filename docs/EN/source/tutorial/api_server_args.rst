@@ -478,34 +478,34 @@ Quantization Parameters
 
        * - ``quant_type``
          - Quantization
-         - Operator backend
+         - Implementation backend
        * - ``w8a8``
          - INT8 W8A8; W: per-channel, A: per-token
-         - CUTLASS
+         - vLLM
        * - ``fp8w8a8``
          - FP8 W8A8; W: per-channel, A: per-token
-         - CUTLASS / Triton
+         - vLLM
        * - ``fp8w8a8-pt-cutlass``
          - FP8 W8A8; W: per-tensor, A: per-token
-         - CUTLASS
+         - vLLM
        * - ``fp8w8a8-pt-sgl``
          - FP8 W8A8; W: per-tensor, A: per-token
          - SGL
        * - ``fp8w8a8-b128``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - CUTLASS
+         - vLLM
        * - ``fp8w8a8-b128-cutlass``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - CUTLASS
+         - vLLM
        * - ``fp8w8a8-b128-deepgemm``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - DeepGEMM
        * - ``awq``
          - INT4 weight-only; group size comes from the checkpoint
-         - AWQ CUDA Kernel / PyTorch
+         - vLLM
        * - ``awq_marlin``
          - INT4 weight-only; group size comes from the checkpoint
-         - Marlin
+         - vLLM
        * - ``none``
          - No quantization
          - -
