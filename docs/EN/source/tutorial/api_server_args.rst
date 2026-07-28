@@ -469,51 +469,51 @@ Quantization Parameters
 
 .. option:: --quant_type
 
-    The following table maps each quantization method and granularity to its implementation backend. Multiple
-    ``quant_type`` values in the same row are aliases:
+    ``W`` denotes weights and ``A`` denotes activations. Compatibility aliases are shown in parentheses.
 
     .. list-table::
        :header-rows: 1
-       :widths: 34 41 25
+       :widths: 35 40 25
+       :align: left
 
        * - ``quant_type``
-         - Method and granularity
-         - Implementation backend
-       * - ``w8a8``, ``vllm-w8a8``
-         - INT8: per-channel weights and per-token activations
-         - vLLM / CUTLASS
-       * - ``fp8w8a8``, ``vllm-fp8w8a8``
-         - FP8: per-channel weights and per-token activations
-         - vLLM / CUTLASS; optional Triton GEMM
-       * - ``fp8w8a8-b128``, ``vllm-fp8w8a8-b128``
-         - FP8: per-block 128×128 weights and per-token-group 128 activations
-         - CUTLASS / Triton
+         - Quantization
+         - Operator backend
+       * - ``w8a8`` (``vllm-w8a8``)
+         - INT8 W8A8; W: per-channel, A: per-token
+         - CUTLASS (vLLM)
+       * - ``fp8w8a8`` (``vllm-fp8w8a8``)
+         - FP8 W8A8; W: per-channel, A: per-token
+         - CUTLASS (vLLM) / Triton (optional)
+       * - ``fp8w8a8-b128`` (``vllm-fp8w8a8-b128``)
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - CUTLASS / Triton (shape-dependent)
        * - ``deepgemm-fp8w8a8-b128``
-         - FP8: per-block 128×128 weights and per-token-group 128 activations
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - DeepGEMM
-       * - ``awq``
-         - INT4 weight-only (W4A16)
-         - vLLM AWQ
-       * - ``awq_marlin``
-         - INT4 weight-only (W4A16)
-         - vLLM Marlin
        * - ``fp8w8a8-pt-cutlass``
-         - FP8: per-tensor weights and per-token activations
+         - FP8 W8A8; W: per-tensor, A: per-token
          - CUTLASS
        * - ``fp8w8a8-pt-sgl``
-         - FP8: per-tensor weights and per-token activations
-         - SGL
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - SGL Kernel
+       * - ``awq``
+         - INT4 weight-only; W4A16
+         - AWQ CUDA Kernel (vLLM)
+       * - ``awq_marlin``
+         - INT4 weight-only; W4A16
+         - Marlin (vLLM)
        * - ``none`` (default)
          - No quantization
-         - Default floating-point implementation
-       * - ``fp8w8a8-pt``, ``fp8w8a8-pt-triton``
-         - FP8: per-tensor weights and per-token activations
+         - —
+       * - ``fp8w8a8-pt`` (``fp8w8a8-pt-triton``)
+         - FP8 W8A8; W: per-tensor, A: per-token
          - Triton
-       * - ``fp8w8a8g128``, ``triton-fp8w8a8g128``
-         - FP8: per-channel weights and per-token-group 128 activations
+       * - ``fp8w8a8g128`` (``triton-fp8w8a8g128``)
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
          - Triton
-       * - ``fp8w8a8g64``, ``triton-fp8w8a8g64``
-         - FP8: per-channel weights and per-token-group 64 activations
+       * - ``fp8w8a8g64`` (``triton-fp8w8a8g64``)
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
          - Triton
 
 .. option:: --quant_cfg

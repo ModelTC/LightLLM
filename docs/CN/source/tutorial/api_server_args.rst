@@ -467,50 +467,51 @@ PD 分离模式参数
 
 .. option:: --quant_type
 
-    量化方法、粒度和实现 backend 的对应关系如下。表格中同一行的 ``quant_type`` 互为别名：
+    ``W`` 表示权重，``A`` 表示激活。括号内为兼容别名。
 
     .. list-table::
        :header-rows: 1
-       :widths: 34 41 25
+       :widths: 35 40 25
+       :align: left
 
        * - ``quant_type``
-         - 量化方法与粒度
-         - 实现 backend
-       * - ``w8a8``, ``vllm-w8a8``
-         - INT8：权重 per-channel，激活 per-token
-         - vLLM / CUTLASS
-       * - ``fp8w8a8``, ``vllm-fp8w8a8``
-         - FP8：权重 per-channel，激活 per-token
-         - vLLM / CUTLASS；可选 Triton GEMM
-       * - ``fp8w8a8-b128``, ``vllm-fp8w8a8-b128``
-         - FP8：权重 per-block 128×128，激活 per-token-group 128
-         - CUTLASS / Triton
+         - 量化介绍
+         - 算子 backend
+       * - ``w8a8``（``vllm-w8a8``）
+         - INT8 W8A8；W：per-channel，A：per-token
+         - CUTLASS（vLLM）
+       * - ``fp8w8a8``（``vllm-fp8w8a8``）
+         - FP8 W8A8；W：per-channel，A：per-token
+         - CUTLASS（vLLM）/ Triton（可选）
+       * - ``fp8w8a8-b128``（``vllm-fp8w8a8-b128``）
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - CUTLASS / Triton（按 shape 选择）
        * - ``deepgemm-fp8w8a8-b128``
-         - FP8：权重 per-block 128×128，激活 per-token-group 128
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - DeepGEMM
-       * - ``awq``
-         - INT4 weight-only（W4A16）
-         - vLLM AWQ
-       * - ``awq_marlin``
-         - INT4 weight-only（W4A16）
-         - vLLM Marlin
        * - ``fp8w8a8-pt-cutlass``
-         - FP8：权重 per-tensor，激活 per-token
+         - FP8 W8A8；W：per-tensor，A：per-token
          - CUTLASS
        * - ``fp8w8a8-pt-sgl``
-         - FP8：权重 per-tensor，激活 per-token
-         - SGL
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - SGL Kernel
+       * - ``awq``
+         - INT4 weight-only；W4A16
+         - AWQ CUDA Kernel（vLLM）
+       * - ``awq_marlin``
+         - INT4 weight-only；W4A16
+         - Marlin（vLLM）
        * - ``none``（默认）
          - 不量化
-         - 默认浮点实现
-       * - ``fp8w8a8-pt``, ``fp8w8a8-pt-triton``
-         - FP8：权重 per-tensor，激活 per-token
+         - —
+       * - ``fp8w8a8-pt``（``fp8w8a8-pt-triton``）
+         - FP8 W8A8；W：per-tensor，A：per-token
          - Triton
-       * - ``fp8w8a8g128``, ``triton-fp8w8a8g128``
-         - FP8：权重 per-channel，激活 per-token-group 128
+       * - ``fp8w8a8g128``（``triton-fp8w8a8g128``）
+         - FP8 W8A8；W：per-channel，A：per-token-group 128
          - Triton
-       * - ``fp8w8a8g64``, ``triton-fp8w8a8g64``
-         - FP8：权重 per-channel，激活 per-token-group 64
+       * - ``fp8w8a8g64``（``triton-fp8w8a8g64``）
+         - FP8 W8A8；W：per-channel，A：per-token-group 64
          - Triton
 
 .. option:: --quant_cfg
