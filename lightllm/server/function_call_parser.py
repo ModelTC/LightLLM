@@ -54,9 +54,15 @@ class ToolCallItem(BaseModel):
 class StreamingParseResult:
     """Result of streaming incremental parsing."""
 
-    def __init__(self, normal_text: str = "", calls: Optional[List[ToolCallItem]] = None):
+    def __init__(
+        self,
+        normal_text: str = "",
+        calls: Optional[List[ToolCallItem]] = None,
+        emit_empty_chunk: bool = False,
+    ):
         self.normal_text = normal_text
         self.calls = calls or []
+        self.emit_empty_chunk = emit_empty_chunk
 
 
 def _find_common_prefix(s1: str, s2: str) -> str:
@@ -133,12 +139,6 @@ class BaseFormatDetector(ABC):
         self.bot_token = ""
         self.eot_token = ""
         self.tool_call_separator = ", "
-
-    def get_streamed_arguments(self, tool_index: int) -> Optional[str]:
-        """Return the exact argument prefix already emitted for a tool call."""
-        if 0 <= tool_index < len(self.streamed_args_for_tool):
-            return self.streamed_args_for_tool[tool_index]
-        return None
 
     def _get_tool_indices(self, tools: List[Tool]) -> Dict[str, int]:
         """
@@ -1752,6 +1752,8 @@ class Qwen3CoderDetector(BaseFormatDetector):
     Reference: https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3-Coder-480B-A35B.html
     """
 
+    KEEPALIVE_CHUNK_INTERVAL = 16
+
     def __init__(self):
         super().__init__()
         self.bot_token = "<tool_call>"
@@ -1765,23 +1767,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
         )
         self._normal_text_buffer = ""
-
-        # Incremental streaming parser state. Only an ambiguous tag suffix, a tag
-        # name, or the current non-string value is buffered; completed string
-        # content is escaped and emitted exactly once.
-        self._qwen_stream_state = "outside"
-        self._qwen_stream_buffer = ""
-        self._qwen_function_name = ""
-        self._qwen_function_defined = False
-        self._qwen_parameter_name = ""
-        self._qwen_parameter_type = "string"
-        self._qwen_parameter_count = 0
-        self._qwen_buffered_value_parts: List[str] = []
-        self._qwen_value_at_start = True
-        self._qwen_pending_value_newline = False
-        self._qwen_string_started = False
-        self._qwen_string_prefix = ""
-        self._qwen_streamed_arg_parts: List[List[str]] = []
+        self._buffered_chunk_count = 0
 
     def has_tool_call(self, text: str) -> bool:
         return "<function=" in text or self.bot_token in text
@@ -1805,7 +1791,8 @@ class Qwen3CoderDetector(BaseFormatDetector):
         if param_name not in param_config:
             return value
 
-        param_type = self._get_qwen3_param_type(param_name, param_config)
+        prop = param_config.get(param_name, {})
+        param_type = str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
 
         if param_type in ("string", "str", "enum"):
             return value
@@ -1855,7 +1842,12 @@ class Qwen3CoderDetector(BaseFormatDetector):
             except ValueError:
                 continue
             param_name = match[:idx].strip()
-            param_value = self._strip_value_newlines(match[idx + 1 :])
+            param_value = match[idx + 1 :]
+            # Strip leading/trailing newlines from value
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
 
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
 
@@ -1865,167 +1857,47 @@ class Qwen3CoderDetector(BaseFormatDetector):
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
 
-    def _get_qwen3_param_type(self, param_name: str, param_config: Dict) -> str:
-        prop = param_config.get(param_name, {})
-        return str(prop.get("type", "string")).strip().lower() if isinstance(prop, dict) else "string"
-
-    def _strip_value_newlines(self, value: str) -> str:
-        """Strip the single leading/trailing newline the Qwen3 template wraps each value in."""
-        if value.startswith("\n"):
-            value = value[1:]
-        if value.endswith("\n"):
-            value = value[:-1]
-        return value
-
-    def _ensure_qwen3_stream_state(self, tool_index: int) -> None:
-        while len(self.prev_tool_call_arr) <= tool_index:
-            self.prev_tool_call_arr.append({})
-        while len(self.streamed_args_for_tool) <= tool_index:
-            self.streamed_args_for_tool.append("")
-        while len(self._qwen_streamed_arg_parts) <= tool_index:
-            self._qwen_streamed_arg_parts.append([])
-
-    def get_streamed_arguments(self, tool_index: int) -> Optional[str]:
-        if not 0 <= tool_index < len(self.streamed_args_for_tool):
+    def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
+        """Build the current argument JSON from a partial XML tool-call body."""
+        param_matches = self.parameter_regex.findall(partial_body)
+        if not param_matches:
             return None
-        cached = self.streamed_args_for_tool[tool_index]
-        if cached:
-            return cached
-        return "".join(self._qwen_streamed_arg_parts[tool_index])
 
-    def _qwen_marker_tail(self, value: str, markers: Tuple[str, ...]) -> str:
-        """Keep only the suffix that could become a control tag in the next chunk."""
-        max_len = min(len(value), max(len(marker) for marker in markers) - 1)
-        for suffix_len in range(max_len, 0, -1):
-            suffix = value[-suffix_len:]
-            if any(marker.startswith(suffix) for marker in markers):
-                return suffix
-        return ""
+        param_config = self._get_param_config(func_name, tools)
+        param_dict = {}
+        has_visible_value = False
 
-    def _qwen_find_marker(self, markers: Tuple[str, ...]) -> Optional[Tuple[int, str]]:
-        found = [(position, marker) for marker in markers if (position := self._qwen_stream_buffer.find(marker)) != -1]
-        return min(found, default=None)
-
-    def _emit_qwen_arguments_fragment(self, calls: List[ToolCallItem], value: str) -> None:
-        if not value or not self._qwen_function_defined:
-            return
-        tool_index = self.current_tool_id
-        self._ensure_qwen3_stream_state(tool_index)
-        self._qwen_streamed_arg_parts[tool_index].append(value)
-        if calls and calls[-1].tool_index == tool_index and calls[-1].name is None:
-            calls[-1].parameters += value
-        else:
-            calls.append(ToolCallItem(tool_index=tool_index, name=None, parameters=value))
-
-    def _emit_qwen_string_payload(self, calls: List[ToolCallItem], value: str) -> None:
-        """Emit escaped string content while deferring the ambiguous literal `null`."""
-        if not value:
-            return
-        if self._qwen_string_started:
-            self._emit_qwen_arguments_fragment(calls, json.dumps(value, ensure_ascii=False)[1:-1])
-            return
-
-        self._qwen_string_prefix += value
-        if "null".startswith(self._qwen_string_prefix.lower()) and len(self._qwen_string_prefix) <= 4:
-            return
-
-        self._emit_qwen_arguments_fragment(
-            calls,
-            '"' + json.dumps(self._qwen_string_prefix, ensure_ascii=False)[1:-1],
-        )
-        self._qwen_string_prefix = ""
-        self._qwen_string_started = True
-
-    def _consume_qwen_string_text(self, calls: List[ToolCallItem], value: str) -> None:
-        if self._qwen_value_at_start and value:
-            if value.startswith("\n"):
-                value = value[1:]
-            self._qwen_value_at_start = False
-
-        if self._qwen_pending_value_newline and value:
-            value = "\n" + value
-            self._qwen_pending_value_newline = False
-
-        if value.endswith("\n"):
-            value = value[:-1]
-            self._qwen_pending_value_newline = True
-
-        self._emit_qwen_string_payload(calls, value)
-
-    def _start_qwen_parameter(self, calls: List[ToolCallItem], tools: List[Tool], param_name: str) -> None:
-        self._qwen_parameter_name = param_name.strip()
-        self._qwen_buffered_value_parts = []
-        self._qwen_value_at_start = True
-        self._qwen_pending_value_newline = False
-        self._qwen_string_started = False
-        self._qwen_string_prefix = ""
-
-        if not self._qwen_function_defined or not self._qwen_parameter_name:
-            self._qwen_stream_state = "ignored_value"
-            return
-
-        param_config = self._get_param_config(self._qwen_function_name, tools)
-        self._qwen_parameter_type = self._get_qwen3_param_type(self._qwen_parameter_name, param_config)
-        prefix = "{" if self._qwen_parameter_count == 0 else ", "
-        self._emit_qwen_arguments_fragment(
-            calls,
-            prefix + json.dumps(self._qwen_parameter_name, ensure_ascii=False) + ": ",
-        )
-        self._qwen_parameter_count += 1
-        if self._qwen_parameter_type in ("string", "str", "enum"):
-            self._qwen_stream_state = "string_value"
-        else:
-            self._qwen_stream_state = "buffered_value"
-
-    def _finish_qwen_parameter(self, calls: List[ToolCallItem], tools: List[Tool]) -> None:
-        if self._qwen_stream_state == "string_value":
-            self._qwen_pending_value_newline = False
-            if self._qwen_string_started:
-                self._emit_qwen_arguments_fragment(calls, '"')
-            elif self._qwen_string_prefix.lower() == "null":
-                self._emit_qwen_arguments_fragment(calls, "null")
-            else:
-                self._emit_qwen_arguments_fragment(
-                    calls,
-                    json.dumps(self._qwen_string_prefix, ensure_ascii=False),
-                )
-        elif self._qwen_stream_state == "buffered_value":
-            raw_value = self._strip_value_newlines("".join(self._qwen_buffered_value_parts))
-            param_config = self._get_param_config(self._qwen_function_name, tools)
-            converted = self._convert_param_value(
-                raw_value,
-                self._qwen_parameter_name,
-                param_config,
-                self._qwen_function_name,
-            )
-            self._emit_qwen_arguments_fragment(calls, json.dumps(converted, ensure_ascii=False))
-
-        self._qwen_buffered_value_parts = []
-        self._qwen_stream_state = "inside_function"
-
-    def _finish_qwen_function(self, calls: List[ToolCallItem]) -> None:
-        if self._qwen_function_defined:
-            self._emit_qwen_arguments_fragment(calls, "}" if self._qwen_parameter_count else "{}")
-            tool_index = self.current_tool_id
-            arguments_json = self.get_streamed_arguments(tool_index) or "{}"
+        for match in param_matches:
             try:
-                arguments = json.loads(arguments_json)
-            except json.JSONDecodeError:
-                logger.warning("Qwen3-Coder produced invalid arguments for tool index %s", tool_index)
-                arguments = {}
-            self.streamed_args_for_tool[tool_index] = arguments_json
-            self._qwen_streamed_arg_parts[tool_index] = []
-            self.prev_tool_call_arr[tool_index] = {
-                "name": self._qwen_function_name,
-                "arguments": arguments,
-            }
-            self.current_tool_id += 1
-            self.current_tool_name_sent = False
+                idx = match.index(">")
+            except ValueError:
+                continue
 
-        self._qwen_function_name = ""
-        self._qwen_function_defined = False
-        self._qwen_parameter_count = 0
-        self._qwen_stream_state = "inside_tool"
+            param_name = match[:idx].strip()
+            param_value = match[idx + 1 :]
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            if param_value.strip():
+                has_visible_value = True
+            elif (
+                f"<parameter={param_name}>" in partial_body
+                and f"<parameter={param_name}>{param_value}</parameter>" in partial_body
+            ):
+                # Closed empty-string parameter. We can safely emit it.
+                has_visible_value = True
+            else:
+                # Parameter tag is present but its value has not started streaming yet.
+                continue
+
+            param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
+
+        if not param_dict and not has_visible_value:
+            return None
+
+        return json.dumps(param_dict, ensure_ascii=False)
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         idx = text.find(self.bot_token)
@@ -2052,152 +1924,61 @@ class Qwen3CoderDetector(BaseFormatDetector):
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
-        """Incrementally parse Qwen3-Coder XML without rescanning completed content."""
+        """Streaming incremental parsing for Qwen3-Coder XML tool calls."""
+        self._buffer += new_text
         if not hasattr(self, "_tool_indices"):
             self._tool_indices = self._get_tool_indices(tools)
 
-        self._qwen_stream_buffer += new_text
         normal_text = ""
         calls: List[ToolCallItem] = []
-        function_start_prefix = "<function="
-        parameter_start_prefix = "<parameter="
-        parameter_end = "</parameter>"
-        function_end = "</function>"
-        value_markers = (parameter_end, parameter_start_prefix, function_end, self.eot_token)
 
-        while self._qwen_stream_buffer:
-            state = self._qwen_stream_state
+        while True:
+            current_text = self._buffer
+            tool_call_start = current_text.find(self.bot_token)
 
-            if state == "outside":
-                tool_pos = self._qwen_stream_buffer.find(self.bot_token)
-                if tool_pos == -1:
-                    tail = self._qwen_marker_tail(self._qwen_stream_buffer, (self.bot_token,))
-                    safe_end = len(self._qwen_stream_buffer) - len(tail)
-                    normal_text += self._qwen_stream_buffer[:safe_end].replace(self.eot_token, "")
-                    self._qwen_stream_buffer = tail
-                    break
-                normal_text += self._qwen_stream_buffer[:tool_pos]
-                self._qwen_stream_buffer = self._qwen_stream_buffer[tool_pos + len(self.bot_token) :]
-                self._qwen_stream_state = "inside_tool"
-                continue
+            if tool_call_start == -1:
+                partial_len = self._ends_with_partial_token(current_text, self.bot_token)
+                if partial_len:
+                    return StreamingParseResult(normal_text=normal_text, calls=calls)
+                if current_text:
+                    normal_text += current_text.replace(self.eot_token, "")
+                    self._buffer = ""
+                self._buffered_chunk_count = 0
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
 
-            if state == "inside_tool":
-                match = self._qwen_find_marker((function_start_prefix, self.eot_token))
-                if match is None:
-                    self._qwen_stream_buffer = self._qwen_marker_tail(
-                        self._qwen_stream_buffer,
-                        (function_start_prefix, self.eot_token),
-                    )
-                    break
-                position, marker = match
-                self._qwen_stream_buffer = self._qwen_stream_buffer[position + len(marker) :]
-                if marker == self.eot_token:
-                    self._qwen_stream_buffer = self._qwen_stream_buffer.lstrip()
-                    self._qwen_stream_state = "outside"
-                else:
-                    self._qwen_stream_state = "function_name"
-                continue
+            if tool_call_start > 0:
+                normal_text += current_text[:tool_call_start]
+                self._buffer = current_text[tool_call_start:]
+                current_text = self._buffer
 
-            if state == "function_name":
-                end_pos = self._qwen_stream_buffer.find(">")
-                if end_pos == -1:
-                    break
-                self._qwen_function_name = self._qwen_stream_buffer[:end_pos].strip()
-                self._qwen_stream_buffer = self._qwen_stream_buffer[end_pos + 1 :]
-                self._qwen_function_defined = self._qwen_function_name in self._tool_indices
-                self._qwen_parameter_count = 0
-                if self._qwen_function_defined:
-                    if self.current_tool_id == -1:
-                        self.current_tool_id = 0
-                    self._ensure_qwen3_stream_state(self.current_tool_id)
-                    calls.append(
-                        ToolCallItem(
-                            tool_index=self.current_tool_id,
-                            name=self._qwen_function_name,
-                            parameters="",
-                        )
-                    )
-                    self.current_tool_name_sent = True
-                    self.prev_tool_call_arr[self.current_tool_id] = {
-                        "name": self._qwen_function_name,
-                        "arguments": {},
-                    }
-                self._qwen_stream_state = "inside_function"
-                continue
-
-            if state == "inside_function":
-                match = self._qwen_find_marker(
-                    (parameter_start_prefix, function_end, function_start_prefix, self.eot_token)
+            eot_pos = current_text.find(self.eot_token)
+            if eot_pos == -1:
+                self._buffered_chunk_count += 1
+                emit_empty_chunk = self._buffered_chunk_count >= self.KEEPALIVE_CHUNK_INTERVAL
+                if emit_empty_chunk:
+                    self._buffered_chunk_count = 0
+                return StreamingParseResult(
+                    normal_text=normal_text,
+                    calls=calls,
+                    emit_empty_chunk=emit_empty_chunk,
                 )
-                if match is None:
-                    self._qwen_stream_buffer = self._qwen_marker_tail(
-                        self._qwen_stream_buffer,
-                        (parameter_start_prefix, function_end, function_start_prefix, self.eot_token),
-                    )
-                    break
-                position, marker = match
-                self._qwen_stream_buffer = self._qwen_stream_buffer[position + len(marker) :]
-                if marker == parameter_start_prefix:
-                    self._qwen_stream_state = "parameter_name"
-                elif marker == function_start_prefix:
-                    self._finish_qwen_function(calls)
-                    self._qwen_stream_state = "function_name"
-                elif marker == function_end:
-                    self._finish_qwen_function(calls)
-                else:
-                    self._finish_qwen_function(calls)
-                    self._qwen_stream_buffer = self._qwen_stream_buffer.lstrip()
-                    self._qwen_stream_state = "outside"
-                continue
 
-            if state == "parameter_name":
-                end_pos = self._qwen_stream_buffer.find(">")
-                if end_pos == -1:
-                    break
-                param_name = self._qwen_stream_buffer[:end_pos]
-                self._qwen_stream_buffer = self._qwen_stream_buffer[end_pos + 1 :]
-                self._start_qwen_parameter(calls, tools, param_name)
-                continue
+            self._buffered_chunk_count = 0
+            complete_block = current_text[: eot_pos + len(self.eot_token)]
+            func_matches = self.function_regex.findall(complete_block)
 
-            if state in ("string_value", "buffered_value", "ignored_value"):
-                match = self._qwen_find_marker(value_markers)
-                if match is None:
-                    tail = self._qwen_marker_tail(self._qwen_stream_buffer, value_markers)
-                    safe_end = len(self._qwen_stream_buffer) - len(tail)
-                    safe_value = self._qwen_stream_buffer[:safe_end]
-                    self._qwen_stream_buffer = tail
-                    if state == "string_value":
-                        self._consume_qwen_string_text(calls, safe_value)
-                    elif state == "buffered_value" and safe_value:
-                        self._qwen_buffered_value_parts.append(safe_value)
-                    break
+            if self.current_tool_id == -1:
+                self.current_tool_id = 0
 
-                position, marker = match
-                value = self._qwen_stream_buffer[:position]
-                self._qwen_stream_buffer = self._qwen_stream_buffer[position + len(marker) :]
-                if state == "string_value":
-                    self._consume_qwen_string_text(calls, value)
-                elif state == "buffered_value" and value:
-                    self._qwen_buffered_value_parts.append(value)
-                self._finish_qwen_parameter(calls, tools)
+            for match in func_matches:
+                func_str = match[0] if match[0] else match[1]
+                item = self._parse_function_call(func_str, tools)
+                if item:
+                    item.tool_index = self.current_tool_id
+                    calls.append(item)
+                    self.current_tool_id += 1
 
-                if marker == parameter_start_prefix:
-                    self._qwen_stream_state = "parameter_name"
-                elif marker == function_end:
-                    self._finish_qwen_function(calls)
-                elif marker == self.eot_token:
-                    self._finish_qwen_function(calls)
-                    self._qwen_stream_buffer = self._qwen_stream_buffer.lstrip()
-                    self._qwen_stream_state = "outside"
-                continue
-
-            logger.warning("Unknown Qwen3-Coder streaming state: %s", state)
-            self._qwen_stream_state = "outside"
-
-        # Keep the inherited buffer observable for diagnostics without retaining the
-        # already-consumed tool-call body.
-        self._buffer = self._qwen_stream_buffer
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+            self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 
 class FunctionCallParser:
@@ -2232,6 +2013,7 @@ class FunctionCallParser:
 
         self.detector = detector
         self.tools = tools
+        self.should_emit_empty_chunk = False
 
     def has_tool_call(self, text: str) -> bool:
         """
@@ -2287,6 +2069,7 @@ class FunctionCallParser:
         final_calls = []
 
         sp_result = self.detector.parse_streaming_increment(chunk_text, self.tools)
+        self.should_emit_empty_chunk = sp_result.emit_empty_chunk
         if sp_result.normal_text:
             final_normal_text = sp_result.normal_text
         if sp_result.calls:

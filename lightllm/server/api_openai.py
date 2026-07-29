@@ -59,6 +59,8 @@ from .api_models import (
 
 logger = init_logger(__name__)
 
+TOOL_ARGUMENT_STREAM_CHUNK_SIZE = 4096
+
 
 async def _safe_stream_wrapper(stream_generator):
     """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
@@ -192,10 +194,15 @@ def _process_reasoning_stream(
     return reasoning_parser.parse_stream_chunk(delta)
 
 
-def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: ChatCompletionRequest):
-    from .api_http import g_objs
-
+def _process_tools_stream(
+    index: int,
+    delta: str,
+    parser_dict: Dict,
+    request: ChatCompletionRequest,
+) -> Tuple[str, List[ToolCallItem], bool]:
     if index not in parser_dict:
+        from .api_http import g_objs
+
         # 为 tool_call_parser 提供默认值
         tool_parser = getattr(g_objs.args, "tool_call_parser", None) or "llama3"
         parser_dict[index] = FunctionCallParser(
@@ -204,25 +211,30 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
         )
     parser = parser_dict[index]
 
-    # parse_increment => returns (normal_text, calls)
+    # parse_stream_chunk keeps its public two-item return shape. The empty-chunk
+    # signal is intentionally separate and opt-in for buffered Qwen3-Coder calls.
     normal_text, calls = parser.parse_stream_chunk(delta)
-    return normal_text, calls
+    return normal_text, calls, parser.should_emit_empty_chunk
 
 
 def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
-    """Split a complete JSON argument string into OpenAI-style deltas."""
+    """Split complete JSON arguments into bounded OpenAI-style string deltas."""
     if not arguments:
         return []
     if len(arguments) <= 2:
         return [arguments]
+
+    def split_bounded(value: str) -> List[str]:
+        return [
+            value[start : start + TOOL_ARGUMENT_STREAM_CHUNK_SIZE]
+            for start in range(0, len(value), TOOL_ARGUMENT_STREAM_CHUNK_SIZE)
+        ]
+
+    # Preserve the existing brace-first/brace-last streaming shape while also
+    # bounding a potentially very large body such as write_file.content.
     if arguments[0] in "{[" and arguments[-1] in "}]":
-        middle = arguments[1:-1]
-        chunks = [arguments[0]]
-        if middle:
-            chunks.append(middle)
-        chunks.append(arguments[-1])
-        return [chunk for chunk in chunks if chunk]
-    return [arguments]
+        return [arguments[0], *split_bounded(arguments[1:-1]), arguments[-1]]
+    return split_bounded(arguments)
 
 
 async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
@@ -531,7 +543,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             if request.tool_choice != "none" and request.tools:
                 # parse_increment => returns (normal_text, calls)
-                normal_text, calls = _process_tools_stream(
+                normal_text, calls, emit_empty_chunk = _process_tools_stream(
                     index=choice_index, delta=delta, parser_dict=parser_dict, request=request
                 )
 
@@ -540,6 +552,23 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     choice_data = ChatCompletionStreamResponseChoice(
                         index=choice_index,
                         delta=DeltaMessage(content=normal_text),
+                        finish_reason=None,
+                    )
+                    chunk = ChatCompletionStreamResponse(
+                        id=chat_completion_id,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=request.model,
+                    )
+                    yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
+
+                # The buffered Qwen3-Coder parser deliberately waits for a complete
+                # tool-call block before parsing it. Keep the SSE connection active
+                # while a large argument is buffered without adding user-visible text.
+                if emit_empty_chunk and not normal_text and not calls:
+                    choice_data = ChatCompletionStreamResponseChoice(
+                        index=choice_index,
+                        delta=DeltaMessage(),
                         finish_reason=None,
                     )
                     chunk = ChatCompletionStreamResponse(
@@ -568,9 +597,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                                 det.prev_tool_call_arr[ti].get("arguments", {}),
                                 ensure_ascii=False,
                             )
-                            actual_call = det.get_streamed_arguments(ti)
-                            if actual_call is None:
-                                actual_call = ""
+                            actual_call = det.streamed_args_for_tool[ti]
                             if latest_delta_len > 0:
                                 actual_call = actual_call[:-latest_delta_len]
                             remaining_call = expected_call.replace(actual_call, "", 1)
