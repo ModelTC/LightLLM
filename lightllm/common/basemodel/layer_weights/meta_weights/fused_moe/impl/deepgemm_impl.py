@@ -82,6 +82,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
+        if getattr(self, "activation", "silu") != "silu":
+            raise NotImplementedError("DeepGEMM expert parallel currently supports only SiLU experts")
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,

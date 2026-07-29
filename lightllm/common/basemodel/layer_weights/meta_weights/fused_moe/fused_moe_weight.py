@@ -35,6 +35,9 @@ class FusedMoeWeight(BaseWeightTpl):
         layer_num: int = 0,
         network_config: Dict[str, Any] = None,
         per_expert_scale_name: str = "",
+        activation: str = "silu",
+        activation_situ_beta: Optional[float] = None,
+        activation_situ_linear_beta: Optional[float] = None,
     ) -> None:
         super().__init__(data_type=data_type)
         self.w1_weight_name = gate_proj_name
@@ -53,6 +56,7 @@ class FusedMoeWeight(BaseWeightTpl):
         self.quant_method = quant_method
         assert num_fused_shared_experts in [0, 1], "num_fused_shared_experts can only support 0 or 1 now."
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        self.moe_ep_backend = getattr(get_env_start_args(), "moe_ep_backend", "deepep")
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self._init_config(network_config)
@@ -68,6 +72,9 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
+        self.fuse_moe_impl.activation = activation
+        self.fuse_moe_impl.activation_situ_beta = activation_situ_beta
+        self.fuse_moe_impl.activation_situ_linear_beta = activation_situ_linear_beta
         self.lock = threading.Lock()
         self._create_weight()
 
@@ -289,6 +296,10 @@ class FusedMoeWeight(BaseWeightTpl):
         return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
 
     def _create_weight(self):
+        if self.enable_ep_moe and self.moe_ep_backend == "moonep":
+            self._create_moonep_weight()
+            return
+
         intermediate_size = self.split_inter_size
         self.e_score_correction_bias = None
         self.per_expert_scale = None
@@ -327,6 +338,68 @@ class FusedMoeWeight(BaseWeightTpl):
         self.w1_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[0])
         self.w3_list: List[WeightPack] = self._get_expert_weight_list(w13_param_list[1])
         self.w2_list: List[WeightPack] = self._get_expert_weight_list(self.w2)
+
+    def _create_moonep_weight(self):
+        from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.moonep_weight import (
+            create_moonep_source_weight,
+            get_moonep_prefetch_slots,
+        )
+
+        if self.quant_method.method_name != "none" or self.data_type_ != torch.bfloat16:
+            raise ValueError("MoonEP currently supports only non-quantized BF16 expert weights")
+        if self.redundancy_expert_num != 0:
+            raise ValueError("MoonEP cannot be combined with statically redundant experts")
+        try:
+            import deep_gemm
+        except ImportError as exc:
+            raise RuntimeError("MoonEP requires DeepGEMM for its VM grouped GEMMs") from exc
+        if not hasattr(deep_gemm, "m_grouped_bf16_gemm_nt_contiguous"):
+            raise RuntimeError("MoonEP requires a DeepGEMM build with BF16 contiguous grouped GEMM support")
+
+        intermediate_size = self.split_inter_size
+        local_num_experts = self.n_routed_experts // self.global_world_size
+        num_slots = int(getattr(get_env_start_args(), "moonep_prefetch_slots", 4))
+        full_w13 = create_moonep_source_weight(
+            local_num_experts=local_num_experts,
+            out_dim=2 * intermediate_size,
+            in_dim=self.hidden_size,
+            dtype=self.data_type_,
+            rank=self.global_rank_,
+            world_size=self.global_world_size,
+        )
+        full_w2 = create_moonep_source_weight(
+            local_num_experts=local_num_experts,
+            out_dim=self.hidden_size,
+            in_dim=intermediate_size,
+            dtype=self.data_type_,
+            rank=self.global_rank_,
+            world_size=self.global_world_size,
+        )
+        self.w13 = WeightPack(weight=full_w13)
+        self.w2 = WeightPack(weight=full_w2)
+        self.w13.moonep_prefetch_slots = get_moonep_prefetch_slots(
+            num_slots, 2 * intermediate_size, self.hidden_size, self.data_type_, self.device_id_
+        )
+        self.w2.moonep_prefetch_slots = get_moonep_prefetch_slots(
+            num_slots, self.hidden_size, intermediate_size, self.data_type_, self.device_id_
+        )
+
+        local_start = self.global_rank_ * local_num_experts
+        local_w13 = full_w13[local_start : local_start + local_num_experts]
+        local_w2 = full_w2[local_start : local_start + local_num_experts]
+        self.w1_list = [WeightPack(weight=local_w13[i, :intermediate_size]) for i in range(local_num_experts)]
+        self.w3_list = [WeightPack(weight=local_w13[i, intermediate_size:]) for i in range(local_num_experts)]
+        self.w2_list = [WeightPack(weight=local_w2[i]) for i in range(local_num_experts)]
+
+        self.e_score_correction_bias = None
+        if self.e_score_correction_bias_name:
+            self.e_score_correction_bias = torch.empty(
+                (self.n_routed_experts,),
+                dtype=self.data_type_,
+                device=f"cuda:{self.device_id_}",
+            )
+            self.e_score_correction_bias.load_ok = False
+        self.per_expert_scale = None
 
     def _load_e_score_correction_bias(self, weights: Dict[str, torch.Tensor]):
         if self.e_score_correction_bias_name and self.e_score_correction_bias_name in weights:

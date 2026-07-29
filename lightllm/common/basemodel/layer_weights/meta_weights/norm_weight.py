@@ -73,6 +73,11 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
 
 
 class GatedRMSNormWeight(RMSNormWeight):
+    def __init__(self, dim: int, weight_name: str, data_type: torch.dtype, activation: str = "silu"):
+        assert activation in ("silu", "sigmoid")
+        self.activation = activation
+        super().__init__(dim=dim, weight_name=weight_name, data_type=data_type)
+
     def _triton_forward(
         self,
         input: torch.Tensor,
@@ -86,7 +91,15 @@ class GatedRMSNormWeight(RMSNormWeight):
         ), f"input.ndim: {input.ndim} != 2 or weight.ndim: {self.weight.ndim} != 1"
         if out is None:
             out = alloc_func(input.shape, dtype=input.dtype, device=input.device)
-        return gated_rmsnorm_forward(x=input, weight=self.weight, bias=None, eps=eps, z=gate_value, out=out)
+        return gated_rmsnorm_forward(
+            x=input,
+            weight=self.weight,
+            bias=None,
+            eps=eps,
+            z=gate_value,
+            out=out,
+            activation=self.activation,
+        )
 
     def _cuda_forward(
         self,

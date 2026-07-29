@@ -1,6 +1,9 @@
-import torch
+import bisect
 import dataclasses
+
+import torch
 import triton
+
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
@@ -31,6 +34,8 @@ class LinearAttCacheConfig:
     full_attention_interval: int
     all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
     draft_full_att_kv_layer_num: int = 0
+    full_attention_layers: tuple[int, ...] | None = None
+    full_att_kv_factor: int = 2
 
     def get_conv_dim(self):
         # 第一项对应q的参数，第二项对应k的参数，第三项对应v的参数
@@ -43,9 +48,23 @@ class LinearAttCacheConfig:
         )
 
     def get_main_model_full_att_layer_num(self):
+        if self.full_attention_layers is not None:
+            return len(self.full_attention_layers)
         full_att_layer_num = self.all_layer_num - self.linear_layer_num
         assert full_att_layer_num == self.all_layer_num // self.full_attention_interval
         return full_att_layer_num
+
+    def get_full_attention_layer_index(self, layer_index: int) -> int:
+        if self.full_attention_layers is None:
+            return layer_index // self.full_attention_interval
+        index = bisect.bisect_left(self.full_attention_layers, layer_index)
+        assert index < len(self.full_attention_layers) and self.full_attention_layers[index] == layer_index
+        return index
+
+    def get_linear_attention_layer_index(self, layer_index: int) -> int:
+        if self.full_attention_layers is None:
+            return layer_index - (layer_index // self.full_attention_interval)
+        return layer_index - bisect.bisect_left(self.full_attention_layers, layer_index)
 
     def get_full_att_kv_layer_num_with_draft_model(self):
         return self.get_main_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
@@ -79,7 +98,12 @@ class LinearAttCacheConfig:
             get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
         )
         assert big_page_token_num == get_env_start_args().cpu_cache_token_page_size
-        full_att_bytes = 2 * self.full_att_all_num_kv_heads * self.full_att_head_dim * self.full_att_dtype.itemsize
+        full_att_bytes = (
+            self.full_att_kv_factor
+            * self.full_att_all_num_kv_heads
+            * self.full_att_head_dim
+            * self.full_att_dtype.itemsize
+        )
         a = full_att_bytes * self.get_full_att_kv_layer_num_with_draft_model() * big_page_token_num
         return a
 
@@ -99,7 +123,6 @@ class LinearAttCacheConfig:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        assert model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]
         llm_config = model_cfg
         try:
             llm_config = llm_config["text_config"]
@@ -107,8 +130,34 @@ class LinearAttCacheConfig:
             pass
 
         n_layer = llm_config["num_hidden_layers"]
-
         tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+
+        if model_type in ("kimi_linear", "kimi_k3"):
+            linear_config = llm_config["linear_attn_config"]
+            full_attention_layers = tuple(layer - 1 for layer in linear_config["full_attn_layers"])
+            return LinearAttCacheConfig(
+                tp_world_size=tp_world_size,
+                full_att_all_num_kv_heads=1,
+                full_att_dtype=get_torch_dtype(args.data_type),
+                full_att_num_kv_heads=1,
+                full_att_head_dim=llm_config["kv_lora_rank"] + llm_config["qk_rope_head_dim"],
+                global_linear_k_heads=linear_config["num_heads"],
+                global_linear_v_heads=linear_config["num_heads"],
+                num_linear_k_heads=linear_config["num_heads"] // tp_world_size,
+                num_linear_v_heads=linear_config["num_heads"] // tp_world_size,
+                head_linear_k_dim=linear_config["head_dim"],
+                head_linear_v_dim=linear_config["head_dim"],
+                conv_kernel_size=linear_config["short_conv_kernel_size"],
+                linear_layer_num=len(linear_config["kda_layers"]),
+                conv_state_dtype=get_torch_dtype(args.data_type),
+                ssm_state_dtype=torch.float32,
+                full_attention_interval=1,
+                all_layer_num=n_layer,
+                full_attention_layers=full_attention_layers,
+                full_att_kv_factor=1,
+            )
+
+        assert model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]
         return LinearAttCacheConfig(
             tp_world_size=tp_world_size,
             full_att_all_num_kv_heads=llm_config["num_key_value_heads"],

@@ -33,7 +33,7 @@ class Qwen3NextMemManager(MemoryManager):
             # MTP draft full-attn layers are packed after the main model layers.
             layer_index -= self.linear_config.linear_layer_num
         else:
-            layer_index = layer_index // self.linear_config.full_attention_interval
+            layer_index = self.linear_config.get_full_attention_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):

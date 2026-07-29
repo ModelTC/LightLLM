@@ -100,7 +100,7 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         if f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight" in weights:
             kv_b_proj_ = weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj.weight"]
             # for deepseek_v3, the bmm operator is not quantized
-            if self.quant_cfg.quantized_weight:
+            if self.quant_cfg.quantized_weight and weight_scale_suffix is not None:
                 kv_b_proj_ = weight_dequant(
                     kv_b_proj_.cuda(),
                     weights[f"model.layers.{self.layer_num_}.self_attn.kv_b_proj." + weight_scale_suffix].cuda(),

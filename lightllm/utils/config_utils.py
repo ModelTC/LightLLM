@@ -175,6 +175,7 @@ def auto_set_fused_shared_experts(args) -> None:
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
+        "kimi_linear",
     }
     if model_type not in supported_model_types:
         logger.info(f"do not enable fused shared experts: unsupported model_type={model_type}")
@@ -450,7 +451,14 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+        if model_type in [
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+            "kimi_linear",
+            "kimi_k3",
+        ]:
             return True
         else:
             return False

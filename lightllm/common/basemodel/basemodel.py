@@ -192,6 +192,7 @@ class TpPartBaseModel:
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
             weight_dict=weight_dict,
+            weight_prefix=getattr(self, "weight_prefix", ""),
         )
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
@@ -663,7 +664,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

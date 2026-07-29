@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import ast
+import html
 import json
 import os
 import orjson
@@ -40,6 +41,7 @@ TOOLS_TAG_LIST = [
     "[TOOL_CALLS]",
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
+    "<|open|>tools<|sep|>",
 ]
 
 
@@ -632,6 +634,137 @@ class Llama32Detector(BaseFormatDetector):
         return StreamingParseResult(normal_text=normal_text + trailing_text, calls=calls)
 
 
+class KimiK3Detector(BaseFormatDetector):
+    tools_start = "<|open|>tools<|sep|>"
+    tools_end = "<|close|>tools<|sep|>"
+    message_end = "<|close|>message<|sep|>"
+    response_end = "<|close|>response<|sep|>"
+    call_end = "<|close|>call<|sep|>"
+    argument_end = "<|close|>argument<|sep|>"
+    json_end = "<|close|>json<|sep|>"
+
+    call_start_re = re.compile(r"<\|open\|>call(?P<attrs>.*?)<\|sep\|>", re.DOTALL)
+    argument_start_re = re.compile(r"<\|open\|>argument(?P<attrs>.*?)<\|sep\|>", re.DOTALL)
+    json_start_re = re.compile(r"<\|open\|>json(?P<attrs>.*?)<\|sep\|>", re.DOTALL)
+    attr_re = re.compile(r'([A-Za-z_][\w.-]*)="([^"]*)"')
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = self.tools_start
+        self.eot_token = self.tools_end
+
+    @classmethod
+    def _attrs(cls, text: str) -> Dict[str, str]:
+        return {key: html.unescape(value) for key, value in cls.attr_re.findall(text)}
+
+    @staticmethod
+    def _typed_value(value: str, value_type: str) -> Any:
+        if value_type == "string":
+            return value
+        if value_type == "null":
+            return None
+        if value_type == "boolean":
+            return value.strip().lower() == "true"
+        if value_type in {"number", "object", "array"}:
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
+
+    @classmethod
+    def _parse_call_body(cls, body: str) -> Dict[str, Any]:
+        json_match = cls.json_start_re.search(body)
+        if json_match is not None:
+            json_end = body.find(cls.json_end, json_match.end())
+            if json_end != -1:
+                raw_json = body[json_match.end() : json_end]
+                try:
+                    value = json.loads(raw_json)
+                    return value if isinstance(value, dict) else {"value": value}
+                except (TypeError, ValueError):
+                    return {}
+
+        arguments: Dict[str, Any] = {}
+        position = 0
+        while True:
+            match = cls.argument_start_re.search(body, position)
+            if match is None:
+                break
+            end = body.find(cls.argument_end, match.end())
+            if end == -1:
+                break
+            attrs = cls._attrs(match.group("attrs"))
+            key = attrs.get("key")
+            if key is not None:
+                arguments[key] = cls._typed_value(
+                    body[match.end() : end],
+                    attrs.get("type", "string"),
+                )
+            position = end + len(cls.argument_end)
+        return arguments
+
+    @classmethod
+    def _clean_normal_text(cls, text: str) -> str:
+        text = text.split(cls.tools_start, 1)[0]
+        for marker in (cls.response_end, cls.message_end):
+            text = text.replace(marker, "")
+        return text
+
+    def has_tool_call(self, text: str) -> bool:
+        return self.tools_start in text
+
+    def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        normal_text = self._clean_normal_text(text)
+        tools_pos = text.find(self.tools_start)
+        if tools_pos == -1:
+            return StreamingParseResult(normal_text=normal_text)
+
+        section_end = text.find(self.tools_end, tools_pos)
+        section = text[tools_pos + len(self.tools_start) : section_end if section_end != -1 else None]
+        calls: List[ToolCallItem] = []
+        parsed_arguments: List[Dict[str, Any]] = []
+        position = 0
+        while True:
+            match = self.call_start_re.search(section, position)
+            if match is None:
+                break
+            end = section.find(self.call_end, match.end())
+            if end == -1:
+                break
+            attrs = self._attrs(match.group("attrs"))
+            name = attrs.get("tool")
+            if name:
+                arguments = self._parse_call_body(section[match.end() : end])
+                try:
+                    tool_index = max(int(attrs.get("index", len(calls) + 1)) - 1, 0)
+                except ValueError:
+                    tool_index = len(calls)
+                calls.append(
+                    ToolCallItem(
+                        tool_index=tool_index,
+                        name=name,
+                        parameters=json.dumps(arguments, ensure_ascii=False),
+                    )
+                )
+                parsed_arguments.append(arguments)
+            position = end + len(self.call_end)
+
+        self.prev_tool_call_arr = [
+            {"name": call.name, "arguments": arguments} for call, arguments in zip(calls, parsed_arguments)
+        ]
+        self.streamed_args_for_tool = [call.parameters for call in calls]
+        return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        self._buffer += new_text
+        if self.message_end not in self._buffer:
+            return StreamingParseResult()
+        text = self._buffer
+        self._buffer = ""
+        return self.detect_and_parse(text, tools)
+
+
 class KimiK2Detector(BaseFormatDetector):
     """
     Detector for Kimi K2 model function call format.
@@ -788,7 +921,6 @@ class KimiK2Detector(BaseFormatDetector):
                     parsed_args_diff = argument_diff.split("<|tool_call_end|>", 1)[0]
 
                     if parsed_args_diff:
-
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -2026,6 +2158,7 @@ class FunctionCallParser:
         "deepseekv31": DeepSeekV31Detector,
         "deepseekv32": DeepSeekV32Detector,
         "glm47": Glm47Detector,
+        "kimi_k3": KimiK3Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,
         "mistral": MistralDetector,

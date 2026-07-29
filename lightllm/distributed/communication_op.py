@@ -111,6 +111,9 @@ class DistributeGroupManager:
         self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
+        self.moonep_group = None
+        self.moonep_prefill_buffer = None
+        self.moonep_decode_buffer = None
 
     def __len__(self):
         return len(self.groups)
@@ -139,7 +142,14 @@ class DistributeGroupManager:
         num_experts_per_tok: int = 1,
         moe_intermediate_size: Optional[int] = None,
     ):
-        enable_ep_moe = get_env_start_args().enable_ep_moe
+        start_args = get_env_start_args()
+        enable_ep_moe = start_args.enable_ep_moe
+        if enable_ep_moe and getattr(start_args, "moe_ep_backend", "deepep") == "moonep":
+            return self.new_moonep_group(
+                n_routed_experts=n_routed_experts,
+                hidden_size=hidden_size,
+                num_experts_per_tok=num_experts_per_tok,
+            )
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
@@ -193,6 +203,57 @@ class DistributeGroupManager:
             )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(theoretical_sms)
+
+    def new_moonep_group(
+        self,
+        n_routed_experts: int,
+        hidden_size: int,
+        num_experts_per_tok: int,
+    ):
+        if not has_nvlink():
+            raise RuntimeError("MoonEP requires an NVLink-connected expert-parallel group")
+        try:
+            import moonep  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "MoonEP is required for --moe_ep_backend moonep. "
+                "Install it from https://github.com/MoonshotAI/MoonEP."
+            ) from exc
+
+        global_world_size = get_global_world_size()
+        self.moonep_group = dist.new_group(list(range(global_world_size)))
+        self.moonep_config = {
+            "H": hidden_size,
+            "K": num_experts_per_tok,
+            "E": n_routed_experts,
+            "R": global_world_size,
+            "B": int(getattr(get_env_start_args(), "moonep_prefetch_slots", 4)),
+        }
+        self.ll_num_tokens = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        self.ll_decode_num_tokens = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        self.ep_buffer = None
+        self.ep_low_latency_buffer = None
+        self.ep_mega_moe_buffer = None
+        self.ep_num_sms = None
+
+    def get_moonep_buffer(self, is_prefill: bool):
+        from moonep import Buffer
+
+        attr_name = "moonep_prefill_buffer" if is_prefill else "moonep_decode_buffer"
+        buffer = getattr(self, attr_name)
+        if buffer is None:
+            token_capacity = self.ll_num_tokens if is_prefill else self.ll_decode_num_tokens
+            buffer = Buffer(
+                S=token_capacity,
+                H=self.moonep_config["H"],
+                K=self.moonep_config["K"],
+                E=self.moonep_config["E"],
+                num_ep_ranks=self.moonep_config["R"],
+                B=self.moonep_config["B"],
+                group=self.moonep_group,
+            )
+            setattr(self, attr_name, buffer)
+        return buffer
 
     def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
         try:

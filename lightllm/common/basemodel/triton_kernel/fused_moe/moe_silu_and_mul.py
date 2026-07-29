@@ -18,6 +18,8 @@ def _silu_and_mul_kernel_fast(
     size_n,
     limit: tl.constexpr,
     alpha: tl.constexpr,
+    situ_beta: tl.constexpr,
+    situ_linear_beta: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -25,6 +27,8 @@ def _silu_and_mul_kernel_fast(
     layout: tl.constexpr = "blocked",  # "blocked" or "interleaved"
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
+    USE_SITU: tl.constexpr = False,
+    USE_SITU_LINEAR_CLIP: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
     stride_output_m = tl.cast(stride_output_m, dtype=tl.int64)
@@ -76,7 +80,13 @@ def _silu_and_mul_kernel_fast(
                 mask=mask,
             )
         else:
-            if USE_TANH_APPROXIMATE_GELU:
+            if USE_SITU:
+                gate_tanh = 2.0 / (1.0 + tl.exp(-2.0 * gate / situ_beta)) - 1.0
+                gate = situ_beta * gate_tanh * tl.sigmoid(gate)
+                if USE_SITU_LINEAR_CLIP:
+                    up = up.to(tl.float32)
+                    up = situ_linear_beta * (2.0 / (1.0 + tl.exp(-2.0 * up / situ_linear_beta)) - 1.0)
+            elif USE_TANH_APPROXIMATE_GELU:
                 # tanh-approx GELU, matching Gemma's gelu_pytorch_tanh MLP.
                 gate_cubed = gate * gate * gate
                 tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
@@ -120,11 +130,16 @@ def silu_and_mul_fwd(
     layout="blocked",
     limit=None,
     alpha=None,
+    activation="silu",
+    activation_situ_beta=None,
+    activation_situ_linear_beta=None,
     run_config=None,
 ):
     assert input.stride(-1) == 1
     assert output.is_contiguous()
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    assert activation in ("silu", "situ")
+    assert not (activation == "situ" and limit is not None)
 
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
@@ -147,6 +162,10 @@ def silu_and_mul_fwd(
     while triton.cdiv(size_m, BLOCK_M) > 8192:
         BLOCK_M *= 2
     USE_LIMIT_AND_ALPHA = limit is not None and alpha is not None
+    USE_SITU = activation == "situ"
+    USE_SITU_LINEAR_CLIP = USE_SITU and activation_situ_linear_beta is not None
+    situ_beta = 1.0 if activation_situ_beta is None else float(activation_situ_beta)
+    situ_linear_beta = 1.0 if activation_situ_linear_beta is None else float(activation_situ_linear_beta)
 
     grid = (
         triton.cdiv(size_n, BLOCK_N),
@@ -164,6 +183,8 @@ def silu_and_mul_fwd(
         size_n=size_n,
         limit=limit,
         alpha=alpha,
+        situ_beta=situ_beta,
+        situ_linear_beta=situ_linear_beta,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         NUM_STAGES=NUM_STAGES,
@@ -171,6 +192,8 @@ def silu_and_mul_fwd(
         num_warps=num_warps,
         layout=layout,
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
-        USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
+        USE_TANH_APPROXIMATE_GELU=activation == "silu" and ffn_use_tanh_approximate_gelu(),
+        USE_SITU=USE_SITU,
+        USE_SITU_LINEAR_CLIP=USE_SITU_LINEAR_CLIP,
     )
     return

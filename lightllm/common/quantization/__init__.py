@@ -5,6 +5,7 @@ from .w8a8 import *
 from .w8a8gx import *
 from .deepgemm import *
 from .awq import *
+from .mxfp4 import *
 from .no_quant import *
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import is_sm100_gpu
@@ -43,6 +44,11 @@ class Quantcfg:
             self.quantized_weight = False
             self.static_activation = False
             self.hf_quantization_config = None
+            if self.expert_dtype is not None:
+                target = self._get_expert_quant_type(self.expert_dtype)
+                for layer_num in range(self.layer_num):
+                    self.quant_cfg[layer_num]["fused_moe"] = target
+                logger.info(f"select fused_moe quant way from expert_dtype=`{self.expert_dtype}`: {target}")
             return
         self.quantized_weight = True
         activation_scheme = network_config.get("activation_scheme", "dynamic")
@@ -80,6 +86,13 @@ class Quantcfg:
             if is_awq_marlin_compatible(self.hf_quantization_config):
                 self.quant_type = "awq_marlin"
             logger.info(f"select awq quant way: {self.quant_type}")
+        elif (
+            self.hf_quantization_method == "compressed-tensors"
+            and self.hf_quantization_config.get("format") == "mxfp4-pack-quantized"
+        ):
+            for layer_num in range(self.layer_num):
+                self.quant_cfg[layer_num]["fused_moe"] = "mxfp4"
+            logger.info("select compressed-tensors MXFP4 quant way for fused_moe")
         else:
             # TODO: more quant method
             pass

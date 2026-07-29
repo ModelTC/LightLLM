@@ -2,7 +2,6 @@ import argparse
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-
     parser.add_argument(
         "--run_mode",
         type=str,
@@ -161,6 +160,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "deepseekv31",
             "deepseekv32",
             "glm47",
+            "kimi_k3",
             "kimi_k2",
             "qwen3_coder",
         ],
@@ -659,7 +659,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_ep_moe",
         action="store_true",
-        help="""Whether to enable ep moe for deepseekv3 model.""",
+        help="""Whether to enable expert-parallel MoE.""",
+    )
+    parser.add_argument(
+        "--moe_ep_backend",
+        type=str,
+        choices=["deepep", "moonep"],
+        default="deepep",
+        help="""Expert-parallel communication backend. MoonEP currently supports Kimi K3 BF16 experts on NVLink.""",
+    )
+    parser.add_argument(
+        "--moonep_prefetch_slots",
+        type=int,
+        default=4,
+        help="""Number of local MoonEP remote-weight prefetch slots. MoonEP recommends 3-4 for inference.""",
     )
     parser.add_argument(
         "--ep_redundancy_expert_config_path",
@@ -819,6 +832,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=["bfloat16", "float32"],
         default="float32",
         help="the data type of linear att smm data type",
+    )
+    parser.add_argument(
+        "--kda_prefill_backend",
+        type=str,
+        choices=["auto", "fla", "flashkda"],
+        default="auto",
+        help="KDA prefill backend. 'auto' selects FlashKDA when its CUDA 12.9+, bfloat16, head_dim=128, and SM90+ requirements are met.",
     )
     parser.add_argument(
         "--disable_linear_att_small_page_cpu_cache",

@@ -50,6 +50,7 @@ class StartArgs:
                 "deepseekv32",
                 "glm47",
                 "kimi_k2",
+                "kimi_k3",
                 "qwen3_coder",
             ]
         },
@@ -171,6 +172,8 @@ class StartArgs:
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
     enable_ep_moe: bool = field(default=False)
+    moe_ep_backend: str = field(default="deepep", metadata={"choices": ["deepep", "moonep"]})
+    moonep_prefetch_slots: int = field(default=4)
     ep_redundancy_expert_config_path: Optional[str] = field(default=None)
     auto_update_redundancy_expert: bool = field(default=False)
     enable_fused_shared_experts: bool = field(default=False)
@@ -226,3 +229,4 @@ class StartArgs:
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+    kda_prefill_backend: Optional[str] = field(default="auto", metadata={"choices": ["auto", "fla", "flashkda"]})

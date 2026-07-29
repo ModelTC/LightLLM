@@ -279,7 +279,7 @@ class ReqManagerForMamba(ReqManager):
         assert (
             0 <= layer_idx_in_all < self.linear_config.all_layer_num
         ), f"invalid transformer layer index {layer_idx_in_all}"
-        layer_idx_in_linear = layer_idx_in_all - (layer_idx_in_all // self.linear_config.full_attention_interval)
+        layer_idx_in_linear = self.linear_config.get_linear_attention_layer_index(layer_idx_in_all)
         conv_states = self.req_to_conv_state.buffer[layer_idx_in_linear]
         ssm_states = self.req_to_ssm_state.buffer[layer_idx_in_linear]
         return conv_states, ssm_states

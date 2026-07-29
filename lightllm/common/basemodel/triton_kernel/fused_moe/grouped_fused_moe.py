@@ -114,7 +114,6 @@ def moe_align1_kernel(
     TOKEN_BLOCK_SIZE: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
-
     expert_id = tl.program_id(axis=0)
 
     off_n = tl.arange(0, TOKEN_BLOCK_SIZE)
@@ -406,7 +405,6 @@ def moe_align2_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_EXPERT: tl.constexpr,
 ):
-
     expert_id = tl.program_id(axis=0)
     off_expert = tl.arange(0, BLOCK_EXPERT)
     expert_to_token_num = tl.load(experts_token_num_ptr + off_expert, mask=off_expert < expert_num, other=0)
@@ -1009,6 +1007,9 @@ def fused_experts_impl(
     layout="blocked",
     limit=None,
     alpha=None,
+    activation="silu",
+    activation_situ_beta=None,
+    activation_situ_linear_beta=None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -1088,6 +1089,9 @@ def fused_experts_impl(
             limit=limit,
             alpha=alpha,
             layout=layout,
+            activation=activation,
+            activation_situ_beta=activation_situ_beta,
+            activation_situ_linear_beta=activation_situ_linear_beta,
         )
 
         grouped_matmul(
