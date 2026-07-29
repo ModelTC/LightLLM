@@ -293,9 +293,13 @@ Multimodal Parameters
 
     If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
 
+    In multimodal PD disaggregation mode, PD Master and every Prefill node must use the same value; otherwise Prefill registration is rejected.
+
 .. option:: --disable_image_resize
 
     Disable automatic resize for images exceeding ``--max_image_pixels``. Resize is enabled by default.
+
+    In multimodal PD disaggregation mode, PD Master and every Prefill node must use the same value.
 
 .. option:: --visual_infer_batch_size
 

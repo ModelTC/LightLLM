@@ -83,10 +83,13 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
     while True:
         forwarding_tokens_task = None
+        heartbeat_task = None
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
-                uri, max_size=get_lightllm_websocket_max_message_size(), max_queue=(2048 * 1024, 2048 * 1023)  # 关键修改
+                uri,
+                max_size=get_lightllm_websocket_max_message_size(),
+                max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
             ) as websocket:
 
                 sock = websocket.transport.get_extra_info("socket")
@@ -107,6 +110,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
                 # 转发任务
                 forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
+                heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -155,19 +159,22 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
         except asyncio.CancelledError:
             # 如果任务被取消，则退出循环
-            logger.warning(f"forwarding_tokens_task {pd_master_obj} cancelled")
-            if forwarding_tokens_task is not None:
-                forwarding_tokens_task.cancel()
+            logger.warning(f"pd_handle_task {pd_master_obj} cancelled")
             return
 
         except Exception as e:
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
-            if forwarding_tokens_task is not None:
-                forwarding_tokens_task.cancel()
-            await asyncio.sleep(10)
-            await forwarding_queue.get_all_data()
-            logger.info("reconnection to pd_master")
+        finally:
+            child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
+            for task in child_tasks:
+                task.cancel()
+            if child_tasks:
+                await asyncio.gather(*child_tasks, return_exceptions=True)
+
+        await asyncio.sleep(10)
+        await forwarding_queue.get_all_data()
+        logger.info("reconnection to pd_master")
 
 
 async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_Obj]]:
@@ -238,6 +245,13 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: Clien
         if handle_list:
             load_info: dict = _get_load_info()
             await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
+
+
+async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
+    heartbeat_interval_seconds = 15
+    while True:
+        await websocket.send(pickle.dumps((ObjType.HEARTBEAT,)))
+        await asyncio.sleep(heartbeat_interval_seconds)
 
 
 # 获取节点负载信息

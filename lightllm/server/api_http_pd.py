@@ -8,11 +8,13 @@
 ``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。
 """
 
+import asyncio
 import pickle
 
 import ujson as json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.utils.log_utils import init_logger
 
@@ -34,12 +36,23 @@ async def register_and_keep_alive(websocket: WebSocket):
     await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 
     try:
+        heartbeat_timeout_seconds = 30
         while True:
-            data = await websocket.receive_bytes()
+            data = await asyncio.wait_for(websocket.receive_bytes(), timeout=heartbeat_timeout_seconds)
             obj = pickle.loads(data)
+            if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
+                continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
+    except asyncio.TimeoutError:
+        logger.warning(f"client {regist_json} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
+        try:
+            await websocket.close(code=1011, reason="PD heartbeat timed out")
+        except BaseException:
+            logger.debug(f"failed to close timed-out client {regist_json}", exc_info=True)
+    except WebSocketDisconnect as e:
+        logger.info(f"client {regist_json} disconnected: {str(e)}")
+    except BaseException as e:
         logger.error(f"client {regist_json} has error {str(e)}")
         logger.exception(str(e))
     finally:

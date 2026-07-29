@@ -10,6 +10,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 # 节点的行为
 class NodeRole(enum.Enum):
     P = "prefill"
@@ -39,6 +40,7 @@ class ObjType(enum.Enum):
     TOKEN_PACKS = 3
     PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
+    HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
 
 
 @dataclass

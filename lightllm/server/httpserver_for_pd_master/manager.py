@@ -112,6 +112,7 @@ class HttpServerManagerForPDMaster:
     ):
         assert isinstance(prompt, str), "prompt must be str"
         start_time = time.time()
+        await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
         input_token_num = self.tokens(prompt, multimodal_params, sampling_params)
@@ -549,6 +550,18 @@ class PDManager:
                 f"client info {pd_info_json}"
             )
             assert False
+
+        if pd_client.mode == "prefill":
+            for arg_name in ("max_image_pixels", "disable_image_resize"):
+                master_value = getattr(self.args, arg_name)
+                client_value = pd_client.start_args.get(arg_name)
+                if client_value != master_value:
+                    error_info = (
+                        f"prefill client must use the same {arg_name} as pd master: "
+                        f"master={master_value}, client={client_value}, client info={pd_info_json}"
+                    )
+                    logger.error(error_info)
+                    raise ValueError(error_info)
 
         pd_client.websocket = websocket
         self.url_to_pd_nodes[pd_client.client_ip_port] = pd_client

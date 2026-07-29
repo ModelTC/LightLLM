@@ -294,9 +294,13 @@ PD 分离模式参数
 
     当输入图片超过该阈值时，LightLLM 会先自动将其缩放到该像素预算内，再继续后续流程。
 
+    多模态 PD 分离模式下，PD Master 与所有 Prefill 节点必须使用相同值，否则 Prefill 注册会被拒绝。
+
 .. option:: --disable_image_resize
 
     禁用对超过 ``--max_image_pixels`` 的图片的自动缩放。默认开启自动缩放。
+
+    多模态 PD 分离模式下，PD Master 与所有 Prefill 节点必须使用相同值。
 
 .. option:: --visual_infer_batch_size
 

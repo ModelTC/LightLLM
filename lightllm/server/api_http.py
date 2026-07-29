@@ -93,16 +93,17 @@ class G_Objs:
 
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
+        init_tokenizer(args)  # for openai api
+        SamplingParams.load_generation_cfg(args.model_dir)
+        CompletionRequest.load_generation_cfg(args.model_dir)
+        ChatCompletionRequest.load_generation_cfg(args.model_dir)
+
         if args.run_mode == "pd_master":
             self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
                 args=args,
             )
         else:
-            init_tokenizer(args)  # for openai api
-            SamplingParams.load_generation_cfg(args.model_dir)
-            CompletionRequest.load_generation_cfg(args.model_dir)
-            ChatCompletionRequest.load_generation_cfg(args.model_dir)
             self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容

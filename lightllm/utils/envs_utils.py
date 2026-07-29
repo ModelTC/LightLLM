@@ -97,7 +97,7 @@ def get_lightllm_websocket_max_message_size():
     Get the maximum size of the WebSocket message.
     :return: Maximum size in bytes.
     """
-    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 16 * 1024 * 1024))
+    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 128 * 1024 * 1024))
 
 
 # get_redundancy_expert_ids and get_redundancy_expert_num are primarily
