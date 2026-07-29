@@ -624,12 +624,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "  awq                            INT4 weight-only; checkpoint group     vLLM\n"
             "  awq_marlin                     INT4 weight-only; checkpoint group     vLLM\n"
             "  none                           No quantization                        -\n"
+            "  w8a8-vllm                      INT8; W per-channel, A per-token       vLLM\n"
+            "  fp8w8a8-vllm                   FP8; W per-channel, A per-token        vLLM\n"
             "  fp8w8a8-pt-vllm                FP8; W per-tensor, A per-token         vLLM\n"
             "  fp8w8a8-pt-sgl                 FP8; W per-tensor, A per-token         SGL\n"
             "  fp8w8a8-pt-triton              FP8; W per-tensor, A per-token         Triton\n"
             "  fp8w8a8-b128-vllm              FP8; W block 128x128, A group 128      vLLM\n"
             "  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      DeepGEMM\n"
-            "  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      Triton"
+            "  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      Triton\n"
+            "  fp8w8a8g128-triton             FP8; W per-channel, A group 128        Triton\n"
+            "  fp8w8a8g64-triton              FP8; W per-channel, A group 64         Triton\n"
+            "  fp4fp8-b32-deepgemm            FP4/FP8; fused MoE experts only        DeepGEMM"
         ),
     )
     parser.add_argument(

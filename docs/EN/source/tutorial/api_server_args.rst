@@ -506,6 +506,12 @@ Quantization Parameters
        * - ``none``
          - No quantization
          - -
+       * - ``w8a8-vllm``
+         - INT8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-vllm``
+         - FP8 W8A8; W: per-channel, A: per-token
+         - vLLM
        * - ``fp8w8a8-pt-vllm``
          - FP8 W8A8; W: per-tensor, A: per-token
          - vLLM
@@ -524,6 +530,15 @@ Quantization Parameters
        * - ``fp8w8a8-b128-triton``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - Triton
+       * - ``fp8w8a8g128-triton``
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64-triton``
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
+         - Triton
+       * - ``fp4fp8-b32-deepgemm``
+         - FP4/FP8 mixed quantization; fused MoE expert weights only (SM100)
+         - DeepGEMM
 
 .. option:: --quant_cfg
 
