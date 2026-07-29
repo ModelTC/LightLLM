@@ -1820,7 +1820,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         func_name = function_str[:end_index].strip()
         tool_indices = self._get_tool_indices(tools)
-        if func_name not in tool_indices:
+        if not func_name or (ENABLE_TOOL_NAME_CHECK and func_name not in tool_indices):
             logger.warning(f"Model attempted to call undefined function: {func_name}")
             return None
 
@@ -1844,7 +1844,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
 
         return ToolCallItem(
-            tool_index=tool_indices[func_name],
+            tool_index=tool_indices.get(func_name, -1),
             name=func_name,
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
@@ -1861,7 +1861,9 @@ class Qwen3CoderDetector(BaseFormatDetector):
             return None
 
         function_name = text[name_start:name_end].strip()
-        return function_name if function_name in self._tool_indices else None
+        if not function_name or (ENABLE_TOOL_NAME_CHECK and function_name not in self._tool_indices):
+            return None
+        return function_name
 
     def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
         """Build the current argument JSON from a partial XML tool-call body."""

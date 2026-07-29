@@ -66,7 +66,27 @@ def test_qwen3_coder_emits_one_tool_delta_for_every_decode_after_the_name():
     assert json.loads("".join(call.parameters for call in streamed_calls)) == {"content": "ab" + "c" * 100_000}
 
 
-def test_qwen3_coder_does_not_open_an_undefined_tool_call():
+def test_qwen3_coder_accepts_an_undefined_tool_when_name_check_is_disabled(monkeypatch):
+    import lightllm.server.function_call_parser as parser_module
+
+    monkeypatch.setattr(parser_module, "ENABLE_TOOL_NAME_CHECK", False)
+    parser = FunctionCallParser([_tool()], "qwen3_coder")
+
+    _, calls = parser.parse_stream_chunk("<tool_call>\n<function=unknown>\n")
+    assert len(calls) == 1
+    assert calls[0].name == "unknown"
+    assert calls[0].parameters == ""
+
+    _, calls = parser.parse_stream_chunk("<parameter=value>x</parameter>\n</function>\n</tool_call>")
+    assert len(calls) == 1
+    assert calls[0].name is None
+    assert json.loads(calls[0].parameters) == {"value": "x"}
+
+
+def test_qwen3_coder_rejects_an_undefined_tool_when_name_check_is_enabled(monkeypatch):
+    import lightllm.server.function_call_parser as parser_module
+
+    monkeypatch.setattr(parser_module, "ENABLE_TOOL_NAME_CHECK", True)
     parser = FunctionCallParser([_tool()], "qwen3_coder")
 
     _, calls = parser.parse_stream_chunk("<tool_call>\n<function=unknown>\n")
