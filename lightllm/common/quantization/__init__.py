@@ -13,7 +13,7 @@ logger = init_logger(__name__)
 
 EXPERT_DTYPE_TO_QUANT_TYPE = {
     "fp8": "fp8w8a8-b128-deepgemm",
-    "fp4": "deepgemm-fp4fp8-b32",
+    "fp4": "fp4fp8-b32-deepgemm",
 }
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
