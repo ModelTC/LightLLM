@@ -1,7 +1,12 @@
+import os
+import signal
+import subprocess
 import sys
+import time
 import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.process_check import is_process_active
 
 logger = init_logger(__name__)
 
@@ -67,6 +72,91 @@ class SubmoduleManager:
 
             stop_mps()
         logger.info("All processes terminated gracefully.")
+
+    def setup_signal_handlers(self, http_server_process=None):
+        def signal_handler(sig, _frame):
+            if sig == signal.SIGINT:
+                logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
+                if http_server_process is not None:
+                    kill_recursive(http_server_process)
+
+                self.terminate_all_processes()
+                logger.info("All processes have been forcefully terminated.")
+                sys.exit(0)
+
+            if sig == signal.SIGTERM:
+                logger.info("Received SIGTERM, shutting down gracefully...")
+            else:
+                logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
+
+            if http_server_process is not None and http_server_process.poll() is None:
+                http_server_process.send_signal(signal.SIGTERM)
+                try:
+                    http_server_process.wait(timeout=60)
+                    logger.info("HTTP server exited gracefully")
+                except subprocess.TimeoutExpired:
+                    logger.warning("HTTP server did not exit in time, killing it...")
+                    kill_recursive(http_server_process)
+
+            self.terminate_all_processes()
+            logger.info("All processes have been terminated gracefully.")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGHUP, signal_handler)
+
+        logger.info(f"start process pid {os.getpid()}")
+        if http_server_process is not None:
+            logger.info(f"http server pid {http_server_process.pid}")
+
+    def supervise_processes(self, http_server_process=None):
+        """Watch the HTTP server, when present, and all registered submodules.
+
+        Signal-driven shutdown is handled by the launcher. Reaching an exited
+        process here therefore means that the service can no longer operate
+        correctly. Clean up the remaining process tree and raise so the container's
+        main process exits with a non-zero status.
+        """
+        supervisor_interval_seconds = 5.0
+        while True:
+            if http_server_process is not None:
+                http_return_code = http_server_process.poll()
+                if http_return_code is not None:
+                    message = f"HTTP server exited unexpectedly with return code {http_return_code}"
+                    logger.error(message)
+                    self._cleanup_after_process_failure(http_server_process)
+                    raise RuntimeError(message)
+
+            dead_processes = [
+                process for process in self.processes if not process.is_alive() or not is_process_active(process.pid)
+            ]
+            if dead_processes:
+                dead_process_descriptions = ", ".join(
+                    f"name={getattr(process, 'name', type(process).__name__)} "
+                    f"pid={getattr(process, 'pid', None)} "
+                    f"exitcode={getattr(process, 'exitcode', None)}"
+                    for process in dead_processes
+                )
+                message = f"Critical LightLLM submodule exited unexpectedly: {dead_process_descriptions}"
+                logger.error(message)
+                self._cleanup_after_process_failure(http_server_process)
+                raise RuntimeError(message)
+
+            time.sleep(supervisor_interval_seconds)
+
+    def _cleanup_after_process_failure(self, http_server_process):
+        """Best-effort cleanup before the launcher exits with a failure."""
+        if http_server_process is not None and http_server_process.poll() is None:
+            try:
+                kill_recursive(http_server_process)
+            except Exception:
+                logger.exception("Failed to terminate the HTTP server process tree")
+
+        try:
+            self.terminate_all_processes()
+        except Exception:
+            logger.exception("Failed to terminate all LightLLM submodule processes")
 
 
 def start_submodule_processes(start_funcs=[], start_args=[]):

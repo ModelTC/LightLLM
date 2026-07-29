@@ -1,12 +1,9 @@
 import multiprocessing as mp
 import os
-import sys
-import time
 import uuid
 import subprocess
-import signal
 import math
-from lightllm.utils.start_utils import process_manager, kill_recursive
+from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
@@ -16,7 +13,6 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
-from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
@@ -31,69 +27,6 @@ from lightllm.utils.config_utils import (
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
-
-
-def setup_signal_handlers(http_server_process, process_manager):
-    def signal_handler(sig, frame):
-        if sig == signal.SIGINT:
-            logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
-            if http_server_process:
-                kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been forcefully terminated.")
-            sys.exit(0)
-        elif sig == signal.SIGTERM:
-            logger.info("Received SIGTERM, shutting down gracefully...")
-            if http_server_process and http_server_process.poll() is None:
-                http_server_process.send_signal(signal.SIGTERM)
-
-                start_time = time.time()
-                while (time.time() - start_time) < 60:
-                    if not is_process_active(http_server_process.pid):
-                        logger.info("httpserver exit")
-                        break
-                    time.sleep(1)
-
-                if time.time() - start_time < 60:
-                    logger.info("HTTP server has exited gracefully")
-                else:
-                    logger.warning("HTTP server did not exit in time, killing it...")
-                    kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
-            sys.exit(0)
-        elif sig == signal.SIGHUP:
-            logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
-            if http_server_process and http_server_process.poll() is None:
-                http_server_process.send_signal(signal.SIGTERM)
-
-                start_time = time.time()
-                while (time.time() - start_time) < 60:
-                    if not is_process_active(http_server_process.pid):
-                        logger.info("httpserver exit")
-                        break
-                    time.sleep(1)
-
-                if time.time() - start_time < 60:
-                    logger.info("HTTP server has exited gracefully")
-                else:
-                    logger.warning("HTTP server did not exit in time, killing it...")
-                    kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully due to terminal closure.")
-            sys.exit(0)
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGHUP, signal_handler)
-
-    logger.info(f"start process pid {os.getpid()}")
-    if http_server_process:
-        logger.info(f"http server pid {http_server_process.pid}")
-    return
 
 
 def _set_envs_and_config(args: StartArgs):
@@ -506,9 +439,8 @@ def normal_or_p_d_start(args: StartArgs):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
-    return
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
 
 
 def pd_master_start(args: StartArgs):
@@ -565,8 +497,8 @@ def pd_master_start(args: StartArgs):
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
 
 
 def visual_only_start(args):
@@ -610,15 +542,8 @@ def visual_only_start(args):
             (args,),
         ],
     )
-    setup_signal_handlers(None, process_manager)
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down...")
-        process_manager.terminate_all_processes()
-        logger.info("All processes have been terminated gracefully.")
-        sys.exit(0)
+    process_manager.setup_signal_handlers()
+    process_manager.supervise_processes()
 
 
 def config_server_start(args):
@@ -655,5 +580,5 @@ def config_server_start(args):
     ]
 
     http_server_process = subprocess.Popen(command)
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
