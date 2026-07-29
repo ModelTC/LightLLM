@@ -2,7 +2,6 @@ import torch
 from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
-from lightllm.common.quant_type import QUANT_TYPE_AWQ, QUANT_TYPE_AWQ_MARLIN, QUANT_TYPE_NONE
 
 
 class SliceMixinBase(ABC):
@@ -191,9 +190,9 @@ class BMMRowSliceMixin(SliceMixinTpl):
 def get_row_slice_mixin(
     quant_method_name: str, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1
 ) -> SliceMixinTpl:
-    if quant_method_name in (QUANT_TYPE_AWQ, QUANT_TYPE_AWQ_MARLIN):
+    if quant_method_name.startswith("awq"):
         return AwqQuantizedRowSliceMixin(tp_rank, tp_world_size, repeat_times)
-    elif quant_method_name == QUANT_TYPE_NONE:
+    elif quant_method_name == "none":
         return RowSliceMixin(tp_rank, tp_world_size, repeat_times)
     else:
         return QuantizedRowSliceMixin(tp_rank, tp_world_size, repeat_times)
@@ -202,9 +201,9 @@ def get_row_slice_mixin(
 def get_col_slice_mixin(
     quant_method_name: str, tp_rank: int = None, tp_world_size: int = None, repeat_times: int = 1
 ) -> SliceMixinTpl:
-    if quant_method_name in (QUANT_TYPE_AWQ, QUANT_TYPE_AWQ_MARLIN):
+    if quant_method_name.startswith("awq"):
         return AwqQuantizedColSliceMixin(tp_rank, tp_world_size, repeat_times)
-    elif quant_method_name == QUANT_TYPE_NONE:
+    elif quant_method_name == "none":
         return ColSliceMixin(tp_rank, tp_world_size, repeat_times)
     else:
         return QuantizedColSliceMixin(tp_rank, tp_world_size, repeat_times)

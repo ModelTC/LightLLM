@@ -1,14 +1,6 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from lightllm.common.quant_type import (
-    QUANT_TYPE_NONE,
-    SUPPORTED_QUANT_TYPES,
-    SUPPORTED_VIT_QUANT_TYPES,
-    normalize_quant_type,
-    normalize_vit_quant_type,
-)
-
 # 服务启动参数
 
 
@@ -158,11 +150,9 @@ class StartArgs:
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
     graph_max_len_in_batch: int = field(default=0)
-    quant_type: Optional[str] = field(default=QUANT_TYPE_NONE, metadata={"choices": list(SUPPORTED_QUANT_TYPES)})
+    quant_type: Optional[str] = field(default="none")
     quant_cfg: Optional[str] = field(default=None)
-    vit_quant_type: Optional[str] = field(
-        default=QUANT_TYPE_NONE, metadata={"choices": list(SUPPORTED_VIT_QUANT_TYPES)}
-    )
+    vit_quant_type: Optional[str] = field(default="none")
     vit_quant_cfg: Optional[str] = field(default=None)
     expert_dtype: Optional[str] = field(default=None, metadata={"choices": ["fp8", "fp4"]})
     llm_prefill_att_backend: List[str] = field(
@@ -238,7 +228,3 @@ class StartArgs:
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
-
-    def __post_init__(self):
-        self.quant_type = normalize_quant_type(self.quant_type)
-        self.vit_quant_type = normalize_vit_quant_type(self.vit_quant_type)

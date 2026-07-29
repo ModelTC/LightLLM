@@ -3,11 +3,10 @@ from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
-from lightllm.common.quant_type import QUANT_TYPE_NONE
 
 
-@QUANTMETHODS.register(QUANT_TYPE_NONE, platform="musa")
-@QUANTMETHODS.register(QUANT_TYPE_NONE, platform="cuda")
+@QUANTMETHODS.register("none", platform="musa")
+@QUANTMETHODS.register("none", platform="cuda")
 class NoQuantization(QuantizationMethod):
     """No quantization - uses full precision weights."""
 
@@ -58,4 +57,4 @@ class NoQuantization(QuantizationMethod):
 
     @property
     def method_name(self):
-        return QUANT_TYPE_NONE
+        return "none"

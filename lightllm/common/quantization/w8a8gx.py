@@ -2,7 +2,6 @@ import torch
 from typing import Optional, List, Union, Tuple
 from .quantize_method import QuantizationMethod
 from .registry import QUANTMETHODS
-from lightllm.common.quant_type import QUANT_TYPE_FP8W8A8G128_TRITON, QUANT_TYPE_FP8W8A8G64_TRITON
 
 from .quantize_method import WeightPack
 
@@ -38,7 +37,7 @@ class _BaseQuantizationMethod(QuantizationMethod):
         raise NotImplementedError("Not implemented")
 
 
-@QUANTMETHODS.register(QUANT_TYPE_FP8W8A8G128_TRITON, platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8g128-triton", "fp8w8a8g128"], platform="cuda")
 class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -117,7 +116,7 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return QUANT_TYPE_FP8W8A8G128_TRITON
+        return f"fp8w8a8g{self.act_quant_group_size}-triton"
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
@@ -138,12 +137,8 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(QUANT_TYPE_FP8W8A8G64_TRITON, platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8g64-triton", "fp8w8a8g64"], platform="cuda")
 class FP8w8a8g64QuantizationMethod(FP8w8a8g128QuantizationMethod):
     def __init__(self):
         super().__init__()
         self.act_quant_group_size = 64
-
-    @property
-    def method_name(self):
-        return QUANT_TYPE_FP8W8A8G64_TRITON

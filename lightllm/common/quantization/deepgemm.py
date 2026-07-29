@@ -5,10 +5,6 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod, Wei
 from lightllm.common.quantization.registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.quant_type import (
-    QUANT_TYPE_FP8W8A8_B128_DEEPGEMM,
-    QUANT_TYPE_FP4FP8_B32_DEEPGEMM,
-)
 
 logger = init_logger(__name__)
 
@@ -47,7 +43,7 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         return "base-deepgemm"
 
 
-@QUANTMETHODS.register(QUANT_TYPE_FP8W8A8_B128_DEEPGEMM, platform="cuda")
+@QUANTMETHODS.register("fp8w8a8-b128-deepgemm", platform="cuda")
 class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -60,7 +56,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return QUANT_TYPE_FP8W8A8_B128_DEEPGEMM
+        return "fp8w8a8-b128-deepgemm"
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
@@ -130,7 +126,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(QUANT_TYPE_FP4FP8_B32_DEEPGEMM, platform="cuda")
+@QUANTMETHODS.register("fp4fp8-b32-deepgemm", platform="cuda")
 class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -143,7 +139,7 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return QUANT_TYPE_FP4FP8_B32_DEEPGEMM
+        return "fp4fp8-b32-deepgemm"
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         from deep_gemm.utils import per_token_cast_to_fp4

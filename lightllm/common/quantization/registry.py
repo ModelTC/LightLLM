@@ -1,5 +1,4 @@
 from .quantize_method import QuantizationMethod
-from lightllm.common.quant_type import normalize_quant_type
 
 
 class QuantMethodFactory:
@@ -12,9 +11,6 @@ class QuantMethodFactory:
             if isinstance(local_names, str):
                 local_names = [local_names]
             for n in local_names:
-                canonical_name = normalize_quant_type(n)
-                if canonical_name != n:
-                    raise ValueError(f"QuantMethod must register canonical name `{canonical_name}`, not alias `{n}`.")
                 if n not in self._quant_methods:
                     self._quant_methods[n] = {}
                 self._quant_methods[n][platform] = cls
@@ -23,14 +19,13 @@ class QuantMethodFactory:
         return decorator
 
     def get(self, key, platform="cuda", *args, **kwargs) -> "QuantizationMethod":
-        canonical_name = normalize_quant_type(key)
-        quant_method_class_dict = self._quant_methods.get(canonical_name)
+        quant_method_class_dict = self._quant_methods.get(key)
         if not quant_method_class_dict:
-            raise ValueError(f"QuantMethod '{canonical_name}' not registered.")
+            raise ValueError(f"QuantMethod '{key}' not supported.")
 
         quant_method_class = quant_method_class_dict.get(platform)
         if quant_method_class is None:
-            raise ValueError(f"QuantMethod '{canonical_name}' for platform '{platform}' not supported.")
+            raise ValueError(f"QuantMethod '{key}' for platform '{platform}' not supported.")
         return quant_method_class()
 
 

@@ -4,7 +4,6 @@ from .triton_impl import FuseMoeTriton
 from lightllm.distributed import dist_group_manager
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.quantization.quantize_method import WeightPack
-from lightllm.common.quant_type import QUANT_TYPE_NONE
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
@@ -122,7 +121,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
 
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-        use_fp8_w8a8 = self.quant_method.method_name != QUANT_TYPE_NONE
+        use_fp8_w8a8 = self.quant_method.method_name != "none"
         recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
             topk_idx=topk_idx,
             x=hidden_states,
