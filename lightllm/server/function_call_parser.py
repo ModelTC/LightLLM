@@ -54,15 +54,9 @@ class ToolCallItem(BaseModel):
 class StreamingParseResult:
     """Result of streaming incremental parsing."""
 
-    def __init__(
-        self,
-        normal_text: str = "",
-        calls: Optional[List[ToolCallItem]] = None,
-        emit_empty_chunk: bool = False,
-    ):
+    def __init__(self, normal_text: str = "", calls: Optional[List[ToolCallItem]] = None):
         self.normal_text = normal_text
         self.calls = calls or []
-        self.emit_empty_chunk = emit_empty_chunk
 
 
 def _find_common_prefix(s1: str, s2: str) -> str:
@@ -1752,8 +1746,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
     Reference: https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3-Coder-480B-A35B.html
     """
 
-    KEEPALIVE_CHUNK_INTERVAL = 16
-
     def __init__(self):
         super().__init__()
         self.bot_token = "<tool_call>"
@@ -1767,7 +1759,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
         )
         self._normal_text_buffer = ""
-        self._buffered_chunk_count = 0
+        self._current_tool_name: Optional[str] = None
 
     def has_tool_call(self, text: str) -> bool:
         return "<function=" in text or self.bot_token in text
@@ -1857,6 +1849,20 @@ class Qwen3CoderDetector(BaseFormatDetector):
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
 
+    def _get_incomplete_function_name(self, text: str) -> Optional[str]:
+        """Return a complete, valid function name from an unfinished tool-call block."""
+        function_start = text.find("<function=")
+        if function_start == -1:
+            return None
+
+        name_start = function_start + len("<function=")
+        name_end = text.find(">", name_start)
+        if name_end == -1:
+            return None
+
+        function_name = text[name_start:name_end].strip()
+        return function_name if function_name in self._tool_indices else None
+
     def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
         """Build the current argument JSON from a partial XML tool-call body."""
         param_matches = self.parameter_regex.findall(partial_body)
@@ -1943,7 +1949,6 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 if current_text:
                     normal_text += current_text.replace(self.eot_token, "")
                     self._buffer = ""
-                self._buffered_chunk_count = 0
                 return StreamingParseResult(normal_text=normal_text, calls=calls)
 
             if tool_call_start > 0:
@@ -1953,17 +1958,33 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
             eot_pos = current_text.find(self.eot_token)
             if eot_pos == -1:
-                self._buffered_chunk_count += 1
-                emit_empty_chunk = self._buffered_chunk_count >= self.KEEPALIVE_CHUNK_INTERVAL
-                if emit_empty_chunk:
-                    self._buffered_chunk_count = 0
-                return StreamingParseResult(
-                    normal_text=normal_text,
-                    calls=calls,
-                    emit_empty_chunk=emit_empty_chunk,
-                )
+                if not self.current_tool_name_sent:
+                    function_name = self._get_incomplete_function_name(current_text)
+                    if function_name is None:
+                        return StreamingParseResult(normal_text=normal_text, calls=calls)
 
-            self._buffered_chunk_count = 0
+                    if self.current_tool_id == -1:
+                        self.current_tool_id = 0
+                    self.current_tool_name_sent = True
+                    self._current_tool_name = function_name
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=function_name,
+                            parameters="",
+                        )
+                    )
+                else:
+                    # Keep the connection active for every decoded chunk without
+                    # exposing a partial XML value as malformed JSON arguments.
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            parameters="",
+                        )
+                    )
+                return StreamingParseResult(normal_text=normal_text, calls=calls)
+
             complete_block = current_text[: eot_pos + len(self.eot_token)]
             func_matches = self.function_regex.findall(complete_block)
 
@@ -1975,9 +1996,17 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 item = self._parse_function_call(func_str, tools)
                 if item:
                     item.tool_index = self.current_tool_id
+                    if self.current_tool_name_sent and item.name == self._current_tool_name:
+                        # The head was already emitted. Send the complete arguments as
+                        # one continuation delta and do not repeat the function name.
+                        item.name = None
+                        self.current_tool_name_sent = False
+                        self._current_tool_name = None
                     calls.append(item)
                     self.current_tool_id += 1
 
+            self.current_tool_name_sent = False
+            self._current_tool_name = None
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 
@@ -2013,7 +2042,6 @@ class FunctionCallParser:
 
         self.detector = detector
         self.tools = tools
-        self.should_emit_empty_chunk = False
 
     def has_tool_call(self, text: str) -> bool:
         """
@@ -2069,7 +2097,6 @@ class FunctionCallParser:
         final_calls = []
 
         sp_result = self.detector.parse_streaming_increment(chunk_text, self.tools)
-        self.should_emit_empty_chunk = sp_result.emit_empty_chunk
         if sp_result.normal_text:
             final_normal_text = sp_result.normal_text
         if sp_result.calls:

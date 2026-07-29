@@ -1,10 +1,10 @@
-"""Coverage for buffered Qwen3-Coder streaming and keepalive behavior."""
+"""Coverage for buffered Qwen3-Coder streaming keepalive deltas."""
 
 import json
 from types import SimpleNamespace
 
-from lightllm.server.api_models import Function, Tool
 from lightllm.server.api_cli import make_argument_parser
+from lightllm.server.api_models import Function, Tool
 from lightllm.server.function_call_parser import FunctionCallParser, Qwen3CoderDetector
 
 
@@ -30,81 +30,79 @@ def test_qwen3_coder_selects_buffered_parser():
     assert args.tool_call_parser == "qwen3_coder"
 
 
-def test_qwen3_coder_requests_empty_chunks_while_buffering_large_content():
+def test_qwen3_coder_emits_one_tool_delta_for_every_decode_after_the_name():
     parser = FunctionCallParser([_tool()], "qwen3_coder")
-    interval = parser.detector.KEEPALIVE_CHUNK_INTERVAL
-    content_parts = []
 
-    normal_text, calls = parser.parse_stream_chunk("<tool_call>\n<function=write_file>\n<parameter=content>\n")
+    normal_text, calls = parser.parse_stream_chunk("<tool_call>\n<func")
     assert normal_text == ""
     assert calls == []
-    assert parser.should_emit_empty_chunk is False
 
-    for _ in range(interval - 2):
-        normal_text, calls = parser.parse_stream_chunk("x")
-        content_parts.append("x")
+    normal_text, calls = parser.parse_stream_chunk("tion=write_file>\n<parameter=content>\n")
+    assert normal_text == ""
+    assert len(calls) == 1
+    assert calls[0].tool_index == 0
+    assert calls[0].name == "write_file"
+    assert calls[0].parameters == ""
+
+    streamed_calls = list(calls)
+    for chunk in ("a", "b", "c" * 100_000):
+        normal_text, calls = parser.parse_stream_chunk(chunk)
         assert normal_text == ""
-        assert calls == []
-        assert parser.should_emit_empty_chunk is False
-
-    normal_text, calls = parser.parse_stream_chunk("y")
-    content_parts.append("y")
-    assert normal_text == ""
-    assert calls == []
-    assert parser.should_emit_empty_chunk is True
-
-    normal_text, calls = parser.parse_stream_chunk("z" * 100_000)
-    content_parts.append("z" * 100_000)
-    assert normal_text == ""
-    assert calls == []
-    assert parser.should_emit_empty_chunk is False
+        assert len(calls) == 1
+        assert calls[0].tool_index == 0
+        assert calls[0].name is None
+        assert calls[0].parameters == ""
+        streamed_calls.extend(calls)
 
     normal_text, calls = parser.parse_stream_chunk("\n</parameter>\n</function>\n</tool_call>")
     assert normal_text == ""
     assert len(calls) == 1
-    assert calls[0].name == "write_file"
-    assert json.loads(calls[0].parameters) == {"content": "".join(content_parts)}
-    assert parser.should_emit_empty_chunk is False
+    assert calls[0].tool_index == 0
+    assert calls[0].name is None
+    assert json.loads(calls[0].parameters) == {"content": "ab" + "c" * 100_000}
+    streamed_calls.extend(calls)
+
+    assert [call.name for call in streamed_calls].count("write_file") == 1
+    assert json.loads("".join(call.parameters for call in streamed_calls)) == {"content": "ab" + "c" * 100_000}
 
 
-def test_api_empty_chunk_signal_is_opt_in_for_buffered_qwen3_parser():
+def test_qwen3_coder_does_not_open_an_undefined_tool_call():
+    parser = FunctionCallParser([_tool()], "qwen3_coder")
+
+    _, calls = parser.parse_stream_chunk("<tool_call>\n<function=unknown>\n")
+    assert calls == []
+
+    _, calls = parser.parse_stream_chunk("<parameter=value>x</parameter>\n</function>\n</tool_call>")
+    assert calls == []
+
+
+def test_api_tool_parser_keeps_its_two_item_return_contract():
     from lightllm.server.api_openai import _process_tools_stream
 
     request = SimpleNamespace(tools=[_tool()])
-    streaming_formats = {
-        "llama3": [
-            '<|python_tag|>{"name":"write_file","arguments":{"content":"abc',
-            'def"}}',
-        ],
-        "qwen25": [
-            '<tool_call>\n{"name":"write_file","arguments":{"content":"abc',
-            'def"}}\n</tool_call>',
-        ],
-    }
-    for parser_name, chunks in streaming_formats.items():
-        parser_dict = {0: FunctionCallParser(request.tools, parser_name)}
-        streamed_calls = []
-        for chunk in chunks:
-            _, calls, emit_empty_chunk = _process_tools_stream(0, chunk, parser_dict, request)
-            streamed_calls.extend(calls)
-            assert emit_empty_chunk is False
-        assert streamed_calls[0].name == "write_file"
-        assert json.loads("".join(call.parameters for call in streamed_calls)) == {"content": "abcdef"}
-
     parser_dict = {0: FunctionCallParser(request.tools, "qwen3_coder")}
-    interval = parser_dict[0].detector.KEEPALIVE_CHUNK_INTERVAL
-    for chunk_index in range(interval):
-        delta = "<tool_call>\n<function=write_file>\n<parameter=content>\n" if chunk_index == 0 else "x"
-        _, calls, emit_empty_chunk = _process_tools_stream(0, delta, parser_dict, request)
-        assert calls == []
-        assert emit_empty_chunk is (chunk_index == interval - 1)
+
+    result = _process_tools_stream(
+        0,
+        "<tool_call>\n<function=write_file>\n<parameter=content>\n",
+        parser_dict,
+        request,
+    )
+
+    assert len(result) == 2
+    normal_text, calls = result
+    assert normal_text == ""
+    assert len(calls) == 1
+    assert calls[0].name == "write_file"
 
 
-def test_keepalive_chunk_uses_empty_delta_without_starting_a_text_block():
+def test_empty_arguments_are_preserved_in_the_sse_payload():
     from lightllm.server.api_models import (
         ChatCompletionStreamResponse,
         ChatCompletionStreamResponseChoice,
         DeltaMessage,
+        FunctionResponse,
+        ToolCall,
     )
     from lightllm.server.api_openai import _serialize_sse_chunk
 
@@ -115,27 +113,19 @@ def test_keepalive_chunk_uses_empty_delta_without_starting_a_text_block():
         choices=[
             ChatCompletionStreamResponseChoice(
                 index=0,
-                delta=DeltaMessage(),
+                delta=DeltaMessage(
+                    tool_calls=[
+                        ToolCall(
+                            index=0,
+                            function=FunctionResponse(arguments=""),
+                        )
+                    ]
+                ),
                 finish_reason=None,
             )
         ],
     )
+
     payload = json.loads(_serialize_sse_chunk(chunk, ("logprobs", "token_ids", "finish_reason")))
-    assert payload["choices"][0]["delta"] == {}
-    assert payload["choices"][0]["finish_reason"] is None
-
-
-def test_large_complete_arguments_are_split_into_bounded_stream_deltas():
-    from lightllm.server.api_openai import TOOL_ARGUMENT_STREAM_CHUNK_SIZE, _split_tool_argument_delta
-
-    arguments = json.dumps(
-        {"content": 'print("hello")\n' * 10_000},
-        ensure_ascii=False,
-    )
-    deltas = _split_tool_argument_delta(arguments)
-
-    assert "".join(deltas) == arguments
-    assert deltas[0] == "{"
-    assert deltas[-1] == "}"
-    assert max(len(delta) for delta in deltas) <= TOOL_ARGUMENT_STREAM_CHUNK_SIZE
-    assert len(deltas) > 3
+    function_delta = payload["choices"][0]["delta"]["tool_calls"][0]["function"]
+    assert function_delta["arguments"] == ""
