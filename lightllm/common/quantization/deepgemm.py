@@ -40,10 +40,10 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
 
     @property
     def method_name(self):
-        return "deepgemm-base"
+        return "base-deepgemm"
 
 
-@QUANTMETHODS.register(["fp8w8a8-b128-deepgemm", "deepgemm-fp8w8a8-b128"], platform="cuda")
+@QUANTMETHODS.register("fp8w8a8-b128-deepgemm", platform="cuda")
 class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -126,7 +126,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["fp4fp8-b32-deepgemm", "deepgemm-fp4fp8-b32"], platform="cuda")
+@QUANTMETHODS.register("fp4fp8-b32-deepgemm", platform="cuda")
 class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()

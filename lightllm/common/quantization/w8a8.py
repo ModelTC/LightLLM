@@ -58,7 +58,7 @@ class BaseQuantizationMethod(QuantizationMethod):
         raise NotImplementedError("Not implemented")
 
 
-@QUANTMETHODS.register(["w8a8-vllm", "w8a8", "vllm-w8a8"], platform="cuda")
+@QUANTMETHODS.register(["w8a8-vllm", "w8a8"], platform="cuda")
 class w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -120,7 +120,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["fp8w8a8-vllm", "fp8w8a8", "vllm-fp8w8a8"], platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8-vllm", "fp8w8a8"], platform="cuda")
 class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -286,7 +286,7 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         return torch.empty((1,), dtype=torch.float32, device=f"cuda:{device_id}")
 
 
-@QUANTMETHODS.register(["fp8w8a8-pt-vllm", "fp8w8a8-pt-cutlass"], platform="cuda")
+@QUANTMETHODS.register("fp8w8a8-pt-vllm", platform="cuda")
 class FP8w8a8PerTensorVllmQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -438,10 +438,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(
-    ["fp8w8a8-b128-vllm", "vllm-fp8w8a8-b128", "fp8w8a8-b128-cutlass"],
-    platform="cuda",
-)
+@QUANTMETHODS.register("fp8w8a8-b128-vllm", platform="cuda")
 class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
         self,
