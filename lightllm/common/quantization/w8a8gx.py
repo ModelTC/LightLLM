@@ -116,7 +116,7 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return f"triton-fp8w8a8g{self.act_quant_group_size}"
+        return f"fp8w8a8g{self.act_quant_group_size}"
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1

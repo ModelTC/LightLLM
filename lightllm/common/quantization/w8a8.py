@@ -100,7 +100,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return "vllm-w8a8"
+        return "w8a8"
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
@@ -163,7 +163,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return "vllm-fp8w8a8"
+        return "fp8w8a8"
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1

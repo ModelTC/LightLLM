@@ -60,7 +60,7 @@ class Quantcfg:
                 if HAS_DEEPGEMM:
                     self.quant_type = "fp8w8a8-b128-deepgemm"
                 else:
-                    self.quant_type = "vllm-fp8w8a8-b128"
+                    self.quant_type = "fp8w8a8-b128-vllm"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
 
             # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
