@@ -175,7 +175,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
 
     # PD prefill mode for DeepSeek-R1 (DP+EP) on H200
     # Usage: sh pd_prefill.sh <host> <pd_master_ip>
-    # NIXL is used by default. To use NCCL as the data-plane backend, set LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl.
+    # NCCL is the default data-plane backend. Set --pd_trans_mode nixl on both prefill and decode to select NIXL.
     # nvidia-cuda-mps-control -d, run MPS (optional, performance will be much better with mps support, but some GPUs may encounter errors when enabling mps, it's recommended to upgrade to a higher driver version, especially for H-series cards)
 
     export host=$1
@@ -184,6 +184,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
+    --pd_trans_mode nccl \
     --tp 8 \
     --dp 8 \
     --host $host \
@@ -199,13 +200,14 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
 
     # PD decode mode for DeepSeek-R1 (DP+EP) on H200
     # Usage: sh pd_decode.sh <host> <pd_master_ip>
-    # NIXL is used by default. To use NCCL as the data-plane backend, set LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl.
+    # NCCL is the default data-plane backend. Set --pd_trans_mode nixl on both prefill and decode to select NIXL.
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
+    --pd_trans_mode nccl \
     --tp 8 \
     --dp 8 \
     --host $host \
@@ -274,6 +276,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
+    --pd_trans_mode nccl \
     --host $host \
     --port 8019 \
     --tp 8 \
@@ -293,6 +296,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
+    --pd_trans_mode nccl \
     --host $host \
     --port 8121 \
     --nccl_port 12322 \

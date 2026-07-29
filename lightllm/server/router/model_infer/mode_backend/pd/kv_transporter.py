@@ -1,5 +1,3 @@
-import os
-
 from torch import Tensor
 
 from lightllm.server.core.objs import StartArgs
@@ -13,7 +11,7 @@ _NCCL_CONTROL_PORT_MAX = 40000
 
 
 def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
-    backend = os.getenv("LIGHTLLM_PD_KV_TRANSPORT_BACKEND", "nixl").lower()
+    backend = args.pd_trans_mode
     if backend == "nixl":
         from .nixl_kv_transporter import NixlKVTransporter
 
@@ -37,4 +35,4 @@ def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_bu
             control_port_max=port_max,
         )
 
-    raise ValueError(f"unsupported LIGHTLLM_PD_KV_TRANSPORT_BACKEND={backend}")
+    raise ValueError(f"unsupported pd_trans_mode={backend}")

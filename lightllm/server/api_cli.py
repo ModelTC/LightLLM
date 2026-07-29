@@ -53,6 +53,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
     parser.add_argument(
+        "--pd_trans_mode",
+        type=str,
+        choices=["nccl", "nixl"],
+        default="nccl",
+        help="KV transfer backend for PD disaggregation; default: nccl",
+    )
+    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
         default="cache_aware",

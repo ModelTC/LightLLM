@@ -9,12 +9,12 @@ description: >-
   pd_master for warmup verification. Requires LOG_DIR, MODEL_DIR, proxy cleared, no_proxy,
   summary.txt. Same-GPU model_infer + pd_*_trans need NVIDIA MPS for best KV copy perf;
   record MPS on/off in summary. Run check_nvidia_peermem.sh in this skill dir; record in summary.txt.
-  Use for PD separation tests with either the default NIXL transport or NCCL transport.
+  Use for PD separation tests with either NIXL transport or the default NCCL transport.
 ---
 
 # Qwen3-8B **PD 分离**（`pd_master` + `prefill` + `decode`）本地 GSM8K 评测
 
-**测试标识**：同一 **`--model_dir`**（Qwen3-8B）下拆 **三条** `api_server` 进程——**调度/入口（`pd_master`）**、**`prefill` 节点**、**`decode` 节点**；评测 **`lm_eval`** 只访问 **`pd_master` 的 HTTP 端口（8089）**。默认使用 NIXL 传输；需要验证 NCCL 数据面时，设置 **`LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl`**，上层仍保持相同的 `prefill` / `decode` 管理路径。
+**测试标识**：同一 **`--model_dir`**（Qwen3-8B）下拆 **三条** `api_server` 进程——**调度/入口（`pd_master`）**、**`prefill` 节点**、**`decode` 节点**；评测 **`lm_eval`** 只访问 **`pd_master` 的 HTTP 端口（8089）**。启动参数 **`--pd_trans_mode`** 可选 `nccl`（默认）和 `nixl`；本 NIXL 测试须为 prefill 和 decode 统一传入 **`--pd_trans_mode nixl`**，上层仍保持相同的管理路径。
 
 **端口约定**：**`pd_master`：`8089`**；**prefill：`8001`**；**decode：`8002`**。启动与就绪探测须覆盖这三处（以及日志中的 PD 注册/报错信息）。
 
@@ -70,7 +70,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 
 ### 显卡分配（`nvidia-smi` + 人工/Agent 决策，不用复杂脚本）
 
-**prefill**、**decode** 各 **2** 张 GPU，共 **4** 张互不重复。需要验证 NCCL 数据面时，额外设置 **`LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl`**。
+**prefill**、**decode** 各 **2** 张 GPU，共 **4** 张互不重复。本 skill 的两个工作节点统一使用 **`--pd_trans_mode nixl`**；需要验证 NCCL 数据面时，将两处都改为 **`--pd_trans_mode nccl`**（或两处都省略，使用默认值）。
 
 1. 执行 **`nvidia-smi`**（可选用 `--query-gpu=index,name,memory.used,memory.free --format=csv`）。
 2. 由执行者选定哪 2 张给 prefill、哪 2 张给 decode（不重叠）。
@@ -79,7 +79,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 
 **禁止**：为选卡编写 **awk / mapfile / 长段 bash** 自动化；以 **`nvidia-smi` 事实 + 明确决策**为准。
 
-### UCX / RDMA（默认 NIXL 传输）
+### UCX / RDMA（显式 NIXL 传输）
 
 - **`UCX_NET_DEVICES`**：须覆盖本进程要用的 **RDMA 设备**；是否排除某些 HCA（例如数据面网卡）由**本机拓扑**决定，在 **`summary.txt`** 中写明依据。
 - **`UCX_TLS`**：常见 **`rc,cuda,gdr_copy`**；若环境不支持再按报错调整。
@@ -131,6 +131,7 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --run_mode prefill \
+  --pd_trans_mode nixl \
   --tp 2 \
   --dp 1 \
   --host "${HOST}" \
@@ -156,6 +157,7 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES="${DECODE_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --run_mode decode \
+  --pd_trans_mode nixl \
   --tp 2 \
   --dp 1 \
   --host "${HOST}" \

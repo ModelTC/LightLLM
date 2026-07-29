@@ -8,6 +8,7 @@ nvidia-cuda-mps-control -d
 LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
 --run_mode "prefill" \
+--pd_trans_mode nccl \
 --host $host \
 --port 8019 \
 --tp 8 \
