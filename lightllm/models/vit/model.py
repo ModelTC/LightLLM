@@ -111,6 +111,7 @@ class VisionTransformer:
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path)
+        self.quant_type = self.quant_cfg.quant_type
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_infer_layer(self):

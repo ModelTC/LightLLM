@@ -19,10 +19,11 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.common.quant_type import QUANT_TYPE_FP8W8A8_B128_DEEPGEMM, QUANT_TYPE_FP4FP8_B32_DEEPGEMM
 
 logger = init_logger(__name__)
 _MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
-SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
+SUPPORTED_EP_EXPERT_DTYPES = (QUANT_TYPE_FP8W8A8_B128_DEEPGEMM, QUANT_TYPE_FP4FP8_B32_DEEPGEMM)
 
 try:
     from deep_ep import Buffer, EventOverlap
@@ -39,7 +40,7 @@ def get_ep_num_sms() -> int:
 
 
 def use_sm100_mega_moe(quant_method: Any) -> bool:
-    return is_sm100_gpu() and quant_method.method_name == "fp4fp8-b32-deepgemm"
+    return is_sm100_gpu() and quant_method.method_name == QUANT_TYPE_FP4FP8_B32_DEEPGEMM
 
 
 def check_ep_expert_dtype(quant_method: Any):
@@ -51,7 +52,7 @@ def check_ep_expert_dtype(quant_method: Any):
             "Please start with --expert_dtype fp8 or --expert_dtype fp4. "
             "Note that --expert_dtype fp4 is only supported on SM100 GPUs."
         )
-    if expert_dtype == "fp4fp8-b32-deepgemm" and not is_sm100_gpu():
+    if expert_dtype == QUANT_TYPE_FP4FP8_B32_DEEPGEMM and not is_sm100_gpu():
         raise RuntimeError(
             "--expert_dtype fp4 requires an SM100 GPU for EP MoE; " "please use --expert_dtype fp8 on non-SM100 GPUs."
         )

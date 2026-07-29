@@ -22,6 +22,7 @@ from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_m
 from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
+from lightllm.common.quant_type import QUANT_TYPE_NONE
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
@@ -90,7 +91,7 @@ class TpPartBaseModel:
 
         self.graph_max_len_in_batch = kvargs.get("graph_max_len_in_batch", 8192)
         self.disable_cudagraph = kvargs.get("disable_cudagraph", False)
-        self.quant_type = kvargs.get("quant_type", "none")
+        self.quant_type = kvargs.get("quant_type", QUANT_TYPE_NONE)
         self.quant_cfg_path = kvargs.get("quant_cfg", None)
         self.expert_dtype = kvargs.get("expert_dtype", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
@@ -169,6 +170,7 @@ class TpPartBaseModel:
 
     def _init_quant(self):
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
+        self.quant_type = self.quant_cfg.quant_type
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
     def _init_weights(self, start_layer_index=0):

@@ -3,6 +3,7 @@ from typing import Any, Optional, Tuple, List
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
+from lightllm.common.quant_type import QUANT_TYPE_AWQ, QUANT_TYPE_AWQ_MARLIN
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
 
@@ -66,7 +67,7 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         return "awq-base"
 
 
-@QUANTMETHODS.register("awq", platform="cuda")
+@QUANTMETHODS.register(QUANT_TYPE_AWQ, platform="cuda")
 class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -79,7 +80,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return "awq"
+        return QUANT_TYPE_AWQ
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
@@ -135,7 +136,7 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("awq_marlin", platform="cuda")
+@QUANTMETHODS.register(QUANT_TYPE_AWQ_MARLIN, platform="cuda")
 class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -154,7 +155,7 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return "awq_marlin"
+        return QUANT_TYPE_AWQ_MARLIN
 
     def quantize(self, weight: torch.Tensor, output: WeightPack):
         raise NotImplementedError("AWQ online quantization is not supported yet.")
@@ -293,7 +294,7 @@ def is_awq_marlin_compatible(quantization_config: dict[str, Any]):
     if not torch.cuda.is_available():
         return False
 
-    if quant_method != "awq":
+    if quant_method != QUANT_TYPE_AWQ:
         return False
 
     # If we cannot find the info needed in the config, cannot convert.

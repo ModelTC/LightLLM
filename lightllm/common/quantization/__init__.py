@@ -8,20 +8,29 @@ from .awq import *
 from .no_quant import *
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.common.quant_type import (
+    QUANT_TYPE_AWQ,
+    QUANT_TYPE_AWQ_MARLIN,
+    QUANT_TYPE_NONE,
+    QUANT_TYPE_FP8W8A8_B128_DEEPGEMM,
+    QUANT_TYPE_FP8W8A8_B128_VLLM,
+    QUANT_TYPE_FP4FP8_B32_DEEPGEMM,
+    normalize_quant_type,
+)
 
 logger = init_logger(__name__)
 
 EXPERT_DTYPE_TO_QUANT_TYPE = {
-    "fp8": "fp8w8a8-b128-deepgemm",
-    "fp4": "fp4fp8-b32-deepgemm",
+    "fp8": QUANT_TYPE_FP8W8A8_B128_DEEPGEMM,
+    "fp4": QUANT_TYPE_FP4FP8_B32_DEEPGEMM,
 }
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
 
 class Quantcfg:
-    def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
+    def __init__(self, network_config, quant_type=QUANT_TYPE_NONE, custom_cfg_path=None, expert_dtype=None):
         self.layer_num = network_config["n_layer"]
-        self.quant_type = quant_type
+        self.quant_type = normalize_quant_type(quant_type)
         self.expert_dtype = expert_dtype
         self.network_config_ = network_config
         self._parse_custom_cfg(custom_cfg_path)
@@ -58,9 +67,9 @@ class Quantcfg:
                 from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM
 
                 if HAS_DEEPGEMM:
-                    self.quant_type = "fp8w8a8-b128-deepgemm"
+                    self.quant_type = QUANT_TYPE_FP8W8A8_B128_DEEPGEMM
                 else:
-                    self.quant_type = "fp8w8a8-b128-vllm"
+                    self.quant_type = QUANT_TYPE_FP8W8A8_B128_VLLM
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
 
             # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，
@@ -75,10 +84,10 @@ class Quantcfg:
                 else:
                     self.quant_cfg[layer_num].setdefault("fused_moe", target)
             logger.info(f"select fused_moe quant way from expert_dtype=`{expert_dtype}`: {target}")
-        elif self.hf_quantization_method == "awq":
-            self.quant_type = "awq"
+        elif self.hf_quantization_method == QUANT_TYPE_AWQ:
+            self.quant_type = QUANT_TYPE_AWQ
             if is_awq_marlin_compatible(self.hf_quantization_config):
-                self.quant_type = "awq_marlin"
+                self.quant_type = QUANT_TYPE_AWQ_MARLIN
             logger.info(f"select awq quant way: {self.quant_type}")
         else:
             # TODO: more quant method
@@ -92,11 +101,11 @@ class Quantcfg:
         with open(custom_cfg_path, "r") as file:
             data = yaml.safe_load(file)
 
-        self.quant_type = data["quant_type"]
+        self.quant_type = normalize_quant_type(data["quant_type"])
         for layer_quant_cfg in data.get("mix_bits", []):
             name = layer_quant_cfg["name"]
             layer_nums = layer_quant_cfg.get("layer_nums", range(self.layer_num))
-            layer_quant_type = layer_quant_cfg["quant_type"]
+            layer_quant_type = normalize_quant_type(layer_quant_cfg["quant_type"])
             for layer_num in layer_nums:
                 self.quant_cfg[layer_num].update({name: layer_quant_type})
 
