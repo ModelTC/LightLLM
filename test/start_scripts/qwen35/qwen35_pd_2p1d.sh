@@ -36,6 +36,7 @@ COMMON_ARGS=(
   --linear_att_cache_size 500
   --linear_att_hash_page_size 4096
   --linear_att_page_block_num 8
+  --quant_type fp8w8a8-pt-triton
   --mtp_mode eagle_with_att
   --mtp_draft_model_dir "${MODEL_DIR}"
   --mtp_step 3
