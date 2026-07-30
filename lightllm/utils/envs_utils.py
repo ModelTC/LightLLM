@@ -49,6 +49,15 @@ def get_env_start_args():
     return start_args
 
 
+def get_local_dp_max_req_size(args=None) -> int:
+    args = get_env_start_args() if args is None else args
+    if getattr(args, "enable_dp_prompt_cache_fetch", False):
+        return args.running_max_req_size
+
+    dp_size_in_node = max(1, args.dp // args.nnodes)
+    return max(1, (args.running_max_req_size + dp_size_in_node - 1) // dp_size_in_node)
+
+
 @lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type

@@ -258,22 +258,24 @@ class ReqSamplingParamsManager:
 class ReqManagerForMamba(ReqManager):
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
-        self.mtp_step = get_env_start_args().mtp_step
-        self.big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
+        args = get_env_start_args()
+        self.mtp_step = args.mtp_step
+        from lightllm.common.linear_att_cache_manager.config_objs import get_linear_att_state_mtp_size
+
+        self.linear_att_state_mtp_size = get_linear_att_state_mtp_size(args)
+        self.big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         assert_mtp_step_within_next_token_ids_width(self.mtp_step)
         self.linear_config = linear_config
 
         self.req_to_conv_state = LayerCache(
             size=(max_request_num + 1),
             dtype=self.linear_config.conv_state_dtype,
-            shape=self.linear_config.get_gpu_conv_state_shape(mtp_step=self.mtp_step),
+            shape=self.linear_config.get_gpu_conv_state_shape(mtp_step=self.linear_att_state_mtp_size - 1),
             layer_num=self.linear_config.linear_layer_num,
             device="cuda",
         )
         self.req_to_ssm_state = LayerCache(
-            size=(max_request_num + 1) * (self.mtp_step + 1),
+            size=(max_request_num + 1) * self.linear_att_state_mtp_size,
             dtype=self.linear_config.ssm_state_dtype,
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
@@ -286,6 +288,7 @@ class ReqManagerForMamba(ReqManager):
         logger.info(
             "linear att gpu state buffers: "
             f"max_request_num={max_request_num}, hold_request_id={self.HOLD_REQUEST_ID}, mtp_step={self.mtp_step}, "
+            f"state_mtp_size={self.linear_att_state_mtp_size}, "
             f"conv_state shape={tuple(conv_buffer.shape)}, dtype={conv_buffer.dtype}, "
             f"nbytes={conv_nbytes}, memory={_format_nbytes(conv_nbytes)}; "
             f"ssm_state shape={tuple(ssm_buffer.shape)}, dtype={ssm_buffer.dtype}, "
@@ -296,11 +299,11 @@ class ReqManagerForMamba(ReqManager):
 
     def init_linear_att_state(self, req: "InferReq"):
         conv_index = req.req_idx
-        ssm_start = req.req_idx * (self.mtp_step + 1)
+        ssm_start = req.req_idx * self.linear_att_state_mtp_size
         self.req_to_conv_state.buffer[:, conv_index, ...].fill_(0)
-        # #17: zero the FULL (mtp_step + 1)-row SSM block, not just canonical row +0, so a future
+        # #17: zero the FULL state block, not just canonical row +0, so a future
         # first-step verify reading offset>0 after fresh init never hits a never-written row (NaN).
-        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + (self.mtp_step + 1), ...].fill_(0)
+        self.req_to_ssm_state.buffer[:, ssm_start : ssm_start + self.linear_att_state_mtp_size, ...].fill_(0)
         if self.req_to_accept_len is not None:
             self.req_to_accept_len[req.req_idx] = 1
         return
@@ -321,7 +324,7 @@ class ReqManagerForMamba(ReqManager):
 
         conv_state, ssm_state = big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_idx)
         conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        ssm_dest = req.req_idx * self.linear_att_state_mtp_size
         narrow_w = conv_state.shape[-1]  # persisted (narrow) width
         self.req_to_conv_state.buffer[:, conv_dest, ..., :narrow_w] = conv_state
         self.req_to_ssm_state.buffer[:, ssm_dest, ...] = ssm_state
@@ -336,7 +339,7 @@ class ReqManagerForMamba(ReqManager):
             buffer_idx=req.shared_kv_node.small_page_buffer_idx
         )
         conv_dest = req.req_idx
-        ssm_dest = req.req_idx * (self.mtp_step + 1)
+        ssm_dest = req.req_idx * self.linear_att_state_mtp_size
         narrow_w = conv_state.shape[-1]
         # TODO 下面这个从 cpu cache 拷贝数据的 gpu的操作，是否是阻塞的操作。
         # 同时，非连续对象的拷贝，可能存在效率问题。

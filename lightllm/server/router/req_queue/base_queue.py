@@ -4,6 +4,7 @@ from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.config_utils import get_fixed_kv_len
 from lightllm.server.core.objs import StartArgs
+from lightllm.utils.envs_utils import get_local_dp_max_req_size
 
 
 class BaseQueue:
@@ -21,7 +22,7 @@ class BaseQueue:
         self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
         assert args.batch_max_tokens is not None
         self.batch_max_tokens = args.batch_max_tokens
-        self.running_max_req_size = args.running_max_req_size  # Maximum number of concurrent requests
+        self.running_max_req_size = get_local_dp_max_req_size(args)
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy
 

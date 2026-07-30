@@ -5,7 +5,8 @@ from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_copy_linear_att_state_to_cpu_cache_buffer():
+@pytest.mark.parametrize("ssm_state_stride", [1, 4])
+def test_copy_linear_att_state_to_cpu_cache_buffer(ssm_state_stride):
     layer_num = 2
     req_slots = 4
     conv_dim = 3
@@ -20,10 +21,10 @@ def test_copy_linear_att_state_to_cpu_cache_buffer():
         device="cuda",
     ).view(layer_num, req_slots, conv_dim, widened_width)
     gpu_ssm_state = torch.arange(
-        layer_num * req_slots * ssm_dim,
+        layer_num * req_slots * ssm_state_stride * ssm_dim,
         dtype=torch.float32,
         device="cuda",
-    ).view(layer_num, req_slots, ssm_dim)
+    ).view(layer_num, req_slots * ssm_state_stride, ssm_dim)
 
     cpu_kv_conv_state = torch.empty(
         cache_size, layer_num, conv_dim, persisted_width, dtype=torch.float16, device="cpu"
@@ -40,14 +41,14 @@ def test_copy_linear_att_state_to_cpu_cache_buffer():
         gpu_ssm_state=gpu_ssm_state,
         cpu_kv_conv_state=cpu_kv_conv_state,
         cpu_kv_ssm_state=cpu_kv_ssm_state,
-        mtp_step=0,
+        ssm_state_stride=ssm_state_stride,
     )
 
     expected_conv = torch.empty_like(cpu_kv_conv_state).fill_(-1)
     expected_ssm = torch.empty_like(cpu_kv_ssm_state).fill_(-1)
     expected_conv[4].copy_(gpu_conv_state[:, 1, :, :persisted_width].cpu())
     expected_conv[2].copy_(gpu_conv_state[:, 0, :, :persisted_width].cpu())
-    expected_ssm[4].copy_(gpu_ssm_state[:, 1, :].cpu())
+    expected_ssm[4].copy_(gpu_ssm_state[:, ssm_state_stride, :].cpu())
     expected_ssm[2].copy_(gpu_ssm_state[:, 0, :].cpu())
 
     assert torch.equal(cpu_kv_conv_state, expected_conv)

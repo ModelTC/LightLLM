@@ -257,6 +257,9 @@ def create_new_group_for_current_node(backend):
     args = get_env_start_args()
     ans_group = None
     nnodes = args.nnodes
+    if nnodes == 1:
+        return dist.group.WORLD
+
     node_world_size = args.tp // nnodes
     for iter_node_rank in range(nnodes):
         ranks = list(i + iter_node_rank * node_world_size for i in range(node_world_size))

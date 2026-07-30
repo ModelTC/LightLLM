@@ -125,6 +125,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         )
         self.mem_manager.main_full_att_layer_num = main_full_att
         self.mem_manager.draft_full_att_layers = self.linear_config.draft_full_att_layer_num
+        self.mem_manager.linear_att_state_mtp_size = self.req_manager.linear_att_state_mtp_size
 
     def _init_req_manager(self):
         create_max_seq_len = 0

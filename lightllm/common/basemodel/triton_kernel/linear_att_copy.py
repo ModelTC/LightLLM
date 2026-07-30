@@ -20,7 +20,7 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_conv_stride_d,
     cpu_kv_ssm_stride_s,
     cpu_kv_ssm_stride_l,
-    mtp_step,
+    ssm_state_stride,
     conv_dim,  # number of conv rows (the d dimension)
     gpu_conv_row_bytes,  # widened per-row byte length: gpu_widened_width * itemsize
     conv_narrow_row_bytes,  # narrow per-row byte length: width_narrow * itemsize
@@ -50,7 +50,7 @@ def _copy_linear_att_state_to_kv_buffer(
             conv_data = tl.load(gpu_conv_base + d * gpu_conv_row_bytes + off, mask=mask)
             tl.store(cpu_conv_base + d * cpu_kv_conv_stride_d + off, conv_data, mask=mask)
 
-    ssm_src_slot = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
+    ssm_src_slot = (cur_req_idx * ssm_state_stride).to(tl.int64)
     for i in range(tl.cdiv(gpu_ssm_tail_dim, BLOCK)):
         gpu_start_off = i * BLOCK + tl.arange(0, BLOCK)
         mask = gpu_start_off < gpu_ssm_tail_dim
@@ -73,7 +73,7 @@ def copy_linear_att_state_to_kv_buffer(
     gpu_ssm_state: torch.Tensor,  # [linear_layer_num, s_block, ...]
     cpu_kv_conv_state: torch.Tensor,  # [size, linear_layer_num, conv_dim, width_narrow]
     cpu_kv_ssm_state: torch.Tensor,  # [size, linear_layer_num, ...]
-    mtp_step: int,
+    ssm_state_stride: int,
 ):
     assert len(b_req_idx) == big_page_buffer_ids.shape[0]
     BLOCK = 4096
@@ -127,7 +127,7 @@ def copy_linear_att_state_to_kv_buffer(
                 gpu_conv_state[:, cur_req_idx, :, :conv_narrow_row_bytes],
                 non_blocking=False,
             )
-            ssm_src_slot = cur_req_idx * (mtp_step + 1)
+            ssm_src_slot = cur_req_idx * ssm_state_stride
             cpu_kv_ssm_state[big_page_buffer_idx].copy_(
                 gpu_ssm_state[:, ssm_src_slot, :gpu_ssm_tail_dim],
                 non_blocking=False,
@@ -150,7 +150,7 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_conv_stride_d=cpu_kv_conv_state.stride(2),
         cpu_kv_ssm_stride_s=cpu_kv_ssm_state.stride(0),
         cpu_kv_ssm_stride_l=cpu_kv_ssm_state.stride(1),
-        mtp_step=mtp_step,
+        ssm_state_stride=ssm_state_stride,
         conv_dim=conv_dim,
         gpu_conv_row_bytes=gpu_conv_row_bytes,
         conv_narrow_row_bytes=conv_narrow_row_bytes,

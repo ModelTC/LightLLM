@@ -34,7 +34,7 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_unique_server_name, get_local_dp_max_req_size
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .stats import RouterStatics
 from .profiler_service import RouterProfilerCmdQueue, start_router_profiler_server
@@ -54,6 +54,7 @@ class RouterManager:
         self.schedule_time_interval = args.schedule_time_interval  # 默认30ms 的调度周期
         # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
         self.dp_size_in_node = max(1, args.dp // self.nnodes)
+        self.local_dp_max_req_size = get_local_dp_max_req_size(args)
         self.dp_world_size = self.world_size // self.dp_size
         self.is_multinode_tp = args.nnodes > 1 and args.dp == 1
         self.is_multinode_tp_master = self.is_multinode_tp and args.node_rank == 0
@@ -148,7 +149,7 @@ class RouterManager:
             "weight_dir": self.model_weightdir,
             "load_way": self.load_way,
             "max_total_token_num": self.max_total_token_num,
-            "max_req_num": self.args.running_max_req_size,
+            "max_req_num": self.local_dp_max_req_size,
             "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量
             "nccl_host": self.args.nccl_host,
             "nccl_port": self.args.nccl_port,
@@ -172,6 +173,11 @@ class RouterManager:
             "expert_dtype": self.args.expert_dtype,
             "pd_rpyc_ports": self.args.pd_node_infer_rpyc_ports,  # 非 pd 模式可以不设置
         }
+        logger.info(
+            "request capacity: "
+            f"service={self.args.running_max_req_size}, dp_size_in_node={self.dp_size_in_node}, "
+            f"per_dp_model={self.local_dp_max_req_size}"
+        )
 
         # Call init_model on all model processes
         init_tasks = []

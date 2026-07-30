@@ -8,6 +8,12 @@ from lightllm.utils.torch_dtype_utils import get_torch_dtype
 logger = init_logger(__name__)
 
 
+def get_linear_att_state_mtp_size(args) -> int:
+    if args.run_mode == "prefill":
+        return 1
+    return args.mtp_step + 1
+
+
 def get_mtp_draft_full_att_layer_num(args) -> int:
     # mtp_mode -> draft model 增加的 full-att KV 层数（与 envs_utils.get_added_mtp_kv_layer_num 同口径）。
     mtp_mode = getattr(args, "mtp_mode", None)

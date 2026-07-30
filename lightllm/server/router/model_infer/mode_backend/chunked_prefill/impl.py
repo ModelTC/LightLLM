@@ -272,7 +272,7 @@ class ChunkedPrefillBackend(ModeBackend):
         self.mtp_chain_scratch = None
         if not (self.is_mtp_eagle and self.mtp_step > 1):
             return
-        max_rows = get_env_start_args().running_max_req_size * (self.mtp_step + 1)
+        max_rows = g_infer_context.req_manager.max_request_num * (self.mtp_step + 1)
         scratch_num = max_rows * (self.mtp_step - 1)
         scratch_cpu = g_infer_context.req_manager.mem_manager.alloc(scratch_num)
         self.mtp_chain_scratch = scratch_cpu.cuda()

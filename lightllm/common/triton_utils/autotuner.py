@@ -80,6 +80,10 @@ class Autotuner:
     _autotune_warmup: bool = False
 
     @staticmethod
+    def _filter_valid_configs(configs):
+        return {run_key: config for run_key, config in configs.items() if config is not None}
+
+    @staticmethod
     def start_autotune_warmup():
         Autotuner._autotune_warmup = True
         return
@@ -103,7 +107,6 @@ class Autotuner:
         run_key_distance_func: Callable = lambda run_key, config_key: abs(int(run_key) - int(config_key)),
         mutates_args: List[str] = [],
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.cache_dir = os.path.join(
@@ -156,13 +159,7 @@ class Autotuner:
         run_key = str(self._run_key(*args, **kwargs))
 
         # Lazy load the cached configs in lightllm/common/triton_utils/autotune_kernel_configs
-        if self._try_load_cache(static_key) or Autotuner.is_autotune_warmup():
-            all_configs = self.cached_configs.get(static_key, {})
-            for run_config in all_configs.values():
-                # warmup all configs
-                _copy_kwargs = kwargs.copy()
-                _copy_kwargs["run_config"] = run_config
-                self.kernel_warmup(static_key, *args, **_copy_kwargs)
+        cache_loaded = self._try_load_cache(static_key)
 
         if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
             if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
@@ -194,16 +191,31 @@ class Autotuner:
                     world_size=world_size,
                 )
 
+        cached_configs = self.cached_configs.get(static_key, {})
+        if run_key in cached_configs and cached_configs[run_key] is None:
+            raise RuntimeError(
+                f"Cached autotuning failed for {self.kernel_name} run key {run_key}. "
+                "Use a supported input size or retune this key with LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2."
+            )
+
         closest_config = self.fast_match_configs.get(static_key, {}).get(run_key, None)
         if closest_config is not None:
+            if cache_loaded or Autotuner.is_autotune_warmup():
+                warmup_kwargs = kwargs.copy()
+                warmup_kwargs["run_config"] = closest_config
+                self.kernel_warmup(static_key, *args, **warmup_kwargs)
             kwargs["run_config"] = closest_config
             return self.fn(*args, **kwargs)
 
-        all_configs = self.cached_configs.get(static_key, {})
+        all_configs = self._filter_valid_configs(cached_configs)
         if len(all_configs) != 0:
             closest_config = min(
                 list(all_configs.items()), key=lambda item: self.run_key_distance_func(run_key, item[0])
             )[1]
+            if cache_loaded or Autotuner.is_autotune_warmup():
+                warmup_kwargs = kwargs.copy()
+                warmup_kwargs["run_config"] = closest_config
+                self.kernel_warmup(static_key, *args, **warmup_kwargs)
             kwargs["run_config"] = closest_config
             self.fast_match_configs[static_key][run_key] = closest_config
 
@@ -217,7 +229,14 @@ class Autotuner:
         if os.path.exists(cache_file):
             logger.info(f"Loading cached configs for {self.kernel_name} - {dict(static_key)}")
             with open(cache_file, "rb") as f:
-                self.cached_configs[static_key] = orjson.loads(f.read())
+                loaded_configs = orjson.loads(f.read())
+            valid_configs = self._filter_valid_configs(loaded_configs)
+            if len(valid_configs) != len(loaded_configs):
+                logger.warning(
+                    f"Ignoring {len(loaded_configs) - len(valid_configs)} invalid cached configs "
+                    f"for {self.kernel_name} - {dict(static_key)}"
+                )
+            self.cached_configs[static_key] = loaded_configs
         return True
 
     def kernel_warmup(self, static_key, *args, **kwargs):
