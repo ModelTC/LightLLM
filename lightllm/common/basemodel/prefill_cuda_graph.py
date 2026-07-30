@@ -171,7 +171,7 @@ class PrefillCudaGraph:
         for handle_token_num in self.graph_handle_token_nums[::-1]:
             logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
             total_token_num = handle_token_num
-            input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
+            input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
             mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
             b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
             b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
@@ -231,7 +231,7 @@ class PrefillCudaGraph:
             for micro_batch_index in [0, 1]:
                 # dummy prefill, capture the cudagraph
                 total_token_num = handle_token_num
-                input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
+                input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
                 mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
                 b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
                 b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")

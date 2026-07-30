@@ -253,13 +253,13 @@ def linear_att_mtp_state_index_update(
 
 def test_mtp_verify():
     req_to_next_token_ids = torch.tensor(
-        [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int32, device="cuda"
+        [[1, 2, -2, -1, -1], [1, 2, 0, -1, -1], [1, 3, 4, 4, 5]], dtype=torch.int64, device="cuda"
     )
     b_req_idx = torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32, device="cuda")
     b_req_mtp_start_loc = torch.tensor([0, 2], dtype=torch.int32, device="cuda")
-    new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int32, device="cuda")
+    new_next_token_ids = torch.tensor([1, 4, 2, 4, 13], dtype=torch.int64, device="cuda")
     all_next_token_ids = torch.tensor(
-        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int32, device="cuda"
+        [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15]], dtype=torch.int64, device="cuda"
     )
     mtp_accept_len, accepted_index = mtp_verify(
         req_to_next_token_ids, b_req_mtp_start_loc, new_next_token_ids, b_req_idx

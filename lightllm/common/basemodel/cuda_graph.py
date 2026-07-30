@@ -217,7 +217,7 @@ class CudaGraph:
             seq_len = 2
             total_token_num = batch_size * seq_len
             max_len_in_batch = self.graph_max_len_in_batch
-            input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
+            input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
             mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
             b_req_idx = torch.tensor(
                 [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
@@ -276,7 +276,7 @@ class CudaGraph:
                 seq_len = 2
                 total_token_num = batch_size * seq_len
                 max_len_in_batch = self.graph_max_len_in_batch
-                input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int32, device="cuda")
+                input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
                 mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
                 b_req_idx = torch.tensor(
                     [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
