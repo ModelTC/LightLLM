@@ -238,7 +238,7 @@ def test_pd_master_request_count_covers_async_generator_lifecycle():
 
     async def consume_one_result_and_close():
         results_generator = manager.generate(None, None, None, None)
-        assert await anext(results_generator) == "result"
+        assert await results_generator.__anext__() == "result"
         assert manager.running_request_count == 1
         await results_generator.aclose()
 
