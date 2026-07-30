@@ -101,6 +101,7 @@ sh multi_pd_master/pd_master_2.sh <host> <config_server_host>
 ### Important Parameters
 
 - `--model_dir`: Model file path
+- `--pd_master_mode`: PD master topology mode; use `elastic` (default) for dynamically changing nodes or a fixed topology such as `2p4d` for exactly 2 Prefill and 4 Decode nodes
 - `--pd_trans_mode`: KV transporter backend for PD disaggregation; choose `nccl` (default) or `nixl`, and use the same value for prefill and decode services
 - `--tp`: Tensor parallelism degree
 - `--dp`: Data parallelism degree

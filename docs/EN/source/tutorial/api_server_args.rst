@@ -64,6 +64,25 @@ PD disaggregation Mode Parameters
     
     This parameter needs to be set when run_mode is set to prefill or decode
 
+.. option:: --pd_master_mode
+
+    PD master topology mode, optional values:
+
+    * ``elastic``: The number of Prefill and Decode nodes can change dynamically (default)
+    * ``<P>p<D>d``: The numbers of Prefill and Decode nodes are fixed. For example,
+      ``2p4d`` expects exactly 2 Prefill nodes and 4 Decode nodes.
+
+    This parameter is used when ``run_mode`` is set to ``pd_master``.
+    In ``elastic`` mode, PD Master becomes ready after at least one Prefill and one Decode node are registered;
+    additional nodes do not make it unready. In a fixed mode, PD Master is ready only when the registered node
+    counts exactly match the configured topology. ``/health``, ``/healthz``, and ``/readiness`` return HTTP 503
+    while the nodes are not ready. In a fixed topology mode, PD Master also requests ``/health`` concurrently
+    from every connected Prefill and Decode node. A failed or timed-out request, or any response other than
+    HTTP 200, makes the PD Master health endpoints return HTTP 503. Independently of the topology mode,
+    PD Master also applies the regular inference-progress health check: while requests remain in flight,
+    the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
+    ``HEALTH_TIMEOUT`` consecutive seconds.
+
 .. option:: --pd_decode_rpyc_port
 
     Port used by decode nodes for kv move manager rpyc server in PD mode, default is ``42000``

@@ -179,6 +179,12 @@ def liveness():
 @app.get("/readiness")
 @app.post("/readiness")
 def readiness():
+    if g_objs.args.run_mode == "pd_master":
+        pd_nodes_are_ready = g_objs.httpserver_manager.pd_manager.is_pd_nodes_ready()
+        return JSONResponse(
+            {"status": "ok" if pd_nodes_are_ready else "not ready"},
+            status_code=200 if pd_nodes_are_ready else 503,
+        )
     return {"status": "ok"}
 
 
@@ -208,11 +214,43 @@ def get_weight_version():
 @app.get("/health", summary="Check server health")
 @app.head("/health", summary="Check server health")
 async def healthcheck(request: Request):
-    if g_objs.args.run_mode == "pd_master":
-        return JSONResponse({"message": "Ok"}, status_code=200)
-
     if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":
         return JSONResponse({"message": "Error"}, status_code=503)
+
+    if g_objs.args.run_mode == "pd_master":
+        httpserver_manager = g_objs.httpserver_manager
+        pd_manager = httpserver_manager.pd_manager
+        if g_objs.args.pd_master_mode == "elastic":
+            inference_is_healthy = httpserver_manager.is_healthy()
+            pd_nodes_are_ready = pd_manager.is_pd_nodes_ready()
+            is_healthy = inference_is_healthy and pd_nodes_are_ready
+            health_info = {
+                "inference_healthy": inference_is_healthy,
+                "pd_nodes_ready": pd_nodes_are_ready,
+            }
+        else:
+            inference_is_healthy = httpserver_manager.is_healthy()
+            pd_nodes_are_ready = pd_manager.is_pd_nodes_ready()
+            pd_nodes_are_healthy = (
+                inference_is_healthy and pd_nodes_are_ready and await pd_manager.check_pd_nodes_health()
+            )
+            is_healthy = pd_nodes_are_healthy
+            health_info = {
+                "inference_healthy": inference_is_healthy,
+                "pd_nodes_ready": pd_nodes_are_ready,
+                "pd_nodes_healthy": pd_nodes_are_healthy,
+            }
+
+        health_info.update(
+            {
+                "message": "Ok" if is_healthy else "Error",
+                "pd_master_mode": g_objs.args.pd_master_mode,
+                "registered_prefill_nodes": len(pd_manager.prefill_nodes),
+                "registered_decode_nodes": len(pd_manager.decode_nodes),
+            }
+        )
+        return JSONResponse(health_info, status_code=200 if is_healthy else 503)
+
     from lightllm.utils.health_check import health_check
 
     is_healthy = health_check(g_objs.httpserver_manager.shm_req_manager)

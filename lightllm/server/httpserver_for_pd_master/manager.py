@@ -1,10 +1,13 @@
 import sys
+import os
 import asyncio
 import uvloop
 import time
 import datetime
 import ujson as json
 import pickle
+import httpx
+from contextlib import aclosing
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
@@ -42,6 +45,9 @@ class HttpServerManagerForPDMaster:
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         self.infos_queues = None  # 这个需要延迟初始化，否则使用的loop不对
+        self.health_timeout = int(os.getenv("HEALTH_TIMEOUT", "200"))
+        self.latest_success_infer_time = time.time()
+        self.running_request_count = 0
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
 
@@ -53,6 +59,19 @@ class HttpServerManagerForPDMaster:
         # HttpServerManager.generate 会借用 _check_and_repair_length(self, ...)，其中会调用本方法。
         # PD master 无本地 token 池 shm 计数；上限与启动参数及子节点对齐的 max_req_total_len 一致。
         return self.max_req_total_len
+
+    def is_healthy(self):
+        time_since_last_success = time.time() - self.latest_success_infer_time
+        if time_since_last_success <= self.health_timeout:
+            return True
+        if self.running_request_count == 0 and len(self.req_id_to_out_inf) == 0:
+            return True
+
+        logger.warning(
+            f"PD Master health check failed: no successful inference for {int(time_since_last_success)}s "
+            f"and {self.running_request_count} requests are still running"
+        )
+        return False
 
     async def register_pd(self, pd_info_json, websocket):
         self.pd_manager.register_pd(pd_info_json, websocket)
@@ -110,6 +129,21 @@ class HttpServerManagerForPDMaster:
         multimodal_params: MultimodalParams,
         request: Request,
     ):
+        self.running_request_count += 1
+        try:
+            async with aclosing(self._generate(prompt, sampling_params, multimodal_params, request)) as generator:
+                async for result in generator:
+                    yield result
+        finally:
+            self.running_request_count -= 1
+
+    async def _generate(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+    ):
         assert isinstance(prompt, str), "prompt must be str"
         start_time = time.time()
         await multimodal_params.verify_and_preload(request)
@@ -131,6 +165,10 @@ class HttpServerManagerForPDMaster:
         origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
         origin_group_request_id = self.id_gen.generate_id()
         max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
+
+        block_group_request_id = origin_group_request_id
+        p_node = None
+        d_node = None
 
         try:
             # 记录请求到达的相关信息
@@ -364,6 +402,7 @@ class HttpServerManagerForPDMaster:
                 is_first_token = False
                 self.first_time_costs.add(first_token_cost_ms)
 
+            self.latest_success_infer_time = time.time()
             yield sub_req_id, out_str, metadata, finish_status
             if finish_status.is_finished():
                 unfinished_count -= 1
@@ -539,6 +578,56 @@ class PDManager:
         self.url_to_pd_nodes: Dict[str, PD_Client_Obj] = {}
         self.selector = create_selector(args.select_p_d_node_strategy, self)
         return
+
+    def is_pd_nodes_ready(self):
+        prefill_node_count = len(self.prefill_nodes)
+        decode_node_count = len(self.decode_nodes)
+        if self.args.pd_master_mode == "elastic":
+            return prefill_node_count >= 1 and decode_node_count >= 1
+
+        try:
+            expected_prefill_node_count, expected_decode_node_count = (
+                int(node_count) for node_count in self.args.pd_master_mode[:-1].split("p")
+            )
+            is_ready = (
+                prefill_node_count == expected_prefill_node_count and decode_node_count == expected_decode_node_count
+            )
+            if not is_ready:
+                logger.warning(
+                    f"PD nodes are not ready: current_prefill={prefill_node_count}, "
+                    f"expected_prefill={expected_prefill_node_count}, current_decode={decode_node_count}, "
+                    f"expected_decode={expected_decode_node_count}"
+                )
+            return is_ready
+        except ValueError:
+            logger.warning(
+                f"invalid pd_master_mode={self.args.pd_master_mode!r}; expected 'elastic' or a fixed topology "
+                "such as '2p4d'"
+            )
+            return False
+
+    async def check_pd_nodes_health(self):
+        pd_nodes = [*self.prefill_nodes, *self.decode_nodes]
+        if not pd_nodes:
+            return True
+
+        async with httpx.AsyncClient(timeout=8, trust_env=False) as client:
+            results = await asyncio.gather(
+                *(client.get(f"http://{node.client_ip_port}/health") for node in pd_nodes),
+                return_exceptions=True,
+            )
+
+        for node, result in zip(pd_nodes, results):
+            if isinstance(result, BaseException):
+                logger.warning(f"PD {node.mode} node {node.client_ip_port} health check failed: {str(result)}")
+                return False
+            if result.status_code != 200:
+                logger.warning(
+                    f"PD {node.mode} node {node.client_ip_port} health check returned HTTP {result.status_code}"
+                )
+                return False
+
+        return True
 
     def register_pd(self, pd_info_json, websocket):
         pd_client = PD_Client_Obj(**pd_info_json)

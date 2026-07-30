@@ -154,6 +154,26 @@ LightLLM 支持以下几种部署模式：
 
 PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以更好地利用硬件资源。
 
+.. warning::
+
+    如果宿主机或容器设置了 ``HTTP_PROXY``、``HTTPS_PROXY`` 或 ``ALL_PROXY``，
+    Prefill/Decode 节点到 PD Master 的 WebSocket 注册连接可能被发送到代理服务器。
+    典型日志为 ``proxy rejected connection: HTTP 403``。此时 P/D 节点自身的
+    HTTP 服务可能已正常启动，但 PD Master 仍显示 0 个已注册节点，
+    ``/readiness``、``/health`` 和 ``/healthz`` 会返回 HTTP 503。
+
+    启动服务前，应将所有 PD Master、Prefill、Decode 和 Config Server 的内网 IP
+    或主机名加入 ``NO_PROXY``，并同时设置小写的 ``no_proxy`` 以兼容不同网络库。
+
+    .. code-block:: bash
+
+        export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${pd_master_ip},${host},127.0.0.1,localhost"
+        export no_proxy="$NO_PROXY"
+
+    Kubernetes 部署还应包含实际使用的 Service DNS 名和 Service 后缀，例如
+    ``pd-master.default.svc,.default.svc,.svc``。不要只配置 ``localhost``：跨 Pod 通信使用的
+    Service DNS 或 Pod IP 也必须绕过代理。
+
 3.1 单 PD Master 模式
 ~~~~~~~~~~~~~~~~~~~~~
 

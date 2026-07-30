@@ -53,6 +53,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
     parser.add_argument(
+        "--pd_master_mode",
+        type=str,
+        default="elastic",
+        help=(
+            "PD master topology mode: elastic allows the number of Prefill and Decode nodes to change "
+            "dynamically; use <P>p<D>d for a fixed topology, for example 2p4d. Default: elastic."
+        ),
+    )
+    parser.add_argument(
         "--pd_trans_mode",
         type=str,
         choices=["nccl", "nixl"],

@@ -154,6 +154,27 @@ Suitable for deploying MoE models across multiple nodes.
 
 PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for deployment, which can better utilize hardware resources.
 
+.. warning::
+
+    If the host or container defines ``HTTP_PROXY``, ``HTTPS_PROXY``, or ``ALL_PROXY``, the WebSocket
+    registration connection from a Prefill/Decode node to PD Master may be sent through that proxy.
+    A typical error is ``proxy rejected connection: HTTP 403``. The P/D HTTP servers may already be
+    running normally, while PD Master still reports zero registered nodes and returns HTTP 503 from
+    ``/readiness``, ``/health``, and ``/healthz``.
+
+    Before starting the services, add the internal IP addresses or hostnames of every PD Master, Prefill,
+    Decode, and Config Server to ``NO_PROXY``. Also set lowercase ``no_proxy`` for compatibility with
+    different networking libraries.
+
+    .. code-block:: bash
+
+        export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${pd_master_ip},${host},127.0.0.1,localhost"
+        export no_proxy="$NO_PROXY"
+
+    For Kubernetes, include the Service DNS names and suffixes actually used by the deployment, for example
+    ``pd-master.default.svc,.default.svc,.svc``. Configuring only ``localhost`` is insufficient: the Service
+    DNS names or Pod IP addresses used for cross-Pod communication must also bypass the proxy.
+
 3.1 Single PD Master Mode
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
