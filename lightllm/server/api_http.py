@@ -98,6 +98,9 @@ class G_Objs:
         CompletionRequest.load_generation_cfg(args.model_dir)
         ChatCompletionRequest.load_generation_cfg(args.model_dir)
 
+        if self.model_created is None:
+            self.model_created = int(time.time())
+
         if args.run_mode == "pd_master":
             self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
@@ -108,8 +111,6 @@ class G_Objs:
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
             self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
-            if self.model_created is None:
-                self.model_created = int(time.time())
 
 
 g_objs = G_Objs()

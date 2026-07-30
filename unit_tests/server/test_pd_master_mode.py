@@ -8,6 +8,30 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 
 
+def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):
+    from lightllm.server import api_http
+
+    args = StartArgs(run_mode="pd_master", model_dir="/tmp/test-model", model_name="test-model")
+    manager = SimpleNamespace(get_real_supported_max_req_total_len=lambda: 1024)
+    monkeypatch.setattr(api_http, "init_tokenizer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api_http.SamplingParams, "load_generation_cfg", lambda _model_dir: None)
+    monkeypatch.setattr(api_http.CompletionRequest, "load_generation_cfg", lambda _model_dir: None)
+    monkeypatch.setattr(api_http.ChatCompletionRequest, "load_generation_cfg", lambda _model_dir: None)
+    monkeypatch.setattr(api_http, "MetricClient", lambda _port: object())
+    monkeypatch.setattr(api_http, "get_shm_port_args", lambda: SimpleNamespace(metric_port=1234))
+    monkeypatch.setattr(api_http, "HttpServerManagerForPDMaster", lambda args: manager)
+    monkeypatch.setattr(api_http, "get_unique_server_name", lambda: "test-server")
+    monkeypatch.setattr(api_http.setproctitle, "setproctitle", lambda _title: None)
+    monkeypatch.setattr(api_http.time, "time", lambda: 1234.9)
+
+    global_objs = api_http.G_Objs()
+    global_objs.set_args(args)
+    monkeypatch.setattr(api_http, "g_objs", global_objs)
+
+    response = asyncio.run(api_http.get_models(None))
+    assert response.data[0].created == 1234
+
+
 def test_elastic_pd_nodes_are_ready_with_at_least_one_node_of_each_role():
     manager = PDManager(StartArgs(pd_master_mode="elastic"))
     assert manager.is_pd_nodes_ready() is False
