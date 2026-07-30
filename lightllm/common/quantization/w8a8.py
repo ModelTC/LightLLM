@@ -185,54 +185,80 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
 
 
 class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
+    """Common weight and activation quantization for FP8 per-tensor GEMMs.
+
+    A fused dense projection may be exposed as several ``WeightPack`` objects
+    during checkpoint loading (for example, the gate and up projections). The
+    packs are views of one fused runtime weight and therefore must be quantized
+    together with one scale. Private ``_ptq_*`` attributes coordinate that
+    deferred loading path until every source tensor is available.
+    """
+
     def __init__(self):
         super().__init__()
         self.has_weight_scale = True
         self.has_weight_zero_point = False
 
-    def _fp8_per_tensor_quant(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _fp8_ptq_quant(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a complete weight tensor with one FP8 E4M3 scale."""
         weight = weight.float().cuda(self.device_id_)
         fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
+        # Map the largest absolute weight to the largest finite E4M3 value. The
+        # lower bound keeps an all-zero tensor from producing a zero divisor.
         scale = weight.abs().max() / fp8_e4m3_max
         scale = torch.clamp(scale, min=torch.finfo(torch.float32).tiny)
         qweight = (weight / scale).clamp(min=-fp8_e4m3_max, max=fp8_e4m3_max).to(dtype=torch.float8_e4m3fn)
         return qweight, scale.reshape(-1)
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-        qweight, weight_scale = self._fp8_per_tensor_quant(weight)
+        qweight, weight_scale = self._fp8_ptq_quant(weight)
         output.weight.copy_(qweight)
-        # Triton stores the scalar directly, while SGL preallocates a per-channel
-        # buffer required by its GEMM API. copy_ broadcasts the same tensor scale.
+        # The logical scale is always a single value. Triton and Cutlass store it
+        # as one element, whereas the SGL GEMM API requires an [N] scale buffer.
+        # Tensor.copy_ broadcasts the scalar into that backend-specific storage
+        # without changing the per-tensor quantization semantics.
         output.weight_scale.copy_(weight_scale)
         return
 
     def load_weight(self, weight: torch.Tensor, weight_pack: WeightPack) -> None:
-        parent_pack = getattr(weight_pack, "_per_tensor_parent_pack", None)
+        # A pack without staging metadata represents a complete weight, so the
+        # standard loader can quantize it immediately. Split packs instead defer
+        # quantization through their shared parent pack.
+        parent_pack = getattr(weight_pack, "_ptq_parent_pack", None)
         if parent_pack is None:
             super().load_weight(weight, weight_pack)
             return
 
-        with parent_pack._per_tensor_staged_lock:
-            if parent_pack._per_tensor_finalized:
+        # Checkpoint loaders may populate sibling projections concurrently. The
+        # parent lock protects the loaded flags and guarantees that exactly one
+        # thread performs the final fused quantization and metadata cleanup.
+        with parent_pack._ptq_staged_lock:
+            if parent_pack._ptq_finalized:
                 return
-            staged_view = weight_pack._per_tensor_staged_view
+            staged_view = weight_pack._ptq_staged_view
             staged_view.copy_(weight.to(dtype=staged_view.dtype))
-            weight_pack._per_tensor_staged_loaded = True
-            if all(child_pack._per_tensor_staged_loaded for child_pack in parent_pack._per_tensor_child_packs):
-                # Fused dense weights such as gate/up must share one scale, so quantize
-                # only after every source tensor has populated the staging buffer.
-                self.quantize(parent_pack._per_tensor_staging_buffer, parent_pack)
+            weight_pack._ptq_staged_loaded = True
+            if all(child_pack._ptq_staged_loaded for child_pack in parent_pack._ptq_child_packs):
+                # Quantizing each child independently would produce different
+                # scales for slices of the same fused GEMM weight. Quantize the
+                # assembled buffer once so every output channel uses the scale
+                # stored on the parent pack.
+                self.quantize(parent_pack._ptq_staging_buffer, parent_pack)
                 parent_pack.load_ok = [True, True, True]
-                for child_pack in parent_pack._per_tensor_child_packs:
+                for child_pack in parent_pack._ptq_child_packs:
                     child_pack.load_ok = [True, True, True]
-                parent_pack._per_tensor_finalized = True
-                child_packs = parent_pack._per_tensor_child_packs
-                del parent_pack._per_tensor_staging_buffer
-                del parent_pack._per_tensor_child_packs
+                parent_pack._ptq_finalized = True
+
+                # The full-precision CPU staging allocation is needed only while
+                # checkpoint shards are arriving. Drop all parent/child metadata
+                # after quantization so it cannot retain memory for inference.
+                child_packs = parent_pack._ptq_child_packs
+                del parent_pack._ptq_staging_buffer
+                del parent_pack._ptq_child_packs
                 for child_pack in child_packs:
-                    del child_pack._per_tensor_parent_pack
-                    del child_pack._per_tensor_staged_view
-                    del child_pack._per_tensor_staged_loaded
+                    del child_pack._ptq_parent_pack
+                    del child_pack._ptq_staged_view
+                    del child_pack._ptq_staged_loaded
         return
 
     def _dynamic_quant_input(
@@ -247,7 +273,10 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         m = input_tensor.shape[0]
         k = input_tensor.shape[-1]
         n = qweight.shape[1]
-        # direct triton call: the per_token_group_quant_fp8 wrapper picks sgl, which rejects group_size == k
+        # Per-token activation quantization is the group-quantization case where
+        # group_size equals the full K dimension. Call the LightLLM Triton kernel
+        # directly because the generic wrapper may dispatch to the SGL kernel,
+        # which rejects group_size == K.
         alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
         x_q = alloc_func((m, k), dtype=torch.float8_e4m3fn, device=input_tensor.device)
         x_scale = alloc_func((m, 1), dtype=torch.float32, device=input_tensor.device)
@@ -269,20 +298,25 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         weight_splits = torch.split(weight, out_dims, dim=-2)
         mm_param_list = [WeightPack(weight=split_weight, weight_scale=weight_scale) for split_weight in weight_splits]
         if len(mm_param_list) > 1:
+            # Checkpoints store fused projections as separate tensors, but this
+            # method needs one scale for the concatenated runtime weight. Give
+            # each child a view into a full-precision CPU staging buffer; the last
+            # child loaded triggers one quantization of the complete parent pack.
             staging_buffer = torch.empty((out_dim, in_dim), dtype=dtype, device="cpu")
-            mm_param._per_tensor_staging_buffer = staging_buffer
-            mm_param._per_tensor_child_packs = mm_param_list
-            mm_param._per_tensor_staged_lock = threading.Lock()
-            mm_param._per_tensor_finalized = False
+            mm_param._ptq_staging_buffer = staging_buffer
+            mm_param._ptq_child_packs = mm_param_list
+            mm_param._ptq_staged_lock = threading.Lock()
+            mm_param._ptq_finalized = False
             staged_views = torch.split(staging_buffer, out_dims, dim=-2)
             for child_pack, staged_view in zip(mm_param_list, staged_views):
-                child_pack._per_tensor_parent_pack = mm_param
-                child_pack._per_tensor_staged_view = staged_view
-                child_pack._per_tensor_staged_loaded = False
+                child_pack._ptq_parent_pack = mm_param
+                child_pack._ptq_staged_view = staged_view
+                child_pack._ptq_staged_loaded = False
         return mm_param, mm_param_list
 
     def _create_weight_scale(self, out_dim: int, device_id: int) -> torch.Tensor:
-        # Triton and Cutlass accept a scalar per-tensor weight scale.
+        # Triton and Cutlass consume the logical per-tensor scale directly, so
+        # their weight packs reserve only one element regardless of output size.
         return torch.empty((1,), dtype=torch.float32, device=f"cuda:{device_id}")
 
 
@@ -323,7 +357,9 @@ class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
             raise RuntimeError("fp8w8a8-pt-sgl requires sgl_kernel.fp8_scaled_mm support")
 
     def _create_weight_scale(self, out_dim: int, device_id: int) -> torch.Tensor:
-        # sgl_kernel.fp8_scaled_mm requires a contiguous scale for every output channel.
+        # SGL's scaled GEMM accepts only per-output-channel weight scales. Reserve
+        # a contiguous [N] buffer; quantize() fills every entry with the same
+        # scalar so this remains mathematically equivalent to per-tensor scaling.
         return torch.empty((out_dim,), dtype=torch.float32, device=f"cuda:{device_id}")
 
     def apply(
