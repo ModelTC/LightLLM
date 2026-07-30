@@ -550,6 +550,19 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     return None
 
 
+def auto_set_response_parsers(args) -> None:
+    """Infer response parsers from model config unless explicitly configured."""
+    if args.tool_call_parser is None:
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    if args.reasoning_parser is None:
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
+
 @lru_cache(maxsize=None)
 def ffn_use_tanh_approximate_gelu() -> bool:
     try:

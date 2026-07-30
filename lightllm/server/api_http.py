@@ -33,7 +33,7 @@ from http import HTTPStatus
 import uuid
 from PIL import Image
 import multiprocessing as mp
-from typing import Any, AsyncGenerator, Union
+from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -50,7 +50,7 @@ from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
@@ -198,11 +198,11 @@ def get_model_name():
 @app.get("/get_server_info")
 @app.post("/get_server_info")
 def get_server_info():
-    # 将 StartArgs 转换为字典格式
-    from dataclasses import asdict
+    if is_dataclass(g_objs.args):
+        return asdict(g_objs.args)
 
-    server_info: dict[str, Any] = asdict(g_objs.args)
-    return {**server_info}
+    # HTTP workers restore StartArgs from the environment as an EasyDict.
+    return dict(g_objs.args)
 
 
 @app.get("/get_weight_version")

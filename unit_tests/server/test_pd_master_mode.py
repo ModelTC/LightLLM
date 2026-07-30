@@ -3,9 +3,62 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from easydict import EasyDict
 
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+
+
+def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
+    from lightllm.utils.config_utils import auto_set_response_parsers
+
+    (tmp_path / "config.json").write_text('{"model_type": "qwen3_5"}', encoding="utf-8")
+    args = StartArgs(model_dir=str(tmp_path))
+
+    auto_set_response_parsers(args)
+
+    assert args.tool_call_parser == "qwen3_coder"
+    assert args.reasoning_parser == "qwen3"
+
+
+def test_auto_set_response_parsers_preserves_explicit_values(tmp_path):
+    from lightllm.utils.config_utils import auto_set_response_parsers
+
+    (tmp_path / "config.json").write_text('{"model_type": "qwen3_5"}', encoding="utf-8")
+    args = StartArgs(
+        model_dir=str(tmp_path),
+        tool_call_parser="llama3",
+        reasoning_parser="deepseek-r1",
+    )
+
+    auto_set_response_parsers(args)
+
+    assert args.tool_call_parser == "llama3"
+    assert args.reasoning_parser == "deepseek-r1"
+
+
+def test_get_server_info_serializes_runtime_easydict(monkeypatch):
+    from lightllm.server import api_http
+
+    runtime_args = EasyDict(
+        model_name="qwen35_0.8b",
+        tool_call_parser="qwen3_coder",
+        reasoning_parser="qwen3",
+    )
+    monkeypatch.setattr(api_http.g_objs, "args", runtime_args)
+
+    assert api_http.get_server_info() == dict(runtime_args)
+
+
+def test_get_server_info_serializes_start_args_dataclass(monkeypatch):
+    from lightllm.server import api_http
+
+    start_args = StartArgs(model_name="qwen35_0.8b")
+    monkeypatch.setattr(api_http.g_objs, "args", start_args)
+
+    server_info = api_http.get_server_info()
+    assert server_info["model_name"] == "qwen35_0.8b"
+    assert server_info["run_mode"] == "normal"
 
 
 def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):

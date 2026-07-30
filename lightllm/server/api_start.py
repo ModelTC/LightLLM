@@ -23,6 +23,7 @@ from lightllm.utils.config_utils import (
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
     auto_set_fused_shared_experts,
+    auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -272,21 +273,7 @@ def _launch_subprocesses(args: StartArgs):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
-    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
-    if args.tool_call_parser is None:
-        from lightllm.utils.config_utils import get_tool_call_parser_for_model
-
-        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
-        if args.tool_call_parser:
-            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
-
-    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
-    if args.reasoning_parser is None:
-        from lightllm.utils.config_utils import get_reasoning_parser_for_model
-
-        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
-        if args.reasoning_parser:
-            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+    auto_set_response_parsers(args)
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
@@ -450,6 +437,7 @@ def pd_master_start(args: StartArgs):
         return
 
     auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
