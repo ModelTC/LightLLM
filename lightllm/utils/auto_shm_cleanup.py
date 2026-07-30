@@ -1,11 +1,9 @@
-import os
 import ctypes
 import atexit
 import signal
 import threading
-import psutil
 from multiprocessing import shared_memory
-from typing import Set, Optional
+from typing import Optional
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -21,8 +19,7 @@ class AutoShmCleanup:
         self.libc = None
         self._init_libc()
         # System V
-        self.registered_shm_keys = []
-        self.registered_shm_ids = []
+        self.registered_sysv_shms = {}
         # POSIX
         self.registered_posix_shm_names = []
         self.signal_handlers_registered = False
@@ -52,33 +49,26 @@ class AutoShmCleanup:
 
     def _signal_cleanup_handler(self, signum, frame):
         self._cleanup()
-        parent = psutil.Process(os.getpid())
-        # 递归拿到所有子进程并终止
-        for ch in parent.children(recursive=True):
-            ch.kill()
+        raise SystemExit(128 + signum)
+
+    def mark_registered_sysv_shm_for_deletion(self):
+        IPC_RMID = 0
+        marked_sysv = 0
+        for key, shmid in self.registered_sysv_shms.items():
+            try:
+                if shmid is None:
+                    shmid = self.libc.shmget(key, 0, 0)
+                if self.libc.shmctl(shmid, IPC_RMID, None) == 0:
+                    marked_sysv += 1
+            except Exception as e:
+                logger.warning(f"cleanup: shmid {shmid} clean failed, reason: {e}")
+        if marked_sysv:
+            logger.info(f"cleanup: marked {marked_sysv} System V shm segments for deletion")
+        return marked_sysv
 
     def _cleanup(self):
         """清理：System V 执行 IPC_RMID，POSIX 执行 unlink。"""
-        removed_sysv = 0
-        IPC_RMID = 0
-        for shmid in self.registered_shm_ids:
-            try:
-                if self.libc.shmctl(shmid, IPC_RMID, None) == 0:
-                    removed_sysv += 1
-            except Exception as e:
-                logger.warning(f"cleanup: shmid {shmid} clean failed, reason: {e}")
-                pass
-        for key in self.registered_shm_keys:
-            shmid = self.libc.shmget(key, 0, 0)
-            try:
-                if shmid >= 0 and self.libc.shmctl(shmid, IPC_RMID, None) == 0:
-                    removed_sysv += 1
-            except Exception as e:
-                logger.warning(f"cleanup: shmid {shmid} clean failed, reason: {e}")
-                pass
-        if removed_sysv:
-            logger.info(f"cleanup: removed {removed_sysv} System V shm segments")
-
+        self.mark_registered_sysv_shm_for_deletion()
         removed_posix = 0
         for name in self.registered_posix_shm_names:
             try:
@@ -103,9 +93,8 @@ class AutoShmCleanup:
 
     def register_sysv_shm(self, key: int, shmid: Optional[int] = None):
         """注册 System V 共享内存。"""
-        self.registered_shm_keys.append(key)
-        if shmid is not None:
-            self.registered_shm_ids.append(shmid)
+        if key not in self.registered_sysv_shms or shmid is not None:
+            self.registered_sysv_shms[key] = shmid
         return
 
     def register_posix_shm(self, name: str):
@@ -129,6 +118,10 @@ def get_auto_cleanup() -> AutoShmCleanup:
 
 def register_sysv_shm_for_cleanup(key: int, shmid: Optional[int] = None):
     get_auto_cleanup().register_sysv_shm(key, shmid)
+
+
+def mark_registered_sysv_shm_for_deletion():
+    return get_auto_cleanup().mark_registered_sysv_shm_for_deletion()
 
 
 def register_posix_shm_for_cleanup(name: str):

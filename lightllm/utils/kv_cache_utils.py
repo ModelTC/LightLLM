@@ -1,6 +1,7 @@
 import torch
 import ctypes
 import dataclasses
+import errno
 import os
 import xxhash
 import threading
@@ -195,7 +196,9 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
             pass
         return 2 * 1024 * 1024  # fallback 2MB
 
-    shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
+    IPC_CREAT = 0o1000
+    IPC_EXCL = 0o2000
+    shmflg = 0o666 | IPC_CREAT | IPC_EXCL
     if use_hugetlb:
         # 向上对齐到大页大小
         huge_sz = _get_default_hugepage_size()
@@ -213,6 +216,8 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     hugepages_num = (size_to_alloc + 1024 * 1024 * 1024 - 1) // (1024 * 1024 * 1024)
     if shmid < 0:
         err = ctypes.get_errno()
+        if err == errno.EEXIST:
+            raise RuntimeError(f"System V shared memory key {key} already exists")
         if use_hugetlb:
             raise Exception(
                 f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
