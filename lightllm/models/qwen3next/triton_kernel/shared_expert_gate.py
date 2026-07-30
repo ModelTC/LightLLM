@@ -24,7 +24,10 @@ def _sigmoid_mul_kernel(
         gate_vals = tl.load(gate + row * stride_g_m).to(tl.float32)
     else:
         gate_vals = tl.load(gate + row * stride_g_m + offs * stride_g_n, mask=mask, other=0.0).to(tl.float32)
-    gate_vals = tl.sigmoid(gate_vals)
+    # Match the unfused PyTorch path used by training: sigmoid is materialized
+    # in the gate dtype before the multiplication. Keeping this intermediate
+    # rounding is important for rollout/training logprob consistency in BF16.
+    gate_vals = tl.sigmoid(gate_vals).to(gate.dtype.element_ty).to(tl.float32)
     tl.store(x_ptrs, (x_vals * gate_vals).to(x.dtype.element_ty), mask=mask)
 
 
