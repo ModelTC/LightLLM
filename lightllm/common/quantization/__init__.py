@@ -12,8 +12,8 @@ from lightllm.utils.device_utils import is_sm100_gpu
 logger = init_logger(__name__)
 
 EXPERT_DTYPE_TO_QUANT_TYPE = {
-    "fp8": "deepgemm-fp8w8a8-b128",
-    "fp4": "deepgemm-fp4fp8-b32",
+    "fp8": "fp8w8a8-b128-deepgemm",
+    "fp4": "fp4fp8-b32-deepgemm",
 }
 SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 
@@ -58,9 +58,9 @@ class Quantcfg:
                 from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM
 
                 if HAS_DEEPGEMM:
-                    self.quant_type = "deepgemm-fp8w8a8-b128"
+                    self.quant_type = "fp8w8a8-b128-deepgemm"
                 else:
-                    self.quant_type = "vllm-fp8w8a8-b128"
+                    self.quant_type = "fp8w8a8-b128-vllm"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
 
             # fp8 量化下，部分 MoE 模型（如 DeepSeek-V4），可以单独声明 expert 权重精度，

@@ -1759,6 +1759,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
         )
         self._normal_text_buffer = ""
+        self._current_tool_name: Optional[str] = None
 
     def has_tool_call(self, text: str) -> bool:
         return "<function=" in text or self.bot_token in text
@@ -1819,7 +1820,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         func_name = function_str[:end_index].strip()
         tool_indices = self._get_tool_indices(tools)
-        if func_name not in tool_indices:
+        if not func_name or (ENABLE_TOOL_NAME_CHECK and func_name not in tool_indices):
             logger.warning(f"Model attempted to call undefined function: {func_name}")
             return None
 
@@ -1843,10 +1844,26 @@ class Qwen3CoderDetector(BaseFormatDetector):
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
 
         return ToolCallItem(
-            tool_index=tool_indices[func_name],
+            tool_index=tool_indices.get(func_name, -1),
             name=func_name,
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
+
+    def _get_incomplete_function_name(self, text: str) -> Optional[str]:
+        """Return a complete, valid function name from an unfinished tool-call block."""
+        function_start = text.find("<function=")
+        if function_start == -1:
+            return None
+
+        name_start = function_start + len("<function=")
+        name_end = text.find(">", name_start)
+        if name_end == -1:
+            return None
+
+        function_name = text[name_start:name_end].strip()
+        if not function_name or (ENABLE_TOOL_NAME_CHECK and function_name not in self._tool_indices):
+            return None
+        return function_name
 
     def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
         """Build the current argument JSON from a partial XML tool-call body."""
@@ -1943,6 +1960,31 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
             eot_pos = current_text.find(self.eot_token)
             if eot_pos == -1:
+                if not self.current_tool_name_sent:
+                    function_name = self._get_incomplete_function_name(current_text)
+                    if function_name is None:
+                        return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+                    if self.current_tool_id == -1:
+                        self.current_tool_id = 0
+                    self.current_tool_name_sent = True
+                    self._current_tool_name = function_name
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=function_name,
+                            parameters="",
+                        )
+                    )
+                else:
+                    # Keep the connection active for every decoded chunk without
+                    # exposing a partial XML value as malformed JSON arguments.
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            parameters="",
+                        )
+                    )
                 return StreamingParseResult(normal_text=normal_text, calls=calls)
 
             complete_block = current_text[: eot_pos + len(self.eot_token)]
@@ -1956,9 +1998,17 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 item = self._parse_function_call(func_str, tools)
                 if item:
                     item.tool_index = self.current_tool_id
+                    if self.current_tool_name_sent and item.name == self._current_tool_name:
+                        # The head was already emitted. Send the complete arguments as
+                        # one continuation delta and do not repeat the function name.
+                        item.name = None
+                        self.current_tool_name_sent = False
+                        self._current_tool_name = None
                     calls.append(item)
                     self.current_tool_id += 1
 
+            self.current_tool_name_sent = False
+            self._current_tool_name = None
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 

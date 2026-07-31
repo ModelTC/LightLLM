@@ -17,6 +17,9 @@ description: >-
 **`pd_master`**、**`prefill`**、**`decode`**。评测和 warmup 只访问
 **`pd_master` 的 HTTP 端口 `8089`**。
 
+`--pd_trans_mode` 可选 `nccl`（默认）和 `nixl`。本 skill 测试 NIXL，所以下面的
+prefill 和 decode 的启动命令必须统一显式传入 **`--pd_trans_mode nixl`**。
+
 Qwen3.5 与 Qwen3-8B 的关键差异：
 
 | 项 | Qwen3.5-0.8B NIXL PD 要点 |
@@ -139,6 +142,7 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --run_mode prefill \
+  --pd_trans_mode nixl \
   --tp "${TP}" \
   --dp 1 \
   --host "${HOST}" \
@@ -158,6 +162,7 @@ LOADWORKER=18 CUDA_VISIBLE_DEVICES="${DECODE_CUDA_DEVICES}" \
 nohup python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --run_mode decode \
+  --pd_trans_mode nixl \
   --tp "${TP}" \
   --dp 1 \
   --host "${HOST}" \
@@ -310,4 +315,3 @@ fuser -k 8089/tcp 8001/tcp 8002/tcp || true
 ps -eo pid,ppid,stat,cmd | rg 'lightllm::|api_server|hypercorn'
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 ```
-

@@ -2,6 +2,7 @@ import argparse
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.formatter_class = argparse.RawTextHelpFormatter
 
     parser.add_argument(
         "--run_mode",
@@ -57,6 +58,22 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=int,
         default=1212,
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
+    )
+    parser.add_argument(
+        "--pd_master_mode",
+        type=str,
+        default="elastic",
+        help=(
+            "PD master topology mode: elastic allows the number of Prefill and Decode nodes to change "
+            "dynamically; use <P>p<D>d for a fixed topology, for example 2p4d. Default: elastic."
+        ),
+    )
+    parser.add_argument(
+        "--pd_trans_mode",
+        type=str,
+        choices=["nccl", "nixl"],
+        default="nccl",
+        help="KV transfer backend for PD disaggregation; default: nccl",
     )
     parser.add_argument(
         "--select_p_d_node_strategy",
@@ -404,7 +421,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority: flashinfer > fa3 > triton)""",
+                (priority when mtp_step > 0: fa3 > flashinfer > triton;
+                otherwise: flashinfer > fa3 > triton)""",
     )
     parser.add_argument(
         "--vit_att_backend",
@@ -601,10 +619,30 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin |
-                        | triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
-                        triton-fp8w8a8g64 (weight perchannel quantization with group size 64)""",
+        help=(
+            "Quantization methods (W = weight, A = activation):\n"
+            "  quant_type                     quantization                           implementation backend\n"
+            "  w8a8                           INT8; W per-channel, A per-token       vLLM\n"
+            "  fp8w8a8                        FP8; W per-channel, A per-token        vLLM\n"
+            "  fp8w8a8-pt                     FP8; W per-tensor, A per-token         Triton\n"
+            "  fp8w8a8-b128                   FP8; W block 128x128, A group 128      Triton\n"
+            "  fp8w8a8g128                    FP8; W per-channel, A group 128        Triton\n"
+            "  fp8w8a8g64                     FP8; W per-channel, A group 64         Triton\n"
+            "  awq                            INT4 weight-only; checkpoint group     vLLM\n"
+            "  awq_marlin                     INT4 weight-only; checkpoint group     vLLM\n"
+            "  none                           No quantization                        -\n"
+            "  w8a8-vllm                      INT8; W per-channel, A per-token       vLLM\n"
+            "  fp8w8a8-vllm                   FP8; W per-channel, A per-token        vLLM\n"
+            "  fp8w8a8-pt-vllm                FP8; W per-tensor, A per-token         vLLM\n"
+            "  fp8w8a8-pt-sgl                 FP8; W per-tensor, A per-token         SGL\n"
+            "  fp8w8a8-pt-triton              FP8; W per-tensor, A per-token         Triton\n"
+            "  fp8w8a8-b128-vllm              FP8; W block 128x128, A group 128      vLLM\n"
+            "  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      DeepGEMM\n"
+            "  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      Triton\n"
+            "  fp8w8a8g128-triton             FP8; W per-channel, A group 128        Triton\n"
+            "  fp8w8a8g64-triton              FP8; W per-channel, A group 64         Triton\n"
+            "  fp4fp8-b32-deepgemm            FP4/FP8; fused MoE experts only        DeepGEMM"
+        ),
     )
     parser.add_argument(
         "--quant_cfg",
@@ -625,7 +663,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--vit_quant_type",
         type=str,
         default="none",
-        help="""Quantization method for ViT: vllm-w8a8 | vllm-fp8w8a8""",
+        help="""Quantization method for ViT: w8a8 | fp8w8a8""",
     )
     parser.add_argument(
         "--vit_quant_cfg",

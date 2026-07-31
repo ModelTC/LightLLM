@@ -40,6 +40,9 @@ class AudioItem:
         self.extra_params = {}
 
     async def preload(self, request: Request):
+        if self._preload_data is not None:
+            return
+
         try:
             if self._type == "url":
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "5"))
@@ -132,6 +135,8 @@ class ImageItem:
         self.extra_params = {}
 
     async def preload(self, request: Request):
+        if self._preload_data is not None:
+            return
 
         start_args = get_env_start_args()
         max_image_pixels = start_args.max_image_pixels

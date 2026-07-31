@@ -1,4 +1,4 @@
-quant_type: vllm-w8a8
+quant_type: w8a8
 mix_bits:
   - name: "down_proj"
     quant_type: "none"

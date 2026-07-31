@@ -69,6 +69,24 @@ PD 分离模式参数
     
     当 run_mode 设置为 prefill 或 decode 时需要设置此参数
 
+.. option:: --pd_master_mode
+
+    PD Master 拓扑模式，可选值：
+
+    * ``elastic``：Prefill 和 Decode 节点数量可以动态变化（默认）
+    * ``<P>p<D>d``：Prefill 和 Decode 节点数量固定。例如，``2p4d``
+      表示期望恰好注册 2 个 Prefill 节点和 4 个 Decode 节点。
+
+    当 ``run_mode`` 设置为 ``pd_master`` 时使用此参数。
+    在 ``elastic`` 模式下，至少注册一个 Prefill 和一个 Decode 节点后，PD Master 才会
+    进入 ready 状态，节点数量超过一个时仍然保持 ready。使用固定拓扑模式时，只有已注册
+    节点数量与配置完全一致才进入 ready 状态。节点未 ready 时，``/health`` 和 ``/healthz``
+    以及 ``/readiness`` 返回 HTTP 503。在固定拓扑模式下，PD Master 还会并发请求所有已连接
+    Prefill 和 Decode 节点的 ``/health`` 接口；任一节点请求失败、超时或返回非 HTTP 200 时，
+    PD Master 的健康接口都会返回 HTTP 503。无论使用哪种拓扑模式，PD Master 都会同时执行与普通节点类似的
+    推理进度健康检查：当仍有在途请求，且整个 PD Master 连续 ``HEALTH_TIMEOUT`` 秒
+    没有任何请求成功返回 token 时，接口将返回 HTTP 503。
+
 .. option:: --pd_decode_rpyc_port
 
     PD 模式下解码节点用于 kv move manager rpyc 服务器的端口，默认为 ``42000``
@@ -299,9 +317,13 @@ PD 分离模式参数
 
     当输入图片超过该阈值时，LightLLM 会先自动将其缩放到该像素预算内，再继续后续流程。
 
+    多模态 PD 分离模式下，PD Master 与所有 Prefill 节点必须使用相同值，否则 Prefill 注册会被拒绝。
+
 .. option:: --disable_image_resize
 
     禁用对超过 ``--max_image_pixels`` 的图片的自动缩放。默认开启自动缩放。
+
+    多模态 PD 分离模式下，PD Master 与所有 Prefill 节点必须使用相同值。
 
 .. option:: --visual_infer_batch_size
 
@@ -450,18 +472,76 @@ PD 分离模式参数
 
 .. option:: --quant_type
 
-    量化方法，可选值：
+    ``W`` 表示权重，``A`` 表示激活。可选值如下：
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
-    * ``vllm-fp8w8a8-b128``
-    * ``deepgemm-fp8w8a8-b128``
-    * ``triton-fp8w8a8-block128``
-    * ``triton-fp8w8a8g128``: 权重 per-channel 量化和激活 per-group 128 量化
-    * ``triton-fp8w8a8g64``: 权重 per-channel 量化, group size 64
-    * ``awq``
-    * ``awq_marlin``
-    * ``none`` (默认)
+    .. list-table::
+       :header-rows: 1
+       :widths: 35 45 20
+       :align: left
+
+       * - ``quant_type``
+         - 量化介绍
+         - 实现 backend
+       * - ``w8a8``
+         - INT8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8``
+         - FP8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8-pt``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
+       * - ``fp8w8a8-b128``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128``
+         - FP8 W8A8；W：per-channel，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64``
+         - FP8 W8A8；W：per-channel，A：per-token-group 64
+         - Triton
+       * - ``awq``
+         - INT4 weight-only；group size 由 checkpoint 提供
+         - vLLM
+       * - ``awq_marlin``
+         - INT4 weight-only；group size 由 checkpoint 提供
+         - vLLM
+       * - ``none``
+         - 不量化
+         - -
+       * - ``w8a8-vllm``
+         - INT8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8-vllm``
+         - FP8 W8A8；W：per-channel，A：per-token
+         - vLLM
+       * - ``fp8w8a8-pt-vllm``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - vLLM
+       * - ``fp8w8a8-pt-sgl``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - SGL
+       * - ``fp8w8a8-pt-triton``
+         - FP8 W8A8；W：per-tensor，A：per-token
+         - Triton
+       * - ``fp8w8a8-b128-vllm``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - vLLM
+       * - ``fp8w8a8-b128-deepgemm``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - DeepGEMM
+       * - ``fp8w8a8-b128-triton``
+         - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128-triton``
+         - FP8 W8A8；W：per-channel，A：per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64-triton``
+         - FP8 W8A8；W：per-channel，A：per-token-group 64
+         - Triton
+       * - ``fp4fp8-b32-deepgemm``
+         - FP4/FP8 混合量化；仅用于 fused MoE 专家权重（SM100）
+         - DeepGEMM
 
 .. option:: --quant_cfg
 
@@ -481,8 +561,8 @@ PD 分离模式参数
 
     ViT 量化方法，可选值：
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
+    * ``w8a8``
+    * ``fp8w8a8``
     * ``none`` (默认)
 
 .. option:: --vit_quant_cfg

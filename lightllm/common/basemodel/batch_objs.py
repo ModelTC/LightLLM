@@ -57,6 +57,7 @@ class ModelInput:
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
     def to_cuda(self):
+        self.check_input()
         if self.input_ids is not None:
             self.input_ids = self.input_ids.cuda(non_blocking=True)
         if self.mem_indexes is None:
@@ -95,6 +96,10 @@ class ModelInput:
 
     def check_input(self):
         assert len(self.multimodal_params) == self.batch_size
+        if self.input_ids is not None:
+            assert (
+                self.input_ids.dtype == torch.int64
+            ), f"model input_ids must use torch.int64, got {self.input_ids.dtype}"
 
 
 @dataclass

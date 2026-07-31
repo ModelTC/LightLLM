@@ -154,6 +154,27 @@ Suitable for deploying MoE models across multiple nodes.
 
 PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for deployment, which can better utilize hardware resources.
 
+.. warning::
+
+    If the host or container defines ``HTTP_PROXY``, ``HTTPS_PROXY``, or ``ALL_PROXY``, the WebSocket
+    registration connection from a Prefill/Decode node to PD Master may be sent through that proxy.
+    A typical error is ``proxy rejected connection: HTTP 403``. The P/D HTTP servers may already be
+    running normally, while PD Master still reports zero registered nodes and returns HTTP 503 from
+    ``/readiness``, ``/health``, and ``/healthz``.
+
+    Before starting the services, add the internal IP addresses or hostnames of every PD Master, Prefill,
+    Decode, and Config Server to ``NO_PROXY``. Also set lowercase ``no_proxy`` for compatibility with
+    different networking libraries.
+
+    .. code-block:: bash
+
+        export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${pd_master_ip},${host},127.0.0.1,localhost"
+        export no_proxy="$NO_PROXY"
+
+    For Kubernetes, include the Service DNS names and suffixes actually used by the deployment, for example
+    ``pd-master.default.svc,.default.svc,.svc``. Configuring only ``localhost`` is insufficient: the Service
+    DNS names or Pod IP addresses used for cross-Pod communication must also bypass the proxy.
+
 3.1 Single PD Master Mode
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -175,7 +196,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
 
     # PD prefill mode for DeepSeek-R1 (DP+EP) on H200
     # Usage: sh pd_prefill.sh <host> <pd_master_ip>
-    # NIXL is used by default. To use NCCL as the data-plane backend, set LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl.
+    # NCCL is the default data-plane backend. Set --pd_trans_mode nixl on both prefill and decode to select NIXL.
     # nvidia-cuda-mps-control -d, run MPS (optional, performance will be much better with mps support, but some GPUs may encounter errors when enabling mps, it's recommended to upgrade to a higher driver version, especially for H-series cards)
 
     export host=$1
@@ -184,6 +205,7 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
+    --pd_trans_mode nccl \
     --tp 8 \
     --dp 8 \
     --host $host \
@@ -199,13 +221,14 @@ PD (Prefill-Decode) disaggregation mode separates prefill and decode stages for 
 
     # PD decode mode for DeepSeek-R1 (DP+EP) on H200
     # Usage: sh pd_decode.sh <host> <pd_master_ip>
-    # NIXL is used by default. To use NCCL as the data-plane backend, set LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl.
+    # NCCL is the default data-plane backend. Set --pd_trans_mode nixl on both prefill and decode to select NIXL.
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
+    --pd_trans_mode nccl \
     --tp 8 \
     --dp 8 \
     --host $host \
@@ -274,6 +297,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
+    --pd_trans_mode nccl \
     --host $host \
     --port 8019 \
     --tp 8 \
@@ -293,6 +317,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
+    --pd_trans_mode nccl \
     --host $host \
     --port 8121 \
     --nccl_port 12322 \

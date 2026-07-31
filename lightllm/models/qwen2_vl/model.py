@@ -63,6 +63,13 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
 
         # <img><image_pad></img> -> <img></img>
         origin_ids = [token for token in origin_ids if token != self.image_token_id]
+
+        # Token-counting paths do not have multimodal cache token ids yet.  Keep
+        # the vision boundary tokens in the text ids and let the caller account
+        # for the image tokens separately.
+        if multimodal_params is None:
+            return origin_ids
+
         # <img></img> --> <img>id,id+1...id+num</img>
         input_ids = []
         image_id = 0

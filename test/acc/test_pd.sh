@@ -19,6 +19,7 @@ export UCX_TLS=rc,cuda,gdr_copy
 LOADWORKER=18 CUDA_VISIBLE_DEVICES=0,1 python -m lightllm.server.api_server \
 --model_dir /mtc/models/qwen3-8b \
 --run_mode "prefill" \
+--pd_trans_mode nccl \
 --tp 2 \
 --dp 1 \
 --host $host \
@@ -40,6 +41,7 @@ $pd_master_ip 为pd_master的ip地址, 测试的时候，自己修改为对应�
 LOADWORKER=18 CUDA_VISIBLE_DEVICES=2,3 python -m lightllm.server.api_server \
 --model_dir /mtc/models/qwen3-8b \
 --run_mode "decode" \
+--pd_trans_mode nccl \
 --tp 2 \
 --dp 1 \
 --host $host \

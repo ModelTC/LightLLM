@@ -1,4 +1,5 @@
 import uuid
+import random
 import threading
 import dataclasses
 import requests
@@ -54,8 +55,24 @@ class InMemoryCache:
         need_update_range = self.token_id_range_start + alloced_token_num >= self.token_id_range_end
         if need_update_range:
             if not self.use_config_server:
-                self.token_id_range_start = 100000000
-                self.token_id_range_end = 2 ** 63 - 1
+                if self.args.run_mode == "prefill":
+                    range_index = self._set_prefill_node_random_token_id_range()
+                    logger.warning(
+                        "Config Server is disabled; selected a time-seeded probabilistic virtual "
+                        f"multimodal token-ID range for node_id={self.args.pd_node_id}: slot={range_index}/"
+                        f"9999, range=[{self.token_id_range_start}, {self.token_id_range_end}). This prevents "
+                        "every Prefill node from starting at token ID 100000000, which could make different images "
+                        "produce identical prompt-cache keys and cause a shared Decode node to reuse incorrect "
+                        "multimodal KV cache entries. The 10000-range random selection greatly reduces that risk, "
+                        f"but does not guarantee global uniqueness: any pair of nodes still has a "
+                        f"{1 / 10000:.4%} probability of choosing the same range, and the "
+                        "aggregate collision probability increases with the number of nodes. Use a shared Config "
+                        "Server when strict range uniqueness is required, or disable the Decode node's dynamic "
+                        "prompt cache as a correctness-first fallback."
+                    )
+                else:
+                    self.token_id_range_start = 100000000
+                    self.token_id_range_end = 2 ** 63 - 1
             else:
                 while True:
                     try:
@@ -244,3 +261,24 @@ class InMemoryCache:
 
     def get_items_embed(self, ids: list[int]) -> list[Optional[bool]]:
         return [self._id_to_records.get(id_).embed if id_ in self._id_to_records else False for id_ in ids]
+
+    def _set_prefill_node_random_token_id_range(self):
+        """Assign a probabilistic virtual token-ID range to this Prefill node.
+
+        When no Config Server is available, different Prefill nodes cannot
+        coordinate globally unique multimodal token IDs. Randomly selecting
+        one of 10000 non-overlapping ranges makes nodes unlikely to generate
+        the same virtual IDs, but it cannot guarantee uniqueness across nodes.
+
+        ``token_id_range_end`` is an exclusive boundary, matching the range
+        exhaustion check in ``_check_and_set_new_id_range``.
+        """
+        available_range_start = 100000000
+        available_range_end = 2 ** 63 - 1
+
+        random.seed(time.time())
+        range_index = random.randint(0, 9999)
+        range_size = (available_range_end - available_range_start) // 10000
+        self.token_id_range_start = available_range_start + range_index * range_size
+        self.token_id_range_end = self.token_id_range_start + range_size
+        return range_index

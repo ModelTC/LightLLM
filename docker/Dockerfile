@@ -28,7 +28,8 @@ RUN chmod 777 -R /tmp && \
       g++ \
       make \
       git \
-      wget && \
+      wget \
+      poppler-utils && \
     rm -rf /var/lib/apt/lists/*
 
 RUN case ${TARGETPLATFORM} in \

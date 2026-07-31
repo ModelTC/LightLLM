@@ -154,6 +154,26 @@ LightLLM 支持以下几种部署模式：
 
 PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以更好地利用硬件资源。
 
+.. warning::
+
+    如果宿主机或容器设置了 ``HTTP_PROXY``、``HTTPS_PROXY`` 或 ``ALL_PROXY``，
+    Prefill/Decode 节点到 PD Master 的 WebSocket 注册连接可能被发送到代理服务器。
+    典型日志为 ``proxy rejected connection: HTTP 403``。此时 P/D 节点自身的
+    HTTP 服务可能已正常启动，但 PD Master 仍显示 0 个已注册节点，
+    ``/readiness``、``/health`` 和 ``/healthz`` 会返回 HTTP 503。
+
+    启动服务前，应将所有 PD Master、Prefill、Decode 和 Config Server 的内网 IP
+    或主机名加入 ``NO_PROXY``，并同时设置小写的 ``no_proxy`` 以兼容不同网络库。
+
+    .. code-block:: bash
+
+        export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${pd_master_ip},${host},127.0.0.1,localhost"
+        export no_proxy="$NO_PROXY"
+
+    Kubernetes 部署还应包含实际使用的 Service DNS 名和 Service 后缀，例如
+    ``pd-master.default.svc,.default.svc,.svc``。不要只配置 ``localhost``：跨 Pod 通信使用的
+    Service DNS 或 Pod IP 也必须绕过代理。
+
 3.1 单 PD Master 模式
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -175,7 +195,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
 
     # PD prefill 模式 for DeepSeek-R1 (DP+EP) on H200
     # 使用方法: sh pd_prefill.sh <host> <pd_master_ip>
-    # 默认使用 NIXL 传输；如需使用 NCCL 数据面，可设置 LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl
+    # 默认使用 NCCL 数据面；如需使用 NIXL，请为 prefill 和 decode 统一设置 --pd_trans_mode nixl
     # nvidia-cuda-mps-control -d，运行MPS(可选, 有mps支持性能会好特别多，但是部分显卡和驱动环境开启mps会容易出现错误，建议升级驱动到较高版本，特别是H系列卡)
 
     export host=$1
@@ -184,6 +204,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
+    --pd_trans_mode nccl \
     --tp 8 \
     --dp 8 \
     --host $host \
@@ -202,13 +223,14 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
 
     # PD decode 模式 for DeepSeek-R1 (DP+EP) on H200
     # 使用方法: sh pd_decode.sh <host> <pd_master_ip>
-    # 默认使用 NIXL 传输；如需使用 NCCL 数据面，可设置 LIGHTLLM_PD_KV_TRANSPORT_BACKEND=nccl
+    # 默认使用 NCCL 数据面；如需使用 NIXL，请为 prefill 和 decode 统一设置 --pd_trans_mode nixl
     export host=$1
     export pd_master_ip=$2
     nvidia-cuda-mps-control -d
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
+    --pd_trans_mode nccl \
     --tp 8 \
     --dp 8 \
     --host $host \
@@ -277,6 +299,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "prefill" \
+    --pd_trans_mode nccl \
     --host $host \
     --port 8019 \
     --tp 8 \
@@ -296,6 +319,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     LOADWORKER=18 python -m lightllm.server.api_server \
     --model_dir /path/DeepSeek-R1 \
     --run_mode "decode" \
+    --pd_trans_mode nccl \
     --host $host \
     --port 8121 \
     --nccl_port 12322 \

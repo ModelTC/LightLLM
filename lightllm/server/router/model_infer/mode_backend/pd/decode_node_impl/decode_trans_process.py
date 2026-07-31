@@ -21,6 +21,7 @@ from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.process_check import start_parent_check_thread
 
 logger = init_logger(__name__)
 
@@ -46,6 +47,7 @@ def _init_env(
     task_out_queue: mp.Queue,
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
+    start_parent_check_thread()
     import lightllm.utils.rpyc_fix_utils as _
 
     import os

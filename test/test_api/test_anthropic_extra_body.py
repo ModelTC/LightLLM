@@ -10,11 +10,13 @@ No server required — calls the pure translation helper directly.
 """
 
 import asyncio
+import base64
 import pytest
 import ujson as json
 
 pytest.importorskip("litellm")
 
+import lightllm.server.api_anthropic as api_anthropic
 from lightllm.server.api_anthropic import _anthropic_to_chat_request, _openai_sse_to_anthropic_events
 
 
@@ -23,6 +25,91 @@ def _base_body():
         "model": "test-model",
         "max_tokens": 32,
         "messages": [{"role": "user", "content": "hi"}],
+    }
+
+
+def _pdf_document_block():
+    return {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": base64.b64encode(b"%PDF-1.4\n").decode("ascii"),
+        },
+    }
+
+
+def _url_pdf_document_block():
+    return {
+        "type": "document",
+        "source": {
+            "type": "url",
+            "url": "https://example.com/document.pdf",
+        },
+    }
+
+
+def _enable_pdf_parsing(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_ANTHROPIC_ENABLE_PDF_PARSING", "1")
+    monkeypatch.setattr(api_anthropic, "_ensure_pdf_tools_installed", lambda: None)
+    monkeypatch.setattr(api_anthropic, "_pdf_page_count", lambda _, deadline=None: 1)
+
+
+def _user_pdf_body():
+    return {
+        "model": "test-model",
+        "max_tokens": 32,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    _pdf_document_block(),
+                    {"type": "text", "text": "What is in the PDF?"},
+                ],
+            }
+        ],
+    }
+
+
+def _tool_result_body(content):
+    return {
+        "model": "test-model",
+        "max_tokens": 32,
+        "tools": [
+            {
+                "name": "Read",
+                "description": "Read a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"file_path": {"type": "string"}},
+                    "required": ["file_path"],
+                },
+            }
+        ],
+        "messages": [
+            {"role": "user", "content": "read a file"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_read",
+                        "name": "Read",
+                        "input": {"file_path": "file"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_read",
+                        "content": content,
+                    }
+                ],
+            },
+        ],
     }
 
 
@@ -75,6 +162,522 @@ def test_non_dict_extra_body_is_ignored():
     body["extra_body"] = "not-a-dict"
     chat_dict, _ = _anthropic_to_chat_request(body)
     assert "extra_body" not in chat_dict
+
+
+def test_pdf_document_block_becomes_text_not_pdf_image_url(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: False)
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text", lambda _, deadline=None: "PDF_SENTINEL_DIRECT")
+    body = _user_pdf_body()
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    content = chat_dict["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert "PDF_SENTINEL_DIRECT" in content[0]["text"]
+    assert "data:application/pdf" not in json.dumps(chat_dict)
+
+
+def test_pdf_document_block_becomes_images_when_vision_enabled(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: True)
+    monkeypatch.setattr(
+        api_anthropic,
+        "_render_pdf_pages_to_png_b64",
+        lambda _, page_count=None, deadline=None: ["UE5HMQ==", "UE5HMg=="],
+    )
+    body = _user_pdf_body()
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    content = chat_dict["messages"][0]["content"]
+    assert [p["type"] for p in content[:2]] == ["image_url", "image_url"]
+    assert [p["image_url"]["url"] for p in content[:2]] == [
+        "data:image/png;base64,UE5HMQ==",
+        "data:image/png;base64,UE5HMg==",
+    ]
+    assert "data:application/pdf" not in json.dumps(chat_dict)
+    assert "PDF extracted text" not in json.dumps(chat_dict)
+
+
+def test_pdf_document_block_with_invalid_base64_fails_cleanly(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    body = {
+        "model": "test-model",
+        "max_tokens": 32,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": "not-base64!",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="Invalid base64 PDF document block"):
+        _anthropic_to_chat_request(body)
+
+
+def test_pdf_document_block_over_size_fails_cleanly(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_PDF_MAX_BYTES", 4)
+
+    with pytest.raises(ValueError, match="PDF document block exceeds configured size limit"):
+        _anthropic_to_chat_request(_user_pdf_body())
+
+
+def test_pdf_request_rejects_too_many_documents_before_page_checks(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_PDF_MAX_DOCUMENTS", 1)
+    monkeypatch.setattr(
+        api_anthropic,
+        "_pdf_page_count",
+        lambda *_: pytest.fail("page count should not run before document-count validation"),
+    )
+    body = _user_pdf_body()
+    body["messages"][0]["content"].insert(0, _pdf_document_block())
+
+    with pytest.raises(ValueError, match="document limit"):
+        _anthropic_to_chat_request(body)
+
+
+def test_pdf_request_enforces_total_byte_limit(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_PDF_MAX_BYTES", 10)
+    monkeypatch.setattr(
+        api_anthropic,
+        "_pdf_page_count",
+        lambda *_: pytest.fail("page count should not run before byte validation"),
+    )
+    first = _pdf_document_block()
+    second = _pdf_document_block()
+    first["source"]["data"] = base64.b64encode(b"123456").decode("ascii")
+    second["source"]["data"] = base64.b64encode(b"abcdef").decode("ascii")
+    body = _user_pdf_body()
+    body["messages"][0]["content"] = [first, second]
+
+    with pytest.raises(ValueError, match="request size limit"):
+        _anthropic_to_chat_request(body)
+
+
+def test_pdf_request_validates_total_pages_before_conversion(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_pdf_page_count", lambda *args: 11)
+    monkeypatch.setattr(
+        api_anthropic,
+        "_pdf_bytes_to_anthropic_parts",
+        lambda *_: pytest.fail("conversion should not run before page validation"),
+    )
+    body = _user_pdf_body()
+    body["messages"][0]["content"].insert(0, _pdf_document_block())
+
+    with pytest.raises(ValueError, match="request page limit"):
+        _anthropic_to_chat_request(body)
+
+
+def test_pdf_request_uses_one_subprocess_deadline(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    deadlines = []
+
+    def fake_page_count(_pdf_bytes, deadline):
+        deadlines.append(deadline)
+        return 1
+
+    def fake_convert(_pdf_bytes, _page_count, deadline):
+        deadlines.append(deadline)
+        return [{"type": "text", "text": "PDF"}]
+
+    monkeypatch.setattr(api_anthropic, "_pdf_page_count", fake_page_count)
+    monkeypatch.setattr(api_anthropic, "_pdf_bytes_to_anthropic_parts", fake_convert)
+    body = _user_pdf_body()
+    body["messages"][0]["content"].insert(0, _pdf_document_block())
+
+    _anthropic_to_chat_request(body)
+
+    assert len(deadlines) == 4
+    assert len(set(deadlines)) == 1
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        [{"type": "text", "text": "1234"}],
+        [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "YWJj"}}],
+    ],
+    ids=["text", "rendered-image"],
+)
+def test_pdf_request_enforces_total_converted_output_limit(monkeypatch, replacement):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_PDF_MAX_CONVERTED_BYTES", 7)
+    calls = {"count": 0}
+
+    def fake_convert(_pdf_bytes, _page_count, _deadline):
+        calls["count"] += 1
+        return replacement
+
+    monkeypatch.setattr(api_anthropic, "_pdf_bytes_to_anthropic_parts", fake_convert)
+    body = _user_pdf_body()
+    body["messages"][0]["content"] = [
+        _pdf_document_block(),
+        _pdf_document_block(),
+        _pdf_document_block(),
+    ]
+
+    with pytest.raises(ValueError, match="request output size limit"):
+        _anthropic_to_chat_request(body)
+
+    assert calls["count"] == 2
+
+
+def test_url_pdf_document_block_is_rejected_explicitly():
+    body = _user_pdf_body()
+    body["messages"][0]["content"][0] = _url_pdf_document_block()
+
+    with pytest.raises(ValueError, match="URL-backed PDF document blocks are not supported"):
+        _anthropic_to_chat_request(body)
+
+
+def test_tool_result_url_pdf_document_block_is_rejected_explicitly():
+    body = _tool_result_body([_url_pdf_document_block()])
+
+    with pytest.raises(ValueError, match="URL-backed PDF document blocks are not supported"):
+        _anthropic_to_chat_request(body)
+
+
+def test_tool_result_pdf_document_block_becomes_text_not_pdf_image_url(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: False)
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text", lambda _, deadline=None: "PDF_SENTINEL_TOOL")
+    body = _tool_result_body([_pdf_document_block()])
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["messages"][2]["role"] == "tool"
+    assert "PDF_SENTINEL_TOOL" in chat_dict["messages"][2]["content"]
+    assert "data:application/pdf" not in json.dumps(chat_dict)
+
+
+def test_tool_result_pdf_document_block_becomes_images_when_vision_enabled(monkeypatch):
+    _enable_pdf_parsing(monkeypatch)
+    monkeypatch.setattr(api_anthropic, "_is_vision_enabled", lambda: True)
+    monkeypatch.setattr(
+        api_anthropic,
+        "_render_pdf_pages_to_png_b64",
+        lambda _, page_count=None, deadline=None: ["UE5HMQ=="],
+    )
+    body = _tool_result_body([_pdf_document_block()])
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["messages"][2]["role"] == "tool"
+    assert chat_dict["messages"][2]["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,UE5HMQ=="},
+        }
+    ]
+    assert "data:application/pdf" not in json.dumps(chat_dict)
+
+
+def test_pdf_vision_render_limits_pages(monkeypatch):
+    captured = []
+
+    api_anthropic._render_pdf_pages_to_png_b64.cache_clear()
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        with open(f"{cmd[-1]}-1.png", "wb") as f:
+            f.write(b"png")
+        return type("Proc", (), {"returncode": 0})()
+
+    monkeypatch.setattr(api_anthropic.shutil, "which", lambda _: "/usr/bin/pdftoppm")
+    monkeypatch.setattr(api_anthropic.subprocess, "run", fake_run)
+
+    assert api_anthropic._render_pdf_pages_to_png_b64(b"%PDF-1.4\n") == ("cG5n",)
+    assert len(captured) == 1
+    for cmd in captured:
+        assert "-l" in cmd
+        assert cmd[cmd.index("-f") + 1] == "1"
+        assert cmd[cmd.index("-l") + 1] == str(api_anthropic._PDF_MAX_RENDER_PAGES)
+        assert "-scale-to" in cmd
+        assert "-scale-to-x" not in cmd
+        assert "-scale-to-y" not in cmd
+        assert str(api_anthropic._PDF_MAX_RENDER_DIMENSION) in cmd
+
+
+def test_pdf_vision_reads_zero_padded_page_names(monkeypatch):
+    api_anthropic._render_pdf_pages_to_png_b64.cache_clear()
+
+    def fake_run(cmd, **kwargs):
+        with open(f"{cmd[-1]}-01.png", "wb") as f:
+            f.write(b"one")
+        with open(f"{cmd[-1]}-02.png", "wb") as f:
+            f.write(b"two")
+        return type("Proc", (), {"returncode": 0})()
+
+    monkeypatch.setattr(api_anthropic.shutil, "which", lambda _: "/usr/bin/pdftoppm")
+    monkeypatch.setattr(api_anthropic.subprocess, "run", fake_run)
+
+    assert api_anthropic._render_pdf_pages_to_png_b64(b"%PDF-padded\n", page_count=2) == (
+        "b25l",
+        "dHdv",
+    )
+
+
+def test_pdf_vision_rejects_large_rendered_page(monkeypatch):
+    api_anthropic._render_pdf_pages_to_png_b64.cache_clear()
+    monkeypatch.setattr(api_anthropic, "_PDF_MAX_RENDER_PAGE_BYTES", 2)
+
+    def fake_run(cmd, **kwargs):
+        with open(f"{cmd[-1]}-1.png", "wb") as f:
+            f.write(b"png")
+        return type("Proc", (), {"returncode": 0})()
+
+    monkeypatch.setattr(api_anthropic.shutil, "which", lambda _: "/usr/bin/pdftoppm")
+    monkeypatch.setattr(api_anthropic.subprocess, "run", fake_run)
+
+    assert api_anthropic._render_pdf_pages_to_png_b64(b"%PDF-1.4\n") == ()
+
+
+def test_pdf_text_extraction_limits_output(monkeypatch):
+    class FakeStdout:
+        def fileno(self):
+            return 42
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        stdout = FakeStdout()
+        returncode = -9
+        killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, **kwargs):
+            pass
+
+    process = FakeProcess()
+    monkeypatch.setattr(api_anthropic, "_PDF_MAX_TEXT_BYTES", 4)
+    monkeypatch.setattr(api_anthropic.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(api_anthropic.select, "select", lambda *args: ([process.stdout], [], []))
+    monkeypatch.setattr(api_anthropic.os, "read", lambda _fd, size: b"x" * size)
+
+    assert api_anthropic._extract_pdf_text_with_pdftotext("/usr/bin/pdftotext", b"%PDF-1.4\n") == ""
+    assert process.killed
+
+
+def test_pdf_text_extraction_times_out_while_stdout_is_open(monkeypatch):
+    class FakeStdout:
+        def fileno(self):
+            return 42
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        stdout = FakeStdout()
+        returncode = -9
+        killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, **kwargs):
+            pass
+
+    process = FakeProcess()
+    timeouts = []
+    monkeypatch.setattr(api_anthropic.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def fake_select(*args):
+        timeouts.append(args[-1])
+        return [], [], []
+
+    monkeypatch.setattr(api_anthropic.select, "select", fake_select)
+
+    assert api_anthropic._extract_pdf_text_with_pdftotext("/usr/bin/pdftotext", b"%PDF-1.4\n") == ""
+    assert process.killed
+    assert 0 < timeouts[0] <= api_anthropic._PDF_SUBPROCESS_TIMEOUT_SECONDS
+
+
+def test_pdf_text_extraction_does_not_start_after_request_deadline(monkeypatch):
+    monkeypatch.setattr(
+        api_anthropic.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("expired request must not start pdftotext"),
+    )
+
+    assert api_anthropic._extract_pdf_text_with_pdftotext("/usr/bin/pdftotext", b"%PDF-1.4\n", deadline=0) == ""
+
+
+def test_pdf_text_extraction_is_cached(monkeypatch):
+    calls = {"count": 0}
+
+    api_anthropic._extract_pdf_text.cache_clear()
+
+    def fake_extract(_pdftotext, _pdf_bytes, _deadline=None):
+        calls["count"] += 1
+        return "PDF_SENTINEL"
+
+    monkeypatch.setattr(api_anthropic.shutil, "which", lambda _: "/usr/bin/pdftotext")
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text_with_pdftotext", fake_extract)
+
+    assert api_anthropic._extract_pdf_text(b"%PDF-1.4\n") == "PDF_SENTINEL"
+    assert api_anthropic._extract_pdf_text(b"%PDF-1.4\n") == "PDF_SENTINEL"
+    assert calls["count"] == 1
+
+
+def test_pdf_cache_evicts_by_memory_budget(monkeypatch):
+    calls = {"count": 0}
+
+    api_anthropic._extract_pdf_text.cache_clear()
+    monkeypatch.setattr(api_anthropic, "_PDF_CACHE_MAX_BYTES", 8)
+
+    def fake_extract(_pdftotext, pdf_bytes, _deadline=None):
+        calls["count"] += 1
+        return pdf_bytes.decode("ascii")
+
+    monkeypatch.setattr(api_anthropic.shutil, "which", lambda _: "/usr/bin/pdftotext")
+    monkeypatch.setattr(api_anthropic, "_extract_pdf_text_with_pdftotext", fake_extract)
+
+    assert api_anthropic._extract_pdf_text(b"aaaa") == "aaaa"
+    assert api_anthropic._extract_pdf_text(b"bbbbbbbb") == "bbbbbbbb"
+    assert api_anthropic._extract_pdf_text(b"aaaa") == "aaaa"
+    assert calls["count"] == 3
+
+
+def test_pdf_cache_does_not_store_empty_results():
+    api_anthropic._clear_pdf_cache()
+
+    api_anthropic._pdf_cache_set(("text", b"a", 1), "")
+    api_anthropic._pdf_cache_set(("vision", b"b", 1), ())
+
+    assert not api_anthropic._PDF_CACHE
+    assert api_anthropic._PDF_CACHE_BYTES == 0
+
+
+def test_anthropic_messages_impl_runs_translation_in_thread(monkeypatch):
+    called = {}
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        called["to_thread"] = True
+        return fn(*args, **kwargs)
+
+    def fake_translate(_body):
+        return {"model": "test-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}, {}
+
+    async def fake_chat_completions_impl(_request, _raw_request):
+        from fastapi.responses import Response
+
+        return Response("ok")
+
+    class FakeRequest:
+        async def json(self):
+            return {"model": "test-model", "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]}
+
+    import lightllm.server.api_openai as api_openai
+
+    monkeypatch.setattr(api_anthropic.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(api_anthropic, "_anthropic_to_chat_request", fake_translate)
+    monkeypatch.setattr(api_openai, "chat_completions_impl", fake_chat_completions_impl)
+
+    response = asyncio.run(api_anthropic.anthropic_messages_impl(FakeRequest()))
+
+    assert called["to_thread"]
+    assert response.body == b"ok"
+
+
+def test_tool_result_image_blocks_survive_as_image_url_parts():
+    body = _tool_result_body(
+        [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "YWJjZA==",
+                },
+            }
+        ]
+    )
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["messages"][2]["role"] == "tool"
+    assert chat_dict["messages"][2]["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,YWJjZA=="},
+        }
+    ]
+
+
+def test_tool_result_url_image_block_survives_as_image_url_part():
+    body = _tool_result_body(
+        [
+            {
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/image.png",
+                },
+            }
+        ]
+    )
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["messages"][2]["role"] == "tool"
+    assert chat_dict["messages"][2]["content"] == [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/image.png"},
+        }
+    ]
+
+
+def test_tool_result_textual_image_data_url_stays_text():
+    data_url = "data:image/png;base64,YWJjZA=="
+    body = _tool_result_body(data_url)
+
+    chat_dict, _ = _anthropic_to_chat_request(body)
+
+    assert chat_dict["messages"][2]["role"] == "tool"
+    assert chat_dict["messages"][2]["content"] == data_url
+
+
+def test_pdf_shaped_tool_schema_example_is_not_rewritten(monkeypatch):
+    body = _base_body()
+    body["tools"] = [
+        {
+            "name": "inspect",
+            "description": "inspect",
+            "input_schema": {
+                "type": "object",
+                "examples": [_pdf_document_block()],
+            },
+        }
+    ]
+    original = json.loads(json.dumps(body))
+    monkeypatch.setattr(
+        api_anthropic,
+        "_ensure_pdf_parsing_supported",
+        lambda: pytest.fail("tool schemas are not message content"),
+    )
+
+    api_anthropic._replace_anthropic_pdf_documents(body)
+
+    assert body == original
 
 
 # Helpers for streaming test

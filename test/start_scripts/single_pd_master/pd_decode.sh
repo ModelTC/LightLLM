@@ -13,6 +13,7 @@ nvidia-cuda-mps-control -d
 LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
 --run_mode "decode" \
+--pd_trans_mode nccl \
 --tp 8 \
 --dp 8 \
 --host $host \

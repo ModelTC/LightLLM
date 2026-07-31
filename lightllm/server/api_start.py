@@ -1,14 +1,10 @@
 import multiprocessing as mp
 import os
-import sys
-import time
 import uuid
 import subprocess
-import signal
 import math
 from lightllm.utils.start_utils import (
     process_manager,
-    kill_recursive,
     _get_hypercorn_config_args,
 )
 from .metrics.manager import start_metric_manager
@@ -20,7 +16,6 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
-from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
@@ -31,73 +26,11 @@ from lightllm.utils.config_utils import (
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
     auto_set_fused_shared_experts,
+    auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
-
-
-def setup_signal_handlers(http_server_process, process_manager):
-    def signal_handler(sig, frame):
-        if sig == signal.SIGINT:
-            logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
-            if http_server_process:
-                kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been forcefully terminated.")
-            sys.exit(0)
-        elif sig == signal.SIGTERM:
-            logger.info("Received SIGTERM, shutting down gracefully...")
-            if http_server_process and http_server_process.poll() is None:
-                http_server_process.send_signal(signal.SIGTERM)
-
-                start_time = time.time()
-                while (time.time() - start_time) < 60:
-                    if not is_process_active(http_server_process.pid):
-                        logger.info("httpserver exit")
-                        break
-                    time.sleep(1)
-
-                if time.time() - start_time < 60:
-                    logger.info("HTTP server has exited gracefully")
-                else:
-                    logger.warning("HTTP server did not exit in time, killing it...")
-                    kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
-            sys.exit(0)
-        elif sig == signal.SIGHUP:
-            logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
-            if http_server_process and http_server_process.poll() is None:
-                http_server_process.send_signal(signal.SIGTERM)
-
-                start_time = time.time()
-                while (time.time() - start_time) < 60:
-                    if not is_process_active(http_server_process.pid):
-                        logger.info("httpserver exit")
-                        break
-                    time.sleep(1)
-
-                if time.time() - start_time < 60:
-                    logger.info("HTTP server has exited gracefully")
-                else:
-                    logger.warning("HTTP server did not exit in time, killing it...")
-                    kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully due to terminal closure.")
-            sys.exit(0)
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGHUP, signal_handler)
-
-    logger.info(f"start process pid {os.getpid()}")
-    if http_server_process:
-        logger.info(f"http server pid {http_server_process.pid}")
-    return
 
 
 def _set_envs_and_config(args: StartArgs):
@@ -343,21 +276,7 @@ def _launch_subprocesses(args: StartArgs):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
-    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
-    if args.tool_call_parser is None:
-        from lightllm.utils.config_utils import get_tool_call_parser_for_model
-
-        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
-        if args.tool_call_parser:
-            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
-
-    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
-    if args.reasoning_parser is None:
-        from lightllm.utils.config_utils import get_reasoning_parser_for_model
-
-        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
-        if args.reasoning_parser:
-            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+    auto_set_response_parsers(args)
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
@@ -391,7 +310,9 @@ def _launch_subprocesses(args: StartArgs):
     auto_configure_allreduce_flags_from_args(args)
 
     # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
-    ports_to_check = [args.port, args.multinode_httpmanager_port, args.multinode_router_gloo_port]
+    ports_to_check = [args.port]
+    if args.dp == 1 and args.nnodes > 1:
+        ports_to_check.extend([args.multinode_httpmanager_port, args.multinode_router_gloo_port])
     if args.node_rank == 0 and args.nccl_port is not None:
         ports_to_check.append(args.nccl_port)
     validate_ports(ports_to_check)
@@ -509,9 +430,8 @@ def normal_or_p_d_start(args: StartArgs):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
-    return
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
 
 
 def pd_master_start(args: StartArgs):
@@ -521,6 +441,7 @@ def pd_master_start(args: StartArgs):
         return
 
     auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
@@ -569,8 +490,8 @@ def pd_master_start(args: StartArgs):
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
 
 
 def visual_only_start(args):
@@ -614,15 +535,8 @@ def visual_only_start(args):
             (args,),
         ],
     )
-    setup_signal_handlers(None, process_manager)
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down...")
-        process_manager.terminate_all_processes()
-        logger.info("All processes have been terminated gracefully.")
-        sys.exit(0)
+    process_manager.setup_signal_handlers()
+    process_manager.supervise_processes()
 
 
 def config_server_start(args):
@@ -660,5 +574,5 @@ def config_server_start(args):
     ]
 
     http_server_process = subprocess.Popen(command)
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)

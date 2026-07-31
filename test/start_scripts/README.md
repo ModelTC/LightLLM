@@ -96,12 +96,13 @@ sh multi_pd_master/pd_master_2.sh <host> <config_server_host>
 ### Environment Variables
 
 - `LOADWORKER`: Model loading thread count, recommended 8-18
-- `LIGHTLLM_PD_KV_TRANSPORT_BACKEND`: KV transporter backend for PD disaggregation, `nixl` by default; set to `nccl` to use the NCCL data plane.
 - `CUDA_VISIBLE_DEVICES`: Specify GPU devices to use
 
 ### Important Parameters
 
 - `--model_dir`: Model file path
+- `--pd_master_mode`: PD master topology mode; use `elastic` (default) for dynamically changing nodes or a fixed topology such as `2p4d` for exactly 2 Prefill and 4 Decode nodes
+- `--pd_trans_mode`: KV transporter backend for PD disaggregation; choose `nccl` (default) or `nixl`, and use the same value for prefill and decode services
 - `--tp`: Tensor parallelism degree
 - `--dp`: Data parallelism degree
 - `--enable_ep_mode`: enable expert parallel 
