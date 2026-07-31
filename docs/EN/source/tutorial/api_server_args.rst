@@ -90,10 +90,6 @@ PD disaggregation Mode Parameters
     the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
     ``HEALTH_TIMEOUT`` consecutive seconds.
 
-.. option:: --pd_decode_rpyc_port
-
-    Port used by decode nodes for kv move manager rpyc server in PD mode, default is ``42000``
-
 .. option:: --config_server_host
 
     Host address in configuration server mode

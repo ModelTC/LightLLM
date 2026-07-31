@@ -354,7 +354,7 @@ Supports multiple PD Master nodes, providing better load balancing and high avai
 
     # DeepSeek-R1 Performance Testing
     cd test
-    python benchmark_client.py \
+    python benchmark/service/benchmark_client.py \
     --num_clients 100 \
     --input_num 2000 \
     --tokenizer_path /path/DeepSeek-R1/ \

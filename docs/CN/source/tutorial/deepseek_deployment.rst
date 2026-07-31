@@ -356,7 +356,7 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
 
     # DeepSeek-R1 性能测试
     cd test
-    python benchmark_client.py \
+    python benchmark/service/benchmark_client.py \
     --num_clients 100 \
     --input_num 2000 \
     --tokenizer_path /path/DeepSeek-R1/ \

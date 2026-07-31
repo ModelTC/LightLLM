@@ -87,10 +87,6 @@ PD 分离模式参数
     推理进度健康检查：当仍有在途请求，且整个 PD Master 连续 ``HEALTH_TIMEOUT`` 秒
     没有任何请求成功返回 token 时，接口将返回 HTTP 503。
 
-.. option:: --pd_decode_rpyc_port
-
-    PD 模式下解码节点用于 kv move manager rpyc 服务器的端口，默认为 ``42000``
-
 .. option:: --config_server_host
 
     配置服务器模式下的主机地址
