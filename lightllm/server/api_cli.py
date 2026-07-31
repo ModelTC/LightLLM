@@ -38,7 +38,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--hypercorn_config",
         type=str,
         default=None,
-        help="Hypercorn configuration reference (TOML path, file:path.py, or python:module).",
+        help="Path to a Hypercorn TOML configuration file. See test/hypercorn_config.toml for an example.",
     )
     parser.add_argument(
         "--zmq_mode",

@@ -3,10 +3,7 @@ import os
 import uuid
 import subprocess
 import math
-from lightllm.utils.start_utils import (
-    process_manager,
-    _get_hypercorn_config_args,
-)
+from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
@@ -402,7 +399,7 @@ def normal_or_p_d_start(args: StartArgs):
     # 启动 Hypercorn
     command = [
         "hypercorn",
-        *_get_hypercorn_config_args(args),
+        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
@@ -467,7 +464,7 @@ def pd_master_start(args: StartArgs):
 
     command = [
         "hypercorn",
-        *_get_hypercorn_config_args(args),
+        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
         "--workers",
         "1",
         "--bind",
@@ -557,7 +554,7 @@ def config_server_start(args):
 
     command = [
         "hypercorn",
-        *_get_hypercorn_config_args(args),
+        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
         "--workers",
         "1",
         "--bind",

@@ -6,16 +6,9 @@ import time
 import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.process_check import is_process_active
 
 logger = init_logger(__name__)
-
-
-def _get_hypercorn_config_args(args: StartArgs):
-    if args.hypercorn_config is None:
-        return []
-    return ["--config", args.hypercorn_config]
 
 
 class SubmoduleManager:
