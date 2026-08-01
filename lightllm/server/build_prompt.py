@@ -79,11 +79,36 @@ def _alias_reasoning_to_reasoning_content(messages: list) -> None:
             msg["reasoning_content"] = reasoning
 
 
+def _normalize_openai_multimodal_content(messages: list) -> None:
+    # OpenAI clients send content parts as type=image_url / audio_url. Some HF
+    # chat templates (e.g. Gemma3) only emit media placeholders for type=image /
+    # type=audio. Convert placeholders before apply_chat_template; media bytes
+    # are already extracted into MultimodalParams separately.
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        normalized = []
+        for part in content:
+            if not isinstance(part, dict):
+                normalized.append(part)
+                continue
+            ptype = part.get("type")
+            if ptype == "image_url":
+                normalized.append({"type": "image"})
+            elif ptype == "audio_url":
+                normalized.append({"type": "audio"})
+            else:
+                normalized.append(part)
+        msg["content"] = normalized
+
+
 async def build_prompt(request, tools) -> str:
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     _normalize_tool_call_arguments(messages)
     _alias_reasoning_to_reasoning_content(messages)
+    _normalize_openai_multimodal_content(messages)
 
     kwargs = {"conversation": messages}
     if request.character_settings:

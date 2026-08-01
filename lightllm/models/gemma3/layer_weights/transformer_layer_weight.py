@@ -82,8 +82,16 @@ class Gemma3TransformerLayerWeight(LlamaTransformerLayerWeight):
         super()._init_qkv()
 
     def _init_norm(self):
-        super()._init_norm()
-
+        self.att_norm_weight_ = NoTpGEMMANormWeight(
+            dim=self.n_embed,
+            weight_name=self._att_norm_weight_name,
+            data_type=self.data_type_,
+        )
+        self.ffn_norm_weight_ = NoTpGEMMANormWeight(
+            dim=self.n_embed,
+            weight_name=self._ffn_norm_weight_name,
+            data_type=self.data_type_,
+        )
         self.k_norm_weight_ = NoTpGEMMANormWeight(
             dim=self.head_dim, weight_name=self._k_norm_weight_name, data_type=self.data_type_
         )

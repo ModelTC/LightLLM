@@ -9,6 +9,60 @@ from lightllm.common.triton_utils.autotuner import autotune
 logger = init_logger(__name__)
 
 
+def build_mrope_flat_idx(mrope_section, head_dim: int, device) -> torch.Tensor:
+    if isinstance(mrope_section, torch.Tensor):
+        section = [int(x) for x in mrope_section.tolist()]
+    else:
+        section = [int(x) for x in mrope_section]
+    half = head_dim // 2
+    idx = []
+    start = 0
+    for i, sf in enumerate([s * 2 for s in section]):
+        plane = i % 3
+        for d in range(start, start + sf):
+            idx.append(plane * half + (d % half))
+        start += sf
+    return torch.tensor(idx, device=device, dtype=torch.int64)
+
+
+@torch.no_grad()
+def mrope_torch_ascend(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    mrope_section,
+    is_interleaved: bool = False,
+    partial_rotary_factor: float = 1.0,
+    flat_idx: Optional[torch.Tensor] = None,
+) -> None:
+    assert not is_interleaved, "interleaved mrope torch path is not implemented"
+    assert partial_rotary_factor == 1.0, "partial_rotary_factor != 1.0 is not supported in mrope_torch"
+    if isinstance(mrope_section, torch.Tensor):
+        section = [int(x) for x in mrope_section.tolist()]
+    else:
+        section = [int(x) for x in mrope_section]
+    head_dim = q.shape[-1]
+    half = head_dim // 2
+    assert cos.shape[-1] == half, f"expected cos last dim {half}, got {cos.shape[-1]}"
+
+    if flat_idx is None:
+        flat_idx = build_mrope_flat_idx(section, head_dim, q.device)
+    tokens = cos.shape[1]
+    stacked_c = cos.permute(1, 0, 2).reshape(tokens, 3 * half)
+    stacked_s = sin.permute(1, 0, 2).reshape(tokens, 3 * half)
+    cos_emb = stacked_c.index_select(1, flat_idx)
+    sin_emb = stacked_s.index_select(1, flat_idx)
+    import torch_npu
+
+    q4 = q.unsqueeze(0).contiguous()
+    k4 = k.unsqueeze(0).contiguous()
+    c4 = cos_emb.unsqueeze(0).unsqueeze(2).contiguous()
+    s4 = sin_emb.unsqueeze(0).unsqueeze(2).contiguous()
+    q.copy_(torch_npu.npu_rotary_mul(q4, c4, s4, rotary_mode="half").squeeze(0))
+    k.copy_(torch_npu.npu_rotary_mul(k4, c4, s4, rotary_mode="half").squeeze(0))
+
+
 @triton.jit
 def _mrope_triton_fused_kernel(
     q,

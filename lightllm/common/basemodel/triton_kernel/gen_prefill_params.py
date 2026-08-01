@@ -83,7 +83,32 @@ def _gen_prefill_position(
 
 
 @torch.no_grad()
+def gen_prefill_params_npu_torch(input_token_num: int, b_ready_cache_len: torch.Tensor, b_seq_len: torch.Tensor):
+    assert b_ready_cache_len.shape[0] == b_seq_len.shape[0]
+    device = b_ready_cache_len.device
+    dtype = torch.int32
+    b_q_seq_len = (b_seq_len - b_ready_cache_len).to(dtype)
+    b_kv_seq_len = b_seq_len
+
+    b1_cu_q_seq_len = torch.empty((b_q_seq_len.shape[0] + 1,), dtype=dtype, device=device)
+    b1_cu_kv_seq_len = torch.empty((b_kv_seq_len.shape[0] + 1,), dtype=dtype, device=device)
+    b1_cu_q_seq_len[0] = 0
+    b1_cu_kv_seq_len[0] = 0
+    b1_cu_q_seq_len[1:] = torch.cumsum(b_q_seq_len, dim=0)
+    b1_cu_kv_seq_len[1:] = torch.cumsum(b_kv_seq_len.to(dtype), dim=0)
+
+    global_idx = torch.arange(input_token_num, device=device, dtype=dtype)
+    batch_id = torch.searchsorted(b1_cu_q_seq_len[1:], global_idx, right=True)
+    local_offset = global_idx - b1_cu_q_seq_len[:-1][batch_id]
+    position_ids = b_ready_cache_len.to(dtype)[batch_id] + local_offset
+    return b_q_seq_len, b1_cu_q_seq_len, b_kv_seq_len, b1_cu_kv_seq_len, position_ids
+
+
+@torch.no_grad()
 def gen_prefill_params(input_token_num: int, b_ready_cache_len: torch.Tensor, b_seq_len: torch.Tensor):
+    if b_ready_cache_len.device.type == "npu":
+        return gen_prefill_params_npu_torch(input_token_num, b_ready_cache_len, b_seq_len)
+
     batch_size = b_ready_cache_len.shape[0]
     position_ids = torch.empty((input_token_num,), dtype=torch.int32, device=b_ready_cache_len.device)
     assert b_ready_cache_len.shape[0] == b_seq_len.shape[0]

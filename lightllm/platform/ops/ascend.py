@@ -140,6 +140,9 @@ def rms_norm(
 
     import torch_npu
 
+    # Gemma3 fp32 norm + bf16 weight
+    if weight.dtype != input.dtype:
+        weight = weight.to(dtype=input.dtype)
     _out = torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]
     out.copy_(_out)
     return out
@@ -173,6 +176,11 @@ def qk_rms_norm(
     head_dim_k = w_k.shape[0]
     flat_q = q.reshape(-1, head_dim_q)
     flat_k = k.reshape(-1, head_dim_k)
+    # Gemma3 fp32 norm + bf16 weight
+    if w_q.dtype != flat_q.dtype:
+        w_q = w_q.to(dtype=flat_q.dtype)
+    if w_k.dtype != flat_k.dtype:
+        w_k = w_k.to(dtype=flat_k.dtype)
     _q = torch_npu.npu_rms_norm(flat_q, w_q, epsilon=eps)[0]
     _k = torch_npu.npu_rms_norm(flat_k, w_k, epsilon=eps)[0]
     _q = _q.view(q.shape)
