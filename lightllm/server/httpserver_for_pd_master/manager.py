@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import os
 import uvloop
 import time
 import datetime
@@ -47,6 +48,7 @@ class HttpServerManagerForPDMaster:
 
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
+        self.log_pd_routes = os.getenv("LIGHTLLM_PD_ROUTE_LOG", "0").lower() in ("1", "true", "yes")
         return
 
     def get_real_supported_max_req_total_len(self):
@@ -153,6 +155,15 @@ class HttpServerManagerForPDMaster:
             if not p_node or not d_node:
                 logger.error(f"{origin_group_request_id}: No p_node or d_node found")
                 raise Exception(f"{origin_group_request_id}: No p_node or d_node found")
+
+            if self.log_pd_routes:
+                logger.info(
+                    "pd_route request_id=%s input_tokens=%s p_node=%s d_node=%s",
+                    origin_group_request_id,
+                    input_token_num,
+                    p_node.client_ip_port,
+                    d_node.client_ip_port,
+                )
 
             for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)

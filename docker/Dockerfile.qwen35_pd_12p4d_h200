@@ -1,0 +1,32 @@
+ARG BASE_IMAGE=registry.cn-sh-02.sensecore.cn/ccr-ams-public/crafted/lightllm@sha256:feffc50ae1658a44a284e7d515ce28959aecbeb23e09e54444e58d422582e6c1
+FROM ${BASE_IMAGE}
+
+ARG SOURCE_REVISION=unknown
+
+USER root
+
+COPY start_pd_12p4d.sh /opt/lightllm-launch/start_pd_12p4d.sh
+RUN chmod 0755 /opt/lightllm-launch/start_pd_12p4d.sh
+
+COPY lightllm/server/router/req_queue/dp_balancer/__init__.py \
+    /lightllm/lightllm/server/router/req_queue/dp_balancer/__init__.py
+COPY lightllm/server/router/req_queue/dp_balancer/bs.py \
+    /lightllm/lightllm/server/router/req_queue/dp_balancer/bs.py
+COPY lightllm/server/httpserver_for_pd_master/manager.py \
+    /lightllm/lightllm/server/httpserver_for_pd_master/manager.py
+COPY lightllm/server/httpserver_for_pd_master/pd_selector/pd_selector.py \
+    /lightllm/lightllm/server/httpserver_for_pd_master/pd_selector/pd_selector.py
+
+ENV LIGHTLLM_TRITON_AUTOTUNE_LEVEL=0 \
+    LIGHTLLM_FP8_GEMM=sgl \
+    LOADWORKER=18
+
+LABEL org.opencontainers.image.title="LightLLM Qwen3.5-27B H200 12P+4D" \
+      org.opencontainers.image.base.digest="sha256:feffc50ae1658a44a284e7d515ce28959aecbeb23e09e54444e58d422582e6c1" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      lightllm.pd.topology="12p-4d" \
+      lightllm.pd.prefill-services="tp8-dp4,tp4-dp2" \
+      lightllm.pd.decode-services="tp4-dp1" \
+      lightllm.pd.balance-observability="enabled"
+
+WORKDIR /lightllm

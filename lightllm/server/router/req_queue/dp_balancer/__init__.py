@@ -8,6 +8,10 @@ def get_dp_balancer(args, dp_size_in_node: int, inner_queues: List[BaseQueue]):
     if args.dp_balancer == "round_robin":
         return RoundRobinDpBalancer(dp_size_in_node, inner_queues)
     elif args.dp_balancer == "bs_balancer":
-        return DpBsBalancer(dp_size_in_node, inner_queues)
+        return DpBsBalancer(
+            dp_size_in_node,
+            inner_queues,
+            balance_by_input_tokens=args.run_mode == "prefill",
+        )
     else:
         raise ValueError(f"Invalid dp balancer: {args.dp_balancer}")

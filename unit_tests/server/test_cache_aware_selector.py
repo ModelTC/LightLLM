@@ -55,6 +55,23 @@ def test_distinct_conversations_spread():
     assert counts[0] > 20 and counts[1] > 20
 
 
+def test_load_sampling_is_weighted_by_dp_capacity(monkeypatch):
+    selector, p_nodes = _make_selector(p_usages=(0.25, 0.5))
+    p_nodes[0].start_args = {"dp": 4}
+    p_nodes[1].start_args = {"dp": 2}
+    captured = {}
+
+    def capture_choices(nodes, weights):
+        captured["nodes"] = nodes
+        captured["weights"] = weights
+        return [nodes[0]]
+
+    monkeypatch.setattr(random, "choices", capture_choices)
+    assert selector._sample_by_load(p_nodes) is p_nodes[0]
+    assert captured["nodes"] == p_nodes
+    assert captured["weights"] == pytest.approx([3.0, 1.0])
+
+
 def test_overloaded_node_falls_back():
     random.seed(0)
     selector, p_nodes = _make_selector()

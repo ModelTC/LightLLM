@@ -21,6 +21,24 @@ class PDSelector:
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj]:
         raise NotImplementedError("Subclass must implement this method")
 
+    @staticmethod
+    def _load_weight(node: PD_Client_Obj) -> float:
+        """Scale normalized free capacity by the service's number of DP groups."""
+        start_args = node.start_args
+        if isinstance(start_args, dict):
+            dp = start_args.get("dp", 1)
+        else:
+            dp = getattr(start_args, "dp", 1)
+        try:
+            dp_capacity = max(float(dp), 1.0)
+        except (TypeError, ValueError):
+            dp_capacity = 1.0
+        free_rate = max(1.0 - node.run_status.total_token_usage_rate, 0.02)
+        return dp_capacity * free_rate
+
+    def _sample_by_load(self, nodes: List[PD_Client_Obj]) -> PD_Client_Obj:
+        return random.choices(nodes, weights=[self._load_weight(node) for node in nodes])[0]
+
 
 class RandomSelector(PDSelector):
     """随机选择器"""
@@ -65,7 +83,7 @@ class AdaptiveLoadSelector(PDSelector):
         return p_node, d_node
 
     def _importance_sampling(self, nodes: List[PD_Client_Obj]):
-        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
+        return self._sample_by_load(nodes)
 
 
 class CacheAwareSelector(PDSelector):
@@ -124,6 +142,3 @@ class CacheAwareSelector(PDSelector):
             self.prefix_to_node.move_to_end(h)
         while len(self.prefix_to_node) > self.MAX_ENTRIES:
             self.prefix_to_node.popitem(last=False)
-
-    def _sample_by_load(self, nodes: List[PD_Client_Obj]) -> PD_Client_Obj:
-        return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
