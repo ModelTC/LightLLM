@@ -157,6 +157,15 @@ def auto_configure_allreduce_flags_from_args(args: "StartArgs") -> None:
 
     会就地修改 ``args.disable_flashinfer_allreduce`` / ``args.disable_symm_mem_allreduce``。
     """
+    if args.enable_rl:
+        # Keep rollout replicas on one deterministic communication path.  A
+        # capability probe can fail independently on different replicas and
+        # otherwise leave an RL job mixing custom all-reduce with NCCL.
+        logger.info("RL mode: force TP all-reduce to NCCL.")
+        args.disable_flashinfer_allreduce = True
+        args.disable_symm_mem_allreduce = True
+        return
+
     if not _should_run_allreduce_capability_check(args):
         return
 
