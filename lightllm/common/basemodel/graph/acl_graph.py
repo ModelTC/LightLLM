@@ -1,6 +1,5 @@
 import torch
 from dataclasses import dataclass, field
-from lightllm.common.basemodel.attention.paged_fa3.graph_utils import update_attn_params
 from lightllm.common.basemodel.batch_objs import ModelOutput
 from lightllm.common.basemodel.graph.base.decode_graph import DecodeGraph, register_decode_graph
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -17,31 +16,14 @@ class AclGraph(DecodeGraph):
         init_attn_params(self.graph_batch_sizes)
         self.update_stream = torch.npu.Stream()
 
-    def _prefetch_next_attn_params(
-        self,
-        batch_size: int,
-        b1_cu_q_seq_len_cpu,
-        b_cu_kv_seq_len_cpu,
-    ) -> None:
-        compute_stream = torch.npu.current_stream()
-        self.update_stream.wait_stream(compute_stream)
-        update_attn_params(
-            batch_size,
-            b1_cu_q_seq_len_cpu,
-            b_cu_kv_seq_len_cpu.add_(1),
-            self.update_stream,
-        )
-
     def _replay(
         self,
         infer_state: InferStateInfo,
         b1_cu_q_seq_len_cpu: list[int],
         b_cu_kv_seq_len_cpu: list[int],
     ) -> ModelOutput:
-        graph_output = super()._replay(infer_state, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
-        batch_size = infer_state.input_ids.shape[0]
-        self._prefetch_next_attn_params(batch_size, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
-        return graph_output
+        torch.npu.current_stream().wait_stream(self.update_stream)
+        return super()._replay(infer_state, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
 
     def _replay_overlap(
         self,
@@ -50,11 +32,8 @@ class AclGraph(DecodeGraph):
         b1_cu_q_seq_len_cpu: list[int],
         b_cu_kv_seq_len_cpu: list[int],
     ):
-        graph_model_output, graph_model_output1 = super()._replay_overlap(
-            infer_state, infer_state1, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
-        batch_size = infer_state.input_ids.shape[0]
-        self._prefetch_next_attn_params(batch_size, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
-        return graph_model_output, graph_model_output1
+        torch.npu.current_stream().wait_stream(self.update_stream)
+        return super()._replay_overlap(infer_state, infer_state1, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
 
     def replay(
         self,

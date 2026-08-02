@@ -21,7 +21,7 @@ from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.graph import DecodeGraph
 from lightllm.common.basemodel.attention.paged_fa3.graph_utils import (
-    maybe_sync_attn_params,
+    sync_attn_params,
     new_seq_len_ref_buffers,
 )
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
@@ -594,7 +594,7 @@ class TpPartBaseModel:
             b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
             if self.platform_backend.name == "ascend":
                 if not self.platform_backend.graph.is_capturing():
-                    maybe_sync_attn_params(
+                    sync_attn_params(
                         batch_size=batch_size,
                         b1_cu_q_seq_len_cpu_slice=b1_cu_q_seq_len_cpu_slice,
                         b_cu_kv_seq_len_cpu_slice=b_cu_kv_seq_len_cpu_slice,
@@ -851,6 +851,16 @@ class TpPartBaseModel:
             batch_size = infer_state0.batch_size
             b1_cu_q_seq_len_cpu_slice = self.b1_cu_q_seq_len_cpu_ref[:batch_size]
             b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
+            if self.platform_backend.name == "ascend":
+                if not self.platform_backend.graph.is_capturing():
+                    sync_attn_params(
+                        batch_size=batch_size,
+                        b1_cu_q_seq_len_cpu_slice=b1_cu_q_seq_len_cpu_slice,
+                        b_cu_kv_seq_len_cpu_slice=b_cu_kv_seq_len_cpu_slice,
+                        b1_cu_q_seq_len_cpu=infer_state0.b1_cu_q_seq_len_cpu,
+                        b_cu_kv_seq_len_cpu=infer_state0.b_cu_kv_seq_len_cpu,
+                        update_stream=self.graph.update_stream,
+                    )
 
             if self.graph.need_capture(infer_batch_size):
                 infer_state0.is_cuda_graph = True

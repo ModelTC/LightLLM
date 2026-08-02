@@ -11,7 +11,7 @@ def new_seq_len_ref_buffers(max_batch_size: int) -> tuple[torch.Tensor, torch.Te
     )
 
 
-def maybe_sync_attn_params(
+def sync_attn_params(
     *,
     batch_size: int,
     b1_cu_q_seq_len_cpu_slice: torch.Tensor,
@@ -22,11 +22,10 @@ def maybe_sync_attn_params(
 ) -> None:
     if batch_size == 0:
         return
-    if torch.equal(b_cu_kv_seq_len_cpu_slice, b_cu_kv_seq_len_cpu):
-        return
 
     b1_cu_q_seq_len_cpu_slice.copy_(b1_cu_q_seq_len_cpu)
     b_cu_kv_seq_len_cpu_slice.copy_(b_cu_kv_seq_len_cpu)
+    update_stream.wait_stream(torch.npu.current_stream())
     update_attn_params(
         batch_size,
         b1_cu_q_seq_len_cpu_slice,
