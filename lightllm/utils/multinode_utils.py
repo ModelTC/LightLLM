@@ -19,7 +19,10 @@ def send_and_receive_node_ip(args):
                 comm_socket = context.socket(zmq.PULL)
                 comm_socket.bind(f"tcp://*:{args.multinode_httpmanager_port + i + 100}")
                 logger.info(f"binding port {args.multinode_httpmanager_port + i + 100}")
-                args.child_ips.append(comm_socket.recv_pyobj())
+                # Use JSON instead of pickle: the payload is only the child IP
+                # string, and recv_pyobj() -> pickle.loads() on a socket bound to
+                # all interfaces would allow unauthenticated RCE (cf. CVE-2025-32444).
+                args.child_ips.append(comm_socket.recv_json())
                 comm_socket.close()
             logger.info(f"Received child IPs: {args.child_ips}")
         else:
@@ -28,5 +31,5 @@ def send_and_receive_node_ip(args):
             comm_socket = context.socket(zmq.PUSH)
             comm_socket.connect(f"tcp://{args.nccl_host}:{args.multinode_httpmanager_port + args.node_rank + 100}")
             logger.info(f"connecting to {args.nccl_host}:{args.multinode_httpmanager_port + args.node_rank + 100}")
-            comm_socket.send_pyobj(local_ip)
+            comm_socket.send_json(local_ip)
             comm_socket.close()
