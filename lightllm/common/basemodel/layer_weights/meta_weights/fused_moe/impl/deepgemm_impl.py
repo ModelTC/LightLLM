@@ -146,7 +146,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         n_group: int,
         scoring_func: str,
     ):
-        topk_weights, topk_idx = self._select_experts(
+        topk_weights, topk_idx, _ = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
