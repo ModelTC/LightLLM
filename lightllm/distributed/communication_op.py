@@ -152,6 +152,13 @@ class DistributeGroupManager:
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
+        # DeepEP reuses this group's NCCL communicator via _comm_ptr(). Because the
+        # group is created without device_id, warm it up first to avoid reading a null
+        # communicator. The default process group's warmup does not cover this group.
+        dist.barrier(
+            group=deepep_group,
+            device_ids=[torch.cuda.current_device()],
+        )
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
