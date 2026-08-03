@@ -97,4 +97,4 @@ cupy-cuda13x==14.0.1
 nixl==1.2.0
 xformers==0.0.35
 redis==7.3.0
-litellm>=1.52.0,<1.85
+litellm>=1.84.8,<1.85
