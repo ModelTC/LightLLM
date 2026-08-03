@@ -1,5 +1,6 @@
 import torch
-from typing import List, Optional, Union
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Union
 from .mem_manager import MemoryManager
 from .operator import DeepseekV4MemOperator
 from .allocator import KvCacheAllocator
@@ -12,7 +13,7 @@ logger = init_logger(__name__)
 
 # fp8_ds_mla packed-latent byte layout (ABI shared with the flash_mla extra-cache fork and
 # sglang/vllm): 448B NoPE fp8 + 64*2B RoPE bf16 + 7B ue8m0 scale + 1B pad = 584B per token,
-# stored in page slabs whose tail carries the per-token scale bytes.
+# stored in packed GPU pages whose tail carries the per-token scale bytes.
 DSV4_MLA_NOPE_DIM = 448  # 448B
 DSV4_MLA_ROPE_DIM = 64  # 64 dim
 DSV4_MLA_HEAD_DIM = DSV4_MLA_NOPE_DIM + DSV4_MLA_ROPE_DIM  # 512
@@ -30,6 +31,7 @@ DSV4_SWA_PAGE_SIZE = 128  # 128 slots/page
 DSV4_C4_PAGE_SIZE = 64  # 64 slots/page
 DSV4_C128_PAGE_SIZE = 2  # 2 slots/page
 DSV4_PROMPT_CACHE_PAGE_SIZE = DSV4_C4_PAGE_SIZE * 4  # 256 (= c4 ratio)
+DSV4_CPU_CACHE_TOKEN_PAGE_SIZE = 2048
 # compressor state ring: c4 overlap 对的基础窗口为每页 2 个分组槽 × ratio 4 行；MTP
 # 追加候选槽，避免 rejected draft 覆盖仍存活的基础窗口。c128 同样追加候选槽，再对齐到 ratio 4。
 DSV4_C4_STATE_RING = 8  # 8 rows/page before MTP padding
@@ -43,8 +45,196 @@ def _ceil_div(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+def _aligned_gpu_page_nbytes(page_size: int, data_nbytes: int, scale_nbytes: int, align_nbytes: int = 1) -> int:
+    return _ceil_div(page_size * (data_nbytes + scale_nbytes), align_nbytes) * align_nbytes
+
+
+@dataclass(frozen=True)
+class DeepseekV4CpuCacheLayout:
+    """Opaque CPU checkpoint ABI for the composite DeepSeek-V4 cache.
+
+    Every checkpoint contains compressed history for ``token_page_size`` tokens
+    and only the final 256 tokens of SWA/continuation state.  The history is
+    arranged in independent 256-token blocks so a radix hit can skip an initial
+    part of a checkpoint without copying or allocating it again.
+    """
+
+    token_page_size: int
+    history_block_num: int
+    layer_num: int
+    n_c4: int
+    n_c128: int
+    head_dim: int
+    indexer_head_dim: int
+
+    c4_offset: int
+    c4_gpu_page_nbytes: int
+    c4_gpu_pages_per_cpu_page: int
+    c4_layer_nbytes: int
+    c4_nbytes: int
+
+    c4_indexer_offset: int
+    c4_indexer_gpu_page_nbytes: int
+    c4_indexer_layer_nbytes: int
+    c4_indexer_nbytes: int
+
+    c128_offset: int
+    c128_row_nbytes: int
+    c128_rows_per_page: int
+    c128_layer_nbytes: int
+    c128_nbytes: int
+
+    swa_offset: int
+    swa_gpu_page_nbytes: int
+    swa_gpu_pages_per_cpu_page: int
+    swa_layer_nbytes: int
+    swa_nbytes: int
+
+    c4_state_offset: int
+    c4_state_row_nbytes: int
+    c4_state_rows: int
+    c4_state_nbytes: int
+
+    c4_indexer_state_offset: int
+    c4_indexer_state_row_nbytes: int
+    c4_indexer_state_nbytes: int
+    page_nbytes: int
+
+    @classmethod
+    def from_compress_rates(
+        cls,
+        compress_rates: Sequence[int],
+        token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
+        head_dim: int = DSV4_MLA_HEAD_DIM,
+        indexer_head_dim: int = DSV4_INDEXER_HEAD_DIM,
+    ) -> "DeepseekV4CpuCacheLayout":
+        rates = tuple(int(rate) for rate in compress_rates)
+        if token_page_size <= 0 or token_page_size % DSV4_PROMPT_CACHE_PAGE_SIZE != 0:
+            raise ValueError(
+                f"DeepSeek-V4 CPU cache token page size must be a positive multiple of "
+                f"{DSV4_PROMPT_CACHE_PAGE_SIZE}, got {token_page_size}"
+            )
+        if head_dim != DSV4_MLA_HEAD_DIM:
+            raise ValueError(f"DeepSeek-V4 CPU cache expects head_dim={DSV4_MLA_HEAD_DIM}, got {head_dim}")
+        if indexer_head_dim != DSV4_INDEXER_HEAD_DIM:
+            raise ValueError(
+                f"DeepSeek-V4 CPU cache expects indexer_head_dim={DSV4_INDEXER_HEAD_DIM}, got {indexer_head_dim}"
+            )
+
+        layer_num = len(rates)
+        n_c4 = rates.count(4)
+        n_c128 = rates.count(128)
+        history_block_num = token_page_size // DSV4_PROMPT_CACHE_PAGE_SIZE
+
+        # 64 * (576B data + 8B scale) = 37,376B; align to 576B -> 37,440B.
+        c4_gpu_page_nbytes = _aligned_gpu_page_nbytes(
+            DSV4_C4_PAGE_SIZE,
+            DSV4_MLA_DATA_BYTES_PER_TOKEN,
+            DSV4_MLA_SCALE_BYTES,
+            DSV4_MLA_PAGE_ALIGN_BYTES,
+        )
+        c4_gpu_pages_per_cpu_page = history_block_num
+        c4_layer_nbytes = c4_gpu_pages_per_cpu_page * c4_gpu_page_nbytes
+        c4_offset = 0
+        c4_nbytes = n_c4 * c4_layer_nbytes
+
+        # indexer_head_dim is validated as 128: 64 * (128B data + 4B scale) = 8,448B.
+        c4_indexer_gpu_page_nbytes = _aligned_gpu_page_nbytes(
+            DSV4_C4_PAGE_SIZE,
+            indexer_head_dim,
+            DSV4_INDEXER_SCALE_BYTES,
+        )
+        c4_indexer_layer_nbytes = c4_gpu_pages_per_cpu_page * c4_indexer_gpu_page_nbytes
+        c4_indexer_offset = c4_offset + c4_nbytes
+        c4_indexer_nbytes = n_c4 * c4_indexer_layer_nbytes
+
+        c128_row_nbytes = DSV4_MLA_BYTES_PER_TOKEN
+        c128_rows_per_page = token_page_size // 128
+        c128_layer_nbytes = c128_rows_per_page * c128_row_nbytes
+        c128_offset = c4_indexer_offset + c4_indexer_nbytes
+        c128_nbytes = n_c128 * c128_layer_nbytes
+
+        # 128 * (576B data + 8B scale) = 74,752B; align to 576B -> 74,880B.
+        swa_gpu_page_nbytes = _aligned_gpu_page_nbytes(
+            DSV4_SWA_PAGE_SIZE,
+            DSV4_MLA_DATA_BYTES_PER_TOKEN,
+            DSV4_MLA_SCALE_BYTES,
+            DSV4_MLA_PAGE_ALIGN_BYTES,
+        )
+        swa_gpu_pages_per_cpu_page = DSV4_PROMPT_CACHE_PAGE_SIZE // DSV4_SWA_PAGE_SIZE
+        swa_layer_nbytes = swa_gpu_pages_per_cpu_page * swa_gpu_page_nbytes
+        swa_offset = c128_offset + c128_nbytes
+        swa_nbytes = layer_num * swa_layer_nbytes
+
+        # The c4 overlap state has two KV/score pairs, hence a 4 * dim row.
+        c4_state_rows = 4
+        c4_state_row_nbytes = 4 * head_dim * torch._utils._element_size(torch.float32)
+        c4_state_offset = swa_offset + swa_nbytes
+        c4_state_nbytes = n_c4 * c4_state_rows * c4_state_row_nbytes
+        c4_indexer_state_row_nbytes = 4 * indexer_head_dim * torch._utils._element_size(torch.float32)
+        c4_indexer_state_offset = c4_state_offset + c4_state_nbytes
+        c4_indexer_state_nbytes = n_c4 * c4_state_rows * c4_indexer_state_row_nbytes
+        page_nbytes = c4_indexer_state_offset + c4_indexer_state_nbytes
+
+        return cls(
+            token_page_size=token_page_size,
+            history_block_num=history_block_num,
+            layer_num=layer_num,
+            n_c4=n_c4,
+            n_c128=n_c128,
+            head_dim=head_dim,
+            indexer_head_dim=indexer_head_dim,
+            c4_offset=c4_offset,
+            c4_gpu_page_nbytes=c4_gpu_page_nbytes,
+            c4_gpu_pages_per_cpu_page=c4_gpu_pages_per_cpu_page,
+            c4_layer_nbytes=c4_layer_nbytes,
+            c4_nbytes=c4_nbytes,
+            c4_indexer_offset=c4_indexer_offset,
+            c4_indexer_gpu_page_nbytes=c4_indexer_gpu_page_nbytes,
+            c4_indexer_layer_nbytes=c4_indexer_layer_nbytes,
+            c4_indexer_nbytes=c4_indexer_nbytes,
+            c128_offset=c128_offset,
+            c128_row_nbytes=c128_row_nbytes,
+            c128_rows_per_page=c128_rows_per_page,
+            c128_layer_nbytes=c128_layer_nbytes,
+            c128_nbytes=c128_nbytes,
+            swa_offset=swa_offset,
+            swa_gpu_page_nbytes=swa_gpu_page_nbytes,
+            swa_gpu_pages_per_cpu_page=swa_gpu_pages_per_cpu_page,
+            swa_layer_nbytes=swa_layer_nbytes,
+            swa_nbytes=swa_nbytes,
+            c4_state_offset=c4_state_offset,
+            c4_state_row_nbytes=c4_state_row_nbytes,
+            c4_state_rows=c4_state_rows,
+            c4_state_nbytes=c4_state_nbytes,
+            c4_indexer_state_offset=c4_indexer_state_offset,
+            c4_indexer_state_row_nbytes=c4_indexer_state_row_nbytes,
+            c4_indexer_state_nbytes=c4_indexer_state_nbytes,
+            page_nbytes=page_nbytes,
+        )
+
+
+@dataclass(frozen=True)
+class DeepseekV4CpuCacheLoadPlan:
+    loaded_start: int
+    loaded_end: int
+    mem_indexes: torch.Tensor
+    history_full_slots: torch.Tensor
+    history_c4_slots: Optional[torch.Tensor]
+    history_c128_slots: Optional[torch.Tensor]
+    resume_full_slots: torch.Tensor
+    resume_swa_slots: torch.Tensor
+    resume_full_slots_long: torch.Tensor
+    resume_swa_pages: torch.Tensor
+    resume_swa_page_deltas: torch.Tensor
+    history_c4_full_slots_long: Optional[torch.Tensor]
+    history_c4_pages: Optional[torch.Tensor]
+    history_c4_page_deltas: Optional[torch.Tensor]
+    history_c128_full_slots_long: Optional[torch.Tensor]
+
+
 class PackedPagePool:
-    """fp8_ds_mla 风格的 page-slab 存储: 每页前段连续放 token 的 data 字节，页尾放 per-token scale 字节。
+    """fp8_ds_mla 风格的 packed page 存储: 每页前段连续放 token 的 data 字节，页尾放 per-token scale 字节。
 
     寻址是纯 token 槽位 (page = slot // page_size)，page 只是 scale-tail/对齐的物理打包技巧，
     不存在页粒度的分配。``write``/``read`` 是 torch 参考实现(单测 oracle)；生产写入走
@@ -152,6 +342,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         max_request_num: int,
         mtp_step: int,
         indexer_head_dim: int = 128,
+        cpu_cache_token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
         swa_full_tokens_ratio: float = DSV4_SWA_FULL_TOKENS_RATIO,
         always_copy=False,
         mem_fraction=0.9,
@@ -174,6 +365,12 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.c4_state_ring = DSV4_C4_STATE_RING + mtp_step
         self.c128_state_ring = _ceil_div(DSV4_C128_STATE_RING + mtp_step, 4) * 4
         self.swa_full_tokens_ratio = float(swa_full_tokens_ratio)
+        self.cpu_cache_layout = DeepseekV4CpuCacheLayout.from_compress_rates(
+            self.compress_rates,
+            token_page_size=cpu_cache_token_page_size,
+            head_dim=head_dim,
+            indexer_head_dim=indexer_head_dim,
+        )
 
         # 全局层号 -> 各压缩池内的压实层号(同 qwen3next 的层号压实手法)
         self.layer_to_c4_idx = {}
@@ -326,6 +523,13 @@ class DeepseekV4MemoryManager(MemoryManager):
             )
             self._init_state_sentinel(self.c128_state_buffer)
 
+        layout = self.cpu_cache_layout
+        assert self.swa_pool.bytes_per_page == layout.swa_gpu_page_nbytes
+        if self.n_c4:
+            assert self.c4_pool.bytes_per_page == layout.c4_gpu_page_nbytes
+            assert self.c4_indexer_pool.bytes_per_page == layout.c4_indexer_gpu_page_nbytes
+        assert layout.c128_row_nbytes == self.mla_bytes_per_token
+
         logger.info(
             f"DeepseekV4MemoryManager pools: full_tokens={size} swa={self.swa_size}({self.swa_num_pages}p) "
             f"c4={self.c4_size}(L={self.n_c4}) c128={self.c128_size}(L={self.n_c128}) "
@@ -365,6 +569,147 @@ class DeepseekV4MemoryManager(MemoryManager):
     def get_c128_state_buffer(self, layer_index: int) -> torch.Tensor:
         assert self.compress_rates[layer_index] == 128, "只有 c128(HCA) 层有 request-scoped compressor state"
         return self.c128_state_buffer[self.layer_to_c128_idx[layer_index]]
+
+    # ------------------------------------------------------------------ CPU cache load resources
+    def get_loadable_cpu_cache_end(
+        self,
+        loaded_start: int,
+        requested_end: int,
+        full_token_capacity: int,
+        swa_page_capacity: int,
+        c4_page_capacity: int,
+        c128_slot_capacity: int,
+    ) -> int:
+        """Return the farthest loadable checkpoint boundary, or zero.
+
+        History is independently addressable in 256-token blocks, but resume
+        SWA/state exists only at the end of each CPU checkpoint page.  Therefore
+        capacity cropping must never return an intermediate 256-token boundary.
+        """
+        loaded_start = int(loaded_start)
+        requested_end = int(requested_end)
+        page = self.cpu_cache_layout.token_page_size
+        if loaded_start < 0 or loaded_start % DSV4_PROMPT_CACHE_PAGE_SIZE != 0:
+            raise ValueError(f"DeepSeek-V4 CPU cache loaded_start must be 256-token aligned, got {loaded_start}")
+        if requested_end <= loaded_start or requested_end % page != 0:
+            raise ValueError(
+                f"DeepSeek-V4 CPU cache requested_end must be a checkpoint boundary after loaded_start, "
+                f"got start={loaded_start}, end={requested_end}, page={page}"
+            )
+        if int(swa_page_capacity) < 2:
+            return 0
+
+        token_capacity = int(full_token_capacity)
+        if self.n_c4:
+            token_capacity = min(token_capacity, int(c4_page_capacity) * DSV4_PROMPT_CACHE_PAGE_SIZE)
+        if self.n_c128:
+            token_capacity = min(token_capacity, int(c128_slot_capacity) * 128)
+        token_capacity = token_capacity // DSV4_PROMPT_CACHE_PAGE_SIZE * DSV4_PROMPT_CACHE_PAGE_SIZE
+        loadable_end = min(requested_end, (loaded_start + token_capacity) // page * page)
+        return loadable_end if loadable_end > loaded_start else 0
+
+    def prepare_cpu_cache_load(self, token_num: int, loaded_end: int) -> DeepseekV4CpuCacheLoadPlan:
+        """Allocate a missing suffix and publish all derived mappings as one plan.
+
+        ``loaded_end`` is the CPU checkpoint boundary.  ``token_num`` may be
+        smaller than the checkpoint page when a GPU radix prefix overlaps its
+        beginning, but both endpoints remain 256-token aligned.
+        """
+        token_num = int(token_num)
+        loaded_end = int(loaded_end)
+        layout = self.cpu_cache_layout
+        if token_num <= 0 or token_num % DSV4_PROMPT_CACHE_PAGE_SIZE != 0:
+            raise ValueError(
+                f"DeepSeek-V4 CPU cache load size must be a positive multiple of "
+                f"{DSV4_PROMPT_CACHE_PAGE_SIZE}, got {token_num}"
+            )
+        if loaded_end < token_num or loaded_end % layout.token_page_size != 0:
+            raise ValueError(
+                f"DeepSeek-V4 CPU cache loaded_end must be a checkpoint boundary >= token_num, "
+                f"got loaded_end={loaded_end}, token_num={token_num}, page={layout.token_page_size}"
+            )
+
+        block_num = token_num // DSV4_PROMPT_CACHE_PAGE_SIZE
+        device = self.full_to_swa_indexs.device
+        full_indexes_cpu = self.alloc(token_num)
+        swa_pages_cpu = self._alloc_swa_pages(2)
+        c4_pages_cpu = self.alloc_c4_pages(block_num) if self.n_c4 else None
+        c128_slots_cpu = self.alloc_c128(block_num * 2) if self.n_c128 else None
+
+        mem_indexes = full_indexes_cpu.to(device, non_blocking=True)
+        history_full_slots = mem_indexes.view(block_num, DSV4_PROMPT_CACHE_PAGE_SIZE)
+        resume_full_slots = history_full_slots[-1]
+
+        swa_pages = swa_pages_cpu.to(device, non_blocking=True)
+        resume_swa_slots = (
+            swa_pages[:, None] * DSV4_SWA_PAGE_SIZE
+            + torch.arange(DSV4_SWA_PAGE_SIZE, dtype=torch.int32, device=device)[None, :]
+        ).reshape(-1)
+
+        history_c4_slots = None
+        if c4_pages_cpu is not None:
+            c4_pages = c4_pages_cpu.to(device, non_blocking=True)
+            history_c4_slots = (
+                c4_pages[:, None] * DSV4_C4_PAGE_SIZE
+                + torch.arange(DSV4_C4_PAGE_SIZE, dtype=torch.int32, device=device)[None, :]
+            )
+
+        history_c128_slots = None
+        if c128_slots_cpu is not None:
+            history_c128_slots = c128_slots_cpu.to(device, non_blocking=True).view(block_num, 2)
+
+        resume_full_slots_long = resume_full_slots.long()
+        resume_swa_pages = swa_pages
+        resume_swa_page_deltas = torch.full(
+            resume_swa_pages.shape,
+            DSV4_SWA_PAGE_SIZE,
+            dtype=torch.int32,
+            device=device,
+        )
+
+        history_c4_full_slots_long = history_c4_pages = history_c4_page_deltas = None
+        if history_c4_slots is not None:
+            history_c4_full_slots_long = history_full_slots[:, 3::4].long()
+            history_c4_pages = c4_pages
+            history_c4_page_deltas = torch.full(
+                history_c4_pages.shape,
+                DSV4_C4_PAGE_SIZE,
+                dtype=torch.int32,
+                device=device,
+            )
+
+        history_c128_full_slots_long = None
+        if history_c128_slots is not None:
+            history_c128_full_slots_long = history_full_slots[:, 127::128].long()
+
+        return DeepseekV4CpuCacheLoadPlan(
+            loaded_start=loaded_end - token_num,
+            loaded_end=loaded_end,
+            mem_indexes=mem_indexes,
+            history_full_slots=history_full_slots,
+            history_c4_slots=history_c4_slots,
+            history_c128_slots=history_c128_slots,
+            resume_full_slots=resume_full_slots,
+            resume_swa_slots=resume_swa_slots,
+            resume_full_slots_long=resume_full_slots_long,
+            resume_swa_pages=resume_swa_pages,
+            resume_swa_page_deltas=resume_swa_page_deltas,
+            history_c4_full_slots_long=history_c4_full_slots_long,
+            history_c4_pages=history_c4_pages,
+            history_c4_page_deltas=history_c4_page_deltas,
+            history_c128_full_slots_long=history_c128_full_slots_long,
+        )
+
+    def commit_cpu_cache_load_plan(self, plan: DeepseekV4CpuCacheLoadPlan) -> None:
+        """Publish an unpacked plan without allocating at the transaction boundary."""
+        self.full_to_swa_indexs[plan.resume_full_slots_long] = plan.resume_swa_slots
+        self.swa_page_live_count.index_add_(0, plan.resume_swa_pages, plan.resume_swa_page_deltas)
+        if plan.history_c4_slots is not None:
+            self.full_to_c4_indexs[plan.history_c4_full_slots_long] = plan.history_c4_slots
+            self.c4_page_live_count.index_add_(0, plan.history_c4_pages, plan.history_c4_page_deltas)
+        if plan.history_c128_slots is not None:
+            self.full_to_c128_indexs[plan.history_c128_full_slots_long] = plan.history_c128_slots
+        return
 
     # ------------------------------------------------------------------ swa slot lifecycle
     def register_swa_free_hook(self, fn) -> None:
@@ -741,12 +1086,12 @@ class DeepseekV4MemoryManager(MemoryManager):
         )
 
     # ------------------------------------------------------------------ fenced inherited APIs
-    # kv_buffer 是 page 索引的 uint8 slab，基类按 token 索引读写的接口会静默写坏数据，显式拦截。
+    # kv_buffer 是 page 索引的 uint8 buffer，基类按 token 索引读写的接口会静默写坏数据，显式拦截。
     def get_index_kv_buffer(self, index):
-        raise NotImplementedError("DeepSeek-V4 packed page-slab cache does not support token-indexed kv_buffer io")
+        raise NotImplementedError("DeepSeek-V4 packed page cache does not support token-indexed kv_buffer io")
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
-        raise NotImplementedError("DeepSeek-V4 packed page-slab cache does not support token-indexed kv_buffer io")
+        raise NotImplementedError("DeepSeek-V4 packed page cache does not support token-indexed kv_buffer io")
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")

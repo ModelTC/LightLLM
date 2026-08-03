@@ -217,6 +217,11 @@ def get_disk_cache_prompt_limit_length():
 
 
 @lru_cache(maxsize=None)
+def get_dsv4_cpu_cache_max_pages_per_task() -> int:
+    return int(os.getenv("LIGHTLLM_DSV4_CPU_CACHE_MAX_PAGES_PER_TASK", 4))
+
+
+@lru_cache(maxsize=None)
 def enable_huge_page():
     """
     大页模式：启动后可大幅缩短cpu kv cache加载时间

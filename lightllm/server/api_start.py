@@ -27,6 +27,7 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_linear_att_mixed_model,
     auto_set_max_req_total_len,
+    get_model_type,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -81,6 +82,8 @@ def normal_or_p_d_start(args):
 
     auto_set_max_req_total_len(args)
     set_unique_server_name(args)
+    if args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4" and args.llm_kv_type in (None, "None"):
+        args.llm_kv_type = "fp8kv_dsa"
 
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
@@ -304,6 +307,8 @@ def normal_or_p_d_start(args):
     if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+    elif args.enable_cpu_cache and args.cpu_cache_token_page_size is None:
+        args.cpu_cache_token_page_size = 2048 if get_model_type(args.model_dir) == "deepseek_v4" else 256
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -535,6 +540,9 @@ def pd_master_start(args):
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    if args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4":
+        raise ValueError("DeepSeek-V4 CPU cache does not support pd_master")
 
     auto_set_max_req_total_len(args)
 

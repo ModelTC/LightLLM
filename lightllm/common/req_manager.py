@@ -566,6 +566,11 @@ class DeepseekV4ReqManager(ReqManager):
         self.clear_runtime_state(req_idx)
         return
 
+    def finish_cpu_cache_load(self, req_idx: int, loaded_len: int) -> None:
+        """Keep only the final restored 256-token SWA page eligible for radix reuse."""
+        self._swa_evict_marks[req_idx] = loaded_len - self.get_prompt_cache_page_size()
+        return
+
     # ------------------------------------------------------------------ compress slot prep (per step)
     def _register_c4_slots(self, full_slots: torch.Tensor, slots: torch.Tensor) -> None:
         """写入 full->c4 槽映射并按页累加存活计数。"""

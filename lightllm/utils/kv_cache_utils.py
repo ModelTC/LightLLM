@@ -15,13 +15,20 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_att_mixed_model
+from lightllm.utils.config_utils import (
+    get_config_json,
+    get_num_key_value_heads,
+    get_head_dim,
+    get_layer_num,
+    is_linear_att_mixed_model,
+)
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
     Deepseek2MemoryManager,
+    DeepseekV4MemoryManager,
     Qwen3NextMemManager,
 )
 
@@ -114,11 +121,33 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_head_dim=get_head_dim(args.model_dir) // 8,
             scale_data_type=get_llm_data_type(),
         )
+    elif mem_manager_class is DeepseekV4MemoryManager:
+        from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4CpuCacheLayout
+
+        config = get_config_json(args.model_dir)
+        layer_num = get_layer_num(args.model_dir) + get_added_mtp_kv_layer_num()
+        layout = DeepseekV4CpuCacheLayout.from_compress_rates(
+            compress_rates=config["compress_ratios"][:layer_num],
+            token_page_size=args.cpu_cache_token_page_size,
+            head_dim=get_head_dim(args.model_dir),
+            indexer_head_dim=config["index_head_dim"],
+        )
+        cpu_cache_meta = CpuKVCacheMeta(
+            page_num=0,
+            token_page_size=args.cpu_cache_token_page_size,
+            layer_num=layer_num,
+            num_heads=1,
+            head_dim=layout.page_nbytes,
+            data_type=torch.uint8,
+            scale_head_dim=0,
+            scale_data_type=torch.uint8,
+            page_shape=(layout.page_nbytes,),
+        )
     else:
         logger.error(f"not support mem manager: {mem_manager_class} for cpu kv cache")
         raise Exception(f"not support mem manager: {mem_manager_class} for cpu kv cache")
 
-    if args.mtp_mode is not None:
+    if args.mtp_mode is not None and mem_manager_class is not DeepseekV4MemoryManager:
         # TODO 可能会存在不同mtp模式的精度问题
         assert is_linear_att_mixed_model(args.model_dir) is False, "linear att mixed model does not support mtp mode"
         cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
@@ -143,16 +172,30 @@ class CpuKVCacheMeta:
     data_type: torch.dtype
     scale_head_dim: int
     scale_data_type: torch.dtype
+    page_shape: Optional[Tuple[int, ...]] = None
 
     def calcu_size(self):
         return self.page_num * self.calcu_one_page_size()
 
     def calcu_one_page_size(self):
+        if self.page_shape is not None:
+            return int(np.prod(self.page_shape)) * self.data_type.itemsize
         return (
             self.token_page_size
             * self.layer_num
             * self.num_heads
             * (self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize)
+        )
+
+    def get_tensor_shape(self) -> Tuple[int, ...]:
+        if self.page_shape is not None:
+            return (self.page_num, *self.page_shape)
+        return (
+            self.page_num,
+            self.layer_num,
+            self.token_page_size,
+            self.num_heads,
+            self.get_merged_head_dim(),
         )
 
     def get_merged_head_dim(self):

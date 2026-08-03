@@ -93,3 +93,41 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
         mem_manager: DeepseekV4MemoryManager = self.mem_manager
         mem_manager.pack_mla_kv_to_cache(layer_index, mem_index, kv)
         return
+
+    def pack_cpu_cache_pages(self, source_mem_indexes: torch.Tensor, staging: torch.Tensor) -> None:
+        """Pack complete DS4 checkpoints into caller-owned CUDA staging."""
+        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import pack_gpu_cache_to_staging
+
+        pack_gpu_cache_to_staging(self.mem_manager, source_mem_indexes, staging)
+        return
+
+    def scatter_packed_cpu_cache_pages(
+        self,
+        staging: torch.Tensor,
+        page_indexes: torch.Tensor,
+        cpu_cache_client,
+    ) -> None:
+        """Write packed checkpoints to their pinned shared-memory pages."""
+        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import scatter_staging_to_cpu_pages
+
+        scatter_staging_to_cpu_pages(staging, cpu_cache_client.cpu_kv_cache_tensor, page_indexes)
+        return
+
+    def load_cpu_cache_pages(
+        self,
+        plan,
+        page_indexes: torch.Tensor,
+        cpu_cache_client,
+        first_page_history_offset_tokens: int = 0,
+    ) -> None:
+        """Selectively restore compressed history and the final resume window."""
+        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import unpack_cpu_cache_to_gpu
+
+        unpack_cpu_cache_to_gpu(
+            self.mem_manager,
+            plan,
+            cpu_cache_client.cpu_kv_cache_tensor,
+            page_indexes,
+            first_page_history_offset_tokens,
+        )
+        return

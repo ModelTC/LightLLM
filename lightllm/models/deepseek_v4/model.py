@@ -9,6 +9,7 @@ from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
+from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -90,6 +91,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             indexer_head_dim=self.config["index_head_dim"],
             max_request_num=self.max_req_num,
             mtp_step=self.args.mtp_step,
+            cpu_cache_token_page_size=(
+                DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
+                if self.args.cpu_cache_token_page_size is None
+                else self.args.cpu_cache_token_page_size
+            ),
             mem_fraction=self.mem_fraction,
         )
         self.req_manager.mem_manager = self.mem_manager
