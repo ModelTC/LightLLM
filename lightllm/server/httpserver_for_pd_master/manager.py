@@ -165,6 +165,7 @@ class HttpServerManagerForPDMaster:
                     d_node.client_ip_port,
                 )
 
+            origin_prompt_cache_len = None  # 首块 prefill 命中的缓存长度，代表原始 prompt 的真实命中
             for iter_index, block_max_new_tokens in enumerate(max_new_tokens_list):
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
@@ -191,6 +192,12 @@ class HttpServerManagerForPDMaster:
                     history_gen_token_strs.append(request_output)
                     prompt_tokens = min(prompt_tokens, metadata["prompt_tokens"])
                     metadata["prompt_tokens"] = prompt_tokens
+                    # cached_tokens 只在 prefill 节点计算；decode 节点恒为 0。
+                    # 分段时只有首块的命中长度才是原始 prompt 的真实缓存命中，
+                    # 取首块值并回填，避免后续 decode 块把 usage 的 cached_tokens 拉回 0。
+                    if iter_index == 0 and origin_prompt_cache_len is None:
+                        origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
+                    metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_group_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
@@ -319,6 +326,7 @@ class HttpServerManagerForPDMaster:
             assert False, "pd mode dont support set disable_prompt_cache to True"
 
         out_token_counter = 0
+        prompt_cache_len = 0
         first_token_cost_ms = float("inf")
         group_request_id = sampling_params.group_request_id
         unfinished_count = sampling_params.best_of
@@ -334,6 +342,8 @@ class HttpServerManagerForPDMaster:
                 )
 
             prompt_tokens = metadata["prompt_tokens"]
+            # decode 节点 metadata 不带 prompt_cache_len，取本块 prefill 上报的最大命中长度用于统计。
+            prompt_cache_len = max(prompt_cache_len, metadata.get("prompt_cache_len", 0))
             out_token_counter += 1
             sub_req_id_to_mtp_accepted_token_num[sub_req_id] = metadata.get("mtp_accepted_token_num", 0)
             if is_first_token:
@@ -352,7 +362,6 @@ class HttpServerManagerForPDMaster:
         self.per_token_costs.add(mean_per_token_cost_time_ms)
         x_request_id = request.headers.get("X-Request-Id", "")
         x_session_id = request.headers.get("X-Session-Id", "")
-        prompt_cache_len = metadata.pop("prompt_cache_len", 0)
         prompt_cache_ratio = prompt_cache_len / prompt_tokens
         mtp_avg_token_per_step = out_token_counter / max(
             (out_token_counter - 1 - sum(sub_req_id_to_mtp_accepted_token_num.values())), 1
