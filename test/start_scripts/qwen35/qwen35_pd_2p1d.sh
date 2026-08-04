@@ -41,7 +41,7 @@ P_COMMON_ARGS=(
   --mtp_draft_model_dir "${MODEL_DIR}"
   --mtp_step 3
   "${CHAT_TEMPLATE_ARGS[@]}"
-  --pd_trans_mode nixl
+  --pd_trans_mode nccl
   --pd_kv_page_size 4096
   --pd_master_ip 127.0.0.1
   --pd_master_port "${PORT}"
@@ -58,14 +58,12 @@ D_COMMON_ARGS=(
   --max_image_pixels 3686400
   --batch_max_tokens 256
   --linear_att_cache_size 500
-  --linear_att_hash_page_size 2048
-  --linear_att_page_block_num 8
   --quant_type fp8w8a8-pt-sgl
   --mtp_mode eagle_with_att
   --mtp_draft_model_dir "${MODEL_DIR}"
   --mtp_step 3
   "${CHAT_TEMPLATE_ARGS[@]}"
-  --pd_trans_mode nixl
+  --pd_trans_mode nccl
   --pd_kv_page_size 4096
   --pd_master_ip 127.0.0.1
   --pd_master_port "${PORT}"
