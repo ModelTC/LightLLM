@@ -9,7 +9,7 @@ from functools import lru_cache
 from collections import OrderedDict
 from typing import Optional, Tuple
 from lightllm.utils.error_utils import ClientDisconnected
-from lightllm.utils.envs_utils import get_lightllm_url_pool_maxsize
+from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_url_pool_maxsize
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -80,9 +80,11 @@ def _get_xhttp_client(proxy=None):
 
 async def fetch_resource(url, request: Request, timeout, proxy=None):
     logger.info(f"Begin to download resource from url: {url}")
-    cached = URL_RESOURCE_POOL.get(url, proxy)
-    if cached is not None:
-        return cached
+    enable_url_pool = getattr(get_env_start_args(), "enable_url_pool", False)
+    if enable_url_pool:
+        cached = URL_RESOURCE_POOL.get(url, proxy)
+        if cached is not None:
+            return cached
 
     start_time = time.time()
     client = _get_xhttp_client(proxy)
@@ -102,5 +104,6 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
     end_time = time.time()
     cost_time = end_time - start_time
     logger.info(f"Download url {url} resource cost time: {cost_time} seconds")
-    URL_RESOURCE_POOL.put(url, proxy, content)
+    if enable_url_pool:
+        URL_RESOURCE_POOL.put(url, proxy, content)
     return content
