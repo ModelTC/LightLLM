@@ -26,11 +26,16 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.utils.device_utils import is_musa
 
 logger = init_logger(__name__)
 
 
 def _set_envs_and_config(args: StartArgs):
+    if not is_musa():
+        # 减少动态 batch/序列长度引起的 CUDA 显存碎片；该配置会被所有子进程继承，
+        # CUDA IPC 或自定义 allocator 场景需关注 expandable_segments 的兼容性。
+        os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     mp.set_start_method("spawn", force=True)
 
 
