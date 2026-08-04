@@ -8,6 +8,12 @@ from lightllm.utils.torch_dtype_utils import get_torch_dtype
 logger = init_logger(__name__)
 
 
+def get_linear_att_state_mtp_size(args) -> int:
+    if args.run_mode == "prefill":
+        return 1
+    return args.mtp_step + 1
+
+
 @dataclasses.dataclass
 class LinearAttCacheConfig:
     tp_world_size: int

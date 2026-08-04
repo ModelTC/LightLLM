@@ -71,6 +71,7 @@ class Qwen3NextMemManager(MemoryManager):
     def write_to_shm(self, req_manager):
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state
+        self.linear_att_state_mtp_size = req_manager.linear_att_state_mtp_size
         return super().write_to_shm(req_manager)
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
@@ -228,9 +229,7 @@ class Qwen3NextLinearAttPageHelper:
         return
 
     def _get_req_state_indexes(self, req_idx: int):
-        mtp_size = get_env_start_args().mtp_step + 1
-        # Conv is one widened slot per request; SSM keeps the historical S+1 block layout.
-        return req_idx, req_idx * mtp_size
+        return req_idx, req_idx * self.mem_manager.linear_att_state_mtp_size
 
     def _write_one_rank(
         self,

@@ -103,6 +103,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         self.req_manager = ReqManagerForMamba(
             self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
         )
+        self.mem_manager.linear_att_state_mtp_size = self.req_manager.linear_att_state_mtp_size
         return
 
     def _init_att_backend1(self):

@@ -402,7 +402,7 @@ class InferenceContext:
                 gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,
                 cpu_kv_conv_state=self.radix_cache.linear_att_big_page_buffers.conv_state_cache.buffer,
                 cpu_kv_ssm_state=self.radix_cache.linear_att_big_page_buffers.ssm_state_cache.buffer,
-                mtp_step=self.args.mtp_step,
+                ssm_state_stride=self.req_manager.linear_att_state_mtp_size,
             )
 
         assert not self.args.disable_chunked_prefill, "chunked prefill mode must be enabled for linear att mixed model"
@@ -419,7 +419,7 @@ class InferenceContext:
                     )
                     if req.tail_linear_att_small_page_buffer_id is not None:
                         conv_src_idx = req.req_idx
-                        ssm_src_idx = req.req_idx * (self.args.mtp_step + 1)
+                        ssm_src_idx = req.req_idx * self.req_manager.linear_att_state_mtp_size
                         conv_cache_width = self.req_manager.linear_config.get_conv_state_shape()[-1]
                         gpu_conv_state = self.req_manager.req_to_conv_state.buffer[
                             :, conv_src_idx, ..., :conv_cache_width

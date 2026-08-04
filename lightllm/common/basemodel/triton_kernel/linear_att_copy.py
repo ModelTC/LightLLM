@@ -24,7 +24,7 @@ def _copy_linear_att_state_to_kv_buffer(
     cpu_kv_ssm_stride_s,
     cpu_kv_ssm_stride_l,
     cpu_kv_ssm_stride_d,
-    mtp_step,
+    ssm_state_stride,
     gpu_conv_dim,  # number of conv rows
     gpu_conv_tail_dim_bytes,  # bytes copied per conv row; equals the CPU/cache row width
     gpu_ssm_tail_dim,
@@ -50,7 +50,7 @@ def _copy_linear_att_state_to_kv_buffer(
         return
 
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
-    cur_state_req_idx = (cur_req_idx * (mtp_step + 1)).to(tl.int64)
+    cur_state_req_idx = (cur_req_idx * ssm_state_stride).to(tl.int64)
 
     gpu_conv_base = gpu_conv_ptr + cur_layer * gpu_conv_stride_l + cur_req_idx * gpu_conv_stride_s
     cpu_conv_base = cpu_kv_conv_ptr + big_page_buffer_idx * cpu_kv_conv_stride_s + cur_layer * cpu_kv_conv_stride_l
@@ -85,7 +85,7 @@ def copy_linear_att_state_to_kv_buffer(
     gpu_ssm_state: torch.Tensor,  # [linear_layer_num, req_num * (mtp_step + 1), ...]
     cpu_kv_conv_state: torch.Tensor,  # [buffer_num, linear_layer_num, conv_dim, kernel_size]
     cpu_kv_ssm_state: torch.Tensor,  # [buffer_num, linear_layer_num, ...]
-    mtp_step: int,
+    ssm_state_stride: int,
 ):
     # gpu_conv_state 的后两维可能是不连续的。
     assert len(b_req_idx) == big_page_buffer_ids.shape[0]
@@ -143,7 +143,7 @@ def copy_linear_att_state_to_kv_buffer(
         cpu_kv_ssm_stride_s=cpu_kv_ssm_state.stride(0),
         cpu_kv_ssm_stride_l=cpu_kv_ssm_state.stride(1),
         cpu_kv_ssm_stride_d=cpu_kv_ssm_state.stride(2),
-        mtp_step=mtp_step,
+        ssm_state_stride=ssm_state_stride,
         gpu_conv_dim=gpu_conv_dim,
         gpu_conv_tail_dim_bytes=gpu_conv_tail_dim_bytes,
         gpu_ssm_tail_dim=gpu_ssm_tail_dim,
