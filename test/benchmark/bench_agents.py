@@ -125,14 +125,18 @@ async def do_turn(
             # append assistant reply so the next turn's prefix includes it
             sess.history.append({"role": "assistant", "content": "(reply)"})
             if time.perf_counter() >= warmup_until:
-                metrics.append({
-                    "ttft": (first_t - t0) * 1000,
-                    "itl": ((second_t - first_t) * 1000) if (first_t and second_t) else None,
-                    "tpot": (((last_t - first_t) / (ntok - 1)) * 1000) if (ntok > 1 and first_t and last_t) else 0.0,
-                    "lat": (end - t0) * 1000,
-                    "turn_idx": sess.turns_done,
-                    "sid": sess.sid,
-                })
+                metrics.append(
+                    {
+                        "ttft": (first_t - t0) * 1000,
+                        "itl": ((second_t - first_t) * 1000) if (first_t and second_t) else None,
+                        "tpot": (((last_t - first_t) / (ntok - 1)) * 1000)
+                        if (ntok > 1 and first_t and last_t)
+                        else 0.0,
+                        "lat": (end - t0) * 1000,
+                        "turn_idx": sess.turns_done,
+                        "sid": sess.sid,
+                    }
+                )
     except Exception as e:  # keep the run alive; record failure count only
         err = str(e)
     finally:
@@ -220,8 +224,10 @@ def summarize(metrics, fired, blocked, total_time, args):
         by_turn.setdefault(m["turn_idx"], []).append(m["ttft"])
 
     def line(name, s):
-        print(f"  {name:<30} mean={s['mean']:8.1f}  p50={s['p50']:8.1f}  "
-              f"p90={s['p90']:8.1f}  p95={s['p95']:8.1f}  p99={s['p99']:8.1f}  max={s['max']:8.1f}  (ms)")
+        print(
+            f"  {name:<30} mean={s['mean']:8.1f}  p50={s['p50']:8.1f}  "
+            f"p90={s['p90']:8.1f}  p95={s['p95']:8.1f}  p99={s['p99']:8.1f}  max={s['max']:8.1f}  (ms)"
+        )
 
     print("\n" + "=" * 96)
     print("AGENT OPEN-LOOP BENCHMARK RESULTS")
@@ -238,7 +244,10 @@ def summarize(metrics, fired, blocked, total_time, args):
     print("  TTFT by turn index (prefix grows each turn; later turns should be faster if cache hits):")
     for idx in sorted(by_turn):
         s = stats(by_turn[idx])
-        print(f"    turn {idx:<3} n={len(by_turn[idx]):<5} mean={s['mean']:8.1f}  p50={s['p50']:8.1f}  p90={s['p90']:8.1f} (ms)")
+        print(
+            f"    turn {idx:<3} n={len(by_turn[idx]):<5} mean={s['mean']:8.1f}  "
+            f"p50={s['p50']:8.1f}  p90={s['p90']:8.1f} (ms)"
+        )
     print("=" * 96 + "\n")
 
 
@@ -260,4 +269,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
