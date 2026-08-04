@@ -1,0 +1,62 @@
+{
+  "12": {
+    "BLOCK_N": 256,
+    "num_warps": 2
+  },
+  "12288": {
+    "BLOCK_N": 64,
+    "num_warps": 1
+  },
+  "1536": {
+    "BLOCK_N": 64,
+    "num_warps": 1
+  },
+  "192": {
+    "BLOCK_N": 256,
+    "num_warps": 2
+  },
+  "196608": {
+    "BLOCK_N": 64,
+    "num_warps": 1
+  },
+  "24": {
+    "BLOCK_N": 256,
+    "num_warps": 2
+  },
+  "24576": {
+    "BLOCK_N": 128,
+    "num_warps": 1
+  },
+  "3072": {
+    "BLOCK_N": 128,
+    "num_warps": 1
+  },
+  "384": {
+    "BLOCK_N": 512,
+    "num_warps": 1
+  },
+  "48": {
+    "BLOCK_N": 512,
+    "num_warps": 1
+  },
+  "49152": {
+    "BLOCK_N": 128,
+    "num_warps": 1
+  },
+  "6144": {
+    "BLOCK_N": 128,
+    "num_warps": 1
+  },
+  "768": {
+    "BLOCK_N": 512,
+    "num_warps": 1
+  },
+  "96": {
+    "BLOCK_N": 512,
+    "num_warps": 8
+  },
+  "98304": {
+    "BLOCK_N": 128,
+    "num_warps": 1
+  }
+}

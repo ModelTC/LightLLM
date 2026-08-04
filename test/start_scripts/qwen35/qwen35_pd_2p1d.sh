@@ -14,9 +14,9 @@ if [[ -n "${4:-}" ]]; then
   CHAT_TEMPLATE_ARGS=(--chat_template "$4")
 fi
 
+# export PYTORCH_ALLOC_CONF=expandable_segments:True
 export LOADWORKER=8
 export LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1
-export LIGHTLLM_FP8_GEMM=sgl
 export LIGHTLLM_ANTHROPIC_ENABLE_PDF_PARSING=1
 export LIGHTLLM_LOG_LEVEL=debug
 
@@ -24,11 +24,11 @@ export LIGHTLLM_LOG_LEVEL=debug
 export NO_PROXY="${NO_PROXY:+${NO_PROXY},}127.0.0.1,localhost"
 export no_proxy="${NO_PROXY}"
 
-COMMON_ARGS=(
+P_COMMON_ARGS=(
   --model_dir "${MODEL_DIR}"
   --model_name qwen35_27b
-  --graph_max_batch_size 64
-  --running_max_req_size 64
+  --graph_max_batch_size 8
+  --running_max_req_size 8
   --mem_fraction 0.80
   --max_image_token_count 4096
   --max_image_pixels 3686400
@@ -36,12 +36,36 @@ COMMON_ARGS=(
   --linear_att_cache_size 500
   --linear_att_hash_page_size 4096
   --linear_att_page_block_num 8
-  --quant_type fp8w8a8-pt-triton
+  --quant_type fp8w8a8-pt-sgl
   --mtp_mode eagle_with_att
   --mtp_draft_model_dir "${MODEL_DIR}"
   --mtp_step 3
   "${CHAT_TEMPLATE_ARGS[@]}"
-  --pd_trans_mode nccl
+  --pd_trans_mode nixl
+  --pd_kv_page_size 4096
+  --pd_master_ip 127.0.0.1
+  --pd_master_port "${PORT}"
+  --enable_prefill_cudagraph
+)
+
+D_COMMON_ARGS=(
+  --model_dir "${MODEL_DIR}"
+  --model_name qwen35_27b
+  --graph_max_batch_size 64
+  --running_max_req_size 64
+  --mem_fraction 0.80
+  --max_image_token_count 4096
+  --max_image_pixels 3686400
+  --batch_max_tokens 256
+  --linear_att_cache_size 500
+  --linear_att_hash_page_size 4096
+  --linear_att_page_block_num 8
+  --quant_type fp8w8a8-pt-sgl
+  --mtp_mode eagle_with_att
+  --mtp_draft_model_dir "${MODEL_DIR}"
+  --mtp_step 3
+  "${CHAT_TEMPLATE_ARGS[@]}"
+  --pd_trans_mode nixl
   --pd_kv_page_size 4096
   --pd_master_ip 127.0.0.1
   --pd_master_port "${PORT}"
@@ -60,7 +84,7 @@ trap 'exit 143' TERM
 
 # Prefill 1: TP2 on GPUs 0-1.
 CUDA_VISIBLE_DEVICES=0,1 python -m lightllm.server.api_server \
-  "${COMMON_ARGS[@]}" \
+  "${P_COMMON_ARGS[@]}" \
   --run_mode prefill \
   --enable_cpu_cache \
   --cpu_cache_storage_size "${CPU_CACHE_SIZE}" \
@@ -73,7 +97,7 @@ PIDS+=("$!")
 
 # Prefill 2: TP2 on GPUs 2-3.
 CUDA_VISIBLE_DEVICES=2,3 python -m lightllm.server.api_server \
-  "${COMMON_ARGS[@]}" \
+  "${P_COMMON_ARGS[@]}" \
   --run_mode prefill \
   --enable_cpu_cache \
   --cpu_cache_storage_size "${CPU_CACHE_SIZE}" \
@@ -86,7 +110,7 @@ PIDS+=("$!")
 
 # Decode: TP4 on GPUs 4-7.
 CUDA_VISIBLE_DEVICES=4,5,6,7 python -m lightllm.server.api_server \
-  "${COMMON_ARGS[@]}" \
+  "${D_COMMON_ARGS[@]}" \
   --run_mode decode \
   --tp 4 \
   --host 0.0.0.0 \
