@@ -1,3 +1,13 @@
+# Example:
+#   python test/benchmark/bench_agents.py \
+#       --qps 5 \
+#       --num-sessions 32 \
+#       --turns-per-session 6 \
+#       --isl 4096 \
+#       --osl 256 \
+#       --duration-sec 60 \
+#       --warmup-sec 10
+
 import argparse
 import asyncio
 import math
