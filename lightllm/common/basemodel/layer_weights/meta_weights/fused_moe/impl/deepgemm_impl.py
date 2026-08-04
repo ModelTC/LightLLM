@@ -11,6 +11,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     fused_experts,
     get_ep_num_sms,
     masked_group_gemm,
+    MoeWorkspaceConfig,
     get_prefill_moe_workspace,
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
@@ -218,8 +219,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13: WeightPack,
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
-        workspace_index: int = 0,
-        workspace_count: int = 1,
+        workspace_config: MoeWorkspaceConfig = MoeWorkspaceConfig(),
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
@@ -235,7 +235,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             self.quant_method.block_size,
-            get_prefill_moe_workspace(workspace_index, workspace_count),
+            get_prefill_moe_workspace(workspace_config),
             hidden_dtype,
         )
         del recv_x

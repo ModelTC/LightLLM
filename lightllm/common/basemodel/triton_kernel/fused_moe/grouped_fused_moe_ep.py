@@ -1,8 +1,9 @@
 """Fused MoE kernel."""
+
 import torch
 import triton
 import triton.language as tl
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
@@ -28,6 +29,12 @@ from lightllm.utils.device_utils import is_sm100_gpu
 logger = init_logger(__name__)
 _MEGA_MOE_STATES: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
 SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
+
+
+class MoeWorkspaceConfig(NamedTuple):
+    index: int = 0
+    count: int = 1
+
 
 try:
     from deep_ep import Buffer, EventOverlap
@@ -351,13 +358,12 @@ def deepgemm_grouped_fp8_nt_contiguous(
 
 
 def get_prefill_moe_workspace(
-    workspace_index: int = 0,
-    workspace_count: int = 1,
+    workspace_config: MoeWorkspaceConfig = MoeWorkspaceConfig(),
 ):
     workspace = dist_group_manager.prefill_moe_workspace
-    assert 0 <= workspace_index < workspace_count
-    workspace_size = workspace.numel() // workspace_count
-    workspace = workspace.narrow(0, workspace_index * workspace_size, workspace_size)
+    assert 0 <= workspace_config.index < workspace_config.count
+    workspace_size = workspace.numel() // workspace_config.count
+    workspace = workspace.narrow(0, workspace_config.index * workspace_size, workspace_size)
     return workspace
 
 
