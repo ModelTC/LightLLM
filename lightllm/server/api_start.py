@@ -3,6 +3,8 @@ import os
 import uuid
 import subprocess
 import math
+from dataclasses import replace
+from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
@@ -26,8 +28,35 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from lightllm.common.speculative import SpeculativeConfig, get_dspark_family_block_size
 
 logger = init_logger(__name__)
+
+
+def normalize_block_mtp_step_from_first_draft_config(
+    args: StartArgs, spec_config: SpeculativeConfig
+) -> SpeculativeConfig:
+    if not spec_config.uses_block_draft_model:
+        return spec_config
+
+    assert args.mtp_draft_model_dir is not None and len(args.mtp_draft_model_dir) > 0
+    mtp_model_cfg, _ = PretrainedConfig.get_config_dict(args.mtp_draft_model_dir[0])
+    block_size = get_dspark_family_block_size(
+        mtp_model_cfg,
+        require_confidence_head=spec_config.is_dspark,
+    )
+    configured_step = int(args.mtp_step)
+    if configured_step not in (0, block_size):
+        logger.warning(
+            "Overriding mtp_step=%s with block draft config block_size=%s for %s mode",
+            configured_step,
+            block_size,
+            spec_config.mode,
+        )
+    args.mtp_step = block_size
+    spec_config = replace(spec_config, step=block_size)
+    spec_config.validate()
+    return spec_config
 
 
 def _set_envs_and_config(args: StartArgs):
@@ -97,9 +126,9 @@ def _launch_subprocesses(args: StartArgs):
         args.embed_cache_storage_size = 0.8
         args.graph_max_batch_size = 6
         logger.info(
-            f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
-            f"graph_max_batch_size to 32"
+            "performance_mode is personal, set running_max_req_size to 3,"
+            "batch_max_tokens to 2048, chunked_prefill_size to 1024,"
+            "graph_max_batch_size to 32"
         )
 
     if not args.disable_shm_warning:
@@ -162,13 +191,20 @@ def _launch_subprocesses(args: StartArgs):
             )
 
     # mtp params check
-    if args.mtp_mode is not None:
+    spec_config = SpeculativeConfig.from_args(args)
+    spec_config.validate()
+    if spec_config.enabled:
         if args.mtp_draft_model_dir is None:
-            args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
-        assert args.mtp_step > 0
+            assert not spec_config.uses_block_draft_model, (
+                f"--mtp_draft_model_dir is required for {spec_config.mode} mode"
+            )
+            args.mtp_draft_model_dir = [args.model_dir] * spec_config.draft_model_count
+        elif isinstance(args.mtp_draft_model_dir, str):
+            args.mtp_draft_model_dir = [args.mtp_draft_model_dir]
+        assert len(args.mtp_draft_model_dir) >= spec_config.draft_model_count
+        spec_config = normalize_block_mtp_step_from_first_draft_config(args, spec_config)
     else:
         assert args.mtp_draft_model_dir is None
-        assert args.mtp_step == 0
 
     # automatically set visual_dp based on visual_tp and tp.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.

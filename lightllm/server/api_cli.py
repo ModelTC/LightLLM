@@ -614,6 +614,34 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """,
     )
     parser.add_argument(
+        "--mtp_draft_graph_max_batch_size",
+        type=int,
+        default=None,
+        help="""
+        Optional logical CUDA graph batch-size limit for MTP draft models.
+        Defaults to graph_max_batch_size. The value is expanded by the draft
+        model's decode graph group size in the same way as the main setting.
+        """,
+    )
+    parser.add_argument(
+        "--mtp_draft_graph_split_batch_size",
+        type=int,
+        default=None,
+        help="""
+        Optional dense-prefix CUDA graph limit for MTP draft models.
+        Defaults to graph_split_batch_size.
+        """,
+    )
+    parser.add_argument(
+        "--mtp_draft_graph_grow_step_size",
+        type=int,
+        default=None,
+        help="""
+        Optional CUDA graph batch-size growth step for MTP draft models.
+        Defaults to graph_grow_step_size.
+        """,
+    )
+    parser.add_argument(
         "--graph_max_len_in_batch",
         type=int,
         default=0,
@@ -733,13 +761,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "eagle_with_att",
             "vanilla_no_att",
             "eagle_no_att",
+            "eagle3",
+            "qwen3next_vanilla",
+            "qwen3next_eagle",
+            "dspark",
+            "dflash",
             None,
         ],
         default=None,
-        help="""Supported MTP modes.
-        None: Disables MTP.
-        *_with_att: Uses the MTP model with an attention mechanism to predict the next draft token.
-        *_no_att: Uses the MTP model without an attention module to predict the next draft token.""",
+        help="""Speculative decoding mode.
+        *_with_att and *_no_att select attention or non-attention MTP drafts;
+        eagle3 uses a recurrent EAGLE3 draft; dspark and dflash use block draft models.""",
     )
     parser.add_argument(
         "--mtp_draft_model_dir",
@@ -753,11 +785,13 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--mtp_step",
         type=int,
         default=0,
-        help="""Specifies the number of additional tokens to predict using the draft model.
-        Currently, this feature supports only the DeepSeekV3 model.
-        Increasing this value allows for more predictions,
-        but ensure that the model is compatible with the specified step count.
-        currently, deepseekv3 model only support 1 step""",
+        help="""Number of additional draft tokens per request.
+        For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
+    )
+    parser.add_argument(
+        "--mtp_dynamic_verify",
+        action="store_true",
+        help="""Whether to enable dynamic verification for MTP multi-prediction results.""",
     )
     parser.add_argument(
         "--kv_quant_calibration_config_path",

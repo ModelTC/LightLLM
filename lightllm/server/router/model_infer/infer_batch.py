@@ -1,23 +1,20 @@
 import enum
 import torch
 import torch.distributed as dist
-import numpy as np
 import collections
 import pickle
 
 from sortedcontainers import SortedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Callable, Any, Union
 from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
-from lightllm.utils.infer_utils import mark_start, mark_end
-from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
+from lightllm.server.core.objs import Req, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import (
     LinearAttPagedRadixCache,
     LinearAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
@@ -37,6 +34,7 @@ class InferenceContext:
     infer_req_ids = None
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
+    dynamic_mtp_planner: Optional[Any] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -70,6 +68,47 @@ class InferenceContext:
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
+        return
+
+    def init_dynamic_mtp_planner(self, mtp_step: int, mode: str = None):
+        if mode == "dspark":
+            planner_mode = "dspark"
+        elif mode == "eagle3":
+            planner_mode = "eagle3"
+        else:
+            planner_mode = "default"
+        if (
+            self.dynamic_mtp_planner is not None
+            and self.dynamic_mtp_planner.mtp_step == mtp_step
+            and getattr(self.dynamic_mtp_planner, "planner_mode", "default") == planner_mode
+        ):
+            return
+
+        from lightllm.server.router.model_infer.speculative.planner import (
+            DSparkDynamicMTPPlanner,
+            DynamicMTPPlanner,
+            Eagle3DynamicMTPPlanner,
+        )
+
+        planner_cls = {
+            "default": DynamicMTPPlanner,
+            "dspark": DSparkDynamicMTPPlanner,
+            "eagle3": Eagle3DynamicMTPPlanner,
+        }[planner_mode]
+        self.dynamic_mtp_planner = planner_cls(mtp_step=mtp_step)
+        return
+
+    def record_dynamic_mtp_infer_cost(self, *, batch_size: int, infer_cost_ms: float, is_draft_model: bool):
+        if self.dynamic_mtp_planner is None:
+            self.init_dynamic_mtp_planner(
+                mtp_step=get_env_start_args().mtp_step,
+                mode=get_env_start_args().mtp_mode,
+            )
+        self.dynamic_mtp_planner.update_infer_cost(
+            batch_size=batch_size,
+            infer_cost_ms=infer_cost_ms,
+            is_draft_model=is_draft_model,
+        )
         return
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
@@ -569,6 +608,7 @@ class InferReq:
         # mtp_step 用来记录一个请求 draft模型每步需要生成的token数量
         # 正常模式下，这个值为0，在 mtp 模式下，这个值为 draft 模型每步需要生成的token数量
         self.mtp_step: int = get_env_start_args().mtp_step
+
         if self.mtp_step > 0:
             self.decode_need_token_num = self._mtp_decode_need_token_num
         else:
@@ -858,6 +898,14 @@ class InferReq:
     def update_mtp_accepted_token_num(self, accept_token_num: int):
         # 用于统计 mtp 的接受率
         self.shm_req.mtp_accepted_token_num += accept_token_num
+
+    def update_mtp_verify_token_num(self, verify_token_num: int):
+        # 用于统计 mtp 验证时发送给主模型的 token 总数
+        self.shm_req.mtp_verify_token_num += verify_token_num
+
+    def update_mtp_verify_step_num(self, verify_step_num: int):
+        # 用于统计 mtp 验证轮数
+        self.shm_req.mtp_verify_step_num += verify_step_num
 
     def get_last_gen_token(self):
         return self.shm_req.shm_prompt_ids.arr[self.shm_req.input_len + self.cur_output_len - 1]

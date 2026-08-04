@@ -8,10 +8,6 @@ from lightllm.common.basemodel import TpPartBaseModel
 
 
 class Qwen3MOEMTPModel(Qwen3MOEModel):
-
-    # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
-    is_mtp_draft_model = True
-
     pre_and_post_weight_class = Qwen3MOEMTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer
 
@@ -27,6 +23,9 @@ class Qwen3MOEMTPModel(Qwen3MOEModel):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         return
+
+    def _gen_special_model_input(self, token_num: int):
+        return self._gen_mtp_draft_special_model_input(token_num)
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached

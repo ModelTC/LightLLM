@@ -1,12 +1,9 @@
 import dataclasses
 import torch
 from ..base_att import AttControl
-from typing import Optional, TYPE_CHECKING
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_fp8_quant
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
-from typing import Union
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
 if HAS_VLLM:
@@ -99,7 +96,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
-            causal=True,
+            causal=getattr(self.infer_state, "prefill_causal", True),
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale,
@@ -119,11 +116,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         super().init_state()
         self.backend: Fp8Fa3AttBackend = self.backend
 
-        args_mtp_step = get_env_start_args().mtp_step
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
-
-        batch_size = att_batch_size
+        batch_size = self.page_table.shape[0]
         mem_manager = self.backend.model.mem_manager
 
         offline_scales: torch.Tensor = mem_manager.scales
@@ -190,7 +183,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
-            causal=True,
+            causal=getattr(self.infer_state, "decode_causal", True),
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale.view(self.infer_state.batch_size, k_head_num),

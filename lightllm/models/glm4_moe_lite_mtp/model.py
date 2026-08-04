@@ -9,10 +9,6 @@ from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
-
-    # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
-    is_mtp_draft_model = True
-
     pre_and_post_weight_class = Glm4MoeLiteMTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer
 
@@ -23,6 +19,9 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
     def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
+
+    def _gen_special_model_input(self, token_num: int):
+        return self._gen_mtp_draft_special_model_input(token_num)
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached

@@ -1,0 +1,26 @@
+{
+  "1000000128": {
+    "num_stages": 1,
+    "num_warps": 4
+  },
+  "128000000032": {
+    "num_stages": 1,
+    "num_warps": 4
+  },
+  "16000000128": {
+    "num_stages": 1,
+    "num_warps": 4
+  },
+  "32000000064": {
+    "num_stages": 1,
+    "num_warps": 4
+  },
+  "64000000064": {
+    "num_stages": 1,
+    "num_warps": 4
+  },
+  "8000000128": {
+    "num_stages": 1,
+    "num_warps": 4
+  }
+}

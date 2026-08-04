@@ -1,8 +1,12 @@
 import torch
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from typing import List
-from lightllm.utils.envs_utils import enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import (
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_dynamic_mtp_verify,
+    enable_triton_mtp_kernel,
+)
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -55,6 +59,13 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+    # 部分 spec draft 模型会在服务 MTP 模式下执行普通 decode batch
+    # （例如 Eagle3 commit accepted rows），此时 attention 不应按 MTP 展开布局建参。
+    disable_mtp_decode_att: bool = False
+    # Dynamic verification normally needs arbitrary per-request row groups.
+    # A full-width plan has the original fixed K+1 layout and can reuse the
+    # substantially cheaper Static MTP attention parameter construction.
+    use_static_mtp_layout: bool = False
 
     def to_cuda(self):
         self.check_input()
@@ -90,6 +101,12 @@ class ModelInput:
                 self.b_shared_seq_len = torch.zeros(size=(batch_size,), dtype=torch.int32, device="cuda")
             else:
                 self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
+        elif not self.is_prefill and (enable_dynamic_mtp_verify() or enable_triton_mtp_kernel()):
+            batch_size = len(self.b_req_idx)
+            if self.b_mark_shared_group is None:
+                self.b_mark_shared_group = torch.ones(size=(batch_size,), dtype=torch.int32, device="cuda")
+            else:
+                self.b_mark_shared_group = self.b_mark_shared_group.cuda(non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
@@ -108,14 +125,9 @@ class ModelOutput:
     logits: torch.Tensor
     # 用于判断 mem_indexes 是否成功写入 req manager 中的事件对象。
     prefill_mem_indexes_ready_event: torch.Event = None
-
-    # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
-    # 的输出变量。只在特殊的模型模式下才会具体使用和生效。
-
-    # mtp_main_output_hiddens 用于在mtp模式下，llm main model
-    # 输出最后一层的hidden state 状态用于 draft 模型的 mtp_draft_input_hiddens
-    # 输入
-    mtp_main_output_hiddens: Optional[torch.Tensor] = None
+    # DSpark dynamic verify 使用的 raw confidence logits，由 draft model
+    # post layer 产生，proposer 只负责 scatter 到 verify batch。
+    mtp_draft_confidence_logits: Optional[torch.Tensor] = None
 
     # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
     # 保存整个 prefill 阶段每一个 token 位置对应的 logits（而非仅最后一个位置的 logits）。
@@ -125,5 +137,5 @@ class ModelOutput:
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
-        if self.mtp_main_output_hiddens is not None:
-            self.mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.mtp_main_output_hiddens)
+        if self.mtp_draft_confidence_logits is not None:
+            self.mtp_draft_confidence_logits = tensor_to_no_ref_tensor(self.mtp_draft_confidence_logits)

@@ -152,6 +152,9 @@ class StartArgs:
     graph_max_batch_size: int = field(default=256)
     graph_split_batch_size: int = field(default=32)
     graph_grow_step_size: int = field(default=16)
+    mtp_draft_graph_max_batch_size: Optional[int] = field(default=None)
+    mtp_draft_graph_split_batch_size: Optional[int] = field(default=None)
+    mtp_draft_graph_grow_step_size: Optional[int] = field(default=None)
     graph_max_len_in_batch: int = field(default=0)
     quant_type: Optional[str] = field(default="none")
     quant_cfg: Optional[str] = field(default=None)
@@ -187,12 +190,18 @@ class StartArgs:
                 "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
+                "eagle3",
+                "dspark",
+                "dflash",
+                "qwen3next_vanilla",
+                "qwen3next_eagle",
                 None,
             ]
         },
     )
-    mtp_draft_model_dir: Optional[str] = field(default=None)
+    mtp_draft_model_dir: Optional[List[str]] = field(default=None)
     mtp_step: int = field(default=0)
+    mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
     pd_kv_page_num: int = field(default=16)
     pd_kv_page_size: int = field(default=1024)
