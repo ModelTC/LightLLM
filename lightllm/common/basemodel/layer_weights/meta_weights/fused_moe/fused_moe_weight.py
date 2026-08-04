@@ -191,6 +191,23 @@ class FusedMoeWeight(BaseWeightTpl):
             scoring_func=self.scoring_func,
         )
 
+    def low_latency_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        assert self.enable_ep_moe, "low_latency_dispatch_with_topk is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.low_latency_dispatch_with_topk(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor):
+        assert self.enable_ep_moe, "quantize_dispatch_input is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.quantize_dispatch_input(hidden_states=hidden_states, w13=self.w13)
+
     def select_experts_and_quant_input(
         self,
         hidden_states: torch.Tensor,
@@ -226,7 +243,12 @@ class FusedMoeWeight(BaseWeightTpl):
         )
 
     def masked_group_gemm(
-        self, recv_x: Tuple[torch.Tensor], masked_m: torch.Tensor, dtype: torch.dtype, expected_m: int
+        self,
+        recv_x: Tuple[torch.Tensor],
+        masked_m: torch.Tensor,
+        dtype: torch.dtype,
+        expected_m: int,
+        clamp_limit: Optional[float] = None,
     ):
         assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.masked_group_gemm(
@@ -236,6 +258,7 @@ class FusedMoeWeight(BaseWeightTpl):
             masked_m=masked_m,
             dtype=dtype,
             expected_m=expected_m,
+            clamp_limit=clamp_limit,
         )
 
     def prefilled_group_gemm(
@@ -245,6 +268,7 @@ class FusedMoeWeight(BaseWeightTpl):
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
+        clamp_limit: Optional[float] = None,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
@@ -255,6 +279,7 @@ class FusedMoeWeight(BaseWeightTpl):
             w13=self.w13,
             w2=self.w2,
             hidden_dtype=hidden_dtype,
+            clamp_limit=clamp_limit,
         )
 
     def low_latency_combine(

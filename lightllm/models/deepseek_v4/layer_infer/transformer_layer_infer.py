@@ -1,10 +1,13 @@
 import torch
+import triton
 from lightllm.common.basemodel import BaseLayerInfer, TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.utils.vllm_utils import vllm_ops
 from .hyper_connection import hc_pre, hc_fused_post_pre, hc_post
@@ -136,6 +139,187 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         x, residual, post_mix, res_mix = self._hc_ffn_in(x, residual, post_mix, res_mix, layer_weight)
         x = self._ffn(x, infer_state, layer_weight)
         return self._hc_ffn_out(x, residual, post_mix, res_mix)
+
+    def overlap_tpsp_context_forward(
+        self,
+        input_embdings,
+        input_embdings1,
+        infer_state: DeepseekV4InferStateInfo,
+        infer_state1: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+    ):
+        experts = layer_weight.experts_
+        if not self.enable_ep_moe or use_sm100_mega_moe(experts.quant_method):
+            input_embdings = self.context_forward(input_embdings, infer_state, layer_weight)
+            input_embdings1 = self.context_forward(input_embdings1, infer_state1, layer_weight)
+            return input_embdings, input_embdings1
+
+        x0, residual0, post_mix0, res_mix0 = self._hc_attn_in(input_embdings, layer_weight)
+        x0 = self.context_attention_forward(x0, infer_state, layer_weight)
+        x0, residual0, post_mix0, res_mix0 = self._hc_ffn_in(x0, residual0, post_mix0, res_mix0, layer_weight)
+        x0 = self._tpsp_allgather(x0.view(-1, self.embed_dim_), infer_state)
+        logits0 = layer_weight.gate_weight_.mm(x0, out_dtype=torch.float32)
+        weights0, indices0 = self._select_experts(logits0, infer_state, layer_weight)
+
+        indices0 = indices0.to(torch.long)
+        qinput0 = experts.quantize_dispatch_input(x0)
+        from deep_ep import ElasticBuffer
+
+        dispatch_event0 = ElasticBuffer.capture()
+        infer_state1.call_overlap_hook()
+
+        x1, residual1, post_mix1, res_mix1 = self._hc_attn_in(input_embdings1, layer_weight)
+        x1 = self.context_attention_forward(x1, infer_state1, layer_weight)
+        x1, residual1, post_mix1, res_mix1 = self._hc_ffn_in(x1, residual1, post_mix1, res_mix1, layer_weight)
+        x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
+        logits1 = layer_weight.gate_weight_.mm(x1, out_dtype=torch.float32)
+        weights1, indices1 = self._select_experts(logits1, infer_state1, layer_weight)
+
+        recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0 = experts.dispatch(
+            qinput0,
+            indices0,
+            weights0,
+            overlap_event=dispatch_event0,
+        )
+        dispatch_hook0()
+
+        indices1 = indices1.to(torch.long)
+        qinput1 = experts.quantize_dispatch_input(x1)
+
+        dispatch_event1 = ElasticBuffer.capture()
+        recv_x1, recv_indices1, recv_weights1, recv_count1, handle1, dispatch_hook1 = experts.dispatch(
+            qinput1,
+            indices1,
+            weights1,
+            overlap_event=dispatch_event1,
+        )
+
+        moe_out0 = experts.prefilled_group_gemm(
+            recv_count0,
+            recv_x0,
+            recv_indices0,
+            recv_weights0,
+            hidden_dtype=x0.dtype,
+            clamp_limit=self.swiglu_limit,
+        )
+
+        combine_event0 = ElasticBuffer.capture()
+        routed0, combine_hook0 = experts.combine(moe_out0, handle0, overlap_event=combine_event0)
+
+        dispatch_hook1()
+        moe_out1 = experts.prefilled_group_gemm(
+            recv_count1,
+            recv_x1,
+            recv_indices1,
+            recv_weights1,
+            hidden_dtype=x1.dtype,
+            clamp_limit=self.swiglu_limit,
+        )
+
+        combine_event1 = ElasticBuffer.capture()
+        routed1, combine_hook1 = experts.combine(moe_out1, handle1, overlap_event=combine_event1)
+
+        shared0 = self._ffn_tp(x0, infer_state, layer_weight)
+        combine_hook0()
+        routed0.add_(shared0)
+        output0 = self._hc_ffn_out(routed0, residual0, post_mix0, res_mix0)
+
+        shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
+        if self.is_last_layer:
+            combine_hook1()
+            routed1.add_(shared1)
+            output1 = self._hc_ffn_out(routed1, residual1, post_mix1, res_mix1)
+        else:
+
+            def finish():
+                combine_hook1()
+                routed1.add_(shared1)
+
+            infer_state1.hook = finish
+            output1 = routed1, residual1, post_mix1, res_mix1
+        return output0, output1
+
+    def overlap_tpsp_token_forward(
+        self,
+        input_embdings,
+        input_embdings1,
+        infer_state: DeepseekV4InferStateInfo,
+        infer_state1: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+    ):
+        experts = layer_weight.experts_
+        if not self.enable_ep_moe or use_sm100_mega_moe(experts.quant_method):
+            input_embdings = self.token_forward(input_embdings, infer_state, layer_weight)
+            input_embdings1 = self.token_forward(input_embdings1, infer_state1, layer_weight)
+            return input_embdings, input_embdings1
+
+        x0, residual0, post_mix0, res_mix0 = self._hc_attn_in(input_embdings, layer_weight)
+        x0 = self.token_attention_forward(x0, infer_state, layer_weight)
+        x0, residual0, post_mix0, res_mix0 = self._hc_ffn_in(x0, residual0, post_mix0, res_mix0, layer_weight)
+        x0 = self._tpsp_allgather(x0.view(-1, self.embed_dim_), infer_state)
+        logits0 = layer_weight.gate_weight_.mm(x0, out_dtype=torch.float32)
+        weights0, indices0 = self._select_experts(logits0, infer_state, layer_weight)
+        infer_state1.call_overlap_hook()
+
+        shared0 = self._ffn_tp(x0, infer_state, layer_weight)
+        recv_x0, masked_m0, indices0, weights0, handle0, dispatch_hook0 = experts.low_latency_dispatch_with_topk(
+            x0, indices0, weights0
+        )
+
+        x1, residual1, post_mix1, res_mix1 = self._hc_attn_in(input_embdings1, layer_weight)
+        x1 = self.token_attention_forward(x1, infer_state1, layer_weight)
+        x1, residual1, post_mix1, res_mix1 = self._hc_ffn_in(x1, residual1, post_mix1, res_mix1, layer_weight)
+        x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
+        logits1 = layer_weight.gate_weight_.mm(x1, out_dtype=torch.float32)
+        weights1, indices1 = self._select_experts(logits1, infer_state1, layer_weight)
+        dispatch_hook0()
+
+        shared1 = self._ffn_tp(x1, infer_state1, layer_weight)
+        recv_x1, masked_m1, indices1, weights1, handle1, dispatch_hook1 = experts.low_latency_dispatch_with_topk(
+            x1, indices1, weights1
+        )
+
+        expected_m = triton.cdiv(
+            x0.shape[0] * get_global_world_size() * self.num_experts_per_tok,
+            layer_weight.n_routed_experts,
+        )
+        moe_out0 = experts.masked_group_gemm(
+            recv_x0,
+            masked_m0,
+            x0.dtype,
+            expected_m,
+            clamp_limit=self.swiglu_limit,
+        )
+
+        dispatch_hook1()
+        routed0, combine_hook0 = experts.low_latency_combine(moe_out0, indices0, weights0, handle0)
+
+        moe_out1 = experts.masked_group_gemm(
+            recv_x1,
+            masked_m1,
+            x1.dtype,
+            expected_m,
+            clamp_limit=self.swiglu_limit,
+        )
+
+        combine_hook0()
+        routed0.add_(shared0)
+        output0 = self._hc_ffn_out(routed0, residual0, post_mix0, res_mix0)
+
+        routed1, combine_hook1 = experts.low_latency_combine(moe_out1, indices1, weights1, handle1)
+        if self.is_last_layer:
+            combine_hook1()
+            routed1.add_(shared1)
+            output1 = self._hc_ffn_out(routed1, residual1, post_mix1, res_mix1)
+        else:
+
+            def finish():
+                combine_hook1()
+                routed1.add_(shared1)
+
+            infer_state1.hook = finish
+            output1 = routed1, residual1, post_mix1, res_mix1
+        return output0, output1
 
     # ------------------------------------------------------------------ shared projections / cache
     def _select_rope(self, infer_state: DeepseekV4InferStateInfo):

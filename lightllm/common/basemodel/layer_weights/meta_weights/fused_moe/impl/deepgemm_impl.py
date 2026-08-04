@@ -118,6 +118,18 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             scoring_func=scoring_func,
         )
 
+        return self.low_latency_dispatch_with_topk(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def low_latency_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
         topk_idx = topk_idx.to(torch.long)
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
@@ -131,6 +143,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             return_recv_hook=True,
         )
         return recv_x, masked_m, topk_idx, topk_weights, handle, hook
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
+        return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
 
     def select_experts_and_quant_input(
         self,
@@ -221,6 +236,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13: WeightPack,
         w2: WeightPack,
         hidden_dtype=torch.bfloat16,
+        clamp_limit: Optional[float] = None,
     ):
         device = recv_x[0].device
         w13_weight, w13_scale = w13.weight, w13.weight_scale
@@ -273,7 +289,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             # TODO fused kernel
             silu_out = torch.empty((all_tokens, N // 2), device=device, dtype=hidden_dtype)
 
-            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out)
+            silu_and_mul_fwd(gemm_out_a.view(-1, N), silu_out, limit=clamp_limit)
             qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
                 silu_out, block_size, dtype=w13_weight.dtype, column_major_scales=True, scale_tma_aligned=True
             )
@@ -293,7 +309,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             if Autotuner.is_autotune_warmup():
                 _gemm_out_a = torch.zeros((1, N), device=device, dtype=hidden_dtype)
                 _silu_out = torch.zeros((1, N // 2), device=device, dtype=hidden_dtype)
-                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out, limit=clamp_limit)
                 _gemm_out_a, _silu_out = None, None
 
         return gather_out
