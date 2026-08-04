@@ -356,9 +356,9 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
-        "--enable_url_pool",
+        "--enable_multimodal_url_cache",
         action="store_true",
-        help="cache successfully downloaded URL resources in the local process; disabled by default.",
+        help="cache image, video, and audio URL content in the local process to avoid repeated downloads.",
     )
     parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."

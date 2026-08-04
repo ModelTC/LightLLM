@@ -273,9 +273,9 @@ Multimodal Parameters
 
     If the model is a multimodal model, set this to not load the audio part model (default is None, auto-detected based on model)
 
-.. option:: --enable_url_pool
+.. option:: --enable_multimodal_url_cache
 
-    Cache successfully downloaded URL resources in the local process. Disabled by default. The maximum number of cached resources defaults to ``512`` and can be configured with ``LIGHTLLM_URL_POOL_MAXSIZE``.
+    Cache image, video, and audio URL content in the local process to avoid repeated downloads. Disabled by default. The maximum number of cached resources defaults to ``512`` and can be configured with ``LIGHTLLM_URL_POOL_MAXSIZE``.
 
 .. option:: --enable_mps
 

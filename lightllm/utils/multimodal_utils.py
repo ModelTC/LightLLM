@@ -16,6 +16,8 @@ logger = init_logger(__name__)
 
 
 class UrlResourcePool:
+    """Cache image, video, and audio URL content to avoid repeated downloads."""
+
     def __init__(self, maxsize: int = 256):
         self._maxsize = maxsize
         self._cache: "OrderedDict[Tuple[str, Optional[str]], bytes]" = OrderedDict()
@@ -25,6 +27,9 @@ class UrlResourcePool:
         return url.strip()
 
     def get(self, url: str, proxy: Optional[str]) -> Optional[bytes]:
+        if not get_env_start_args().enable_multimodal_url_cache:
+            return None
+
         key = (self._normalize_url(url), proxy)
         cached = self._cache.get(key)
         if cached is not None:
@@ -33,7 +38,7 @@ class UrlResourcePool:
         return cached
 
     def put(self, url: str, proxy: Optional[str], content: bytes) -> None:
-        if self._maxsize <= 0:
+        if not get_env_start_args().enable_multimodal_url_cache or self._maxsize <= 0:
             return
 
         key = (self._normalize_url(url), proxy)
@@ -80,11 +85,9 @@ def _get_xhttp_client(proxy=None):
 
 async def fetch_resource(url, request: Request, timeout, proxy=None):
     logger.info(f"Begin to download resource from url: {url}")
-    enable_url_pool = getattr(get_env_start_args(), "enable_url_pool", False)
-    if enable_url_pool:
-        cached = URL_RESOURCE_POOL.get(url, proxy)
-        if cached is not None:
-            return cached
+    cached = URL_RESOURCE_POOL.get(url, proxy)
+    if cached is not None:
+        return cached
 
     start_time = time.time()
     client = _get_xhttp_client(proxy)
@@ -104,6 +107,5 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
     end_time = time.time()
     cost_time = end_time - start_time
     logger.info(f"Download url {url} resource cost time: {cost_time} seconds")
-    if enable_url_pool:
-        URL_RESOURCE_POOL.put(url, proxy, content)
+    URL_RESOURCE_POOL.put(url, proxy, content)
     return content

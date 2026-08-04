@@ -88,7 +88,8 @@ class StartArgs:
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)
-    enable_url_pool: bool = field(default=False)
+    # Cache image, video, and audio URL content to avoid repeated downloads.
+    enable_multimodal_url_cache: bool = field(default=False)
     visual_use_proxy_mode: bool = field(default=False)
     disable_symm_mem_allreduce: bool = field(default=False)
     disable_flashinfer_allreduce: bool = field(default=False)

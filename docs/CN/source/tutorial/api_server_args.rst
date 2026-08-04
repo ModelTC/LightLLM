@@ -274,9 +274,9 @@ PD 分离模式参数
 
     如果模型是多模态模型，设置此参数将不加载音频部分模型（默认为None，会根据模型自动检测）
 
-.. option:: --enable_url_pool
+.. option:: --enable_multimodal_url_cache
 
-    在本地进程中缓存成功下载的 URL 资源，默认关闭。默认最多缓存 ``512`` 个资源，可通过 ``LIGHTLLM_URL_POOL_MAXSIZE`` 配置。
+    在本地进程中缓存图片、视频和音频的 URL 内容，避免重复下载，默认关闭。默认最多缓存 ``512`` 个资源，可通过 ``LIGHTLLM_URL_POOL_MAXSIZE`` 配置。
 
 .. option:: --enable_mps
 
