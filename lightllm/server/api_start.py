@@ -28,7 +28,10 @@ from lightllm.utils.config_utils import (
     auto_set_response_parsers,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
-from lightllm.common.speculative import SpeculativeConfig, get_dspark_family_block_size
+from lightllm.common.speculative import (
+    SpeculativeConfig,
+    get_block_draft_layout,
+)
 
 logger = init_logger(__name__)
 
@@ -41,20 +44,23 @@ def normalize_block_mtp_step_from_first_draft_config(
 
     assert args.mtp_draft_model_dir is not None and len(args.mtp_draft_model_dir) > 0
     mtp_model_cfg, _ = PretrainedConfig.get_config_dict(args.mtp_draft_model_dir[0])
-    block_size = get_dspark_family_block_size(
+    layout = get_block_draft_layout(
         mtp_model_cfg,
+        mode=spec_config.mode,
         require_confidence_head=spec_config.is_dspark,
     )
     configured_step = int(args.mtp_step)
-    if configured_step not in (0, block_size):
+    draft_step = layout.resolve_draft_step(configured_step)
+    if configured_step not in (0, draft_step):
         logger.warning(
-            "Overriding mtp_step=%s with block draft config block_size=%s for %s mode",
+            "Overriding mtp_step=%s with draft_step=%s from block_size=%s for %s mode",
             configured_step,
-            block_size,
+            draft_step,
+            layout.query_block_size,
             spec_config.mode,
         )
-    args.mtp_step = block_size
-    spec_config = replace(spec_config, step=block_size)
+    args.mtp_step = draft_step
+    spec_config = replace(spec_config, step=draft_step)
     spec_config.validate()
     return spec_config
 

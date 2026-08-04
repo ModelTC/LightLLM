@@ -2,6 +2,7 @@ import torch
 import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
+from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.linear_att_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .operator import LinearAttMemOperator
@@ -25,8 +26,24 @@ class Qwen3NextMemManager(MemoryManager):
         mem_fraction=0.9,
     ):
         self.linear_config = linear_config
+        self._pd_dflash_draft_mem_manager = None
+        self._pd_dflash_global_kv_heads = None
 
         super().__init__(size, dtype, num_kv_heads, head_dim, full_att_layer_num, always_copy, mem_fraction)
+
+    @property
+    def has_separate_dflash_draft_kv(self) -> bool:
+        return self._pd_dflash_draft_mem_manager is not None
+
+    def register_dflash_draft_mem_manager(self, draft_mem_manager: MemoryManager, global_kv_heads: int):
+        """Attach the independent Qwen3.5 DFlash KV cache for PD transfer."""
+        assert draft_mem_manager.size == self.size
+        assert draft_mem_manager.dtype == self.dtype
+        global_kv_heads = int(global_kv_heads)
+        assert global_kv_heads > 0
+        self._pd_dflash_draft_mem_manager = draft_mem_manager
+        self._pd_dflash_global_kv_heads = global_kv_heads
+        return
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         if layer_index >= self.linear_config.all_layer_num:
@@ -84,9 +101,145 @@ class Qwen3NextMemManager(MemoryManager):
             self.linear_att_big_page_buffers = big_page_buffers
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
+        if not self.has_separate_dflash_draft_kv:
+            kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
+        else:
+            # PD pages are opaque contiguous bytes to the transporter. Allocate
+            # one registered page large enough for either target or draft KV;
+            # the page-kind hooks below expose the corresponding shaped view.
+            target_elements = (
+                self.layer_num * 2 * self.linear_config.full_att_all_num_kv_heads * self.head_dim
+            )
+            draft_mem = self._pd_dflash_draft_mem_manager
+            draft_elements = (
+                draft_mem.layer_num * 2 * self._pd_dflash_global_kv_heads * draft_mem.head_dim
+            )
+            linear_state_nbytes = Qwen3NextLinearAttPageHelper(self).state_nbytes
+            linear_state_elements_per_token = (
+                linear_state_nbytes + page_size * self.dtype.itemsize - 1
+            ) // (page_size * self.dtype.itemsize)
+            elements_per_token = max(
+                target_elements,
+                draft_elements,
+                linear_state_elements_per_token,
+            )
+            self.kv_move_buffer = torch.empty(
+                (page_num, page_size, 1, 1, elements_per_token),
+                dtype=self.dtype,
+                device="cuda",
+            )
+            self._buffer_mem_indexes_tensors = [
+                torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True)
+                for _ in range(page_num)
+            ]
+            kv_move_buffer = self.kv_move_buffer
         Qwen3NextLinearAttPageHelper(self).assert_page_size()
         return kv_move_buffer
+
+    def _get_pd_kv_page(self, page_index: int, page_kind: str) -> torch.Tensor:
+        page = self.kv_move_buffer[page_index]
+        if not self.has_separate_dflash_draft_kv:
+            assert page_kind == "kv"
+            return page
+
+        flat_page = page.reshape(-1)
+        if page_kind == "kv":
+            layer_num = self.layer_num
+            global_kv_heads = self.linear_config.full_att_all_num_kv_heads
+            head_dim = self.head_dim
+        elif page_kind == "draft_kv":
+            draft_mem = self._pd_dflash_draft_mem_manager
+            layer_num = draft_mem.layer_num
+            global_kv_heads = self._pd_dflash_global_kv_heads
+            head_dim = draft_mem.head_dim
+        else:
+            raise ValueError(f"unknown KV page kind {page_kind}")
+
+        element_num = layer_num * 2 * global_kv_heads * head_dim
+        total_element_num = page.shape[0] * element_num
+        assert total_element_num <= flat_page.numel()
+        return flat_page[:total_element_num].view(page.shape[0], layer_num, 2 * global_kv_heads, head_dim)
+
+    def _get_pd_mem_manager(self, page_kind: str) -> MemoryManager:
+        if page_kind == "kv":
+            return self
+        if page_kind == "draft_kv" and self.has_separate_dflash_draft_kv:
+            return self._pd_dflash_draft_mem_manager
+        raise ValueError(f"unknown KV page kind {page_kind}")
+
+    def get_dflash_draft_cpu_cache(self, cpu_cache_tensor: torch.Tensor) -> torch.Tensor:
+        """Return the draft-KV portion appended to a mixed-model CPU cache page."""
+
+        assert self.has_separate_dflash_draft_kv
+        assert cpu_cache_tensor.dtype == torch.uint8
+        draft_mem = self._pd_dflash_draft_mem_manager
+        page_num = cpu_cache_tensor.shape[0]
+        page_size = get_env_start_args().cpu_cache_token_page_size
+        draft_shape = (
+            page_num,
+            draft_mem.layer_num,
+            page_size,
+            2 * self._pd_dflash_global_kv_heads,
+            draft_mem.head_dim,
+        )
+        draft_nbytes = 1
+        for dim in draft_shape[1:]:
+            draft_nbytes *= dim
+        draft_nbytes *= self.dtype.itemsize
+
+        # Existing Qwen3Next full-attention/linear-state data occupies the
+        # aligned prefix. Qwen3.5 DFlash KV is stored in the remaining bytes so
+        # disk offload and shared-memory page lifecycle stay unchanged.
+        draft_offset = self.linear_config.get_cpu_cache_big_page_bytes()
+        flat_cache = cpu_cache_tensor.reshape(page_num, -1)
+        assert draft_offset + draft_nbytes <= flat_cache.shape[1]
+        draft_bytes = flat_cache[:, draft_offset : draft_offset + draft_nbytes]
+        return draft_bytes.view(dtype=self.dtype).view(draft_shape)
+
+    def _write_kv_mem_to_page(
+        self, mem_indexes, page_index: int, dp_index: int, mem_managers, dp_world_size: int, page_kind: str
+    ):
+        page = self._get_pd_kv_page(page_index, page_kind)
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        assert len(dp_mems) == dp_world_size
+        source_mems = [mem._get_pd_mem_manager(page_kind) for mem in dp_mems]
+        repeat_count = dp_world_size * source_mems[0].kv_buffer.shape[2] // page.shape[2]
+        assert repeat_count > 0
+        for tp_index, mem in enumerate(source_mems):
+            if tp_index % repeat_count == 0:
+                page_io(
+                    mem_indexes=mem_indexes_gpu,
+                    page_tensor=page,
+                    kv_buffer=mem.kv_buffer,
+                    tp_index=tp_index,
+                    tp_world_size=dp_world_size,
+                    mode="write",
+                )
+        return
+
+    def _read_kv_page_to_mem(
+        self, mem_indexes, page_index: int, dp_index: int, mem_managers, dp_world_size: int, page_kind: str
+    ):
+        page = self._get_pd_kv_page(page_index, page_kind)
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
+        assert len(dp_mems) == dp_world_size
+        target_mems = [mem._get_pd_mem_manager(page_kind) for mem in dp_mems]
+        for tp_index, mem in enumerate(target_mems):
+            page_io(
+                mem_indexes=mem_indexes_gpu,
+                page_tensor=page,
+                kv_buffer=mem.kv_buffer,
+                tp_index=tp_index,
+                tp_world_size=dp_world_size,
+                mode="read",
+            )
+        return
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -98,15 +251,14 @@ class Qwen3NextMemManager(MemoryManager):
         page_kind: str = "kv",
         req_idx: int = None,
     ):
-        if page_kind == "kv":
-            return super().write_mem_to_page_kv_move_buffer(
+        if page_kind in ("kv", "draft_kv"):
+            return self._write_kv_mem_to_page(
                 mem_indexes=mem_indexes,
                 page_index=page_index,
                 dp_index=dp_index,
                 mem_managers=mem_managers,
                 dp_world_size=dp_world_size,
                 page_kind=page_kind,
-                req_idx=req_idx,
             )
         assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None
@@ -125,15 +277,14 @@ class Qwen3NextMemManager(MemoryManager):
         page_kind: str = "kv",
         req_idx: int = None,
     ):
-        if page_kind == "kv":
-            return super().read_page_kv_move_buffer_to_mem(
+        if page_kind in ("kv", "draft_kv"):
+            return self._read_kv_page_to_mem(
                 mem_indexes=mem_indexes,
                 page_index=page_index,
                 dp_index=dp_index,
                 mem_managers=mem_managers,
                 dp_world_size=dp_world_size,
                 page_kind=page_kind,
-                req_idx=req_idx,
             )
         assert page_kind == "linear_att_state", f"unknown page_kind={page_kind}"
         assert req_idx is not None

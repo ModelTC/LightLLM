@@ -436,6 +436,7 @@ class InferenceContext:
 
             copy_linear_att_state_to_kv_buffer(
                 b_req_idx=b_req_idx,
+                req_to_mtp_state_index=self.req_manager.req_to_mtp_state_index,
                 big_page_buffer_ids=big_page_buffer_ids,
                 gpu_conv_state=self.req_manager.req_to_conv_state.buffer,
                 gpu_ssm_state=self.req_manager.req_to_ssm_state.buffer,

@@ -5,6 +5,7 @@ import copy
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.speculative import BlockDraftLayout
 from lightllm.server.router.model_infer.speculative.proposers.base import BaseSpecProposer, SpecProposal
 
 
@@ -63,7 +64,8 @@ class DFlashProposer(BaseSpecProposer):
         num_reqs = int(b_req_mtp_start_loc.shape[0])
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        assert block_size >= draft_step
+        layout = self.backend.block_draft_layout
+        assert block_size == layout.query_block_size
         assert verify_result.accept_len.shape[0] == num_reqs
         token_ids = next_token_ids.new_full(
             (next_token_ids.shape[0], draft_step + 1),
@@ -78,7 +80,10 @@ class DFlashProposer(BaseSpecProposer):
                 draft_probs=None,
             )
 
-        self.extend_draft_kv_cache(main_model_input=main_model_input)
+        self.extend_draft_kv_cache(
+            main_model_input=main_model_input,
+            accepted_index=verify_result.accepted_index,
+        )
 
         # DFlash only drafts from the accepted tail row of each request.  Unlike
         # MTP, one anchor row expands to a whole non-causal block.
@@ -97,26 +102,60 @@ class DFlashProposer(BaseSpecProposer):
         flat_token_ids = self.backend._gen_argmax_token_ids(draft_model_output)
         assert flat_token_ids.numel() == num_reqs * block_size
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
+        token_ids[selected_rows, 1:] = self.select_draft_token_ids(
+            block_token_ids=block_token_ids,
+            draft_step=draft_step,
+            layout=layout,
+        )
         return SpecProposal(
             token_ids=token_ids,
             extra_mem_indexes_cpu=draft_mem_indexes_cpu,
             draft_probs=None,
         )
 
-    def extend_draft_kv_cache(self, *, main_model_input: ModelInput) -> None:
+    @staticmethod
+    def select_draft_token_ids(
+        *,
+        block_token_ids: torch.Tensor,
+        draft_step: int,
+        layout: BlockDraftLayout,
+    ) -> torch.Tensor:
+        output_start = layout.proposal_output_start
+        output_end = output_start + int(draft_step)
+        assert 0 <= output_start <= output_end <= block_token_ids.shape[1]
+        return block_token_ids[:, output_start:output_end]
+
+    def extend_draft_kv_cache(self, *, main_model_input: ModelInput, accepted_index: torch.Tensor) -> None:
         target_hidden = self.runtime.get_hidden()
         draft_model = self.backend.draft_models[0]
+        accepted_rows = torch.nonzero(accepted_index.to(torch.bool), as_tuple=False).flatten().to(torch.long)
+        if accepted_rows.numel() == 0:
+            return
+        target_hidden = target_hidden.index_select(0, accepted_rows)
+
         batch_size = int(target_hidden.shape[0])
 
         draft_kv_input = copy.copy(main_model_input)
         draft_kv_input.batch_size = batch_size
         draft_kv_input.total_token_num = batch_size
+        draft_kv_input.multimodal_params = [{"images": [], "audios": []} for _ in range(batch_size)]
+        # This hidden-commit prefill path does not consume token ids, but
+        # InferState uses input_ids.shape[0] to build position ids. Keep it
+        # aligned with the accepted hidden rows.
+        draft_kv_input.input_ids = torch.empty(
+            (batch_size,),
+            dtype=torch.int64,
+            device=target_hidden.device,
+        )
         draft_kv_input.max_q_seq_len = 1
         draft_kv_input.prefix_total_token_num = 0
         draft_kv_input.is_prefill = True
-        # Each expanded MTP row writes one target-hidden KV slot for the same request.
-        draft_kv_input.b_ready_cache_len = main_model_input.b_seq_len - 1
+        # Each accepted MTP row writes one target-hidden KV slot for the same request.
+        draft_kv_input.b_req_idx = main_model_input.b_req_idx.index_select(0, accepted_rows).contiguous()
+        draft_kv_input.b_mtp_index = main_model_input.b_mtp_index.index_select(0, accepted_rows).contiguous()
+        draft_kv_input.b_seq_len = main_model_input.b_seq_len.index_select(0, accepted_rows).contiguous()
+        draft_kv_input.mem_indexes = main_model_input.mem_indexes.index_select(0, accepted_rows).contiguous()
+        draft_kv_input.b_ready_cache_len = draft_kv_input.b_seq_len - 1
         draft_kv_input.b_prefill_start_loc = torch.arange(
             batch_size,
             dtype=torch.int32,

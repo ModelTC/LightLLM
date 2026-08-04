@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.speculative.config import SpeculativeConfig
+from lightllm.common.speculative.config import SpeculativeConfig, normalize_speculative_draft_config
 from lightllm.server.router.model_infer.speculative.planner import FixedMTPPlanner, SpecDecodePlan
 from lightllm.server.router.model_infer.speculative.proposers import build_spec_proposer
 from lightllm.server.router.model_infer.speculative.proposers.base import SpecProposal
@@ -745,6 +745,7 @@ class SpecRuntime:
         if draft_model_dir:
             with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
                 draft_config = json.load(json_file)
+            normalize_speculative_draft_config(draft_config)
             target_layer_ids = draft_config.get("target_layer_ids")
             if target_layer_ids is not None:
                 self._target_layer_ids = [int(layer_id) for layer_id in target_layer_ids]

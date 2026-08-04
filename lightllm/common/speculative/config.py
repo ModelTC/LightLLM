@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, MutableMapping, Optional
 
 
 VANILLA_SPEC_MODES = frozenset({"vanilla_with_att", "vanilla_no_att", "qwen3next_vanilla"})
@@ -11,10 +11,47 @@ ATTENTION_SPEC_MODES = frozenset({"vanilla_with_att", "eagle_with_att", "eagle3"
 NO_ATTENTION_SPEC_MODES = frozenset({"vanilla_no_att", "eagle_no_att", "qwen3next_vanilla", "qwen3next_eagle"})
 TARGET_HIDDEN_SPEC_MODES = frozenset({"eagle3", "dspark", "dflash"})
 QWEN3_DFLASH_ARCHITECTURES = frozenset({"Qwen3DFlashModel", "Qwen3DSparkModel"})
+QWEN3_5_DFLASH_ARCHITECTURES = frozenset({"Qwen3_5DFlashModel"})
 QWEN3_DSPARK_ARCHITECTURES = frozenset({"Qwen3DSparkModel"})
 GEMMA4_DSPARK_ARCHITECTURES = frozenset({"Gemma4DSparkModel"})
-DSPARK_FAMILY_ARCHITECTURES = QWEN3_DFLASH_ARCHITECTURES | GEMMA4_DSPARK_ARCHITECTURES
+DSPARK_FAMILY_ARCHITECTURES = QWEN3_DFLASH_ARCHITECTURES | QWEN3_5_DFLASH_ARCHITECTURES | GEMMA4_DSPARK_ARCHITECTURES
 DSPARK_MARKOV_HEAD_TYPES = frozenset({"vanilla", "gated", "rnn"})
+SPECULATIVE_CONFIG_SECTIONS = ("dflash_config", "dspark_config", "draft_config", "speculative_config", "mtp_config")
+SPECULATIVE_DRAFT_CONFIG_KEYS = frozenset(
+    {
+        "block_size",
+        "target_layer_ids",
+        "mask_token_id",
+        "markov_rank",
+        "markov_head_type",
+        "enable_confidence_head",
+        "confidence_head_with_markov",
+    }
+)
+
+
+@dataclass(frozen=True)
+class BlockDraftLayout:
+    """Runtime layout of a non-causal block draft checkpoint.
+
+    ``query_block_size`` is the number of logits rows emitted for one anchor,
+    while ``proposal_output_start`` identifies the first row that represents a
+    draft token. Keeping both values explicit lets serving support checkpoints
+    whose query block includes a leading bonus row without teaching generic
+    scheduling or proposer code about a particular model architecture.
+    """
+
+    query_block_size: int
+    proposal_output_start: int
+
+    @property
+    def draft_step(self) -> int:
+        return self.query_block_size - self.proposal_output_start
+
+    def resolve_draft_step(self, configured_step: int) -> int:
+        """Use a positive configured step up to the checkpoint's proposal capacity."""
+        configured_step = int(configured_step)
+        return configured_step if 0 < configured_step <= self.draft_step else self.draft_step
 
 
 @dataclass(frozen=True)
@@ -153,6 +190,11 @@ def is_qwen3_dflash_draft_config(config: Mapping[str, Any]) -> bool:
     return any(architecture in QWEN3_DFLASH_ARCHITECTURES for architecture in architectures)
 
 
+def is_qwen3_5_dflash_draft_config(config: Mapping[str, Any]) -> bool:
+    architectures = config.get("architectures", [])
+    return any(architecture in QWEN3_5_DFLASH_ARCHITECTURES for architecture in architectures)
+
+
 def is_qwen3_dspark_draft_config(config: Mapping[str, Any]) -> bool:
     architectures = config.get("architectures", [])
     return any(architecture in QWEN3_DSPARK_ARCHITECTURES for architecture in architectures)
@@ -163,14 +205,35 @@ def is_gemma4_dspark_draft_config(config: Mapping[str, Any]) -> bool:
     return any(architecture in GEMMA4_DSPARK_ARCHITECTURES for architecture in architectures)
 
 
+def normalize_speculative_draft_config(config: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    """Normalize supported speculative draft config layouts in place.
+
+    LightLLM model code generally normalizes nested checkpoint config once at
+    load time, then downstream code reads a flat `network_config`. This helper
+    applies the same pattern to speculative draft checkpoints whose shared
+    fields may live under sections such as `dflash_config`.
+    """
+
+    for section in SPECULATIVE_CONFIG_SECTIONS:
+        nested_config = config.get(section)
+        if not isinstance(nested_config, Mapping):
+            continue
+        for key in SPECULATIVE_DRAFT_CONFIG_KEYS:
+            if key not in config and key in nested_config:
+                config[key] = nested_config[key]
+    return config
+
+
 def validate_dspark_family_draft_config(
-    config: Mapping[str, Any],
+    config: MutableMapping[str, Any],
     *,
     require_confidence_head: bool = False,
 ) -> None:
     """Validate DFlash/DSpark checkpoint fields consumed by LightLLM serving."""
 
     assert is_dspark_draft_config(config), f"unsupported DFlash/DSpark architecture: {config.get('architectures')}"
+
+    normalize_speculative_draft_config(config)
 
     block_size = int(config.get("block_size", 0))
     assert block_size > 0, "DFlash/DSpark draft config must provide positive block_size"
@@ -214,13 +277,34 @@ def validate_dspark_family_draft_config(
     return
 
 
-def get_dspark_family_block_size(
-    config: Mapping[str, Any],
+def get_block_draft_layout(
+    config: MutableMapping[str, Any],
     *,
+    mode: str,
     require_confidence_head: bool = False,
-) -> int:
+) -> BlockDraftLayout:
+    """Resolve the generic query/proposal layout of a block draft checkpoint.
+
+    Proposal rows start at zero by default. Architectures with a different
+    upstream block contract are registered explicitly.
+    """
+
+    assert mode in BLOCK_SPEC_MODES, f"block draft layout is not defined for mode {mode!r}"
     validate_dspark_family_draft_config(
         config,
         require_confidence_head=require_confidence_head,
     )
-    return int(config["block_size"])
+
+    query_block_size = int(config["block_size"])
+    # The Z-Lab Qwen3.5 DFlash checkpoint defines block_size as the full
+    # query block: row 0 is the accepted/bonus query and proposals start at 1.
+    proposal_output_start = 1 if is_qwen3_5_dflash_draft_config(config) else 0
+
+    assert 0 <= proposal_output_start < query_block_size, (
+        "block draft proposal_output_start must be within the query block: "
+        f"start={proposal_output_start}, block_size={query_block_size}"
+    )
+    return BlockDraftLayout(
+        query_block_size=query_block_size,
+        proposal_output_start=proposal_output_start,
+    )

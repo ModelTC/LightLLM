@@ -40,11 +40,12 @@ from lightllm.utils.envs_utils import (
 from lightllm.distributed import dist_group_manager
 from lightllm.common.speculative import (
     SpeculativeConfig,
-    get_dspark_family_block_size,
+    get_block_draft_layout,
     is_dspark_draft_config,
     is_eagle3_draft_config,
     is_gemma4_dspark_draft_config,
     is_qwen3_dflash_draft_config,
+    is_qwen3_5_dflash_draft_config,
     is_qwen3_dspark_draft_config,
 )
 from lightllm.server.router.model_infer.speculative import build_spec_runtime
@@ -185,6 +186,7 @@ class ModeBackend:
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
         self.is_linear_att_mixed_model = isinstance(self.model.req_manager, ReqManagerForMamba)
+        self._validate_linear_att_spec_support()
 
         if self.is_linear_att_mixed_model:
             self.linear_att_cache_manager = LinearAttCacheManager(
@@ -250,12 +252,6 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
-        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
-            # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
-            # 读取
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
-            dist.barrier(group=self.node_nccl_group)
-
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
@@ -271,9 +267,6 @@ class ModeBackend:
 
         self.init_custom()
 
-        if self.args.enable_dp_prompt_cache_fetch:
-            self.init_dp_kv_shared()
-
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
@@ -285,6 +278,16 @@ class ModeBackend:
                 g_infer_context.init_dynamic_mtp_planner(mtp_step=self.mtp_step, mode=self.spec_config.mode)
             self.spec_adapter = build_spec_runtime(self)
             self._attach_spec_adapter()
+
+        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
+            # Draft models must be initialized before this snapshot. Qwen3.5
+            # DFlash attaches its independent draft KV manager to the target
+            # manager so PD transfer workers can deserialize both buffers.
+            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            dist.barrier(group=self.node_nccl_group)
+
+        if self.args.enable_dp_prompt_cache_fetch:
+            self.init_dp_kv_shared()
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -372,7 +375,6 @@ class ModeBackend:
 
         for i in range(num_mtp_modules):
             mtp_model_cfg, _ = PretrainedConfig.get_config_dict(mtp_draft_model_dirs[i])
-            self._normalize_block_mtp_step_from_config(mtp_model_cfg)
             spec_config = self.spec_config
             model_type = mtp_model_cfg.get("model_type", "")
             mtp_model_kvargs = {
@@ -427,6 +429,10 @@ class ModeBackend:
                 from lightllm.models.qwen3_eagle.model import Qwen3EagleModel
 
                 self.draft_models.append(Qwen3EagleModel(mtp_model_kvargs))
+            elif spec_config.is_dflash and is_qwen3_5_dflash_draft_config(mtp_model_cfg):
+                from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
+
+                self.draft_models.append(Qwen3_5DFlashModel(mtp_model_kvargs))
             elif spec_config.is_dflash and is_qwen3_dflash_draft_config(mtp_model_cfg):
                 from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
 
@@ -449,21 +455,46 @@ class ModeBackend:
         if not self.spec_config.uses_block_draft_model:
             return
 
-        block_size = get_dspark_family_block_size(
+        layout = get_block_draft_layout(
             mtp_model_cfg,
+            mode=self.spec_config.mode,
             require_confidence_head=self.spec_config.is_dspark,
         )
+        self.block_draft_layout = layout
         configured_step = int(getattr(self.args, "mtp_step", 0))
-        if configured_step not in (0, block_size):
+        draft_step = layout.resolve_draft_step(configured_step)
+        if configured_step not in (0, draft_step):
             self.logger.warning(
-                "Overriding mtp_step=%s with block draft config block_size=%s for %s mode",
+                "Overriding mtp_step=%s with draft_step=%s from block_size=%s for %s mode",
                 configured_step,
-                block_size,
+                draft_step,
+                layout.query_block_size,
                 self.spec_config.mode,
             )
-        self.args.mtp_step = block_size
-        self.mtp_step = block_size
-        self.spec_config = replace(self.spec_config, step=block_size)
+        self.args.mtp_step = draft_step
+        self.mtp_step = draft_step
+        self.spec_config = replace(self.spec_config, step=draft_step)
+        return
+
+    def _validate_linear_att_spec_support(self) -> None:
+        """Restrict the new DFlash combination without narrowing existing LightSpec modes."""
+
+        if not self.spec_config.enabled or not self.spec_config.is_dflash:
+            return
+
+        mtp_draft_model_dirs = self.args.mtp_draft_model_dir
+        if isinstance(mtp_draft_model_dirs, str):
+            mtp_draft_model_dirs = [mtp_draft_model_dirs]
+        assert mtp_draft_model_dirs is not None and len(mtp_draft_model_dirs) == 1
+        mtp_model_cfg, _ = PretrainedConfig.get_config_dict(mtp_draft_model_dirs[0])
+        is_qwen35_dflash = is_qwen3_5_dflash_draft_config(mtp_model_cfg)
+        if self.is_linear_att_mixed_model:
+            assert is_qwen35_dflash, (
+                "linear-attention mixed targets require a Qwen3_5DFlashModel draft checkpoint, "
+                f"got architectures={mtp_model_cfg.get('architectures')}"
+            )
+        else:
+            assert not is_qwen35_dflash, "Qwen3_5DFlashModel requires a Qwen3Next target"
         return
 
     def _normalize_block_mtp_step_from_first_draft_config(self) -> None:

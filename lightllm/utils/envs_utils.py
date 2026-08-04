@@ -5,7 +5,7 @@ import uuid
 from easydict import EasyDict
 from functools import lru_cache
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.speculative import SpeculativeConfig
+from lightllm.common.speculative import SpeculativeConfig, is_qwen3_5_dflash_draft_config
 
 
 logger = init_logger(__name__)
@@ -279,6 +279,10 @@ def get_added_mtp_kv_layer_num() -> int:
             return spec_config.draft_model_count
         with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
             draft_config = json.load(json_file)
+        if spec_config.is_dflash and is_qwen3_5_dflash_draft_config(draft_config):
+            # Qwen3.5 DFlash owns a separate KV manager; do not reserve duplicate
+            # draft layers in the mixed target manager.
+            return 0
         return int(draft_config.get("num_hidden_layers", draft_config.get("n_layer", spec_config.draft_model_count)))
     return spec_config.draft_model_count
 

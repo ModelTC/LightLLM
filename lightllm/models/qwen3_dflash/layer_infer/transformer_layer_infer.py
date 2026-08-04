@@ -1,9 +1,19 @@
 import torch
 
+from lightllm.common.basemodel.attention import AttControl
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
+
+
+def get_draft_layer_type(layer_num, network_config):
+    layer_types = network_config.get("layer_types", [])
+    draft_layer_start = int(network_config.get("_draft_layer_start", 0))
+    local_layer_num = int(layer_num) - draft_layer_start
+    if 0 <= local_layer_num < len(layer_types):
+        return layer_types[local_layer_num]
+    return "full_attention"
 
 
 class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
@@ -18,6 +28,11 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         self.block_size_ = int(network_config["block_size"])
+        layer_type = get_draft_layer_type(layer_num, network_config)
+        sliding_window = int(network_config.get("sliding_window", 0) or 0)
+        self.use_sliding_window_ = bool(network_config.get("use_sliding_window", False))
+        self.use_sliding_window_ = self.use_sliding_window_ and layer_type == "sliding_attention" and sliding_window > 0
+        self.sliding_window_ = sliding_window
         return
 
     def context_forward(
@@ -111,3 +126,24 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
             self.head_dim_,
         )
         return q, cache_kv
+
+    def _token_attention_kernel(
+        self,
+        q: torch.Tensor,
+        infer_state: Qwen3DFlashInferStateInfo,
+        layer_weight: Qwen3DFlashTransformerLayerWeight,
+    ) -> torch.Tensor:
+        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+        if self.use_sliding_window_:
+            att_control = AttControl(use_sliding_window=True, sliding_window=(self.sliding_window_ - 1, 0))
+        else:
+            att_control = AttControl()
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            att_control=att_control,
+            alloc_func=self.alloc_tensor,
+        )
+        return o_tensor.view(q.shape)

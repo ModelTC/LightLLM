@@ -109,6 +109,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.draft_layer_start += sum(
             len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models
         )
+        self.config["_draft_layer_start"] = self.draft_layer_start
         super()._init_infer_layer(start_layer_index=self.draft_layer_start)
         return
 

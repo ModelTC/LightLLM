@@ -596,10 +596,6 @@ class TpPartBaseModel:
         if new_model_output.prompt_logics is not None:
             new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
 
-        # 特殊模型，特殊模式的特殊变量的特殊 unpad
-        if new_model_output.mtp_main_output_hiddens is not None:
-            _hidden_states = new_model_output.mtp_main_output_hiddens
-            new_model_output.mtp_main_output_hiddens = _hidden_states[0:origin_handle_token_num]
         if self.spec_adapter is not None:
             self.spec_adapter.unpad_hidden(token_num=origin_handle_token_num, microbatch_index=microbatch_index)
 

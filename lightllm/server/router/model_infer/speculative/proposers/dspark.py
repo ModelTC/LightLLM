@@ -36,7 +36,8 @@ class DSparkProposer(DFlashProposer):
         verify_row_count = next_token_ids.shape[0]
         draft_model = self.backend.draft_models[0]
         block_size = int(draft_model.block_size)
-        assert block_size >= draft_step
+        layout = self.backend.block_draft_layout
+        assert block_size == layout.query_block_size
         assert verify_result.accept_len.shape[0] == num_reqs
 
         proposal_token_ids = next_token_ids.new_full(
@@ -54,7 +55,10 @@ class DSparkProposer(DFlashProposer):
                 schedule_probs=schedule_probs,
             )
 
-        self.extend_draft_kv_cache(main_model_input=main_model_input)
+        self.extend_draft_kv_cache(
+            main_model_input=main_model_input,
+            accepted_index=verify_result.accepted_index,
+        )
         selected_rows = self.select_accepted_tail_rows(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             accept_len=verify_result.accept_len,
@@ -77,7 +81,11 @@ class DSparkProposer(DFlashProposer):
             flat_token_ids.numel() == expected_block_rows
         ), f"draft token rows must be {expected_block_rows}, got {flat_token_ids.numel()}"
         block_token_ids = flat_token_ids.reshape(num_reqs, block_size)
-        proposal_token_ids[selected_rows, 1:] = block_token_ids[:, :draft_step]
+        proposal_token_ids[selected_rows, 1:] = self.select_draft_token_ids(
+            block_token_ids=block_token_ids,
+            draft_step=draft_step,
+            layout=layout,
+        )
 
         draft_probs = None
         if self.enable_dynamic_mtp:
@@ -89,11 +97,13 @@ class DSparkProposer(DFlashProposer):
                 confidence_logits.shape[0] == num_reqs
             ), f"confidence logits rows must be {num_reqs}, got {confidence_logits.shape[0]}"
             assert (
-                confidence_logits.shape[1] >= draft_step
-            ), f"confidence logits columns must cover draft_step={draft_step}, got {confidence_logits.shape[1]}"
+                confidence_logits.shape[1] >= layout.proposal_output_start + draft_step
+            ), f"confidence logits columns must cover the proposal layout, got {confidence_logits.shape[1]}"
+            output_start = layout.proposal_output_start
+            output_end = output_start + draft_step
             schedule_probs = self._scatter_step_probs(
                 selected_rows=selected_rows,
-                probs=confidence_logits[:, :draft_step].sigmoid(),
+                probs=confidence_logits[:, output_start:output_end].sigmoid(),
                 verify_row_count=verify_row_count,
             )
 
