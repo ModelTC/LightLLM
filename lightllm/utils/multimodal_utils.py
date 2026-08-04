@@ -22,15 +22,11 @@ class UrlResourcePool:
         self._maxsize = maxsize
         self._cache: "OrderedDict[Tuple[str, Optional[str]], bytes]" = OrderedDict()
 
-    @staticmethod
-    def _normalize_url(url: str) -> str:
-        return url.strip()
-
     def get(self, url: str, proxy: Optional[str]) -> Optional[bytes]:
         if not get_env_start_args().enable_multimodal_url_cache:
             return None
 
-        key = (self._normalize_url(url), proxy)
+        key = (url.strip(), proxy)
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
@@ -41,7 +37,7 @@ class UrlResourcePool:
         if not get_env_start_args().enable_multimodal_url_cache or self._maxsize <= 0:
             return
 
-        key = (self._normalize_url(url), proxy)
+        key = (url.strip(), proxy)
         self._cache[key] = content
         self._cache.move_to_end(key)
         while len(self._cache) > self._maxsize:
