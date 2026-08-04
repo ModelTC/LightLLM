@@ -376,6 +376,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
     return resp
 
 
@@ -396,6 +399,9 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
+    except Exception as e:
+        logger.error("An error occurred: %s", str(e), exc_info=True)
+        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
     return resp
 
 
