@@ -514,6 +514,37 @@ class DeepseekV4ReqManager(ReqManager):
         )
         return
 
+    def prepare_pd_decode_cache(
+        self,
+        req_idx: int,
+        ready_cache_len: int,
+        input_len: int,
+        new_full_slots: torch.Tensor,
+    ) -> None:
+        """Allocate DSV4 derived slots for a suffix received by a PD decode node."""
+        page = self.get_prompt_cache_page_size()
+        assert ready_cache_len % page == 0
+        assert new_full_slots.numel() == input_len - ready_cache_len
+
+        new_full_slots = new_full_slots.reshape(-1).to(self.req_to_token_indexs.device, non_blocking=True)
+        self.prepare_prefill_compress_slots(
+            req_list=[req_idx],
+            ready_list=[ready_cache_len],
+            seq_list=[input_len],
+            mem_indexes=new_full_slots,
+        )
+
+        resume_start = max(ready_cache_len, max(0, input_len // page * page - page))
+        self.mem_manager.alloc_swa_prefill(
+            new_full_slots[resume_start - ready_cache_len :],
+            self.req_to_token_indexs,
+            req_list=[req_idx],
+            ready_list=[resume_start],
+            seq_list=[input_len],
+        )
+        self._swa_evict_marks[req_idx] = resume_start
+        return
+
     def prepare_decode_swa(
         self,
         req_list: List[int],

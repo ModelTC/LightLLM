@@ -113,6 +113,8 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -136,7 +138,7 @@ class MemoryManager:
         # keep for debug
         # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
-        return
+        return cur_page.numel() * cur_page.element_size()
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -145,6 +147,8 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):

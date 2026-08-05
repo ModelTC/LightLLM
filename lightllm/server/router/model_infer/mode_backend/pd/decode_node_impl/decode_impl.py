@@ -1,5 +1,7 @@
 import random
+import torch
 import torch.multiprocessing as mp
+from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from typing import List, Tuple
@@ -122,10 +124,18 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 if self.radix_cache is not None:
                     self.radix_cache.free_radix_cache_to_get_enough_token(need_mem_size)
 
-                mem_indexes = self.model.req_manager.mem_manager.alloc(need_size=need_mem_size)
-                self.model.req_manager.req_to_token_indexs[
+                req_manager = self.model.req_manager
+                mem_indexes = req_manager.mem_manager.alloc(need_size=need_mem_size)
+                req_manager.req_to_token_indexs[
                     req_obj.req_idx, req_obj.cur_kv_len : (req_obj.cur_kv_len + need_mem_size)
                 ] = mem_indexes
+                if isinstance(req_manager, DeepseekV4ReqManager):
+                    req_manager.prepare_pd_decode_cache(
+                        req_idx=req_obj.req_idx,
+                        ready_cache_len=req_obj.cur_kv_len,
+                        input_len=input_len,
+                        new_full_slots=mem_indexes,
+                    )
 
                 while req_obj.pd_trans_kv_start_index < input_len:
                     cur_page_size = min(page_size, input_len - req_obj.pd_trans_kv_start_index)
@@ -155,6 +165,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
                         group=group,
                         page_kind="linear_att_state",
                     )
+                if isinstance(req_manager, DeepseekV4ReqManager):
+                    torch.cuda.current_stream().synchronize()
         else:
             assert req_obj.cur_kv_len == input_len - 1
 
@@ -190,17 +202,14 @@ class PDDecodeNode(ChunkedPrefillBackend):
             # only self.is_master_in_dp will be used.
             self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
-        if page_kind == "kv":
-            req_idx = None
-        elif page_kind == "linear_att_state":
-            req_idx = req_obj.req_idx
-        else:
+        if page_kind not in ("kv", "linear_att_state"):
             raise ValueError(f"unknown PD trans page kind {page_kind}")
 
         trans_task = PDChunckedTransTask(
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
+            request_kv_len=req_obj.shm_req.input_len,
             time_out_secs=180,
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=None,
@@ -219,7 +228,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             first_gen_token_id=None,
             first_gen_token_logprob=None,
             page_kind=page_kind,
-            req_idx=req_idx,
+            req_idx=req_obj.req_idx,
         )
         group.task_list.append(trans_task)
         req_obj.pd_task_num += 1

@@ -82,7 +82,12 @@ def normal_or_p_d_start(args):
 
     auto_set_max_req_total_len(args)
     set_unique_server_name(args)
-    if args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4" and args.llm_kv_type in (None, "None"):
+    model_type = get_model_type(args.model_dir)
+    if args.pd_kv_page_num is None:
+        args.pd_kv_page_num = 8 if model_type == "deepseek_v4" else 16
+    if args.pd_kv_page_size is None:
+        args.pd_kv_page_size = 2048 if model_type == "deepseek_v4" else 1024
+    if args.enable_cpu_cache and model_type == "deepseek_v4" and args.llm_kv_type in (None, "None"):
         args.llm_kv_type = "fp8kv_dsa"
 
     if args.enable_mps:
@@ -92,6 +97,10 @@ def normal_or_p_d_start(args):
 
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
+
+    if args.run_mode in ("prefill", "decode") and model_type == "deepseek_v4":
+        if args.tp != args.dp:
+            raise ValueError("DeepSeek-V4 PD requires one TP rank per DP replica (--tp must equal --dp)")
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:

@@ -83,15 +83,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_kv_page_num",
         type=int,
-        default=16,
-        help="pd mode, kv move page_num",
+        default=None,
+        help="pd mode, kv move page_num; defaults to 8 for DeepSeek-V4 and 16 otherwise.",
     )
 
     parser.add_argument(
         "--pd_kv_page_size",
         type=int,
-        default=1024,
-        help="pd mode, kv page size.",
+        default=None,
+        help="pd mode, kv page size; defaults to 2048 for DeepSeek-V4 and 1024 otherwise.",
     )
 
     parser.add_argument(

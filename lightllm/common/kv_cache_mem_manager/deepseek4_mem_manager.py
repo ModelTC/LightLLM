@@ -50,15 +50,7 @@ def _aligned_gpu_page_nbytes(page_size: int, data_nbytes: int, scale_nbytes: int
 
 
 @dataclass(frozen=True)
-class DeepseekV4CpuCacheLayout:
-    """Opaque CPU checkpoint ABI for the composite DeepSeek-V4 cache.
-
-    Every checkpoint contains compressed history for ``token_page_size`` tokens
-    and only the final 256 tokens of SWA/continuation state.  The history is
-    arranged in independent 256-token blocks so a radix hit can skip an initial
-    part of a checkpoint without copying or allocating it again.
-    """
-
+class _DeepseekV4CacheLayout:
     token_page_size: int
     history_block_num: int
     layer_num: int
@@ -69,7 +61,7 @@ class DeepseekV4CpuCacheLayout:
 
     c4_offset: int
     c4_gpu_page_nbytes: int
-    c4_gpu_pages_per_cpu_page: int
+    c4_gpu_pages_per_page: int
     c4_layer_nbytes: int
     c4_nbytes: int
 
@@ -86,7 +78,7 @@ class DeepseekV4CpuCacheLayout:
 
     swa_offset: int
     swa_gpu_page_nbytes: int
-    swa_gpu_pages_per_cpu_page: int
+    swa_gpu_pages_per_page: int
     swa_layer_nbytes: int
     swa_nbytes: int
 
@@ -98,27 +90,26 @@ class DeepseekV4CpuCacheLayout:
     c4_indexer_state_offset: int
     c4_indexer_state_row_nbytes: int
     c4_indexer_state_nbytes: int
-    page_nbytes: int
 
     @classmethod
-    def from_compress_rates(
+    def _history_layout(
         cls,
         compress_rates: Sequence[int],
-        token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
-        head_dim: int = DSV4_MLA_HEAD_DIM,
-        indexer_head_dim: int = DSV4_INDEXER_HEAD_DIM,
-    ) -> "DeepseekV4CpuCacheLayout":
+        token_page_size: int,
+        head_dim: int,
+        indexer_head_dim: int,
+    ):
         rates = tuple(int(rate) for rate in compress_rates)
         if token_page_size <= 0 or token_page_size % DSV4_PROMPT_CACHE_PAGE_SIZE != 0:
             raise ValueError(
-                f"DeepSeek-V4 CPU cache token page size must be a positive multiple of "
+                f"DeepSeek-V4 cache page size must be a positive multiple of "
                 f"{DSV4_PROMPT_CACHE_PAGE_SIZE}, got {token_page_size}"
             )
         if head_dim != DSV4_MLA_HEAD_DIM:
-            raise ValueError(f"DeepSeek-V4 CPU cache expects head_dim={DSV4_MLA_HEAD_DIM}, got {head_dim}")
+            raise ValueError(f"DeepSeek-V4 cache expects head_dim={DSV4_MLA_HEAD_DIM}, got {head_dim}")
         if indexer_head_dim != DSV4_INDEXER_HEAD_DIM:
             raise ValueError(
-                f"DeepSeek-V4 CPU cache expects indexer_head_dim={DSV4_INDEXER_HEAD_DIM}, got {indexer_head_dim}"
+                f"DeepSeek-V4 cache expects indexer_head_dim={DSV4_INDEXER_HEAD_DIM}, got {indexer_head_dim}"
             )
 
         layer_num = len(rates)
@@ -126,25 +117,23 @@ class DeepseekV4CpuCacheLayout:
         n_c128 = rates.count(128)
         history_block_num = token_page_size // DSV4_PROMPT_CACHE_PAGE_SIZE
 
-        # 64 * (576B data + 8B scale) = 37,376B; align to 576B -> 37,440B.
         c4_gpu_page_nbytes = _aligned_gpu_page_nbytes(
             DSV4_C4_PAGE_SIZE,
             DSV4_MLA_DATA_BYTES_PER_TOKEN,
             DSV4_MLA_SCALE_BYTES,
             DSV4_MLA_PAGE_ALIGN_BYTES,
         )
-        c4_gpu_pages_per_cpu_page = history_block_num
-        c4_layer_nbytes = c4_gpu_pages_per_cpu_page * c4_gpu_page_nbytes
+        c4_gpu_pages_per_page = history_block_num
+        c4_layer_nbytes = c4_gpu_pages_per_page * c4_gpu_page_nbytes
         c4_offset = 0
         c4_nbytes = n_c4 * c4_layer_nbytes
 
-        # indexer_head_dim is validated as 128: 64 * (128B data + 4B scale) = 8,448B.
         c4_indexer_gpu_page_nbytes = _aligned_gpu_page_nbytes(
             DSV4_C4_PAGE_SIZE,
             indexer_head_dim,
             DSV4_INDEXER_SCALE_BYTES,
         )
-        c4_indexer_layer_nbytes = c4_gpu_pages_per_cpu_page * c4_indexer_gpu_page_nbytes
+        c4_indexer_layer_nbytes = c4_gpu_pages_per_page * c4_indexer_gpu_page_nbytes
         c4_indexer_offset = c4_offset + c4_nbytes
         c4_indexer_nbytes = n_c4 * c4_indexer_layer_nbytes
 
@@ -154,29 +143,7 @@ class DeepseekV4CpuCacheLayout:
         c128_offset = c4_indexer_offset + c4_indexer_nbytes
         c128_nbytes = n_c128 * c128_layer_nbytes
 
-        # 128 * (576B data + 8B scale) = 74,752B; align to 576B -> 74,880B.
-        swa_gpu_page_nbytes = _aligned_gpu_page_nbytes(
-            DSV4_SWA_PAGE_SIZE,
-            DSV4_MLA_DATA_BYTES_PER_TOKEN,
-            DSV4_MLA_SCALE_BYTES,
-            DSV4_MLA_PAGE_ALIGN_BYTES,
-        )
-        swa_gpu_pages_per_cpu_page = DSV4_PROMPT_CACHE_PAGE_SIZE // DSV4_SWA_PAGE_SIZE
-        swa_layer_nbytes = swa_gpu_pages_per_cpu_page * swa_gpu_page_nbytes
-        swa_offset = c128_offset + c128_nbytes
-        swa_nbytes = layer_num * swa_layer_nbytes
-
-        # The c4 overlap state has two KV/score pairs, hence a 4 * dim row.
-        c4_state_rows = 4
-        c4_state_row_nbytes = 4 * head_dim * torch._utils._element_size(torch.float32)
-        c4_state_offset = swa_offset + swa_nbytes
-        c4_state_nbytes = n_c4 * c4_state_rows * c4_state_row_nbytes
-        c4_indexer_state_row_nbytes = 4 * indexer_head_dim * torch._utils._element_size(torch.float32)
-        c4_indexer_state_offset = c4_state_offset + c4_state_nbytes
-        c4_indexer_state_nbytes = n_c4 * c4_state_rows * c4_indexer_state_row_nbytes
-        page_nbytes = c4_indexer_state_offset + c4_indexer_state_nbytes
-
-        return cls(
+        return dict(
             token_page_size=token_page_size,
             history_block_num=history_block_num,
             layer_num=layer_num,
@@ -186,7 +153,7 @@ class DeepseekV4CpuCacheLayout:
             indexer_head_dim=indexer_head_dim,
             c4_offset=c4_offset,
             c4_gpu_page_nbytes=c4_gpu_page_nbytes,
-            c4_gpu_pages_per_cpu_page=c4_gpu_pages_per_cpu_page,
+            c4_gpu_pages_per_page=c4_gpu_pages_per_page,
             c4_layer_nbytes=c4_layer_nbytes,
             c4_nbytes=c4_nbytes,
             c4_indexer_offset=c4_indexer_offset,
@@ -198,9 +165,48 @@ class DeepseekV4CpuCacheLayout:
             c128_rows_per_page=c128_rows_per_page,
             c128_layer_nbytes=c128_layer_nbytes,
             c128_nbytes=c128_nbytes,
-            swa_offset=swa_offset,
+            swa_offset=c128_offset + c128_nbytes,
+        )
+
+
+@dataclass(frozen=True)
+class DeepseekV4CpuCacheLayout(_DeepseekV4CacheLayout):
+    """CPU checkpoint ABI: compressed history plus the final 256-token continuation."""
+
+    page_nbytes: int
+
+    @classmethod
+    def from_compress_rates(
+        cls,
+        compress_rates: Sequence[int],
+        token_page_size: int = DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
+        head_dim: int = DSV4_MLA_HEAD_DIM,
+        indexer_head_dim: int = DSV4_INDEXER_HEAD_DIM,
+    ) -> "DeepseekV4CpuCacheLayout":
+        history = cls._history_layout(compress_rates, token_page_size, head_dim, indexer_head_dim)
+        swa_gpu_page_nbytes = _aligned_gpu_page_nbytes(
+            DSV4_SWA_PAGE_SIZE,
+            DSV4_MLA_DATA_BYTES_PER_TOKEN,
+            DSV4_MLA_SCALE_BYTES,
+            DSV4_MLA_PAGE_ALIGN_BYTES,
+        )
+        swa_gpu_pages_per_page = DSV4_PROMPT_CACHE_PAGE_SIZE // DSV4_SWA_PAGE_SIZE
+        swa_layer_nbytes = swa_gpu_pages_per_page * swa_gpu_page_nbytes
+        swa_nbytes = history["layer_num"] * swa_layer_nbytes
+
+        c4_state_rows = 4
+        c4_state_row_nbytes = 4 * head_dim * torch._utils._element_size(torch.float32)
+        c4_state_offset = history["swa_offset"] + swa_nbytes
+        c4_state_nbytes = history["n_c4"] * c4_state_rows * c4_state_row_nbytes
+
+        c4_indexer_state_row_nbytes = 4 * indexer_head_dim * torch._utils._element_size(torch.float32)
+        c4_indexer_state_offset = c4_state_offset + c4_state_nbytes
+        c4_indexer_state_nbytes = history["n_c4"] * c4_state_rows * c4_indexer_state_row_nbytes
+
+        return cls(
+            **history,
             swa_gpu_page_nbytes=swa_gpu_page_nbytes,
-            swa_gpu_pages_per_cpu_page=swa_gpu_pages_per_cpu_page,
+            swa_gpu_pages_per_page=swa_gpu_pages_per_page,
             swa_layer_nbytes=swa_layer_nbytes,
             swa_nbytes=swa_nbytes,
             c4_state_offset=c4_state_offset,
@@ -210,7 +216,74 @@ class DeepseekV4CpuCacheLayout:
             c4_indexer_state_offset=c4_indexer_state_offset,
             c4_indexer_state_row_nbytes=c4_indexer_state_row_nbytes,
             c4_indexer_state_nbytes=c4_indexer_state_nbytes,
-            page_nbytes=page_nbytes,
+            page_nbytes=c4_indexer_state_offset + c4_indexer_state_nbytes,
+        )
+
+
+@dataclass(frozen=True)
+class DeepseekV4PDCacheLayout(_DeepseekV4CacheLayout):
+    """PD page ABI: compressed history plus request-tail continuation state."""
+
+    c128_state_offset: int
+    c128_state_row_nbytes: int
+    c128_state_rows: int
+    c128_state_layer_nbytes: int
+    c128_state_nbytes: int
+    page_nbytes: int
+
+    @classmethod
+    def from_compress_rates(
+        cls,
+        compress_rates: Sequence[int],
+        token_page_size: int,
+        head_dim: int = DSV4_MLA_HEAD_DIM,
+        indexer_head_dim: int = DSV4_INDEXER_HEAD_DIM,
+    ) -> "DeepseekV4PDCacheLayout":
+        history = cls._history_layout(compress_rates, token_page_size, head_dim, indexer_head_dim)
+        swa_gpu_page_nbytes = _aligned_gpu_page_nbytes(
+            DSV4_SWA_PAGE_SIZE,
+            DSV4_MLA_DATA_BYTES_PER_TOKEN,
+            DSV4_MLA_SCALE_BYTES,
+            DSV4_MLA_PAGE_ALIGN_BYTES,
+        )
+        swa_gpu_pages_per_page = 4
+        swa_layer_nbytes = swa_gpu_pages_per_page * swa_gpu_page_nbytes
+        swa_nbytes = history["layer_num"] * swa_layer_nbytes
+
+        c4_state_rows = DSV4_C4_STATE_RING - 1
+        c4_state_row_nbytes = 4 * head_dim * torch._utils._element_size(torch.float32)
+        c4_state_offset = history["swa_offset"] + swa_nbytes
+        c4_state_nbytes = history["n_c4"] * c4_state_rows * c4_state_row_nbytes
+
+        c4_indexer_state_row_nbytes = 4 * indexer_head_dim * torch._utils._element_size(torch.float32)
+        c4_indexer_state_offset = c4_state_offset + c4_state_nbytes
+        c4_indexer_state_nbytes = history["n_c4"] * c4_state_rows * c4_indexer_state_row_nbytes
+
+        c128_state_rows = DSV4_C128_STATE_RING - 1
+        c128_state_row_nbytes = 2 * head_dim * torch._utils._element_size(torch.float32)
+        c128_state_layer_nbytes = c128_state_rows * c128_state_row_nbytes
+        c128_state_offset = c4_indexer_state_offset + c4_indexer_state_nbytes
+        c128_state_nbytes = history["n_c128"] * c128_state_layer_nbytes
+
+        return cls(
+            **history,
+            swa_gpu_page_nbytes=swa_gpu_page_nbytes,
+            swa_gpu_pages_per_page=swa_gpu_pages_per_page,
+            swa_layer_nbytes=swa_layer_nbytes,
+            swa_nbytes=swa_nbytes,
+            c4_state_offset=c4_state_offset,
+            c4_state_row_nbytes=c4_state_row_nbytes,
+            c4_state_rows=c4_state_rows,
+            c4_state_nbytes=c4_state_nbytes,
+            c4_indexer_state_offset=c4_indexer_state_offset,
+            c4_indexer_state_row_nbytes=c4_indexer_state_row_nbytes,
+            c4_indexer_state_nbytes=c4_indexer_state_nbytes,
+            c128_state_offset=c128_state_offset,
+            c128_state_row_nbytes=c128_state_row_nbytes,
+            c128_state_rows=c128_state_rows,
+            c128_state_layer_nbytes=c128_state_layer_nbytes,
+            c128_state_nbytes=c128_state_nbytes,
+            page_nbytes=c128_state_offset + c128_state_nbytes,
         )
 
 
@@ -1094,10 +1167,75 @@ class DeepseekV4MemoryManager(MemoryManager):
         raise NotImplementedError("DeepSeek-V4 packed page cache does not support token-indexed kv_buffer io")
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
+        self.pd_cache_layout = DeepseekV4PDCacheLayout.from_compress_rates(
+            self.compress_rates,
+            token_page_size=page_size,
+            head_dim=self.head_dim,
+            indexer_head_dim=self.indexer_head_dim,
+        )
+        self.kv_move_buffer = torch.empty(
+            (page_num, 1, 1, 1, self.pd_cache_layout.page_nbytes),
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        self._buffer_mem_indexes_tensors = [
+            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
+        ]
+        return self.kv_move_buffer
 
-    def write_mem_to_page_kv_move_buffer(self, *args, **kwargs):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
+    def write_mem_to_page_kv_move_buffer(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
+    ):
+        assert page_kind == "kv"
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        from lightllm.models.deepseek_v4.triton_kernel.pd_cache_io import pack_pd_cache_page
 
-    def read_page_kv_move_buffer_to_mem(self, *args, **kwargs):
-        raise NotImplementedError("DeepSeek-V4 packed/composite KV transfer is not implemented")
+        return pack_pd_cache_page(
+            mem_managers[dp_index],
+            self.pd_cache_layout,
+            mem_indexes_gpu,
+            self.kv_move_buffer[page_index],
+            start_kv_index,
+            request_kv_len,
+            req_idx,
+        )
+
+    def read_page_kv_move_buffer_to_mem(
+        self,
+        mem_indexes: List[int],
+        page_index: int,
+        dp_index: int,
+        mem_managers: List["MemoryManager"],
+        dp_world_size: int,
+        start_kv_index: int,
+        request_kv_len: int,
+        page_kind: str = "kv",
+        req_idx: int = None,
+    ):
+        assert page_kind == "kv"
+        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
+        pin_mem_indexes.numpy()[:] = mem_indexes
+        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        from lightllm.models.deepseek_v4.triton_kernel.pd_cache_io import unpack_pd_cache_page
+
+        unpack_pd_cache_page(
+            mem_managers[dp_index],
+            self.pd_cache_layout,
+            mem_indexes_gpu,
+            self.kv_move_buffer[page_index],
+            start_kv_index,
+            request_kv_len,
+            req_idx,
+        )
+        return
