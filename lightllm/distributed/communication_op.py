@@ -109,7 +109,6 @@ class DistributeGroupManager:
         self.groups = []
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
-        self.prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
@@ -146,7 +145,6 @@ class DistributeGroupManager:
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
-            self.prefill_moe_workspace = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
             return
@@ -184,10 +182,6 @@ class DistributeGroupManager:
             low_latency_mode=True,
             num_qps_per_rank=(self.ll_num_experts // global_world_size),
         )
-        # 当前rank的low-latency RDMA通信空间在prefill阶段处于空闲状态，将其复用为prefill MoE计算的临时工作区，降低峰值显存占用。
-        self.prefill_moe_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
-            torch.uint8, use_rdma_buffer=True
-        )
         if is_sm100_gpu():
             if moe_intermediate_size is None:
                 raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
@@ -220,6 +214,36 @@ class DistributeGroupManager:
             set_num_sms(max(device_sms - deepep_sms, 2))
         except BaseException as e:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
+
+    def get_deep_ep_prefill_moe_workspace(self, microbatch_index: int = 0) -> torch.Tensor:
+        """Return a slice of the workspace reused by DeepEP prefill MoE kernels.
+
+        DeepEP's low-latency RDMA buffer is idle during prefill, so its local
+        storage is reused as temporary workspace for the expanded MoE compute
+        path to reduce peak GPU memory. With one communication group, the
+        default ``microbatch_index=0`` receives the whole workspace. With
+        multiple groups, the workspace is split into ``len(self.groups)``
+        equal slices and each in-flight microbatch uses the slice matching its
+        group index.
+
+        Args:
+            microbatch_index: Zero-based microbatch and communication-group
+                index assigned to this in-flight prefill computation.
+
+        Returns:
+            A one-dimensional uint8 tensor view over the selected workspace
+            slice; no additional GPU memory is allocated.
+
+        This workspace is only valid after the DeepEP group has been
+        initialized. The same returned slice must not be used concurrently by
+        overlapping calls.
+        """
+        assert self.ep_low_latency_buffer is not None, "DeepEP low-latency buffer is not initialized"
+        workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(torch.uint8, use_rdma_buffer=True)
+        microbatch_count = len(self.groups)
+        assert 0 <= microbatch_index < microbatch_count
+        workspace_size = workspace.numel() // microbatch_count
+        return workspace.narrow(0, microbatch_index * workspace_size, workspace_size)
 
     def clear_deepep_buffer(self):
         """

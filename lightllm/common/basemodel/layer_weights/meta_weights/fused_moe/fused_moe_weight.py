@@ -14,7 +14,6 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import MoeWorkspaceConfig
 
 logger = init_logger(__name__)
 
@@ -233,7 +232,7 @@ class FusedMoeWeight(BaseWeightTpl):
         recv_topk_idx: torch.Tensor,
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
-        workspace_config: MoeWorkspaceConfig = MoeWorkspaceConfig(),
+        microbatch_index: int = 0,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
@@ -246,7 +245,7 @@ class FusedMoeWeight(BaseWeightTpl):
             w13=self.w13,
             w2=self.w2,
             hidden_dtype=hidden_dtype,
-            workspace_config=workspace_config,
+            microbatch_index=microbatch_index,
         )
 
     def low_latency_combine(

@@ -7,7 +7,6 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
-    MoeWorkspaceConfig,
     use_sm100_mega_moe,
 )
 from lightllm.utils.dist_utils import get_global_world_size
@@ -324,7 +323,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_recv_x,
             _0_recv_topk_idx,
             _0_recv_topk_weight,
-            workspace_config=MoeWorkspaceConfig(index=0, count=2),
+            microbatch_index=0,
         )
 
         # 1 dispatch execute
@@ -356,7 +355,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_recv_x,
             _1_recv_topk_idx,
             _1_recv_topk_weight,
-            workspace_config=MoeWorkspaceConfig(index=1, count=2),
+            microbatch_index=1,
         )
 
         # wait 0 combine
