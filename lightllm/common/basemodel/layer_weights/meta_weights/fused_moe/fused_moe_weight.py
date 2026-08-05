@@ -11,7 +11,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import create_fuse_moe_impl
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
 
@@ -65,10 +64,6 @@ class FusedMoeWeight(BaseWeightTpl):
             enable_ep_moe=self.enable_ep_moe,
             layer_index=self.layer_num_,
         )
-        # 冗余专家的 CUDA 状态由 DeepGEMM 实现持有。自动更新仍通过权重对象读写同一份 tensor。
-        if self.enable_ep_moe:
-            self.redundancy_expert_ids_tensor = self.fuse_moe_impl.redundancy_expert_ids_tensor
-            self.routed_expert_counter_tensor = self.fuse_moe_impl.routed_expert_counter_tensor
         self._init_weight_partition()
         self.lock = threading.Lock()
         self._create_weight()
@@ -83,11 +78,8 @@ class FusedMoeWeight(BaseWeightTpl):
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
     def _init_redundancy_expert_params(self):
-        self.redundancy_expert_num = get_redundancy_expert_num()
-        self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
-        self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
-        # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
-        assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
+        self.redundancy_expert_num = 0
+        self.redundancy_expert_ids = []
 
     def _init_weight_partition(self):
         if self.enable_ep_moe:

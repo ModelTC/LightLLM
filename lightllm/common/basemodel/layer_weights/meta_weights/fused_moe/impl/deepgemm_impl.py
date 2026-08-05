@@ -6,9 +6,6 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_env_start_args,
-    get_redundancy_expert_ids,
-    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
@@ -24,7 +21,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 
 
 class FuseMoeDeepGEMM(FuseMoeBaseImpl):
@@ -36,15 +32,11 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.global_rank_ = global_rank
         self.global_world_size_ = world_size
         self.ep_n_routed_experts = self.n_routed_experts // world_size
-        self.redundancy_expert_num = get_redundancy_expert_num()
-        self.auto_update_redundancy_expert = get_env_start_args().auto_update_redundancy_expert
-        redundancy_ids = list(get_redundancy_expert_ids(self.layer_index))
-        self.redundancy_expert_ids_tensor = torch.tensor(redundancy_ids, dtype=torch.int64, device="cuda")
-        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
-        self.total_expert_num_contain_redundancy = self.n_routed_experts + self.redundancy_expert_num * world_size
+        self.redundancy_expert_num = 0
+        self.total_expert_num_contain_redundancy = self.n_routed_experts
         first_local_expert_id = global_rank * self.ep_n_routed_experts
-        self.local_logics_expert_ids_list = (
-            list(range(first_local_expert_id, first_local_expert_id + self.ep_n_routed_experts)) + redundancy_ids
+        self.local_logics_expert_ids_list = list(
+            range(first_local_expert_id, first_local_expert_id + self.ep_n_routed_experts)
         )
         self.ep_balance_counters = None
 
@@ -91,17 +83,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         """在逻辑路由采集之后，生成 DeepEP 实际使用的专家 ID。"""
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
-        if self.redundancy_expert_num > 0:
-            # repair 会原地改写 ID。复制后再改，保留已经交给 capture 的逻辑 ID。
-            topk_ids = topk_ids.clone()
-            redundancy_topk_ids_repair(
-                topk_ids=topk_ids,
-                redundancy_expert_ids=self.redundancy_expert_ids_tensor,
-                ep_expert_num=self.ep_n_routed_experts,
-                global_rank=self.global_rank_,
-                expert_counter=self.routed_expert_counter_tensor,
-                enable_counter=self.auto_update_redundancy_expert,
-            )
         return topk_weights, topk_ids
 
     # ==================== Prefill / Decode 公共接口 ====================
