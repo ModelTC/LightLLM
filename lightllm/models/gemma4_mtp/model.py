@@ -28,6 +28,8 @@ class Gemma4MTPModel(Gemma4TpPartModel):
     @ModelRegistry and not imported in lightllm/models/__init__.py.
     """
 
+    is_mtp_draft_model = True
+
     pre_and_post_weight_class = Gemma4MTPPreAndPostLayerWeight
     transformer_weight_class = Gemma4MTPTransformerLayerWeight
 

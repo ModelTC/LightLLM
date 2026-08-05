@@ -363,6 +363,10 @@ class ModeBackend:
                 from lightllm.models.qwen3_5_moe_mtp.model import Qwen3_5MoeMTPModel
 
                 self.draft_models.append(Qwen3_5MoeMTPModel(mtp_model_kvargs))
+            elif model_type == "gemma4_assistant":
+                assert self.args.mtp_mode == "eagle_frozen_kv"
+
+                self.draft_models.append(Gemma4MTPModel(mtp_model_kvargs))
             else:
                 raise ValueError(f"Unsupported MTP model type: {model_type}")
 

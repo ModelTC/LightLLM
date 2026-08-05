@@ -48,6 +48,30 @@ class Gemma4PostLayerInfer(LlamaPostLayerInfer):
         if self.final_logit_softcapping is not None and self.final_logit_softcapping > 0:
             cap = self.final_logit_softcapping
             logits = torch.tanh(logits / cap) * cap
-            if infer_state.prompt_logics is not None:
-                infer_state.prompt_logics = torch.tanh(infer_state.prompt_logics / cap) * cap
         return logits
+
+    def _logits_from_normed(self, normed, token_num, infer_state, layer_weight):
+        return self._dense_logits_from_normed(normed, token_num, infer_state, layer_weight)
+
+    def _mtp_hiddens_from_normed(self, normed):
+        return normed
+
+    def token_forward(self, input_embdings, infer_state, layer_weight):
+        normed, token_num = self._get_normed_last_hidden(input_embdings, infer_state, layer_weight)
+        logits = self._logits_from_normed(normed, token_num, infer_state, layer_weight)
+        logits = self._apply_logit_softcapping(logits)
+
+        prompt_logics = None
+        prompt_hiddens = infer_state.prompt_logics
+        infer_state.prompt_logics = None
+        if prompt_hiddens is not None:
+            prompt_token_num = prompt_hiddens.shape[0]
+            prompt_normed = self._norm(prompt_hiddens, infer_state, layer_weight)
+            prompt_logics = self._logits_from_normed(prompt_normed, prompt_token_num, infer_state, layer_weight)
+            prompt_logics = self._apply_logit_softcapping(prompt_logics)
+
+        return ModelOutput(
+            logits=logits,
+            mtp_main_output_hiddens=self._mtp_hiddens_from_normed(normed),
+            prompt_logics=prompt_logics,
+        )

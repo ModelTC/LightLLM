@@ -545,64 +545,49 @@ class TpPartBaseModel:
 
         return new_model_output
 
-    def _gather_last_input_embs(
-        self,
-        input_embs: torch.Tensor,
-        infer_state: InferStateInfo,
-    ) -> torch.Tensor:
-        """Gather last input embs from post layer."""
+    def _gather_last_input_embs(self, input_embs: torch.Tensor, infer_state: InferStateInfo) -> torch.Tensor:
         last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
         if infer_state.is_prefill and infer_state.need_dp_prefill_balance:
             last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
         return last_input_embs
 
-    def _get_mtp_main_output_hiddens(
-        self,
-        post_out: ModelOutput,
-        input_embs: torch.Tensor,
-        infer_state: InferStateInfo,
-    ) -> Optional[torch.Tensor]:
-        """Get mtp main output hiddens from post layer output."""
-        if not self.is_mtp_mode:
-            return None
-
-        mtp_hiddens = post_out.mtp_main_output_hiddens
-        if mtp_hiddens is None:
-            mtp_hiddens = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-            if infer_state.is_prefill and infer_state.need_dp_prefill_balance:
-                mtp_hiddens = infer_state._all_to_all_unbalance_get(data=mtp_hiddens)
-
-        return mtp_hiddens.contiguous()
-
     def _build_model_output(
         self,
         post_out: torch.Tensor | ModelOutput,
-        input_embs: torch.Tensor,
+        gathered_input_embs: torch.Tensor,
         infer_state: InferStateInfo,
     ) -> ModelOutput:
-        """Build model output from post layer output."""
         if isinstance(post_out, torch.Tensor):
-            post_out = ModelOutput(logits=post_out.contiguous())
+            logits = post_out.contiguous()
+            prompt_logics = infer_state.prompt_logics
+            mtp_hiddens = None
+        else:
+            assert isinstance(post_out, ModelOutput), f"Invalid post_out type: {type(post_out)}"
+
+            logits = post_out.logits
+            prompt_logics = post_out.prompt_logics
+            mtp_hiddens = post_out.mtp_main_output_hiddens
+
+        if self.is_mtp_mode:
+            if mtp_hiddens is None:
+                mtp_hiddens = gathered_input_embs
+            mtp_hiddens = mtp_hiddens.contiguous()
+        else:
+            mtp_hiddens = None
+
         return ModelOutput(
-            logits=post_out.logits,
-            mtp_main_output_hiddens=self._get_mtp_main_output_hiddens(
-                post_out=post_out,
-                input_embs=input_embs,
-                infer_state=infer_state,
-            ),
+            logits=logits,
+            mtp_main_output_hiddens=mtp_hiddens,
+            prompt_logics=prompt_logics,
         )
 
-    def _post_forward_to_model_output(
-        self,
-        input_embs: torch.Tensor,
-        infer_state: InferStateInfo,
-    ) -> ModelOutput:
-        """Run post layer forward and build model output."""
+    def _post_forward_to_model_output(self, input_embs: torch.Tensor, infer_state: InferStateInfo) -> ModelOutput:
+        # Build ModelOutput from post_infer.token_forward output
         last_input_embs = self._gather_last_input_embs(input_embs, infer_state)
         post_out = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
         return self._build_model_output(
             post_out=post_out,
-            input_embs=input_embs,
+            gathered_input_embs=last_input_embs,
             infer_state=infer_state,
         )
 
@@ -767,20 +752,7 @@ class TpPartBaseModel:
 
         input_embs = output_tensors[0]
 
-        last_input_embs = self.post_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-        if infer_state.need_dp_prefill_balance:
-            last_input_embs = infer_state._all_to_all_unbalance_get(data=last_input_embs)
-
-        predict_logits = self.post_infer.token_forward(last_input_embs, infer_state, self.pre_post_weight)
-        model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
-
-        # 特殊模型特殊模式的额外输出
-        if self.is_mtp_mode:
-            if mtp_main_output_hiddens is None:
-                mtp_main_output_hiddens = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-                if infer_state.need_dp_prefill_balance:
-                    mtp_main_output_hiddens = infer_state._all_to_all_unbalance_get(data=mtp_main_output_hiddens)
-            model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
+        model_output = self._post_forward_to_model_output(input_embs, infer_state)
 
         # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
         # 该调用没有实际意义
@@ -1033,20 +1005,16 @@ class TpPartBaseModel:
         )
         g_cache_manager.cache_env_out()
 
-        model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
-
-        if self.is_mtp_mode:
-            if mtp_main_output_hiddens is None:
-                mtp_main_output_hiddens = self.pre_infer._tpsp_allgather(input=input_embs, infer_state=infer_state)
-                if infer_state.need_dp_prefill_balance:
-                    mtp_main_output_hiddens = infer_state._all_to_all_unbalance_get(data=mtp_main_output_hiddens)
-            model_output.mtp_main_output_hiddens = mtp_main_output_hiddens.contiguous()
-            if mtp_main_output_hiddens1 is None:
-                mtp_main_output_hiddens1 = self.pre_infer._tpsp_allgather(input=input_embs1, infer_state=infer_state1)
-                if infer_state1.need_dp_prefill_balance:
-                    mtp_main_output_hiddens1 = infer_state1._all_to_all_unbalance_get(data=mtp_main_output_hiddens1)
-            model_output1.mtp_main_output_hiddens = mtp_main_output_hiddens1.contiguous()
+        model_output = self._build_model_output(
+            post_out=post_out0,
+            gathered_input_embs=last_input_embs,
+            infer_state=infer_state,
+        )
+        model_output1 = self._build_model_output(
+            post_out=post_out1,
+            gathered_input_embs=last_input_embs1,
+            infer_state=infer_state1,
+        )
 
         return model_output, model_output1
 
@@ -1076,12 +1044,12 @@ class TpPartBaseModel:
 
         model_output = self._build_model_output(
             post_out=post_out0,
-            input_embs=input_embs,
+            gathered_input_embs=last_input_embs,
             infer_state=infer_state,
         )
         model_output1 = self._build_model_output(
             post_out=post_out1,
-            input_embs=input_embs1,
+            gathered_input_embs=last_input_embs1,
             infer_state=infer_state1,
         )
 

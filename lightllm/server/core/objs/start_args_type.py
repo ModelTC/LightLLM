@@ -185,6 +185,7 @@ class StartArgs:
                 "eagle_with_att",
                 "vanilla_no_att",
                 "eagle_no_att",
+                "eagle_frozen_kv",
                 None,
             ]
         },
