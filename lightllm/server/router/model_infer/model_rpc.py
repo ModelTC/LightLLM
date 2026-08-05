@@ -26,7 +26,6 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDecodeNode,
     PDDPForDecodeNode,
 )
-from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import (
     EPBalanceMonitor,
@@ -105,13 +104,6 @@ class ModelRpcServer(rpyc.Service):
         logger.info(f"use {self.backend.__class__.__name__}")
         self.backend.init_model(kvargs)
         self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
-
-        # only deepseekv3 can support auto_update_redundancy_expert
-        if self.args.auto_update_redundancy_expert:
-            self.redundancy_expert_manager = RedundancyExpertManager(self.backend.model)
-            logger.info("init redundancy_expert_manager")
-        else:
-            self.redundancy_expert_manager = None
 
         if should_enable_ep_balance_monitor(self.args):
             monitor = EPBalanceMonitor(self.backend.model)
