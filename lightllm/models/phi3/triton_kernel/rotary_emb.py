@@ -69,8 +69,16 @@ def _rotary_kernel(
         other=0.0,
     )
 
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+    cos = tl.load(
+        Cos + off_dimcos_sin,
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (dim_range0[None, None, :] < rot_dim),
+        other=0.0,
+    )
+    sin = tl.load(
+        Sin + off_dimcos_sin,
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (dim_range0[None, None, :] < rot_dim),
+        other=0.0,
+    )
 
     out0 = q0 * cos - q1 * sin
     out1 = q0 * sin + q1 * cos
@@ -117,8 +125,16 @@ def _rotary_kernel(
         & (dim_range1[None, None, :] < head_dim),
         other=0.0,
     )
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
+    cos = tl.load(
+        Cos + off_dimcos_sin,
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (dim_range0[None, None, :] < rot_dim),
+        other=0.0,
+    )
+    sin = tl.load(
+        Sin + off_dimcos_sin,
+        mask=(cur_seq_range[:, None, None] < max_total_len) & (dim_range0[None, None, :] < rot_dim),
+        other=0.0,
+    )
 
     out_k0 = k0 * cos - k1 * sin
     out_k1 = k0 * sin + k1 * cos
