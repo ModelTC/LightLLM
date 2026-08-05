@@ -287,7 +287,8 @@ class PagedFa3DecodeAttState(BaseDecodeAttState):
                         self.backend.page_size,
                         weak_ref_tensor(output),
                         weak_ref_tensor(softmax_lse),
-                    )
+                    ),
+                    microbatch_index=self.infer_state.microbatch_index,
                 )
             else:
                 torch_npu.npu_fused_infer_attention_score.out(

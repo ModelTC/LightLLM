@@ -20,10 +20,6 @@ from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import copy_kv_index_to_req
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 from lightllm.common.basemodel.graph import DecodeGraph
-from lightllm.common.basemodel.attention.paged_fa3.graph_utils import (
-    sync_attn_params,
-    new_seq_len_ref_buffers,
-)
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token
@@ -137,11 +133,6 @@ class TpPartBaseModel:
         if self.prefill_att_backend1 is not None:
             logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
-
-        if not self.disable_cudagraph:
-            self.b1_cu_q_seq_len_cpu_ref, self.b_cu_kv_seq_len_cpu_ref = new_seq_len_ref_buffers(
-                self.graph_max_batch_size
-            )
 
         self._autotune_warmup()
         self._init_padded_req()
@@ -589,29 +580,11 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
-            batch_size = infer_state.batch_size
-            b1_cu_q_seq_len_cpu_slice = self.b1_cu_q_seq_len_cpu_ref[:batch_size]
-            b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
-            if self.platform_backend.name == "ascend":
-                if not self.platform_backend.graph.is_capturing():
-                    sync_attn_params(
-                        batch_size=batch_size,
-                        b1_cu_q_seq_len_cpu_slice=b1_cu_q_seq_len_cpu_slice,
-                        b_cu_kv_seq_len_cpu_slice=b_cu_kv_seq_len_cpu_slice,
-                        b1_cu_q_seq_len_cpu=infer_state.b1_cu_q_seq_len_cpu,
-                        b_cu_kv_seq_len_cpu=infer_state.b_cu_kv_seq_len_cpu,
-                        update_stream=self.graph.update_stream,
-                    )
-
             if self.graph.need_capture(infer_batch_size):
                 infer_state.is_cuda_graph = True
                 model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
-                model_output: ModelOutput = self.graph.replay(
-                    infer_state,
-                    b1_cu_q_seq_len_cpu_slice,
-                    b_cu_kv_seq_len_cpu_slice,
-                )
+                model_output: ModelOutput = self.graph.replay(infer_state)
 
             model_output = self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
         else:
@@ -848,20 +821,6 @@ class TpPartBaseModel:
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
-            batch_size = infer_state0.batch_size
-            b1_cu_q_seq_len_cpu_slice = self.b1_cu_q_seq_len_cpu_ref[:batch_size]
-            b_cu_kv_seq_len_cpu_slice = self.b_cu_kv_seq_len_cpu_ref[:batch_size]
-            if self.platform_backend.name == "ascend":
-                if not self.platform_backend.graph.is_capturing():
-                    sync_attn_params(
-                        batch_size=batch_size,
-                        b1_cu_q_seq_len_cpu_slice=b1_cu_q_seq_len_cpu_slice,
-                        b_cu_kv_seq_len_cpu_slice=b_cu_kv_seq_len_cpu_slice,
-                        b1_cu_q_seq_len_cpu=infer_state0.b1_cu_q_seq_len_cpu,
-                        b_cu_kv_seq_len_cpu=infer_state0.b_cu_kv_seq_len_cpu,
-                        update_stream=self.graph.update_stream,
-                    )
-
             if self.graph.need_capture(infer_batch_size):
                 infer_state0.is_cuda_graph = True
                 infer_state1.is_cuda_graph = True
@@ -872,12 +831,7 @@ class TpPartBaseModel:
                     infer_state1=infer_state1,
                 )
             else:
-                model_output0, model_output1 = self.graph.replay(
-                    infer_state0,
-                    b1_cu_q_seq_len_cpu_slice,
-                    b_cu_kv_seq_len_cpu_slice,
-                    infer_state1=infer_state1,
-                )
+                model_output0, model_output1 = self.graph.replay(infer_state0, infer_state1=infer_state1)
 
             # TODO 动态 mtp fix
             model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size)

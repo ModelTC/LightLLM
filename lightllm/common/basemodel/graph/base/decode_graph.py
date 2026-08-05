@@ -42,6 +42,9 @@ class DecodeGraph:
     ):
         if cls is not DecodeGraph:
             return object.__new__(cls)
+        if platform_backend == "ascend" and "ascend" not in _DECODE_GRAPH_REGISTRY:
+            import lightllm.common.basemodel.graph.acl_graph as _acl_graph  # noqa: F401
+
         impl_cls = _DECODE_GRAPH_REGISTRY.get(platform_backend)
         if impl_cls is None:
             raise RuntimeError(
@@ -179,12 +182,7 @@ class DecodeGraph:
             assert infer_state1 is None
             return self._capture_decode(decode_func, infer_state)
 
-    def _replay(
-        self,
-        infer_state: InferStateInfo,
-        b1_cu_q_seq_len_cpu: list[int],
-        b_cu_kv_seq_len_cpu: list[int],
-    ) -> ModelOutput:
+    def _replay(self, infer_state: InferStateInfo) -> ModelOutput:
         batch_size = infer_state.input_ids.shape[0]
         graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
         graph_infer_state.copy_for_cuda_graph(infer_state)
@@ -192,13 +190,7 @@ class DecodeGraph:
 
         return graph_output
 
-    def _replay_overlap(
-        self,
-        infer_state: InferStateInfo,
-        infer_state1: InferStateInfo,
-        b1_cu_q_seq_len_cpu: list[int],
-        b_cu_kv_seq_len_cpu: list[int],
-    ):
+    def _replay_overlap(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
         batch_size = infer_state.input_ids.shape[0]
         (
             graph_obj,
@@ -213,12 +205,11 @@ class DecodeGraph:
 
         return graph_model_output, graph_model_output1
 
-    def replay(self, infer_state, b1_cu_q_seq_len_cpu: list[int], b_cu_kv_seq_len_cpu: list[int], infer_state1=None):
+    def replay(self, infer_state: InferStateInfo, infer_state1: Optional[InferStateInfo] = None):
         if self.enable_decode_microbatch_overlap:
-            return self._replay_overlap(infer_state, infer_state1, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
-        else:
-            assert infer_state1 is None
-            return self._replay(infer_state, b1_cu_q_seq_len_cpu, b_cu_kv_seq_len_cpu)
+            return self._replay_overlap(infer_state, infer_state1)
+        assert infer_state1 is None
+        return self._replay(infer_state)
 
     @torch.no_grad()
     def warmup(self, model):

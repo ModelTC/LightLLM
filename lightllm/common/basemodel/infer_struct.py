@@ -16,32 +16,6 @@ from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
 
 
-class SeqLenManager:
-    def __init__(self, max_batch: int):
-        self.max_batch = max_batch
-
-        self.b1_cu_q_seq_len_cpu = torch.empty(
-            max_batch, dtype=torch.int32, device='cpu', pin_memory=True)
-        self.b_cu_kv_seq_len_cpu = torch.empty(
-            max_batch, dtype=torch.int32, device='cpu', pin_memory=True)
-
-        self.b_cu_q_seq_len_list = None
-        self.b_cu_kv_seq_len_list = None
-
-    def update(self, b1_cu_q_seq_len: torch.Tensor, b_cu_kv_seq_len: torch.Tensor):
-        n_q = b1_cu_q_seq_len.numel() - 1
-        n_kv = b_cu_kv_seq_len.numel()
-
-        self.b1_cu_q_seq_len_cpu[:n_q].copy_(b1_cu_q_seq_len[1:], non_blocking=False)
-        self.b_cu_kv_seq_len_cpu[:n_kv].copy_(b_cu_kv_seq_len, non_blocking=False)
-
-        self.n_q = n_q
-        self.n_kv = n_kv
-
-    def get_tensor_slices(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.b1_cu_q_seq_len_cpu[:self.n_q], self.b_cu_kv_seq_len_cpu[:self.n_kv]
-
-
 class InferStateInfo:
     """
     推理时用的信息结构体
@@ -133,6 +107,8 @@ class InferStateInfo:
         self.platform_backend = get_backend()
 
         if self.platform_backend.name == "ascend":
+            from lightllm.common.basemodel.graph.acl_graph import SeqLenManager
+
             args = get_env_start_args()
             self.seq_len_manager = SeqLenManager(args.running_max_req_size + 1)
 

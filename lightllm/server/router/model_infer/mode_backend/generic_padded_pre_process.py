@@ -32,7 +32,6 @@ def padded_prepare_prefill_inputs(
     b_req_idx = []
     b_seq_len = []
     b_q_seq_len = []
-    b_last_mem_index = []
     batch_multimodal_params = []
     b_ready_cache_len = []
     b_mtp_index = []
@@ -69,7 +68,6 @@ def padded_prepare_prefill_inputs(
         b_ready_cache_len.append(0)
         total_token_num += 1
         prefix_total_token_num += 0
-        b_last_mem_index.append(req.last_kv_mem_index)
         batch_multimodal_params.append({"images": [], "audios": []})
 
     max_kv_seq_len = max(b_seq_len)
@@ -81,7 +79,6 @@ def padded_prepare_prefill_inputs(
     b_req_idx = torch.tensor(b_req_idx, dtype=torch.int32, device="cpu")
     b_seq_len = torch.tensor(b_seq_len, dtype=torch.int32, device="cpu")
     b_mtp_index = torch.tensor(b_mtp_index, dtype=torch.int32, device="cpu")
-    b_last_mem_index = torch.tensor(b_last_mem_index, dtype=torch.int32, device="cpu")
     b_ready_cache_len = torch.tensor(b_ready_cache_len, dtype=torch.int32, device="cpu")
     b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
@@ -166,6 +163,7 @@ def padded_prepare_decode_inputs(
         total_token_num += seq_len
         b_mtp_index.append(0)
         batch_multimodal_params.append(req.multimodal_params)
+        b_last_mem_index.append(req.last_kv_mem_index)
         # process the draft tokens.
         for step in range(req.mtp_step):
             run_reqs.append(req)
