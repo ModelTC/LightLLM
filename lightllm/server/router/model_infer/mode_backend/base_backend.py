@@ -101,6 +101,9 @@ class ModeBackend:
         self.load_way = kvargs["load_way"]
         self.disable_chunked_prefill = self.args.disable_chunked_prefill
         self.chunked_prefill_size = self.args.chunked_prefill_size
+        self.prompt_logprobs_chunk_size = int(os.getenv("LIGHTLLM_PROMPT_LOGPROBS_CHUNK_SIZE", "1024"))
+        if self.prompt_logprobs_chunk_size <= 0:
+            raise ValueError("LIGHTLLM_PROMPT_LOGPROBS_CHUNK_SIZE must be positive")
         self.use_dynamic_prompt_cache = not self.args.disable_dynamic_prompt_cache
         self.batch_max_tokens = self.args.batch_max_tokens
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
@@ -421,12 +424,12 @@ class ModeBackend:
         self,
         model_input: ModelInput,
         run_reqs: List[InferReq],
-        prompt_logits: Optional[torch.Tensor],
+        prompt_shard_logits: Optional[torch.Tensor],
+        microbatch_index: int = 0,
     ) -> None:
-        # 仅在开启 return_all_prompt_logics（如 enable_prompt_logprobs）且存在完整的
-        # prefill logits 时，才需要捕获每个 prompt token 的 logprobs 信息。此时用于采样
-        # 的 logits 已经只对应每个请求最后一个位置，无需再处理。
-        if not self.model.return_all_prompt_logics or prompt_logits is None:
+        # Local LM-head logits keep the original full-token GEMM numerics. Only
+        # TP all-gather and FP32 postprocessing are chunked by token here.
+        if not self.model.return_all_prompt_logics or prompt_shard_logits is None:
             return
 
         mgr = PromptLogprobsCaptureManager.get_instance()
@@ -436,37 +439,49 @@ class ModeBackend:
             q_len = req_obj.prefill_need_token_num(is_chuncked_prefill=not self.disable_chunked_prefill)
             topk = req_obj.sampling_param.shm_param.prompt_logprobs
             capture_count = min(q_len, req_obj.shm_req.input_len - req_obj.cur_kv_len - 1)
-            if capture_count > 0 and topk == 0 and self.is_master_in_dp:
-                # prompt_logprobs=0 返回真实命中的 prompt token，
-                # rank 必须基于全 vocab 计算，不能用 top-k 列表位置替代。
-                logit_rows = prompt_logits[start_loc : start_loc + capture_count]
-                target_start = req_obj.cur_kv_len + 1
-                target_end = target_start + capture_count
-                target_token_ids = torch.tensor(
-                    req_obj.shm_req.shm_prompt_ids.arr[target_start:target_end].copy(),
-                    dtype=torch.long,
-                    device=logit_rows.device,
+            if capture_count <= 0 or topk < 0:
+                start_loc += q_len
+                continue
+
+            for chunk_start in range(0, capture_count, self.prompt_logprobs_chunk_size):
+                chunk_end = min(chunk_start + self.prompt_logprobs_chunk_size, capture_count)
+                row_start = start_loc + chunk_start
+                row_end = start_loc + chunk_end
+                logit_rows = self.model.gather_prompt_logits_chunk(
+                    prompt_shard_logits[:, row_start:row_end].contiguous(),
+                    microbatch_index=microbatch_index,
                 )
-                target_logits = logit_rows.gather(1, target_token_ids.long().view(-1, 1)).view(-1)
-                logprobs = target_logits.float() - torch.logsumexp(logit_rows.float(), dim=-1)
-                ranks = (logit_rows > target_logits.view(-1, 1)).sum(dim=-1, dtype=torch.int32) + 1
-                req_obj.prompt_selected_logprobs.add_chunk(target_start, target_end, logprobs, ranks)
-            elif capture_count > 0 and topk > 0 and mgr is not None and mgr.is_buffer_initialized():
-                logit_rows = prompt_logits[start_loc : start_loc + capture_count]
-                log_normalizer = torch.logsumexp(logit_rows.float(), dim=-1)
-                valid_topk = min(topk, logit_rows.shape[-1])
-                top_logits, top_token_ids = logit_rows.topk(valid_topk, dim=-1)
-                top_token_ids = top_token_ids.to(torch.int32)
-                top_logprobs = top_logits.float() - log_normalizer.view(-1, 1)
-                if valid_topk < topk:
-                    padding = (0, topk - valid_topk)
-                    top_token_ids = torch.nn.functional.pad(top_token_ids, padding, value=-1)
-                    top_logprobs = torch.nn.functional.pad(top_logprobs, padding, value=float("-inf"))
-                mgr.capture(
-                    mem_indexes=model_input.mem_indexes[start_loc : start_loc + capture_count],
-                    top_token_ids=top_token_ids,
-                    top_logprobs=top_logprobs,
-                )
+
+                if topk == 0 and self.is_master_in_dp:
+                    # prompt_logprobs=0 返回真实命中的 prompt token，
+                    # rank 必须基于全 vocab 计算，不能用 top-k 列表位置替代。
+                    target_start = req_obj.cur_kv_len + 1 + chunk_start
+                    target_end = target_start + (chunk_end - chunk_start)
+                    target_token_ids = torch.tensor(
+                        req_obj.shm_req.shm_prompt_ids.arr[target_start:target_end].copy(),
+                        dtype=torch.long,
+                        device=logit_rows.device,
+                    )
+                    target_logits = logit_rows.gather(1, target_token_ids.view(-1, 1)).view(-1)
+                    logprobs = target_logits.float() - torch.logsumexp(logit_rows.float(), dim=-1)
+                    ranks = (logit_rows > target_logits.view(-1, 1)).sum(dim=-1, dtype=torch.int32) + 1
+                    req_obj.prompt_selected_logprobs.add_chunk(target_start, target_end, logprobs, ranks)
+                elif topk > 0 and self.is_master_in_dp and mgr is not None and mgr.is_buffer_initialized():
+                    log_normalizer = torch.logsumexp(logit_rows.float(), dim=-1)
+                    valid_topk = min(topk, logit_rows.shape[-1])
+                    top_logits, top_token_ids = logit_rows.topk(valid_topk, dim=-1)
+                    top_token_ids = top_token_ids.to(torch.int32)
+                    top_logprobs = top_logits.float() - log_normalizer.view(-1, 1)
+                    if valid_topk < topk:
+                        padding = (0, topk - valid_topk)
+                        top_token_ids = torch.nn.functional.pad(top_token_ids, padding, value=-1)
+                        top_logprobs = torch.nn.functional.pad(top_logprobs, padding, value=float("-inf"))
+                    mgr.capture(
+                        mem_indexes=model_input.mem_indexes[row_start:row_end],
+                        top_token_ids=top_token_ids,
+                        top_logprobs=top_logprobs,
+                    )
+                del logit_rows
             start_loc += q_len
         return
 

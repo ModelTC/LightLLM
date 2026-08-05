@@ -358,6 +358,19 @@ class TpPartBaseModel:
         else:
             return self._decode(model_input)
 
+    @torch.no_grad()
+    def gather_prompt_logits_chunk(
+        self,
+        prompt_shard_logits: torch.Tensor,
+        microbatch_index: int = 0,
+    ) -> torch.Tensor:
+        """Gather one bounded token chunk of TP-sharded prompt logits."""
+        return self.post_infer.gather_prompt_logits_chunk(
+            prompt_shard_logits,
+            self.pre_post_weight,
+            dist_group_manager.get_group(microbatch_index),
+        )
+
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         infer_state = self.infer_state_class()
         infer_state.input_ids = model_input.input_ids
@@ -532,10 +545,9 @@ class TpPartBaseModel:
         new_model_output = copy.copy(padded_model_output)
         # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
-        # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
+        # prompt_logics is [local_vocab, prompt_tokens]; trim token padding.
         if new_model_output.prompt_logics is not None:
-            new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
+            new_model_output.prompt_logics = new_model_output.prompt_logics[:, 0:origin_handle_token_num]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
