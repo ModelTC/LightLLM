@@ -104,6 +104,11 @@ class BaseDecodeAttState(ABC):
     backend: BaseAttBackend = None
     infer_state: "InferStateInfo" = None
 
+    def prepare_for_forward(self):
+        """Build derived state that must execute inside a captured forward."""
+
+        return
+
     @abstractmethod
     def init_state(self):
         pass

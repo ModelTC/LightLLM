@@ -89,24 +89,6 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
         )
-        if mem_manager.has_separate_dflash_draft_kv:
-            from lightllm.common.basemodel.triton_kernel.kv_cache_offload import (
-                load_cpu_kv_to_gpu,
-            )
-
-            draft_mem = mem_manager._pd_dflash_draft_mem_manager
-            draft_mem_indexes = mem_indexes.masked_fill(mem_indexes < 0, draft_mem.HOLD_TOKEN_MEMINDEX)
-            load_cpu_kv_to_gpu(
-                gpu_mem_indexes=draft_mem_indexes,
-                gpu_kv_cache=draft_mem.kv_buffer,
-                gpu_kv_cache_scale=None,
-                cpu_kv_cache=mem_manager.get_dflash_draft_cpu_cache(cpu_cache_client.cpu_kv_cache_tensor),
-                cpu_kv_cache_scale=None,
-                page_indexes=page_indexes,
-                tp_index=get_current_rank_in_dp(),
-                tp_world_size=get_dp_world_size(),
-                grid_num=16,
-            )
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
@@ -205,31 +187,12 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             big_page_token_num=args.cpu_cache_token_page_size,
             linear_config=self.linear_config,
         )
-        if mem_manager.has_separate_dflash_draft_kv:
-            from lightllm.common.basemodel.triton_kernel.kv_cache_offload import (
-                offload_gpu_kv_to_cpu,
-            )
-
-            draft_mem = mem_manager._pd_dflash_draft_mem_manager
-            draft_mem_indexes = mem_indexes.masked_fill(mem_indexes < 0, draft_mem.HOLD_TOKEN_MEMINDEX)
-            offload_gpu_kv_to_cpu(
-                token_indexes=draft_mem_indexes,
-                gpu_kv_cache=draft_mem.kv_buffer,
-                gpu_kv_cache_scale=None,
-                cpu_kv_cache=mem_manager.get_dflash_draft_cpu_cache(cpu_cache_client.cpu_kv_cache_tensor),
-                cpu_kv_cache_scale=None,
-                page_indexes=page_indexes,
-                page_readies=page_readies,
-                tp_index=get_current_rank_in_dp(),
-                tp_world_size=get_dp_world_size(),
-                grid_num=16,
-            )
-
         return
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        # Qwen3Next 需要调整 layer_index
-        layer_index = layer_index // self.linear_config.full_attention_interval
+        # Qwen3Next packs main full-attention layers first, followed by
+        # speculative draft layers.
+        layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager

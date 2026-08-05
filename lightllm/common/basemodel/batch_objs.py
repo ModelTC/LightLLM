@@ -128,6 +128,9 @@ class ModelOutput:
     # DSpark dynamic verify 使用的 raw confidence logits，由 draft model
     # post layer 产生，proposer 只负责 scatter 到 verify batch。
     mtp_draft_confidence_logits: Optional[torch.Tensor] = None
+    # TP-sharded DSpark Markov head 已经完成全局 greedy 选择时，直接携带
+    # draft token，避免为了下游 argmax 再 all-gather 完整词表 logits。
+    mtp_draft_token_ids: Optional[torch.Tensor] = None
 
     # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
     # 保存整个 prefill 阶段每一个 token 位置对应的 logits（而非仅最后一个位置的 logits）。
@@ -139,3 +142,5 @@ class ModelOutput:
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.mtp_draft_confidence_logits is not None:
             self.mtp_draft_confidence_logits = tensor_to_no_ref_tensor(self.mtp_draft_confidence_logits)
+        if self.mtp_draft_token_ids is not None:
+            self.mtp_draft_token_ids = tensor_to_no_ref_tensor(self.mtp_draft_token_ids)

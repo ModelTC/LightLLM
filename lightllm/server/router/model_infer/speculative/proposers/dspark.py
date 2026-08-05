@@ -55,10 +55,7 @@ class DSparkProposer(DFlashProposer):
                 schedule_probs=schedule_probs,
             )
 
-        self.extend_draft_kv_cache(
-            main_model_input=main_model_input,
-            accepted_index=verify_result.accepted_index,
-        )
+        self.extend_draft_kv_cache(main_model_input=main_model_input)
         selected_rows = self.select_accepted_tail_rows(
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             accept_len=verify_result.accept_len,

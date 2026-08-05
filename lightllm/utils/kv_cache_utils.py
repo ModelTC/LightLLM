@@ -16,7 +16,7 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.speculative import SpeculativeConfig, is_qwen3_5_dflash_draft_config
+from lightllm.common.speculative import SpeculativeConfig
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_att_mixed_model
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
@@ -57,35 +57,6 @@ def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -
         chunks_hash_value.append(hash_value)
 
     return chunks_hash_value
-
-
-def _get_qwen35_dflash_cpu_cache_bytes(args) -> int:
-    """Size of the global draft KV appended to each Qwen3Next CPU cache page."""
-
-    draft_model_dirs = args.mtp_draft_model_dir
-    if isinstance(draft_model_dirs, str):
-        draft_model_dirs = [draft_model_dirs]
-    assert draft_model_dirs and len(draft_model_dirs) == 1
-
-    from transformers.configuration_utils import PretrainedConfig
-
-    draft_config, _ = PretrainedConfig.get_config_dict(draft_model_dirs[0])
-    assert is_qwen3_5_dflash_draft_config(draft_config), (
-        "linear-attention MTP CPU cache only supports Qwen3_5DFlashModel, "
-        f"got architectures={draft_config.get('architectures')}"
-    )
-    page_size = args.cpu_cache_token_page_size
-    draft_bytes = (
-        page_size
-        * get_layer_num(draft_model_dirs[0])
-        * 2
-        * get_num_key_value_heads(draft_model_dirs[0])
-        * get_head_dim(draft_model_dirs[0])
-        * get_llm_data_type().itemsize
-    )
-    # The following typed draft view requires its byte offset and extent to be
-    # naturally aligned. Existing mixed-model pages use the same alignment.
-    return triton.cdiv(draft_bytes, 16) * 16
 
 
 @lru_cache(maxsize=None)
@@ -149,13 +120,9 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         raise Exception(f"not support mem manager: {mem_manager_class} for cpu kv cache")
 
     spec_config = SpeculativeConfig.from_args(args)
-    if spec_config.enabled:
-        if mem_manager_class is Qwen3NextMemManager:
-            if spec_config.is_dflash:
-                cpu_cache_meta.head_dim += _get_qwen35_dflash_cpu_cache_bytes(args)
-        else:
-            # TODO 可能会存在不同mtp模式的精度问题
-            cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
+    if spec_config.enabled and mem_manager_class is not Qwen3NextMemManager:
+        # TODO 可能会存在不同mtp模式的精度问题
+        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
         (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())

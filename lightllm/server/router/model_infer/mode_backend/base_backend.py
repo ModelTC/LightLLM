@@ -252,6 +252,12 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
+        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
+            # The target manager already includes the speculative full-attention
+            # layer slots, so it can be shared before draft model initialization.
+            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            dist.barrier(group=self.node_nccl_group)
+
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
@@ -267,6 +273,9 @@ class ModeBackend:
 
         self.init_custom()
 
+        if self.args.enable_dp_prompt_cache_fetch:
+            self.init_dp_kv_shared()
+
         self.shm_reqs_io_buffer = ShmObjsIOBuffer()
         # 只会在 pd pd 模式下才会使用，用于上传分块传输任务是否成功。
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
@@ -278,16 +287,6 @@ class ModeBackend:
                 g_infer_context.init_dynamic_mtp_planner(mtp_step=self.mtp_step, mode=self.spec_config.mode)
             self.spec_adapter = build_spec_runtime(self)
             self._attach_spec_adapter()
-
-        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
-            # Draft models must be initialized before this snapshot. Qwen3.5
-            # DFlash attaches its independent draft KV manager to the target
-            # manager so PD transfer workers can deserialize both buffers.
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
-            dist.barrier(group=self.node_nccl_group)
-
-        if self.args.enable_dp_prompt_cache_fetch:
-            self.init_dp_kv_shared()
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)
@@ -438,9 +437,14 @@ class ModeBackend:
 
                 self.draft_models.append(Qwen3DFlashModel(mtp_model_kvargs))
             elif spec_config.is_dspark and is_qwen3_dspark_draft_config(mtp_model_cfg):
-                from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+                if self.is_linear_att_mixed_model:
+                    from lightllm.models.qwen3_5_dspark.model import Qwen3_5DSparkModel
 
-                self.draft_models.append(Qwen3DSparkModel(mtp_model_kvargs))
+                    self.draft_models.append(Qwen3_5DSparkModel(mtp_model_kvargs))
+                else:
+                    from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+
+                    self.draft_models.append(Qwen3DSparkModel(mtp_model_kvargs))
             elif (spec_config.is_dflash or spec_config.is_dspark) and is_gemma4_dspark_draft_config(mtp_model_cfg):
                 raise NotImplementedError("Gemma4 DSpark draft checkpoints are not wired to LightLLM serving yet.")
             elif (spec_config.is_dflash or spec_config.is_dspark) and is_dspark_draft_config(mtp_model_cfg):
@@ -477,9 +481,9 @@ class ModeBackend:
         return
 
     def _validate_linear_att_spec_support(self) -> None:
-        """Restrict the new DFlash combination without narrowing existing LightSpec modes."""
+        """Validate block-draft checkpoint families against hybrid targets."""
 
-        if not self.spec_config.enabled or not self.spec_config.is_dflash:
+        if not self.spec_config.enabled or not self.spec_config.uses_block_draft_model:
             return
 
         mtp_draft_model_dirs = self.args.mtp_draft_model_dir
@@ -488,11 +492,18 @@ class ModeBackend:
         assert mtp_draft_model_dirs is not None and len(mtp_draft_model_dirs) == 1
         mtp_model_cfg, _ = PretrainedConfig.get_config_dict(mtp_draft_model_dirs[0])
         is_qwen35_dflash = is_qwen3_5_dflash_draft_config(mtp_model_cfg)
+        is_qwen_dspark = is_qwen3_dspark_draft_config(mtp_model_cfg)
         if self.is_linear_att_mixed_model:
-            assert is_qwen35_dflash, (
-                "linear-attention mixed targets require a Qwen3_5DFlashModel draft checkpoint, "
-                f"got architectures={mtp_model_cfg.get('architectures')}"
-            )
+            if self.spec_config.is_dflash:
+                assert is_qwen35_dflash, (
+                    "linear-attention mixed targets require a Qwen3_5DFlashModel checkpoint in DFlash mode, "
+                    f"got architectures={mtp_model_cfg.get('architectures')}"
+                )
+            else:
+                assert is_qwen_dspark, (
+                    "linear-attention mixed targets require a Qwen3DSparkModel checkpoint in DSpark mode, "
+                    f"got architectures={mtp_model_cfg.get('architectures')}"
+                )
         else:
             assert not is_qwen35_dflash, "Qwen3_5DFlashModel requires a Qwen3Next target"
         return
@@ -1053,8 +1064,11 @@ class ModeBackend:
         return
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
-        logits = model_output.logits
-        draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
+        if model_output.mtp_draft_token_ids is not None:
+            draft_next_token_ids_gpu = model_output.mtp_draft_token_ids
+        else:
+            logits = model_output.logits
+            draft_next_token_ids_gpu = torch.argmax(logits, dim=-1)
 
         # 如果draft和target的词表不同，需要把draft token映射回主模型词表。
         if self.spec_config.needs_draft_vocab_mapping:

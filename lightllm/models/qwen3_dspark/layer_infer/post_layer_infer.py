@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from lightllm.distributed.communication_op import all_gather
+from lightllm.distributed.communication_op import all_gather, all_gather_into_tensor
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import (
@@ -26,11 +26,17 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         self.enable_confidence_head_ = bool(network_config.get("enable_confidence_head", False))
         self.confidence_head_with_markov_ = bool(network_config.get("confidence_head_with_markov", False))
         self.mtp_draft_confidence_logits = None
+        self.mtp_draft_token_ids = None
 
     def pop_mtp_draft_confidence_logits(self):
         logits = self.mtp_draft_confidence_logits
         self.mtp_draft_confidence_logits = None
         return logits
+
+    def pop_mtp_draft_token_ids(self):
+        token_ids = self.mtp_draft_token_ids
+        self.mtp_draft_token_ids = None
+        return token_ids
 
     def has_markov_head(self) -> bool:
         return self.markov_rank_ > 0
@@ -180,6 +186,90 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         gather_data = None
         return logits, head_hidden
 
+    def _token_forward_with_local_logits_and_hidden(
+        self,
+        input_embdings: torch.Tensor,
+        infer_state: LlamaInferStateInfo,
+        layer_weight: Qwen3DSparkPreAndPostLayerWeight,
+    ):
+        """Project the LM head but keep its vocabulary shard local.
+
+        Vanilla Markov decoding only needs the global maximum token at each
+        block position. Keeping logits sharded avoids a full-vocabulary TP
+        all-gather and prevents every rank from repeating the same Markov
+        projection over the complete vocabulary.
+        """
+
+        last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
+        head_hidden = last_input
+        normed_input = self._norm(last_input, infer_state, layer_weight)
+        lm_head_input = normed_input.permute(1, 0).reshape(-1, token_num)
+        local_logits = layer_weight.lm_head_weight_(input=lm_head_input, alloc_func=self.alloc_tensor)
+        return local_logits, head_hidden
+
+    def _sample_tp_sharded_vanilla_markov(
+        self,
+        local_logits: torch.Tensor,
+        *,
+        infer_state: LlamaInferStateInfo,
+        anchor_token_ids: torch.Tensor,
+        layer_weight: Qwen3DSparkPreAndPostLayerWeight,
+    ) -> torch.Tensor:
+        """Run exact greedy Markov decoding on TP vocabulary shards."""
+
+        assert self.markov_head_type_ == "vanilla"
+        assert layer_weight.markov_w2_weight_ is not None
+        token_num = local_logits.shape[1]
+        assert token_num % self.block_size_ == 0
+        num_reqs = token_num // self.block_size_
+
+        vocab_size = int(layer_weight.lm_head_weight_.vocab_size)
+        split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+        local_start = int(split_indexes[self.tp_rank_])
+        local_end = int(split_indexes[self.tp_rank_ + 1])
+        assert local_logits.shape[0] == local_end - local_start, (
+            f"local LM head rows must match TP vocabulary shard [{local_start}, {local_end}), "
+            f"got {local_logits.shape[0]}"
+        )
+        local_markov_w2 = layer_weight.markov_w2_weight_.weight[local_start:local_end, :]
+
+        prev_token_ids = anchor_token_ids.long()
+        sampled_tokens = []
+        req_rows = torch.arange(num_reqs, dtype=torch.long, device=local_logits.device)
+        for step_idx in range(self.block_size_):
+            prev_embeddings = self._markov_prev_embeddings(prev_token_ids, layer_weight)
+            local_markov_bias = F.linear(prev_embeddings.to(dtype=local_markov_w2.dtype), local_markov_w2)
+            local_base_logits = local_logits[:, step_idx::self.block_size_].permute(1, 0).float()
+            local_scores = local_base_logits + local_markov_bias
+            local_max_values, local_max_indexes = torch.max(local_scores, dim=-1)
+            local_token_ids = local_max_indexes + local_start
+
+            if self.tp_world_size_ == 1:
+                next_token_ids = local_token_ids
+            else:
+                local_winners = torch.stack(
+                    [local_max_values, local_token_ids.to(dtype=torch.float32)],
+                    dim=-1,
+                ).contiguous()
+                gathered_winners = self.alloc_tensor(
+                    (self.tp_world_size_ * num_reqs, 2),
+                    dtype=torch.float32,
+                )
+                all_gather_into_tensor(
+                    gathered_winners,
+                    local_winners,
+                    group=infer_state.dist_group,
+                    async_op=False,
+                )
+                gathered_winners = gathered_winners.view(self.tp_world_size_, num_reqs, 2)
+                winning_ranks = torch.argmax(gathered_winners[:, :, 0], dim=0)
+                next_token_ids = gathered_winners[winning_ranks, req_rows, 1].long()
+
+            sampled_tokens.append(next_token_ids)
+            prev_token_ids = next_token_ids
+
+        return torch.stack(sampled_tokens, dim=1)
+
     def token_forward(
         self,
         input_embdings: torch.Tensor,
@@ -187,6 +277,7 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
         layer_weight: Qwen3DSparkPreAndPostLayerWeight,
     ):
         self.mtp_draft_confidence_logits = None
+        self.mtp_draft_token_ids = None
         if self._is_commit_prefill(infer_state):
             return super().token_forward(
                 input_embdings=input_embdings,
@@ -194,13 +285,55 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
                 layer_weight=layer_weight,
             )
 
+        if infer_state.is_prefill:
+            logits, _ = self._token_forward_with_hidden(
+                input_embdings=input_embdings,
+                infer_state=infer_state,
+                layer_weight=layer_weight,
+            )
+            return logits
+
+        use_tp_sharded_markov = (
+            self.tp_world_size_ > 1
+            and self.has_markov_head()
+            and self.markov_head_type_ == "vanilla"
+        )
+        if use_tp_sharded_markov:
+            local_logits, head_hidden = self._token_forward_with_local_logits_and_hidden(
+                input_embdings=input_embdings,
+                infer_state=infer_state,
+                layer_weight=layer_weight,
+            )
+            token_num = local_logits.shape[1]
+            assert token_num % self.block_size_ == 0
+            num_reqs = token_num // self.block_size_
+            block_hidden = head_hidden.reshape(num_reqs, self.block_size_, -1)
+            anchor_token_ids = infer_state.input_ids.reshape(num_reqs, self.block_size_)[:, 0]
+            sampled_tokens = self._sample_tp_sharded_vanilla_markov(
+                local_logits,
+                infer_state=infer_state,
+                anchor_token_ids=anchor_token_ids,
+                layer_weight=layer_weight,
+            )
+            self.mtp_draft_token_ids = sampled_tokens.reshape(-1)
+            self.mtp_draft_confidence_logits = self.predict_confidence_logits(
+                block_hidden,
+                anchor_token_ids=anchor_token_ids,
+                sampled_tokens=sampled_tokens,
+                layer_weight=layer_weight,
+            )
+            # The proposer consumes mtp_draft_token_ids directly. Keep the
+            # leading row dimension for generic graph padding/unpadding while
+            # avoiding an otherwise unused [rows, vocab] tensor. A single
+            # placeholder column is required because CUDA graph's no-ref
+            # tensor wrapper cannot represent a zero-byte allocation.
+            return local_logits.new_empty((token_num, 1))
+
         logits, head_hidden = self._token_forward_with_hidden(
             input_embdings=input_embdings,
             infer_state=infer_state,
             layer_weight=layer_weight,
         )
-        if infer_state.is_prefill:
-            return logits
 
         assert (
             logits.shape[0] % self.block_size_ == 0

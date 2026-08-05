@@ -84,7 +84,15 @@ class TpPartBaseModel:
         assert not (self.is_token_healing and self.return_all_prompt_logics), "can not be true in same time"
         self.data_type = get_llm_data_type()
         mtp_step = get_env_start_args().mtp_step
-        self.graph_max_batch_size = kvargs.get("graph_max_batch_size", 16)
+        # A graph for more logical requests than the scheduler can ever run is
+        # unreachable. In MTP modes the value is expanded by ``mtp_step + 1``
+        # below, so leaving the CLI default (often 256) uncapped can otherwise
+        # create multi-GiB full-vocabulary graph outputs for a server limited
+        # to only a few dozen concurrent requests.
+        self.graph_max_batch_size = min(
+            kvargs.get("graph_max_batch_size", 16),
+            self.max_req_num,
+        )
         self.graph_max_batch_size = (
             self.graph_max_batch_size // 2
             if get_env_start_args().enable_decode_microbatch_overlap
@@ -160,6 +168,15 @@ class TpPartBaseModel:
         self.spec_adapter = spec_adapter
         if self.graph is not None:
             self.graph.set_spec_adapter(spec_adapter, model=self)
+            # Models build their initial decode graphs before the speculative
+            # runtime exists. Attaching the adapter changes both graph batch
+            # sizes and cache keys, so eagerly capture the speculative graph
+            # variants on dummy state now. Lazy capture during the first live
+            # request can execute in-place KV/linear-state updates repeatedly.
+            if get_env_start_args().enable_decode_microbatch_overlap:
+                self.graph.warmup_overlap(self)
+            else:
+                self.graph.warmup(self)
         return
 
     def _init_config(self):
@@ -558,6 +575,8 @@ class TpPartBaseModel:
             return model_output
         new_model_output = copy.copy(model_output)
         new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        if new_model_output.mtp_draft_token_ids is not None:
+            new_model_output.mtp_draft_token_ids = new_model_output.mtp_draft_token_ids[0:origin_batch_size]
         if new_model_output.mtp_draft_confidence_logits is not None:
             confidence_rows = new_model_output.mtp_draft_confidence_logits.shape[0]
             if confidence_rows == padded_batch_size:
@@ -803,6 +822,13 @@ class TpPartBaseModel:
 
     @final
     def _token_forward(self, infer_state: InferStateInfo):
+        # Some derived decode metadata depends on runtime tensor values and
+        # must therefore be computed inside CUDA graph capture/replay. The
+        # attention states cache it for reuse by every transformer layer.
+        infer_state.decode_att_state.prepare_for_forward()
+        if infer_state.decode_att_state1 is not None:
+            infer_state.decode_att_state1.prepare_for_forward()
+
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
@@ -827,9 +853,15 @@ class TpPartBaseModel:
         if pop_confidence_logits is not None:
             mtp_draft_confidence_logits = pop_confidence_logits()
 
+        mtp_draft_token_ids = None
+        pop_draft_token_ids = getattr(self.post_infer, "pop_mtp_draft_token_ids", None)
+        if pop_draft_token_ids is not None:
+            mtp_draft_token_ids = pop_draft_token_ids()
+
         model_output = ModelOutput(
             logits=predict_logits.contiguous(),
             mtp_draft_confidence_logits=mtp_draft_confidence_logits,
+            mtp_draft_token_ids=mtp_draft_token_ids,
         )
 
         if spec_context is not None:

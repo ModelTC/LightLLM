@@ -80,10 +80,7 @@ class DFlashProposer(BaseSpecProposer):
                 draft_probs=None,
             )
 
-        self.extend_draft_kv_cache(
-            main_model_input=main_model_input,
-            accepted_index=verify_result.accepted_index,
-        )
+        self.extend_draft_kv_cache(main_model_input=main_model_input)
 
         # DFlash only drafts from the accepted tail row of each request.  Unlike
         # MTP, one anchor row expands to a whole non-causal block.
@@ -125,15 +122,11 @@ class DFlashProposer(BaseSpecProposer):
         assert 0 <= output_start <= output_end <= block_token_ids.shape[1]
         return block_token_ids[:, output_start:output_end]
 
-    def extend_draft_kv_cache(self, *, main_model_input: ModelInput, accepted_index: torch.Tensor) -> None:
+    def extend_draft_kv_cache(self, *, main_model_input: ModelInput) -> None:
         target_hidden = self.runtime.get_hidden()
         draft_model = self.backend.draft_models[0]
-        accepted_rows = torch.nonzero(accepted_index.to(torch.bool), as_tuple=False).flatten().to(torch.long)
-        if accepted_rows.numel() == 0:
-            return
-        target_hidden = target_hidden.index_select(0, accepted_rows)
-
         batch_size = int(target_hidden.shape[0])
+        assert batch_size == main_model_input.b_req_idx.shape[0]
 
         draft_kv_input = copy.copy(main_model_input)
         draft_kv_input.batch_size = batch_size
@@ -141,7 +134,7 @@ class DFlashProposer(BaseSpecProposer):
         draft_kv_input.multimodal_params = [{"images": [], "audios": []} for _ in range(batch_size)]
         # This hidden-commit prefill path does not consume token ids, but
         # InferState uses input_ids.shape[0] to build position ids. Keep it
-        # aligned with the accepted hidden rows.
+        # aligned with the fixed-shape target verify batch.
         draft_kv_input.input_ids = torch.empty(
             (batch_size,),
             dtype=torch.int64,
@@ -150,12 +143,12 @@ class DFlashProposer(BaseSpecProposer):
         draft_kv_input.max_q_seq_len = 1
         draft_kv_input.prefix_total_token_num = 0
         draft_kv_input.is_prefill = True
-        # Each accepted MTP row writes one target-hidden KV slot for the same request.
-        draft_kv_input.b_req_idx = main_model_input.b_req_idx.index_select(0, accepted_rows).contiguous()
-        draft_kv_input.b_mtp_index = main_model_input.b_mtp_index.index_select(0, accepted_rows).contiguous()
-        draft_kv_input.b_seq_len = main_model_input.b_seq_len.index_select(0, accepted_rows).contiguous()
-        draft_kv_input.mem_indexes = main_model_input.mem_indexes.index_select(0, accepted_rows).contiguous()
-        draft_kv_input.b_ready_cache_len = draft_kv_input.b_seq_len - 1
+        # Match Eagle3's fixed verify commit: write every speculative row and
+        # let the accepted-tail sequence length select the valid prefix. Rejected
+        # suffix slots are ignored and released by the normal verify free path.
+        # Keeping the batch shape static avoids torch.nonzero's implicit D2H
+        # synchronization and lets the host enqueue the draft work immediately.
+        draft_kv_input.b_ready_cache_len = main_model_input.b_seq_len - 1
         draft_kv_input.b_prefill_start_loc = torch.arange(
             batch_size,
             dtype=torch.int32,

@@ -65,6 +65,7 @@ _MODEL_EXPORTS = {
     "Qwen3_5TpPartModel": ("lightllm.models.qwen3_5.model", "Qwen3_5TpPartModel"),
     "Qwen3_5MOETpPartModel": ("lightllm.models.qwen3_5_moe.model", "Qwen3_5MOETpPartModel"),
     "Qwen3_5DFlashModel": ("lightllm.models.qwen3_5_dflash.model", "Qwen3_5DFlashModel"),
+    "Qwen3_5DSparkModel": ("lightllm.models.qwen3_5_dspark.model", "Qwen3_5DSparkModel"),
 }
 
 _MODEL_TYPE_REGISTRY_MODULES = {

@@ -2,7 +2,7 @@ import dataclasses
 import torch
 from typing import TYPE_CHECKING
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
-from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
+from lightllm.utils.envs_utils import enable_dynamic_mtp_verify, get_env_start_args, get_llm_data_type
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
@@ -202,6 +202,47 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
 
+    def _uses_dynamic_mtp_layout(self) -> bool:
+        return (
+            self.backend.mtp_step > 0
+            and enable_dynamic_mtp_verify()
+            and not getattr(self.infer_state, "use_static_mtp_layout", False)
+        )
+
+    def prepare_for_forward(self):
+        """Build compact GDN row metadata as part of the captured forward.
+
+        CUDA graph replay copies the primary ModelInput tensors into the graph
+        state. Deriving these tensors inside the graph makes every replay use
+        the current compact request layout instead of capture-time metadata.
+        """
+
+        if not self._uses_dynamic_mtp_layout():
+            return
+
+        from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
+            build_dynamic_mtp_linear_att_state_params,
+        )
+
+        backend: LinearAttBackend = self.backend
+        batch_size = self.infer_state.batch_size
+        (
+            self.b1_mtp_cu_q_seq_len,
+            self.b_conv_buffer_idx,
+            self.b_num_accepted_tokens,
+        ) = build_dynamic_mtp_linear_att_state_params(
+            b_req_idx=self.infer_state.b_req_idx,
+            b_mtp_index=self.infer_state.b_mtp_index,
+            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
+            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
+        )
+        self.b_ssm_buffer_idx = self.b_conv_buffer_idx.view(batch_size, 1) * (backend.mtp_step + 1) + torch.arange(
+            backend.mtp_step + 1,
+            device=self.infer_state.b_req_idx.device,
+            dtype=self.infer_state.b_req_idx.dtype,
+        ).view(1, backend.mtp_step + 1)
+        return
+
     def init_state(self):
         backend: LinearAttBackend = self.backend
         mtp_step = backend.mtp_step
@@ -216,6 +257,11 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         if mtp_step > 0:
             # mtp 模式下
             batch_size = self.infer_state.batch_size
+            if self._uses_dynamic_mtp_layout():
+                # This must run inside _token_forward so CUDA graph replay
+                # recomputes it from the current compact row layout.
+                return
+
             att_batch_size = batch_size // (mtp_step + 1)
             assert batch_size % (mtp_step + 1) == 0
 

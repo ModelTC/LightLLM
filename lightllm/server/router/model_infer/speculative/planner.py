@@ -1346,6 +1346,11 @@ class DSparkDynamicMTPPlanner(DynamicMTPPlanner):
 
     def get_dynamic_batch_size(self, req_num: int, original_batch_size: int) -> Tuple[int, int, int]:
         assert req_num * (self.mtp_step + 1) == original_batch_size
+        # ``DynamicMTPPlanner.plan`` rewrites a full-width confidence plan to
+        # ``observe`` for that iteration. DSpark may select a narrower plan on
+        # the next iteration, so do not carry the previous iteration's mode
+        # into the new capacity decision.
+        self._selection_mode = "confidence"
         pre_draft_step = self.pre_draft_step
         self.pre_draft_step = self.mtp_step
         if req_num == 0:

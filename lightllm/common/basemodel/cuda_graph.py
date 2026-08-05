@@ -1,3 +1,5 @@
+import gc
+
 import torch
 import torch.distributed as dist
 import copy
@@ -75,6 +77,18 @@ class CudaGraph:
         return
 
     def set_spec_adapter(self, spec_adapter, model=None):
+        # Decode graphs captured before the speculative runtime is attached
+        # use different batch sizes and cache keys, so none of them can be
+        # replayed afterwards. Release their private graph pools before the
+        # speculative warmup; retaining both generations can consume several
+        # extra GiB and OOM otherwise valid mem_fraction configurations.
+        if self.graph:
+            torch.cuda.synchronize()
+            self.graph.clear()
+            self.mempool = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            self.mempool = torch.cuda.graph_pool_handle()
         self.spec_adapter = spec_adapter
         self.model = model
         self._refresh_cuda_graph_batch_sizes()
@@ -432,15 +446,16 @@ class CudaGraph:
             del model_output
             if (
                 enable_dynamic_mtp_verify()
-                and self.args.mtp_mode == "eagle3"
+                and self.args.mtp_mode in {"eagle3", "dspark"}
                 and self.spec_adapter is not None
                 and not self.spec_adapter.is_draft_model(model)
                 and batch_size % (self.args.mtp_step + 1) == 0
             ):
-                # Dynamic Eagle3's profitable full-width state reuses the
-                # fixed K+1 FA3 layout.  Capture that graph variant eagerly;
-                # otherwise its distinct spec key falls back to eager decode
-                # during the measurement and can be much slower than Static.
+                # Dynamic planners can switch back to the fixed K+1 target
+                # layout for a full-width iteration. Capture that graph
+                # variant on the dummy warmup state. Lazy capture on a live
+                # request would execute the in-place linear-attention state
+                # updates multiple times and corrupt subsequent decode state.
                 model_input.use_static_mtp_layout = True
                 model_output = model.forward(model_input)
                 del model_output

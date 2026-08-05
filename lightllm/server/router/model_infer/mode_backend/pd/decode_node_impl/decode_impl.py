@@ -144,15 +144,6 @@ class PDDecodeNode(ChunkedPrefillBackend):
                         kv_end_index=end_index,
                         group=group,
                     )
-                    if getattr(self.model.mem_manager, "has_separate_dflash_draft_kv", False):
-                        self._create_pd_trans_task(
-                            req_obj=req_obj,
-                            mem_indexes=page_mem_indexes.tolist(),
-                            kv_start_index=start_index,
-                            kv_end_index=end_index,
-                            group=group,
-                            page_kind="draft_kv",
-                        )
                     # update
                     req_obj.pd_trans_kv_start_index += cur_page_size
 
@@ -203,7 +194,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             # only self.is_master_in_dp will be used.
             self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
-        if page_kind in ("kv", "draft_kv"):
+        if page_kind == "kv":
             req_idx = None
         elif page_kind == "linear_att_state":
             req_idx = req_obj.req_idx

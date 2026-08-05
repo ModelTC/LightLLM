@@ -184,7 +184,7 @@ class PDChunckedTransTask:
             error_info = "start_kv_index must >=0 and end_kv_index > start_kv_index"
             logger.error(error_info)
             raise ValueError(error_info)
-        if self.page_kind in ("kv", "draft_kv"):
+        if self.page_kind == "kv":
             assert len(self.mem_indexes) == (self.end_kv_index - self.start_kv_index)
         elif self.page_kind == "linear_att_state":
             assert self.start_kv_index == self.end_kv_index

@@ -63,25 +63,13 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             cur_page_size = min(page_size, req_obj.cur_kv_len - req_obj.pd_trans_kv_start_index)
             # 生成页面传输任务， 放入kv move manager 的处理队列中
             if cur_page_size == page_size or prefill_finished:
-                start_index = req_obj.pd_trans_kv_start_index
-                end_index = start_index + cur_page_size
-                trans_task_list.append(
-                    self._create_pd_trans_task(
-                        req_obj=req_obj,
-                        kv_start_index=start_index,
-                        kv_end_index=end_index,
-                    )
+                trans_task = self._create_pd_trans_task(
+                    req_obj=req_obj,
+                    kv_start_index=req_obj.pd_trans_kv_start_index,
+                    kv_end_index=req_obj.pd_trans_kv_start_index + cur_page_size,
                 )
-                if getattr(self.model.mem_manager, "has_separate_dflash_draft_kv", False):
-                    trans_task_list.append(
-                        self._create_pd_trans_task(
-                            req_obj=req_obj,
-                            kv_start_index=start_index,
-                            kv_end_index=end_index,
-                            page_kind="draft_kv",
-                        )
-                    )
                 req_obj.pd_trans_kv_start_index += cur_page_size
+                trans_task_list.append(trans_task)
             else:
                 break
 
@@ -118,7 +106,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             self.pd_iter_device_id = (self.pd_iter_device_id + 1) % self.node_world_size
 
         pd_decode_node_info = req_obj.sampling_param.pd_decode_node
-        if page_kind in ("kv", "draft_kv"):
+        if page_kind == "kv":
             mem_indexes = (
                 self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
                 .detach()
