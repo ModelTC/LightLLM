@@ -14,6 +14,8 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
 )
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 
 
@@ -222,20 +224,38 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         assert recv_topk_idx is None
-        gather_out = chunked_expanded_moe_forward(
-            num_recv_tokens_per_expert_list,
-            num_unaligned_recv_tokens_per_expert,
-            recv_x,
-            recv_topk_weights,
-            recv_src_metadata,
-            w13_weight,
-            w13_scale,
-            w2_weight,
-            w2_scale,
-            self.quant_method.block_size,
-            dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
-            hidden_dtype,
-        )
+        all_tokens = sum(num_recv_tokens_per_expert_list)
+        if all_tokens > 0:
+            gather_out = chunked_expanded_moe_forward(
+                num_recv_tokens_per_expert_list,
+                num_unaligned_recv_tokens_per_expert,
+                recv_x,
+                recv_topk_weights,
+                recv_src_metadata,
+                w13_weight,
+                w13_scale,
+                w2_weight,
+                w2_scale,
+                self.quant_method.block_size,
+                dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
+                hidden_dtype,
+            )
+        else:
+            gather_out = torch.empty(
+                (recv_src_metadata.shape[0], w2_weight.shape[1]),
+                device=recv_x[0].device,
+                dtype=hidden_dtype,
+            )
+            ######################################## warning ##################################################
+            # A rank may receive no tokens during autotune warmup. Run one dummy token through
+            # silu_and_mul_fwd so the empty rank matches the first kernel call made by non-empty ranks.
+            # This branch does not synchronize additional calls caused by different positive chunk counts.
+            if Autotuner.is_autotune_warmup():
+                N = w13_weight.shape[1]
+                _gemm_out_a = torch.zeros((1, N), device=recv_x[0].device, dtype=hidden_dtype)
+                _silu_out = torch.zeros((1, N // 2), device=recv_x[0].device, dtype=hidden_dtype)
+                silu_and_mul_fwd(_gemm_out_a.view(-1, N), _silu_out)
+                _gemm_out_a, _silu_out = None, None
         del recv_x
         return gather_out
 
