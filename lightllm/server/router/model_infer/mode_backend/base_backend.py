@@ -447,7 +447,7 @@ class ModeBackend:
                 chunk_end = min(chunk_start + self.prompt_logprobs_chunk_size, capture_count)
                 row_start = start_loc + chunk_start
                 row_end = start_loc + chunk_end
-                logit_rows = self.model.compute_prompt_logits(
+                logit_rows = self.model.gather_prompt_logits_chunk(
                     prompt_shard_logits[:, row_start:row_end].contiguous(),
                     microbatch_index=microbatch_index,
                 )

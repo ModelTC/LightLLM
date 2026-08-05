@@ -48,13 +48,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             )
             last_input[:, :] = input_embdings[last_index, :]
 
-            # 在开启 return_all_prompt_logics 模式时，额外保存整个 prefill 阶段
-            # 每一个 token 位置对应的 hidden state，用于后续输出 prompt logprobs。
-            # input_embdings 本身已经是本次新增的 token（不含已缓存前缀），
-            # 仅在 chunked prefill 的 padding 场景下会多出行，padding 部分会在
-            # basemodel._create_unpad_prefill_model_output 中按实际 token 数量裁剪掉。
-            if infer_state.return_all_prompt_logics:
-                infer_state.prompt_logics = input_embdings
             return last_input, batch_size
 
         if not infer_state.is_prefill:
@@ -66,6 +59,12 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def _token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ):
+        # input_embdings already contains all newly computed prefill positions.
+        # Keep it explicitly instead of temporarily smuggling hidden states
+        # through infer_state.prompt_logics, whose output meaning is TP-local logits.
+        prompt_hidden_states = (
+            input_embdings if infer_state.is_prefill and infer_state.return_all_prompt_logics else None
+        )
         last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
         input_embdings = None
 
@@ -74,8 +73,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         # Keep the original full-token norm + local LM-head path so BF16 GEMM
         # numerics stay unchanged. Only the TP all-gather and FP32 conversion are
         # deferred and chunked by the backend; prompt_logics is [local_vocab, tokens].
-        if infer_state.prompt_logics is not None:
-            prompt_hidden_states = infer_state.prompt_logics
+        if prompt_hidden_states is not None:
             infer_state.prompt_logics = self._local_lm_head(
                 prompt_hidden_states,
                 prompt_hidden_states.shape[0],
@@ -88,7 +86,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         """Apply model-specific transformations after the LM head."""
         return logits
 
-    def prompt_logits_forward(
+    def gather_prompt_logits_chunk(
         self,
         prompt_shard_logits: torch.Tensor,
         layer_weight: LlamaPreAndPostLayerWeight,

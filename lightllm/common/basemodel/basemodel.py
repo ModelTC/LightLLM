@@ -359,13 +359,13 @@ class TpPartBaseModel:
             return self._decode(model_input)
 
     @torch.no_grad()
-    def compute_prompt_logits(
+    def gather_prompt_logits_chunk(
         self,
         prompt_shard_logits: torch.Tensor,
         microbatch_index: int = 0,
     ) -> torch.Tensor:
         """Gather one bounded token chunk of TP-sharded prompt logits."""
-        return self.post_infer.prompt_logits_forward(
+        return self.post_infer.gather_prompt_logits_chunk(
             prompt_shard_logits,
             self.pre_post_weight,
             dist_group_manager.get_group(microbatch_index),
