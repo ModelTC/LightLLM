@@ -646,17 +646,6 @@ MTP Multi-Prediction Parameters
     Increasing this value allows more predictions, but ensure the model is compatible with the specified number of steps.
     Currently deepseekv3/r1 models only support 1 step
 
-DeepSeek Redundant Expert Parameters
-------------------------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    Path to redundant expert configuration. Can be used for deepseekv3 models.
-
-.. option:: --auto_update_redundancy_expert
-
-    Whether to update redundant experts for deepseekv3 models through online expert usage counters.
-
 Monitoring and Logging Parameters
 ---------------------------------
 

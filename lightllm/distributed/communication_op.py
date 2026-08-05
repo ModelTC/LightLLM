@@ -29,7 +29,6 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
@@ -201,7 +200,7 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
+        self.ll_num_experts = n_routed_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,

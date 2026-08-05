@@ -643,17 +643,6 @@ MTP 多预测参数
     增加此值允许更多预测，但确保模型与指定的步数兼容。
     目前 deepseekv3/r1 模型仅支持 1 步
 
-DeepSeek 冗余专家参数
----------------------
-
-.. option:: --ep_redundancy_expert_config_path
-
-    冗余专家配置的路径。可用于 deepseekv3 模型。
-
-.. option:: --auto_update_redundancy_expert
-
-    是否通过在线专家使用计数器为 deepseekv3 模型更新冗余专家。
-
 监控和日志参数
 --------------
 
