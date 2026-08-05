@@ -37,6 +37,18 @@ def set_env_start_args(args):
     if not isinstance(args, dict):
         args = vars(args)
     os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)
+    if args["enable_ep_moe"]:
+        decode_capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+        min_qp_depth = 2 * (decode_capacity + 1)
+        derived_qp_depth = 1 << (min_qp_depth - 1).bit_length()
+        configured_qp_depth = int(os.getenv("NVSHMEM_QP_DEPTH", derived_qp_depth))
+        if configured_qp_depth < derived_qp_depth:
+            logger.warning(
+                "NVSHMEM_QP_DEPTH=%d is below the required minimum; using %d instead.",
+                configured_qp_depth,
+                derived_qp_depth,
+            )
+        os.environ["NVSHMEM_QP_DEPTH"] = str(max(configured_qp_depth, derived_qp_depth))
     return
 
 
@@ -86,7 +98,14 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
     args = get_env_start_args()
     required = args.running_max_req_size * (args.mtp_step + 1)
     required = ((required + 7) // 8) * 8
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", required))
+    configured = int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", required))
+    if configured != required:
+        logger.warning(
+            "NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=%d differs from the automatically derived value %d.",
+            configured,
+            required,
+        )
+    return max(configured, required)
 
 
 def get_lightllm_gunicorn_keep_alive():
