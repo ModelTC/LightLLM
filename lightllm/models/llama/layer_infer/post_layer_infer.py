@@ -71,26 +71,38 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。
         ans_logics = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
-        # 在 return_all_prompt_logics 模式下，prompt_logics 保存的是完整 prefill
-        # 的 hidden state，需要在 norm/lm_head 之前取出来，避免被 input_embdings 置空。
-        prompt_logics_hiddens = infer_state.prompt_logics
-        infer_state.prompt_logics = None
-        # 在 return_all_prompt_logics 模式下，额外计算整个 prefill 阶段所有位置的 logits，
-        # 存入返回的 prompt_logics 中，原来的 ans_logics 仅保留最后一个位置的 logits。
-        if prompt_logics_hiddens is not None:
-            prompt_token_num = prompt_logics_hiddens.shape[0]
-            infer_state.prompt_logics = self._lm_head_and_gather(
-                prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state
-            )
+        # prompt_logics 保留为 [prompt_tokens, hidden_size]，由 backend 按 token
+        # 分块计算 logits 并立即提取 logprobs。这里不能一次 materialize
+        # [prompt_tokens, vocab_size]，否则长 prefill 会产生数 GB 的瞬时张量。
+        return self._postprocess_logits(ans_logics)
 
-        return ans_logics
+    def _postprocess_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply model-specific transformations after the LM head."""
+        return logits
+
+    def prompt_logits_forward(
+        self,
+        prompt_hidden_states: torch.Tensor,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        dist_group,
+    ) -> torch.Tensor:
+        """Compute logits for one bounded prompt-hidden-state chunk."""
+        logits = self._lm_head_and_gather(
+            prompt_hidden_states,
+            prompt_hidden_states.shape[0],
+            layer_weight,
+            infer_state=None,
+            dist_group=dist_group,
+        )
+        return self._postprocess_logits(logits)
 
     def _lm_head_and_gather(
         self,
         hidden: torch.Tensor,
         token_num: int,
         layer_weight: LlamaPreAndPostLayerWeight,
-        infer_state: LlamaInferStateInfo,
+        infer_state: LlamaInferStateInfo | None,
+        dist_group=None,
     ) -> torch.Tensor:
         normed = self._norm(hidden, infer_state, layer_weight)
         normed = normed.permute(1, 0).view(-1, token_num)
@@ -106,7 +118,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             all_gather(
                 [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
                 logic_batch,
-                group=infer_state.dist_group,
+                group=infer_state.dist_group if infer_state is not None else dist_group,
                 async_op=False,
             )
         logic_batch = None

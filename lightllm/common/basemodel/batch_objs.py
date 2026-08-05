@@ -113,12 +113,13 @@ class ModelOutput:
     mtp_main_output_hiddens: Optional[torch.Tensor] = None
 
     # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
-    # 保存整个 prefill 阶段每一个 token 位置对应的 logits（而非仅最后一个位置的 logits）。
-    # 此时 logits 依然只保存每个请求最后一个位置的 logits，prompt_logics 为可选项，仅在
-    # 需要返回 prompt logprobs 信息时才会非空。
+    # 保存本次 prefill 每一个 token 位置对应的 hidden state。backend 会按 token
+    # 分块计算 logits，避免完整 [prompt_tokens, vocab_size] 张量常驻 GPU。
     prompt_logics: Optional[torch.Tensor] = None
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)
         if self.mtp_main_output_hiddens is not None:
             self.mtp_main_output_hiddens = tensor_to_no_ref_tensor(self.mtp_main_output_hiddens)
+        if self.prompt_logics is not None:
+            self.prompt_logics = tensor_to_no_ref_tensor(self.prompt_logics)

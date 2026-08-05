@@ -270,7 +270,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
-            self._capture_prompt_logprobs_if_needed(model_input1, run_reqs1, model_output1.prompt_logics)
+            self._capture_prompt_logprobs_if_needed(
+                model_input1, run_reqs1, model_output1.prompt_logics, microbatch_index=1
+            )
             logits0 = model_output0.logits
             logits1 = model_output1.logits
 
@@ -696,7 +698,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
             self._capture_prompt_logprobs_if_needed(model_input0, run_reqs0, model_output0.prompt_logics)
-            self._capture_prompt_logprobs_if_needed(model_input1, run_reqs1, model_output1.prompt_logics)
+            self._capture_prompt_logprobs_if_needed(
+                model_input1, run_reqs1, model_output1.prompt_logics, microbatch_index=1
+            )
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             req_num0, req_num1 = len(run_reqs0), len(run_reqs1)
