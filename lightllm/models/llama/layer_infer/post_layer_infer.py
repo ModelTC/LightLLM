@@ -71,9 +71,17 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。
         ans_logics = self._lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
-        # prompt_logics 保留为 [prompt_tokens, hidden_size]，由 backend 按 token
-        # 分块计算 logits 并立即提取 logprobs。这里不能一次 materialize
-        # [prompt_tokens, vocab_size]，否则长 prefill 会产生数 GB 的瞬时张量。
+        # Keep the original full-token norm + local LM-head path so BF16 GEMM
+        # numerics stay unchanged. Only the TP all-gather and FP32 conversion are
+        # deferred and chunked by the backend; prompt_logics is [local_vocab, tokens].
+        if infer_state.prompt_logics is not None:
+            prompt_hidden_states = infer_state.prompt_logics
+            infer_state.prompt_logics = self._local_lm_head(
+                prompt_hidden_states,
+                prompt_hidden_states.shape[0],
+                layer_weight,
+                infer_state,
+            )
         return self._postprocess_logits(ans_logics)
 
     def _postprocess_logits(self, logits: torch.Tensor) -> torch.Tensor:
@@ -82,19 +90,55 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
     def prompt_logits_forward(
         self,
-        prompt_hidden_states: torch.Tensor,
+        prompt_shard_logits: torch.Tensor,
         layer_weight: LlamaPreAndPostLayerWeight,
         dist_group,
     ) -> torch.Tensor:
-        """Compute logits for one bounded prompt-hidden-state chunk."""
-        logits = self._lm_head_and_gather(
-            prompt_hidden_states,
-            prompt_hidden_states.shape[0],
-            layer_weight,
-            infer_state=None,
-            dist_group=dist_group,
+        """Gather and convert one bounded token chunk of TP-sharded logits."""
+        logits = self._gather_local_logits(
+            prompt_shard_logits,
+            prompt_shard_logits.shape[1],
+            layer_weight.lm_head_weight_.vocab_size,
+            dist_group,
         )
         return self._postprocess_logits(logits)
+
+    def _local_lm_head(
+        self,
+        hidden: torch.Tensor,
+        token_num: int,
+        layer_weight: LlamaPreAndPostLayerWeight,
+        infer_state: LlamaInferStateInfo | None,
+    ) -> torch.Tensor:
+        normed = self._norm(hidden, infer_state, layer_weight)
+        normed = normed.permute(1, 0).view(-1, token_num)
+        local_logits = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
+        normed = None
+        return local_logits
+
+    def _gather_local_logits(
+        self,
+        local_logits: torch.Tensor,
+        token_num: int,
+        vocab_size: int,
+        dist_group,
+    ) -> torch.Tensor:
+        if self.tp_world_size_ == 1:
+            gather_data = local_logits
+        else:
+            gather_data = self.alloc_tensor((vocab_size, token_num), dtype=local_logits.dtype)
+            split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+            all_gather(
+                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
+                local_logits,
+                group=dist_group,
+                async_op=False,
+            )
+
+        ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
+        ans_logics[:, :] = gather_data.permute(1, 0)
+        gather_data = None
+        return ans_logics
 
     def _lm_head_and_gather(
         self,
@@ -104,29 +148,14 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state: LlamaInferStateInfo | None,
         dist_group=None,
     ) -> torch.Tensor:
-        normed = self._norm(hidden, infer_state, layer_weight)
-        normed = normed.permute(1, 0).view(-1, token_num)
-        logic_batch = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
-        normed = None
-
+        local_logits = self._local_lm_head(hidden, token_num, layer_weight, infer_state)
         vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if self.tp_world_size_ == 1:
-            gather_data = logic_batch
-        else:
-            gather_data = self.alloc_tensor((vocab_size, token_num), dtype=hidden.dtype)
-            split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
-            all_gather(
-                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
-                logic_batch,
-                group=infer_state.dist_group if infer_state is not None else dist_group,
-                async_op=False,
-            )
-        logic_batch = None
-
-        ans_logics = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
-        ans_logics[:, :] = gather_data.permute(1, 0)
-        gather_data = None
-        return ans_logics
+        return self._gather_local_logits(
+            local_logits,
+            token_num,
+            vocab_size,
+            infer_state.dist_group if infer_state is not None else dist_group,
+        )
 
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight

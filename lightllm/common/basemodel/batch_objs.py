@@ -113,8 +113,8 @@ class ModelOutput:
     mtp_main_output_hiddens: Optional[torch.Tensor] = None
 
     # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
-    # 保存本次 prefill 每一个 token 位置对应的 hidden state。backend 会按 token
-    # 分块计算 logits，避免完整 [prompt_tokens, vocab_size] 张量常驻 GPU。
+    # 保存 [local_vocab_size, prompt_tokens] 的 TP-sharded logits。backend 按 token
+    # 分块 all-gather，避免完整 [prompt_tokens, vocab_size] 张量常驻 GPU。
     prompt_logics: Optional[torch.Tensor] = None
 
     def to_no_ref_tensor(self):

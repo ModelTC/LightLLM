@@ -56,8 +56,8 @@ class InferStateInfo:
 
         self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
-        # 在开启 return_all_prompt_logics 模式时，保存本次 prefill 每一个
-        # token 位置的 hidden state，供 backend 分块计算 prompt logprobs。
+        # 在开启 return_all_prompt_logics 模式时，保存本次 prefill 的
+        # [local_vocab_size, prompt_tokens] sharded logits，供 backend 分块 all-gather。
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None

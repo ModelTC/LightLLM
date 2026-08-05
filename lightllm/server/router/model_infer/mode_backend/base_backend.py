@@ -424,13 +424,12 @@ class ModeBackend:
         self,
         model_input: ModelInput,
         run_reqs: List[InferReq],
-        prompt_hidden_states: Optional[torch.Tensor],
+        prompt_shard_logits: Optional[torch.Tensor],
         microbatch_index: int = 0,
     ) -> None:
-        # Prompt hidden states are intentionally converted to logits in bounded
-        # token chunks here. Materializing [all_prefill_tokens, vocab_size]
-        # would dominate GPU memory even though only top-k results are retained.
-        if not self.model.return_all_prompt_logics or prompt_hidden_states is None:
+        # Local LM-head logits keep the original full-token GEMM numerics. Only
+        # TP all-gather and FP32 postprocessing are chunked by token here.
+        if not self.model.return_all_prompt_logics or prompt_shard_logits is None:
             return
 
         mgr = PromptLogprobsCaptureManager.get_instance()
@@ -449,7 +448,7 @@ class ModeBackend:
                 row_start = start_loc + chunk_start
                 row_end = start_loc + chunk_end
                 logit_rows = self.model.compute_prompt_logits(
-                    prompt_hidden_states[row_start:row_end],
+                    prompt_shard_logits[:, row_start:row_end].contiguous(),
                     microbatch_index=microbatch_index,
                 )
 
