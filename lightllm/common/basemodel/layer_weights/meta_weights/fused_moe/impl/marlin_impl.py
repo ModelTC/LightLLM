@@ -11,6 +11,10 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.workspace = self.create_workspace()
+
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 

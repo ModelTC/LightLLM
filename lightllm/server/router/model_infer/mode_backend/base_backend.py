@@ -13,6 +13,9 @@ from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
+    disable_eplb_model_init,
+)
 from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManagerForMamba
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
@@ -274,6 +277,11 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+        if self.args.enable_prefill_eplb:
+            from lightllm.server.router.model_infer.mode_backend.eplb_manager import EPLBManager
+
+            self.model.eplb_manager = EPLBManager(self.model)
+            dist.barrier()
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -362,7 +370,9 @@ class ModeBackend:
                 model_cfg=draft_model_cfg,
                 spec_mode=spec_mode,
             )
-            self.draft_models.append(draft_model_class(draft_model_kvargs))
+            with disable_eplb_model_init():
+                draft_model = draft_model_class(draft_model_kvargs)
+            self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
         return
