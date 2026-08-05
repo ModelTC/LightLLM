@@ -382,15 +382,17 @@ def chunked_expanded_moe_forward(
         return torch.empty((0, hidden_size), device=recv_x[0].device, dtype=hidden_dtype)
 
     m_indices = torch.empty(all_tokens, device=recv_x[0].device, dtype=torch.int32)
-    expert_start_loc = ep_build_m_indices(num_unaligned_recv_tokens_per_expert, m_indices)
+    # 与 m_indices 一一对应：0 表示真实 token，1 表示 expert 对齐产生的 padding 行。
+    # padding 行必须在 grouped GEMM 前清零，避免无效数据参与计算。
+    padding_mask = torch.empty_like(m_indices)
+    ep_build_m_indices(num_unaligned_recv_tokens_per_expert, m_indices, padding_mask, alignment)
     ep_zero_padding(
         recv_x[0],
         recv_x[1],
         recv_topk_weights,
-        num_unaligned_recv_tokens_per_expert,
-        expert_start_loc,
+        padding_mask,
     )
-    del expert_start_loc
+    del padding_mask
 
     gather_rows = recv_src_metadata.shape[0]
     gather_bytes = gather_rows * hidden_size * hidden_dtype.itemsize

@@ -6,8 +6,8 @@ import triton.language as tl
 @triton.jit
 def _ep_build_m_indices_kernel(
     num_unaligned_recv_tokens_per_expert,
-    expert_start_loc,
     m_indices,
+    padding_mask,
     num_experts: tl.constexpr,
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
@@ -20,19 +20,23 @@ def _ep_build_m_indices_kernel(
         mask=offset_cumsum < num_experts,
         other=0,
     )
-    tokens_per_expert = (tokens_per_expert + BLOCK_E - 1) // BLOCK_E * BLOCK_E
+    tokens_per_expert = tl.cdiv(tokens_per_expert, BLOCK_E) * BLOCK_E
     cur_expert_start = tl.sum(tl.where(offset_cumsum < cur_expert, tokens_per_expert, 0))
     cur_expert_token_num = tl.load(num_unaligned_recv_tokens_per_expert + cur_expert)
-    cur_expert_token_num = (cur_expert_token_num + BLOCK_E - 1) // BLOCK_E * BLOCK_E
-    tl.store(expert_start_loc + cur_expert, cur_expert_start)
+    cur_expert_aligned_token_num = tl.cdiv(cur_expert_token_num, BLOCK_E) * BLOCK_E
 
     m_indices_start_ptr = m_indices + cur_expert_start
+    padding_mask_start_ptr = padding_mask + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E)
 
-    for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
+    for start_m in tl.range(0, cur_expert_aligned_token_num, BLOCK_E, num_stages=4):
         tl.store(
             m_indices_start_ptr + start_m + off_expert,
             cur_expert,
+        )
+        tl.store(
+            padding_mask_start_ptr + start_m + off_expert,
+            tl.where(start_m + off_expert >= cur_expert_token_num, 1, 0),
         )
 
 
@@ -40,31 +44,34 @@ def _ep_build_m_indices_kernel(
 def ep_build_m_indices(
     num_unaligned_recv_tokens_per_expert: torch.Tensor,  # [num_local_experts]
     m_indices: torch.Tensor,  # [num_expanded_tokens]
+    padding_mask: torch.Tensor,  # [num_expanded_tokens]
+    expert_alignment: int,
 ):
-    """Build the 128-aligned expert layout used by contiguous grouped GEMM.
+    """Build the aligned expert layout used by contiguous grouped GEMM.
 
-    Each expert's actual token count is rounded up to 128. ``m_indices`` is
-    filled in-place with the owning expert ID for every real and padding row.
+    Each expert's actual token count is rounded up to ``expert_alignment``.
+    ``m_indices`` is filled in-place with the owning expert ID for every real
+    and padding row. The alignment must match the value used by DeepEP
+    dispatch.
 
-    Returns:
-        ``expert_start_loc`` with shape ``[num_local_experts]``. Each value is
-        the expert's starting row in the expanded tensors.
+    ``padding_mask`` is filled in-place with ``1`` for alignment-padding rows
+    and ``0`` for real token rows.
     """
-    block_e = 128
+    assert expert_alignment >= 8, "expert_alignment must be at least the zero-padding BLOCK_M (8)"
+    assert triton.next_power_of_2(expert_alignment) == expert_alignment, "expert_alignment must be a power of two"
     num_experts = num_unaligned_recv_tokens_per_expert.shape[0]
-    assert m_indices.shape[0] % block_e == 0
+    assert m_indices.shape[0] % expert_alignment == 0
+    assert padding_mask.dtype == torch.int32 and padding_mask.shape == m_indices.shape
 
-    expert_start_loc = torch.empty_like(num_unaligned_recv_tokens_per_expert)
     _ep_build_m_indices_kernel[(num_experts,)](
         num_unaligned_recv_tokens_per_expert,
-        expert_start_loc,
         m_indices,
+        padding_mask,
         num_experts=num_experts,
         num_warps=8,
-        BLOCK_E=block_e,
+        BLOCK_E=expert_alignment,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
     )
-    return expert_start_loc
 
 
 @triton.jit
@@ -76,33 +83,30 @@ def _ep_zero_padding_kernel(
     recv_x_scale_stride_m,
     recv_x_scale_stride_k,
     recv_topk_weights,
-    num_unaligned_recv_tokens_per_expert,
-    expert_start_loc,
+    padding_mask,
     hidden_size: tl.constexpr,
     scale_hidden_size: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_SCALE_K: tl.constexpr,
 ):
-    expert_id = tl.program_id(0)
-    pad_block_id = tl.program_id(1)
-    hidden_block_id = tl.program_id(2)
-    expert_start = tl.load(expert_start_loc + expert_id)
-    actual_count = tl.load(num_unaligned_recv_tokens_per_expert + expert_id)
-    aligned_count = (actual_count + 127) // 128 * 128
-    pad_offsets = pad_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
-    row_offsets = (expert_start + actual_count + pad_offsets).to(tl.int64)
-    row_mask = pad_offsets < aligned_count - actual_count
+    row_block_id = tl.program_id(0)
+    hidden_block_id = tl.program_id(1)
+    row_offsets = row_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_mask = tl.load(padding_mask + row_offsets) == 1
+    row_offsets = row_offsets.to(tl.int64)
 
     hidden_offsets = hidden_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
+    hidden_mask = hidden_offsets < hidden_size
     x_ptrs = recv_x + row_offsets[:, None] * recv_x_stride_m + hidden_offsets[None, :] * recv_x_stride_k
-    tl.store(x_ptrs, 0.0, mask=row_mask[:, None] & (hidden_offsets[None, :] < hidden_size))
+    tl.store(x_ptrs, 0.0, mask=row_mask[:, None] & hidden_mask[None, :])
     if hidden_block_id == 0:
         scale_offsets = tl.arange(0, BLOCK_SCALE_K)
+        scale_mask = scale_offsets < scale_hidden_size
         scale_ptrs = (
             recv_x_scale + row_offsets[:, None] * recv_x_scale_stride_m + scale_offsets[None, :] * recv_x_scale_stride_k
         )
-        tl.store(scale_ptrs, 0.0, mask=row_mask[:, None] & (scale_offsets[None, :] < scale_hidden_size))
+        tl.store(scale_ptrs, 0.0, mask=row_mask[:, None] & scale_mask[None, :])
         tl.store(recv_topk_weights + row_offsets, 0.0, mask=row_mask)
 
 
@@ -111,22 +115,22 @@ def ep_zero_padding(
     recv_x: torch.Tensor,  # [num_expanded_tokens, hidden_size]
     recv_x_scale: torch.Tensor,  # [num_expanded_tokens, scale_hidden_size]
     recv_topk_weights: torch.Tensor,  # [num_expanded_tokens]
-    num_unaligned_recv_tokens_per_expert: torch.Tensor,  # [num_local_experts]
-    expert_start_loc: torch.Tensor,  # [num_local_experts]
+    padding_mask: torch.Tensor,  # [num_expanded_tokens], 1 for padding rows
 ):
     """Zero the alignment-padding rows in DeepEP's expanded receive layout.
 
-    For every expert, rows from its actual token count up to its 128-aligned
-    count are cleared in-place in the FP8 activations, activation scales, and
-    routing weights. ``recv_x_scale`` may use a column-major physical layout;
-    its logical shape remains ``[num_expanded_tokens, scale_hidden_size]``.
+    Rows marked by ``padding_mask`` are cleared in-place in the FP8
+    activations, activation scales, and routing weights. ``recv_x_scale`` may
+    use a column-major physical layout; its logical shape remains
+    ``[num_expanded_tokens, scale_hidden_size]``.
     """
+    assert padding_mask.dtype == torch.int32 and padding_mask.shape == recv_topk_weights.shape
     block_m = 8
     block_k = 256
+    assert padding_mask.shape[0] % block_m == 0, "padding_mask rows must be divisible by BLOCK_M (8)"
     scale_hidden_size = recv_x_scale.shape[1]
     grid = (
-        num_unaligned_recv_tokens_per_expert.shape[0],
-        triton.cdiv(127, block_m),
+        triton.cdiv(padding_mask.shape[0], block_m),
         triton.cdiv(recv_x.shape[1], block_k),
     )
     _ep_zero_padding_kernel[grid](
@@ -137,8 +141,7 @@ def ep_zero_padding(
         recv_x_scale.stride(0),
         recv_x_scale.stride(1),
         recv_topk_weights,
-        num_unaligned_recv_tokens_per_expert,
-        expert_start_loc,
+        padding_mask,
         hidden_size=recv_x.shape[1],
         scale_hidden_size=scale_hidden_size,
         BLOCK_M=block_m,
