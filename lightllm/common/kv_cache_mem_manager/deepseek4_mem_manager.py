@@ -790,6 +790,12 @@ class DeepseekV4MemoryManager(MemoryManager):
         self._free_radix_unreferenced_swa_fn = fn
         return
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # The radix tree is process-local; IPC readers only need its CUDA cache tensors.
+        state["_free_radix_unreferenced_swa_fn"] = None
+        return state
+
     def _alloc_swa_pages(self, need_pages: int) -> torch.Tensor:
         if need_pages > self.swa_page_allocator.can_use_mem_size and self._free_radix_unreferenced_swa_fn is not None:
             self._free_radix_unreferenced_swa_fn(need_pages - self.swa_page_allocator.can_use_mem_size)
