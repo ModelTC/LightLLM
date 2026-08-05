@@ -13,9 +13,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         routed_scaling_factor: float,
         quant_method: QuantizationMethod,
         redundancy_expert_num: int,
-        redundancy_expert_ids_tensor: torch.Tensor,
         routed_expert_counter_tensor: torch.Tensor,
-        auto_update_redundancy_expert: bool,
     ):
         super().__init__(
             n_routed_experts=n_routed_experts,
@@ -23,9 +21,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             routed_scaling_factor=routed_scaling_factor,
             quant_method=quant_method,
             redundancy_expert_num=redundancy_expert_num,
-            redundancy_expert_ids_tensor=redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=routed_expert_counter_tensor,
-            auto_update_redundancy_expert=auto_update_redundancy_expert,
         )
 
     def create_workspace(self):
