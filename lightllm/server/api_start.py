@@ -8,7 +8,6 @@ from .metrics.manager import start_metric_manager
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -393,13 +392,17 @@ def _launch_subprocesses(args: StartArgs):
     return process_manager
 
 
+def _hypercorn_config_args(args: StartArgs):
+    return ["--config", args.hypercorn_config] if args.hypercorn_config is not None else []
+
+
 def normal_or_p_d_start(args: StartArgs):
     process_manager = _launch_subprocesses(args)
 
     # 启动 Hypercorn
     command = [
         "hypercorn",
-        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
+        *_hypercorn_config_args(args),
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
@@ -411,8 +414,6 @@ def normal_or_p_d_start(args: StartArgs):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     # 启动子进程
@@ -464,7 +465,7 @@ def pd_master_start(args: StartArgs):
 
     command = [
         "hypercorn",
-        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
+        *_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
@@ -476,8 +477,6 @@ def pd_master_start(args: StartArgs):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     http_server_process = subprocess.Popen(command)
@@ -554,7 +553,7 @@ def config_server_start(args):
 
     command = [
         "hypercorn",
-        *(["--config", args.hypercorn_config] if args.hypercorn_config is not None else []),
+        *_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
@@ -566,8 +565,6 @@ def config_server_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.config_server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     http_server_process = subprocess.Popen(command)

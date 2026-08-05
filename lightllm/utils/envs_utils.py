@@ -87,10 +87,6 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
     return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
 
 
-def get_lightllm_gunicorn_keep_alive():
-    return int(os.getenv("LIGHTLMM_GUNICORN_KEEP_ALIVE", 10))
-
-
 @lru_cache(maxsize=None)
 def get_lightllm_websocket_max_message_size():
     """

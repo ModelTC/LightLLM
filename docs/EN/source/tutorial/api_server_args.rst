@@ -43,9 +43,8 @@ Basic Configuration Parameters
 .. option:: --hypercorn_config
 
     Path to a Hypercorn TOML configuration file. Only TOML configuration files are supported.
-    See ``test/hypercorn_config.toml`` for an example. Default: ``None``. The bind address, HTTP worker
-    count, and keep-alive timeout explicitly set by LightLLM override the corresponding values in the
-    configuration file.
+    See ``test/hypercorn_config.toml`` for an example. Default: ``None``. The bind address and HTTP worker
+    count explicitly set by LightLLM override the corresponding values in the configuration file.
 
 .. option:: --zmq_mode
 
