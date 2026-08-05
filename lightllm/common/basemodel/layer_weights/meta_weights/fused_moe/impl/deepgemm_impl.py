@@ -16,7 +16,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
@@ -58,17 +57,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         origin_topk_ids = topk_ids
-        if self.redundancy_expert_num > 0:
-            # 因为 redundancy_topk_ids_repair 会修改 topk_ids，所以需要先复制一份
-            origin_topk_ids = topk_ids.clone()
-            redundancy_topk_ids_repair(
-                topk_ids=topk_ids,
-                redundancy_expert_ids=self.redundancy_expert_ids_tensor,
-                ep_expert_num=self.ep_n_routed_experts,
-                global_rank=self.global_rank_,
-                expert_counter=self.routed_expert_counter_tensor,
-                enable_counter=self.auto_update_redundancy_expert,
-            )
         return topk_weights, topk_ids, origin_topk_ids
 
     def _fused_experts(
