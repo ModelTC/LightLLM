@@ -225,14 +225,6 @@ def context_attention_fwd_gemma4_mm(
         assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
         sliding_window_left = int(sliding_window[0])
 
-    if sliding_window == (-1, -1):
-        use_sliding_window = False
-        sliding_window_left = -1
-    else:
-        use_sliding_window = True
-        assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
-        sliding_window_left = int(sliding_window[0])
-
     _fwd_kernel[grid](
         q,
         k,
