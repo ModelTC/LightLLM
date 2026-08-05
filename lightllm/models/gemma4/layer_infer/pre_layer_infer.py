@@ -26,36 +26,6 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
         self.ple_static_buffer = None
 
     def _compute_per_layer_embeds(self, input_ids_for_ple, input_embdings, infer_state, layer_weight):
-        # 查表 PLE。
-        ple_embeds = layer_weight.embed_tokens_per_layer_weight_(input_ids_for_ple)
-        if self.tp_world_size_ > 1:
-            all_reduce(ple_embeds, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
-        ple_embeds = ple_embeds * self.ple_embed_scale_
-
-        # 这个分支本质上只对多模态token存在建模上的意义。
-        ple_proj = layer_weight.per_layer_model_projection_weight_.mm(input_embdings)
-        ple_proj = ple_proj * self.ple_proj_scale_
-        ple_proj = ple_proj.reshape(*ple_proj.shape[:-1], self.num_layers_, self.ple_dim_)
-        ple_proj = layer_weight.per_layer_projection_norm_weight_(
-            input=ple_proj, eps=self.rms_norm_eps_, alloc_func=self.alloc_tensor
-        )
-        ple_embeds = ple_embeds.reshape(*ple_embeds.shape[:-1], self.num_layers_, self.ple_dim_)
-
-        handle_len = input_embdings.shape[0]
-        torch.add(ple_proj, ple_embeds, out=self.ple_static_buffer[:handle_len])
-        self.ple_static_buffer[:handle_len].mul_(self.ple_combine_scale_)
-        return
-
-        self.has_ple = bool(network_config.get("hidden_size_per_layer_input"))
-        if self.has_ple:
-            self.num_layers_ = network_config["num_hidden_layers"]
-            self.ple_dim_ = network_config["hidden_size_per_layer_input"]
-            self.ple_embed_scale_ = math.sqrt(self.ple_dim_)
-            self.ple_proj_scale_ = float(network_config["hidden_size"]) ** -0.5
-            self.ple_combine_scale_ = 2.0 ** -0.5
-            self.rms_norm_eps_ = network_config.get("rms_norm_eps", 1e-6)
-
-    def _compute_per_layer_embeds(self, input_ids_for_ple, input_embdings, infer_state, layer_weight):
         ple_embeds = layer_weight.embed_tokens_per_layer_weight_(input_ids_for_ple)
         if self.tp_world_size_ > 1:
             all_reduce(ple_embeds, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)
