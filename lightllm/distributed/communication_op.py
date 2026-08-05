@@ -29,7 +29,6 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
@@ -272,8 +271,15 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        redundancy_expert_num = get_redundancy_expert_num()
-        self.ll_num_experts = n_routed_experts + redundancy_expert_num * global_world_size
+        total_redundant_experts = (
+            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
+            if get_env_start_args().enable_prefill_eplb
+            else 0
+        )
+        self.ll_prefill_num_experts = n_routed_experts + total_redundant_experts
+        # EPLB's redundant rows are a prefill-only physical layout; decode
+        # always routes the logical expert space.
+        self.ll_decode_num_experts = n_routed_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -298,7 +304,7 @@ class DistributeGroupManager:
             enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE")
             and is_sm90_gpu()
             and FP8_MOE_QUANT_METHOD in expert_quant_method_names
-            and redundancy_expert_num == 0
+            and total_redundant_experts == 0
         ):
             self.ep_mega_moe_mma_type = "fp8xfp8"
             self.ep_mega_moe_quant_method = FP8_MOE_QUANT_METHOD
@@ -336,7 +342,10 @@ class DistributeGroupManager:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
             # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+                self.ll_decode_num_tokens,
+                self.ll_hidden,
+                global_world_size,
+                self.ll_decode_num_experts,
             )
             num_rdma_bytes = decode_size_hint
             # normal 节点同时执行 Prefill 和 Decode，复用的 RDMA buffer 必须覆盖全部 Prefill workspace。
@@ -346,7 +355,7 @@ class DistributeGroupManager:
                     hidden_size=self.ll_hidden,
                     intermediate_size=moe_intermediate_size,
                     num_experts_per_tok=num_experts_per_tok,
-                    num_experts=self.ll_num_experts,
+                    num_experts=self.ll_prefill_num_experts,
                     world_size=global_world_size,
                     hidden_dtype=get_torch_dtype(args.data_type),
                 )
@@ -355,7 +364,7 @@ class DistributeGroupManager:
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
                 low_latency_mode=True,
-                num_qps_per_rank=(self.ll_num_experts // global_world_size),
+                num_qps_per_rank=(self.ll_decode_num_experts // global_world_size),
             )
             self.ep_prefill_moe_workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
                 torch.uint8, use_rdma_buffer=True
@@ -367,7 +376,7 @@ class DistributeGroupManager:
                 hidden_size=self.ll_hidden,
                 intermediate_size=moe_intermediate_size,
                 num_experts_per_tok=num_experts_per_tok,
-                num_experts=self.ll_num_experts,
+                num_experts=self.ll_prefill_num_experts,
                 world_size=global_world_size,
                 hidden_dtype=get_torch_dtype(args.data_type),
             )
@@ -377,9 +386,10 @@ class DistributeGroupManager:
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
 
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
+        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_prefill_num_experts, num_experts_per_tok)
         deepep_sms = 0 if self.ep_mega_moe_mma_type == "fp8xfp8" and not has_legacy_moe_layer else theoretical_sms
-        self._set_num_sms_for_deep_gemm(deepep_sms)
+        low_latency_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_decode_num_experts, num_experts_per_tok)
+        self._set_num_sms_for_deep_gemm(deepep_sms, low_latency_sms)
 
         if enable_mega_moe_buffer:
             if moe_intermediate_size is None:
@@ -392,7 +402,7 @@ class DistributeGroupManager:
             )
             self.ep_mega_moe_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
                 deepep_group,
-                self.ll_num_experts,
+                self.ll_decode_num_experts,
                 self.ll_num_tokens,
                 num_experts_per_tok,
                 self.ll_hidden,
@@ -401,15 +411,18 @@ class DistributeGroupManager:
             )
         logger.info(
             "Initialize DeepEP MoE buffers: low_latency=%s, prefill_workspace_bytes=%s, "
-            "mega_moe=%s, mega_moe_mma_type=%s, expert_quant_method_names=%s",
+            "mega_moe=%s, mega_moe_mma_type=%s, ll_prefill_num_experts=%s, "
+            "ll_decode_num_experts=%s, expert_quant_method_names=%s",
             enable_low_latency_buffer,
             self.ep_prefill_moe_workspace.numel() if self.ep_prefill_moe_workspace is not None else 0,
             enable_mega_moe_buffer,
             self.ep_mega_moe_mma_type,
+            self.ll_prefill_num_experts,
+            self.ll_decode_num_experts,
             sorted(expert_quant_method_names),
         )
 
-    def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
+    def _set_num_sms_for_deep_gemm(self, deepep_sms: int, low_latency_sms: int):
         try:
             try:
                 from deep_gemm.jit_kernels.utils import set_num_sms
@@ -418,9 +431,12 @@ class DistributeGroupManager:
 
             device_sms = get_device_sm_count()
             deepep_sms = max(0, min(deepep_sms, max(device_sms - 2, 0)))
+            low_latency_sms = max(0, min(low_latency_sms, max(device_sms - 2, 0)))
             self.ep_num_sms = deepep_sms
             if self.ep_low_latency_buffer is not None:
-                deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
+                # This setting controls the legacy low-latency buffer; keep
+                # its SM reservation based on decode's logical expert count.
+                deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
             deep_gemm_sms = max(device_sms - deepep_sms, 2)
             if self.ep_mega_moe_mma_type == "fp8xfp8":
                 deep_gemm_sms -= deep_gemm_sms % 2
@@ -467,7 +483,7 @@ class DistributeGroupManager:
         """
         if self.ep_low_latency_buffer is not None:
             self.ep_low_latency_buffer.clean_low_latency_buffer(
-                self.ll_decode_num_tokens, self.ll_hidden, self.ll_num_experts
+                self.ll_decode_num_tokens, self.ll_hidden, self.ll_decode_num_experts
             )
 
 
