@@ -515,54 +515,66 @@ def chunked_expanded_moe_forward(
     gather_out = workspace_manager.alloc((gather_rows, hidden_size), hidden_dtype)
     gather_out.zero_()
 
-    for chunk_start in range(0, all_tokens, max_chunk_rows):
-        chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
-        chunk_rows = chunk_end - chunk_start
-        silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
-        gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
-        deepgemm_grouped_fp8_nt_contiguous(
-            (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
-            (w1, w1_scale),
-            gemm_out_a,
-            m_indices[chunk_start:chunk_end],
-        )
-        silu_and_mul_fwd(gemm_out_a, silu_out)
-        workspace_manager.free(gemm_out_a)
-        del gemm_out_a
+    # 不同 rank 接收到的 token 数不同，因此实际 chunk 数也可能不同。Autotuner warmup
+    # 中的分布式通信要求各 rank 进入 autotuning 的次数一致，否则容易发生通信错位。
+    # 所以只允许第一个 chunk 保持 autotuning；从第二个 chunk 开始临时关闭，循环结束
+    # 后再恢复进入函数时的 warmup 状态。零 token rank 的首次调用由外层特殊分支补齐。
+    is_autotune_warmup = Autotuner.is_autotune_warmup()
+    try:
+        for chunk_index, chunk_start in enumerate(range(0, all_tokens, max_chunk_rows)):
+            if is_autotune_warmup and chunk_index == 1:
+                Autotuner.end_autotune_warmup()
 
-        quant_buffers = []
+            chunk_end = min(chunk_start + max_chunk_rows, all_tokens)
+            chunk_rows = chunk_end - chunk_start
+            silu_out = workspace_manager.alloc((chunk_rows, intermediate_size), hidden_dtype)
+            gemm_out_a = workspace_manager.alloc((chunk_rows, intermediate_twice), hidden_dtype)
+            deepgemm_grouped_fp8_nt_contiguous(
+                (recv_x[0][chunk_start:chunk_end], recv_x[1][chunk_start:chunk_end]),
+                (w1, w1_scale),
+                gemm_out_a,
+                m_indices[chunk_start:chunk_end],
+            )
+            silu_and_mul_fwd(gemm_out_a, silu_out)
+            workspace_manager.free(gemm_out_a)
+            del gemm_out_a
 
-        def workspace_quant_alloc(shape, dtype, device):
-            if device != workspace.device:
-                raise RuntimeError(f"quant buffer must be allocated on {workspace.device}, got {device}")
-            quant_buffer = workspace_manager.alloc(shape, dtype)
-            quant_buffers.append(quant_buffer)
-            return quant_buffer
+            quant_buffers = []
 
-        qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
-            silu_out,
-            block_size_k,
-            dtype=w2.dtype,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            alloc_func=workspace_quant_alloc,
-        )
-        workspace_manager.free(silu_out)
-        del silu_out
+            def workspace_quant_alloc(shape, dtype, device):
+                if device != workspace.device:
+                    raise RuntimeError(f"quant buffer must be allocated on {workspace.device}, got {device}")
+                quant_buffer = workspace_manager.alloc(shape, dtype)
+                quant_buffers.append(quant_buffer)
+                return quant_buffer
 
-        gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
-        deepgemm_grouped_fp8_nt_contiguous(
-            (qsilu_out, qsilu_out_scale),
-            (w2, w2_scale),
-            gemm_out_b,
-            m_indices[chunk_start:chunk_end],
-        )
-        del qsilu_out, qsilu_out_scale
-        for quant_buffer in quant_buffers:
-            workspace_manager.free(quant_buffer)
+            qsilu_out, qsilu_out_scale = per_token_group_quant_fp8(
+                silu_out,
+                block_size_k,
+                dtype=w2.dtype,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                alloc_func=workspace_quant_alloc,
+            )
+            workspace_manager.free(silu_out)
+            del silu_out
 
-        ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
-        workspace_manager.free(gemm_out_b)
+            gemm_out_b = workspace_manager.alloc((chunk_rows, hidden_size), hidden_dtype)
+            deepgemm_grouped_fp8_nt_contiguous(
+                (qsilu_out, qsilu_out_scale),
+                (w2, w2_scale),
+                gemm_out_b,
+                m_indices[chunk_start:chunk_end],
+            )
+            del qsilu_out, qsilu_out_scale
+            for quant_buffer in quant_buffers:
+                workspace_manager.free(quant_buffer)
+
+            ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
+            workspace_manager.free(gemm_out_b)
+    finally:
+        if is_autotune_warmup:
+            Autotuner.start_autotune_warmup()
 
     ep_compact_metadata(recv_src_metadata)
     return gather_out
