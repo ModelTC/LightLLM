@@ -11,7 +11,6 @@ from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
 from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
 
@@ -64,9 +63,7 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
             redundancy_expert_num=self.redundancy_expert_num,
-            redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
-            auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
         self.lock = threading.Lock()
         self._create_weight()
@@ -81,13 +78,9 @@ class FusedMoeWeight(BaseWeightTpl):
         self.scoring_func = network_config.get("scoring_func", "softmax")
 
     def _init_redundancy_expert_params(self):
-        self.redundancy_expert_num = get_redundancy_expert_num()
-        self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
-        self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
-        self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
+        self.redundancy_expert_num = 0
+        self.redundancy_expert_ids = []
         self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
-        # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
-        assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
     def _init_parallel_params(self):
         if self.enable_ep_moe:
