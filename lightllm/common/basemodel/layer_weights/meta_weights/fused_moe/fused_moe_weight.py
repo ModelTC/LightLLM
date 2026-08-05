@@ -15,12 +15,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_placeme
     build_logical_to_physical_map,
 )
 from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.envs_utils import (
-    get_env_start_args,
-    get_prefill_eplb_step_interval,
-    get_redundancy_expert_ids,
-    get_redundancy_expert_num,
-)
+from lightllm.utils.envs_utils import get_env_start_args, get_prefill_eplb_step_interval
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
 
@@ -84,9 +79,7 @@ class FusedMoeWeight(BaseWeightTpl):
             routed_scaling_factor=self.routed_scaling_factor,
             quant_method=self.quant_method,
             redundancy_expert_num=self.redundancy_expert_num,
-            redundancy_expert_ids_tensor=self.redundancy_expert_ids_tensor,
             routed_expert_counter_tensor=self.routed_expert_counter_tensor,
-            auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
         if self.eplb_experts_logical_to_physical_map is not None:
             self.fuse_moe_impl.configure_eplb(
@@ -127,7 +120,6 @@ class FusedMoeWeight(BaseWeightTpl):
                 self.redundancy_expert_num,
             )
             self.redundancy_expert_ids = all_initial_ids[self.global_rank_].tolist()
-            assert len(self.redundancy_expert_ids) == self.redundancy_expert_num
             logical_to_physical, logical_replica_count = build_logical_to_physical_map(
                 all_initial_ids,
                 self.n_routed_experts,
@@ -135,13 +127,11 @@ class FusedMoeWeight(BaseWeightTpl):
             self.eplb_experts_logical_to_physical_map = logical_to_physical.cuda()
             self.eplb_experts_logical_replica_count = logical_replica_count.cuda()
             self.eplb_experts_record_load_tensor = torch.zeros((), dtype=torch.int32, device="cuda")
-            self.auto_update_redundancy_expert = False
         else:
-            self.redundancy_expert_num = get_redundancy_expert_num()
-            self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
-            self.auto_update_redundancy_expert = args.auto_update_redundancy_expert
+            self.redundancy_expert_num = 0
+            self.redundancy_expert_ids = []
 
-        self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
+        assert len(self.redundancy_expert_ids) == self.redundancy_expert_num
         if args.enable_prefill_eplb:
             # The initial dense window needs room for the common two prefill
             # dispatches per manager step.  In steady sparse mode the reset
@@ -154,11 +144,6 @@ class FusedMoeWeight(BaseWeightTpl):
         # Keep int64: the dispatch-token limit is runtime-configurable, so an
         # int32 counter cannot be proven safe for a ring row (or its Gloo sum).
         self.routed_expert_counter_tensor = torch.zeros(counter_shape, dtype=torch.int64, device="cuda")
-        if not args.enable_prefill_eplb:
-            # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
-            assert (
-                self.redundancy_expert_num != 1
-            ), "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
     def _init_parallel_params(self):
         if self.enable_ep_moe:

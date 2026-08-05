@@ -26,7 +26,6 @@ from lightllm.server.router.model_infer.mode_backend import (
     PDDecodeNode,
     PDDPForDecodeNode,
 )
-from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import (
     EPBalanceMonitor,
@@ -111,13 +110,7 @@ class ModelRpcServer(rpyc.Service):
 
         if self.args.enable_prefill_eplb:
             self.backend.model.eplb_manager = EPLBManager(self.backend.model)
-            self.redundancy_expert_manager = None
             logger.info("init eplb_manager")
-        elif self.args.auto_update_redundancy_expert:
-            self.redundancy_expert_manager = RedundancyExpertManager(self.backend.model)
-            logger.info("init redundancy_expert_manager")
-        else:
-            self.redundancy_expert_manager = None
 
         if should_enable_ep_balance_monitor(self.args):
             monitor = EPBalanceMonitor(self.backend.model)

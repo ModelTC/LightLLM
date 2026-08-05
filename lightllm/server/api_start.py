@@ -150,12 +150,6 @@ def _launch_subprocesses(args: StartArgs):
     if args.enable_prefill_eplb:
         assert args.enable_ep_moe, "--enable_prefill_eplb requires --enable_ep_moe"
         assert (
-            args.ep_redundancy_expert_config_path is None
-        ), "--enable_prefill_eplb cannot be enabled with --ep_redundancy_expert_config_path"
-        assert (
-            not args.auto_update_redundancy_expert
-        ), "--enable_prefill_eplb and --auto_update_redundancy_expert cannot be enabled together"
-        assert (
             args.eplb_num_redundant_experts_per_rank > 0
         ), "--eplb_num_redundant_experts_per_rank must be greater than 0"
         assert args.mtp_mode is None, "--enable_prefill_eplb does not support MTP modes"

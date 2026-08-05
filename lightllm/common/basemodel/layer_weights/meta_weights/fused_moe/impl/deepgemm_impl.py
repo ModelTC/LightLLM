@@ -16,7 +16,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner
-from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import redundancy_topk_ids_repair
 from lightllm.common.basemodel.triton_kernel.fused_moe.eplb_kernels import eplb_map
 
 
@@ -79,31 +78,20 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         if per_expert_scale is not None:
             topk_weights = topk_weights * per_expert_scale[topk_ids.to(torch.long)].to(topk_weights.dtype)
         origin_topk_ids = topk_ids
-        if self.eplb_experts_logical_to_physical_map is not None:
-            if is_prefill is True:
-                if preserve_logical_ids:
-                    origin_topk_ids = topk_ids.clone()
-                sample_index = 0
-                if self.eplb_recording:
-                    sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
-                    self.eplb_recorded_sample_count += 1
-                eplb_map(
-                    topk_ids,
-                    self.eplb_experts_logical_to_physical_map,
-                    self.eplb_experts_logical_replica_count,
-                    self.routed_expert_counter_tensor,
-                    self.eplb_experts_record_load_tensor,
-                    sample_index,
-                )
-        elif self.redundancy_expert_num > 0:
-            origin_topk_ids = topk_ids.clone()
-            redundancy_topk_ids_repair(
-                topk_ids=topk_ids,
-                redundancy_expert_ids=self.redundancy_expert_ids_tensor,
-                ep_expert_num=self.ep_n_routed_experts,
-                global_rank=self.global_rank_,
-                expert_counter=self.routed_expert_counter_tensor,
-                enable_counter=self.auto_update_redundancy_expert,
+        if is_prefill is True and self.eplb_experts_logical_to_physical_map is not None:
+            if preserve_logical_ids:
+                origin_topk_ids = topk_ids.clone()
+            sample_index = 0
+            if self.eplb_recording:
+                sample_index = self.eplb_recorded_sample_count % self.routed_expert_counter_tensor.shape[0]
+                self.eplb_recorded_sample_count += 1
+            eplb_map(
+                topk_ids,
+                self.eplb_experts_logical_to_physical_map,
+                self.eplb_experts_logical_replica_count,
+                self.routed_expert_counter_tensor,
+                self.eplb_experts_record_load_tensor,
+                sample_index,
             )
         return topk_weights, topk_ids, origin_topk_ids
 
@@ -117,7 +105,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         router_logits: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
     ):
-        if is_prefill is False and self.eplb_experts_logical_to_physical_map is not None:
+        if is_prefill is False:
             w13 = self._primary_weight_pack(w13)
             w2 = self._primary_weight_pack(w2)
             num_experts = self.n_routed_experts
@@ -139,7 +127,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
 
     def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
         """Return the cached local-primary view used by all decode paths."""
-        if self.eplb_experts_logical_to_physical_map is None:
+        if not self.redundancy_expert_num:
             return weight_pack
         cache = getattr(self, "_primary_weight_pack_cache", None)
         if cache is None:
@@ -195,11 +183,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_idx=topk_idx,
             x=hidden_states,
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
-            num_experts=(
-                self.n_routed_experts
-                if self.eplb_experts_logical_to_physical_map is not None
-                else self.total_expert_num_contain_redundancy
-            ),
+            # Decode is deliberately isolated from EPLB's physical redundant
+            # rows: DeepEP sees the original logical expert IDs.
+            num_experts=self.n_routed_experts,
             use_fp8=use_fp8_w8a8,
             async_finish=False,
             return_recv_hook=True,
@@ -289,8 +275,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         dtype: torch.dtype,
         expected_m: int,
     ):
-        if self.eplb_experts_logical_to_physical_map is not None:
-            w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
+        w13, w2 = self._primary_weight_pack(w13), self._primary_weight_pack(w2)
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         return masked_group_gemm(
