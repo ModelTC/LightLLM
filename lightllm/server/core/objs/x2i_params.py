@@ -84,6 +84,7 @@ class X2IParams(ctypes.Structure):
         self.past_kvcache_img = PastKVCachePageList()
         self.dynamic_resolution = _get("dynamic_resolution", X2IParams._dynamic_resolution)
         self.total_prompt_tokens = 0
+        self.total_image_tokens = 0
         self.request_id = 0
         self.session_id = 0
         self.has_updated_hw = False
@@ -136,6 +137,7 @@ class X2IParams(ctypes.Structure):
         past_kv.img_len = item.img_len
         past_kv.fill(item.page_indexes)
         self.total_prompt_tokens += past_kv.token_len
+        self.total_image_tokens += past_kv.img_tokens
 
     def update_t2i(self, meta, meta_uncond):
         self.update(self.past_kvcache, meta)

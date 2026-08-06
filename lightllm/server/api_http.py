@@ -34,8 +34,8 @@ from http import HTTPStatus
 import uuid
 from PIL import Image
 import multiprocessing as mp
-from typing import AsyncGenerator, Union
-from typing import Callable
+from typing import AsyncGenerator, Union, Awaitable, Any, Callable
+from functools import wraps
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse, JSONResponse
@@ -52,7 +52,12 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
-from .api_openai import chat_completions_impl, completions_impl, chat_completions_impl_v2
+from .api_openai import (
+    chat_completions_impl, 
+    completions_impl, 
+    chat_completions_impl_v2,
+    image_generation_impl,
+)
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -61,8 +66,12 @@ from .api_models import (
     ChatCompletionRequestV2,
     ModelCard,
     ModelListResponse,
+    ImageGenerationRequest,
+    ImageGenerationResponse,
+    ImageEditRequest,
+    ImageEditResponse
 )
-from .build_prompt import build_prompt, init_tokenizer
+from .build_prompt import init_tokenizer
 
 logger = init_logger(__name__)
 
@@ -237,64 +246,49 @@ async def token_load(request: Request):
     return JSONResponse(ans_dict, status_code=200)
 
 
+def http_endpoint_guard(func: Callable[..., Awaitable[Any]]):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
+            return create_error_response(
+                HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
+            )
+        try:
+            return await func(*args, **kwargs)
+        except ServerBusyError as e:
+            logger.error("%s", str(e), exc_info=True)
+            return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
+        except ValueError as e:
+            return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+        except Exception as e:
+            logger.error("An error occurred: %s", str(e), exc_info=True)
+            return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+
+    return wrapper
+
+
 @app.post("/generate")
+@http_endpoint_guard
 async def generate(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
-    try:
-        return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
-    except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
-    except ValueError as e:
-        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    except Exception as e:
-        logger.error("An error occurred: %s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
-
+    return await g_objs.g_generate_func(request, g_objs.httpserver_manager)
+    
 
 @app.post("/generate_stream")
+@http_endpoint_guard
 async def generate_stream(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
-    try:
-        return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
-    except ServerBusyError as e:
-        logger.error("%s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
-    except ValueError as e:
-        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    except Exception as e:
-        logger.error("An error occurred: %s", str(e), exc_info=True)
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
-
+    return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
+   
 
 @app.post("/get_score")
+@http_endpoint_guard
 async def get_score(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
-    try:
-        return await lightllm_get_score(request, g_objs.httpserver_manager)
-    except Exception as e:
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+    return await lightllm_get_score(request, g_objs.httpserver_manager)
 
 
 @app.post("/")
+@http_endpoint_guard
 async def compat_generate(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
+   
     request_dict = await request.json()
     stream = request_dict.pop("stream", False)
     if stream:
@@ -304,54 +298,39 @@ async def compat_generate(request: Request) -> Response:
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@http_endpoint_guard
 async def chat_completions(request: ChatCompletionRequestV2, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
-    try:
-        resp = await chat_completions_impl_v2(request, raw_request)
-    except ValueError as e:
-        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    return resp
-
+    return await chat_completions_impl_v2(request, raw_request)
+    
 
 @app.post("/v1/completions", response_model=CompletionResponse)
+@http_endpoint_guard
 async def completions(request: CompletionRequest, raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
-
-    try:
-        resp = await completions_impl(request, raw_request)
-    except ValueError as e:
-        return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-    return resp
+    return await completions_impl(request, raw_request)
 
 
 @app.post("/generate_image")
+@http_endpoint_guard
 async def generate_image(request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
+    return await g_objs.g_generate_image_func(request, g_objs.httpserver_manager)
+   
 
-    try:
-        return await g_objs.g_generate_image_func(request, g_objs.httpserver_manager)
-    except Exception as e:
-        return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
+@app.post("/v1/images/generations", response_model=ImageGenerationResponse)
+@http_endpoint_guard
+async def image_generation(request: ImageGenerationRequest, raw_request: Request) -> Response:
+    return await image_generation_impl(request, raw_request)
+
+
+@app.post("/v1/images/edit", response_model=ImageEditResponse)
+@http_endpoint_guard
+async def image_edit(request: ImageEditRequest, raw_request: Request) -> Response:
+    return await image_generation_impl(request, raw_request)
 
 
 @app.post("/v1/messages")
+@http_endpoint_guard
 async def anthropic_messages(raw_request: Request) -> Response:
-    if get_env_start_args().run_mode in ["prefill", "decode", "nixl_prefill", "nixl_decode"]:
-        return create_error_response(
-            HTTPStatus.EXPECTATION_FAILED, "service in pd mode dont recv reqs from http interface"
-        )
     from .api_anthropic import anthropic_messages_impl
-
     return await anthropic_messages_impl(raw_request)
 
 

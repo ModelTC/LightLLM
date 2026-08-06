@@ -12,7 +12,7 @@ import uuid
 from lightllm.server.reasoning_parser import ReasoningParser
 
 from .function_call_parser import TOOLS_TAG_LIST, FunctionCallParser, ToolCallItem
-from .build_prompt import build_prompt, init_tokenizer
+from .build_prompt import build_prompt, build_prompt_from_image_request
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import ujson as json
@@ -58,6 +58,12 @@ from .api_models import (
     ChatCompletionRequestV2,
     MessageContent,
     ImageURL,
+    ImageGenerationRequest,
+    ImageGenerationResponse,
+    ImageEditRequest,
+    ImageUsageInfo,
+    ImageInputTokensDetails,
+    ImageB64,
 )
 
 logger = init_logger(__name__)
@@ -1534,3 +1540,48 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
         "top_logprobs": top_logprobs_list,
         "text_offset": all_text_offsets,
     }
+
+
+def _images_to_image_generation_response(
+    images: List[bytes], 
+    request: ImageGenerationRequest, 
+    x2i_params: X2IParams,
+    output_image_tokens: int) -> ImageGenerationResponse:
+
+    return ImageGenerationResponse(
+        data=[ImageB64(b64_json=_raw_image_to_data_url(image, request.output_format)) for image in images],
+        output_format=request.output_format,
+        size=f"{x2i_params.width}x{x2i_params.height}",
+        usage=ImageUsageInfo(
+            input_tokens=x2i_params.total_prompt_tokens,
+            input_tokens_details=ImageInputTokensDetails(
+                image_tokens=x2i_params.total_image_tokens,
+                text_tokens=x2i_params.total_prompt_tokens - x2i_params.total_image_tokens
+            ),
+            output_tokens=output_image_tokens,
+            total_tokens=x2i_params.total_prompt_tokens + output_image_tokens
+        )
+    )
+
+
+async def image_generation_impl(request: ImageGenerationRequest | ImageEditRequest, raw_request: Request) -> Response:
+    from .api_http import g_objs
+
+    # get x2i params
+    x2i_params = X2IParams()
+    x2i_params.init_from_image_config(request.img_config)
+
+    # get prompt
+    prompt = await build_prompt_from_image_request(request)
+
+    images = []
+    if isinstance(request, ImageEditRequest):
+        for image in request.images:
+            images.append(image.to_image_url())
+
+    images = await g_objs.httpserver_manager.generate_image(
+        prompt, x2i_params, MultimodalParams(images=images), request=raw_request, input_image_num=len(images)
+    )
+    output_image_tokens = g_objs.httpserver_manager.tokenizer.get_image_token_length_by_size(x2i_params.width, x2i_params.height)
+
+    return _images_to_image_generation_response(images, request, x2i_params, output_image_tokens)

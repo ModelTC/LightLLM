@@ -1,3 +1,4 @@
+from optparse import Option
 import time
 from typing_extensions import deprecated
 import uuid
@@ -547,3 +548,80 @@ class ModelCard(BaseModel):
 class ModelListResponse(BaseModel):
     object: str = "list"
     data: List[ModelCard]
+    
+
+class ImageGenerationRequest(BaseModel):
+    model: str = "default"
+    prompt: str
+    size: str = "1024x1024"
+    n: Literal[1] = 1
+    output_format: Literal["jpeg"] = "jpeg"
+    response_format: Literal["b64_json"] = "b64_json"
+    watermark: Optional[bool] = False
+
+    img_config: Optional[ImageConfig] = None
+
+    @model_validator(mode="after")
+    def parse_size(self):
+        width = -1
+        height = -1
+        try: 
+            if "x" in self.size:
+                width, height = self.size.split("x")
+            else:
+                width, height = int(self.size), int(self.size)
+        except ValueError:
+            raise ValueError(f"Invalid size: {self.size}")
+
+        self.img_config = ImageConfig(
+            image_type=self.output_format,
+            height=height,
+            width=width,
+        )
+        return self
+
+
+class ImageInputTokensDetails(BaseModel):
+    image_tokens: int = 0
+    text_tokens: int = 0
+
+
+class ImageUsageInfo(BaseModel):
+    input_tokens: int = 0
+    input_tokens_details: ImageInputTokensDetails = ImageInputTokensDetails()
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ImageB64(BaseModel):
+    b64_json: str
+
+
+class ImageGenerationResponse(BaseModel):
+    created: int = Field(default_factory=lambda: int(time.time()))
+    data: List[ImageB64]
+    output_format: ImageType
+    size: str
+    usage: ImageUsageInfo
+
+
+class RawImageURL(BaseModel):
+    image_url: str
+
+    def to_image_url(self) -> Optional[dict]:
+        if self.image_url.startswith("http://") or self.image_url.startswith("https://"):
+            return {"type": "url", "data": self.image_url}
+        elif self.image_url.startswith("data:image"):
+            data_str = self.image_url.split(";", 1)[1]
+            if data_str.startswith("base64,"):
+                data = data_str[7:]
+                return {"type": "base64", "data": data}
+        return None
+
+
+class ImageEditRequest(ImageGenerationRequest):
+    images: List[RawImageURL]
+
+
+class ImageEditResponse(ImageGenerationResponse):
+    pass

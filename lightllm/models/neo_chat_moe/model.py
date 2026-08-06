@@ -86,6 +86,14 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         img.grid_thwd = (1, int(grid_h * self.downsample_ratio), int(grid_w * self.downsample_ratio), 1 - token_num)
         return token_num
 
+    def get_image_token_length_by_size(self, width: int, height: int):
+        assert width > 0 and height > 0 and width % self.patch_size == 0 and height % self.patch_size == 0, \
+            "width and height should be greater than 0 and divisible by patch_size"
+
+        grid_h, grid_w = width // self.patch_size, width // self.patch_size
+        token_num = int((grid_h * grid_w) * (self.downsample_ratio ** 2))
+        return token_num
+
     # only change the impl of the encode func:
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
         # TEXT<image>TEXT<image>TEXT --> TEXT<img></img>TEXT<img></img>TEXT
