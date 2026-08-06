@@ -26,6 +26,7 @@ class Gemma4PreLayerInfer(LlamaMultimodalPreLayerInfer):
         self.ple_static_buffer = None
 
     def _compute_per_layer_embeds(self, input_ids_for_ple, input_embdings, infer_state, layer_weight):
+        # 查表 PLE。
         ple_embeds = layer_weight.embed_tokens_per_layer_weight_(input_ids_for_ple)
         if self.tp_world_size_ > 1:
             all_reduce(ple_embeds, op=dist.ReduceOp.SUM, group=infer_state.dist_group, async_op=False)

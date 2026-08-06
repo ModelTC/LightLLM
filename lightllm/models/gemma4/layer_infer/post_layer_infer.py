@@ -27,13 +27,16 @@ class Gemma4PostLayerInfer(LlamaPostLayerInfer):
         lm_input = normed.permute(1, 0).view(-1, token_num)
         logic_batch = layer_weight.lm_head_weight_(input=lm_input, alloc_func=self.alloc_tensor)
         vocab_size = layer_weight.lm_head_weight_.vocab_size
-        if self.tp_world_size_ == 1:
+
+        # 根据 LM Head 的 world size 判断是否复制了整表，进而决定要不要 gather
+        tp_world_size = layer_weight.lm_head_weight_.tp_world_size_
+        if tp_world_size == 1:
             gather_data = logic_batch
         else:
             gather_data = self.alloc_tensor((vocab_size, token_num), dtype=input_embdings_dtype)
-            split_indexes = np.linspace(0, vocab_size, self.tp_world_size_ + 1, dtype=np.int64)
+            split_indexes = np.linspace(0, vocab_size, tp_world_size + 1, dtype=np.int64)
             all_gather(
-                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(self.tp_world_size_)],
+                [gather_data[split_indexes[i] : split_indexes[i + 1], :] for i in range(tp_world_size)],
                 logic_batch,
                 group=infer_state.dist_group,
                 async_op=False,

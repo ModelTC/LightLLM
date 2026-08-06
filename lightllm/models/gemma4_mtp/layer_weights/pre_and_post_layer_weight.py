@@ -61,6 +61,8 @@ class Gemma4MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
             vocab_size=vocab_size,
             weight_name="model.embed_tokens.weight",
             data_type=self.data_type_,
+            tp_rank=0,
+            tp_world_size=1,
         )
         self.lm_head_weight_ = LMHeadWeight(
             dim=draft_hidden,
@@ -68,6 +70,8 @@ class Gemma4MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="lm_head.weight",
             data_type=self.data_type_,
             embedding_weight=self._mtp_lm_head_embed_,
+            tp_rank=0,
+            tp_world_size=1,
         )
         # The input token embedding is the *target's* (backbone_hidden width);
         # aliased from the main model in Gemma4MTPModel._init_weights.

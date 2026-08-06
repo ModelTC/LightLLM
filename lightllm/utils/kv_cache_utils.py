@@ -16,7 +16,14 @@ from lightllm.utils.envs_utils import (
     get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_linear_att_mixed_model
+from lightllm.utils.config_utils import (
+    get_config_json,
+    get_head_dim,
+    get_layer_num,
+    get_model_type,
+    get_num_key_value_heads,
+    is_linear_att_mixed_model,
+)
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
@@ -94,12 +101,22 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_data_type=get_llm_data_type(),
         )
     elif mem_manager_class is MemoryManager:
+        num_kv = get_num_key_value_heads(args.model_dir)
+        num_heads = num_kv * 2
+        head_dim = get_head_dim(args.model_dir)
+
+        # Gemma4 滑动窗口层和全局注意力层的 KV 宽窄不一样，cache 由较大值决定
+        if str(get_model_type(args.model_dir) or "").startswith("gemma4"):
+            cfg = get_config_json(args.model_dir)
+            text = cfg.get("text_config") or cfg
+            full = (text.get("num_global_key_value_heads") or num_kv) * (text.get("global_head_dim") or head_dim)
+            num_heads = max(num_kv * head_dim, full) // head_dim * 2
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,
             layer_num=get_layer_num(args.model_dir),
-            num_heads=get_num_key_value_heads(args.model_dir) * 2,
-            head_dim=get_head_dim(args.model_dir),
+            num_heads=num_heads,
+            head_dim=head_dim,
             data_type=get_llm_data_type(),
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
