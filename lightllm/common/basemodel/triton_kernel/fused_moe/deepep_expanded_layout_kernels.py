@@ -151,6 +151,9 @@ def ep_zero_padding(
     )
 
 
+# TODO: 当前实现会为每个 chunk 重新遍历所有接收 token 的 top-k metadata，并反复
+# 读取、累加和写回长期保留的 gather_out，仍有较大的性能提升空间。后续可以考虑
+# 预先构建 chunk-local 的路由映射，减少无效 metadata 扫描和全局内存读写。
 @triton.jit
 def _ep_gather_chunk_kernel(
     total_recv_tokens,
