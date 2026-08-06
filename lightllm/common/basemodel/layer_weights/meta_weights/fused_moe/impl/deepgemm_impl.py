@@ -227,18 +227,18 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         all_tokens = sum(num_recv_tokens_per_expert_list)
         if all_tokens > 0:
             gather_out = chunked_expanded_moe_forward(
-                num_recv_tokens_per_expert_list,
-                num_unaligned_recv_tokens_per_expert,
-                recv_x,
-                recv_topk_weights,
-                recv_src_metadata,
-                w13_weight,
-                w13_scale,
-                w2_weight,
-                w2_scale,
-                self.quant_method.block_size,
-                dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
-                hidden_dtype,
+                num_recv_tokens_per_expert_list=num_recv_tokens_per_expert_list,
+                num_unaligned_recv_tokens_per_expert=num_unaligned_recv_tokens_per_expert,
+                recv_x=recv_x,
+                recv_topk_weights=recv_topk_weights,
+                recv_src_metadata=recv_src_metadata,
+                w1=w13_weight,
+                w1_scale=w13_scale,
+                w2=w2_weight,
+                w2_scale=w2_scale,
+                block_size_k=self.quant_method.block_size,
+                workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
+                hidden_dtype=hidden_dtype,
             )
         else:
             gather_out = torch.empty(
