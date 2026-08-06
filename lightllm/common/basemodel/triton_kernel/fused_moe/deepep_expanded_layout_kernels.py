@@ -166,25 +166,39 @@ def _ep_gather_chunk_kernel(
     output,
     output_stride_m,
     output_stride_k,
+    hidden_size,
     TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    NEED_HIDDEN_MASK: tl.constexpr,
 ):
     hidden_block_id = tl.program_id(0)
     start_recv_token_id = tl.program_id(1)
     recv_token_grid_size = tl.num_programs(1)
     hidden_offsets = hidden_block_id * BLOCK_D + tl.arange(0, BLOCK_D)
+    if NEED_HIDDEN_MASK:
+        hidden_mask = hidden_offsets < hidden_size
 
     for recv_token_id in range(start_recv_token_id, total_recv_tokens, recv_token_grid_size):
         output_ptrs = output + recv_token_id * output_stride_m + hidden_offsets * output_stride_k
-        accumulator = tl.load(output_ptrs).to(tl.float32)
+        if NEED_HIDDEN_MASK:
+            accumulator = tl.load(output_ptrs, mask=hidden_mask, other=0.0).to(tl.float32)
+        else:
+            accumulator = tl.load(output_ptrs).to(tl.float32)
         for topk_id in range(TOPK):
             slot = tl.load(recv_src_metadata + recv_token_id * metadata_stride_m + (topk_id + 2) * metadata_stride_k)
             if slot >= chunk_start and slot < chunk_end:
                 local_row = (slot - chunk_start).to(tl.int64)
-                value = tl.load(chunk + local_row * chunk_stride_m + hidden_offsets * chunk_stride_k)
+                chunk_ptrs = chunk + local_row * chunk_stride_m + hidden_offsets * chunk_stride_k
+                if NEED_HIDDEN_MASK:
+                    value = tl.load(chunk_ptrs, mask=hidden_mask, other=0.0)
+                else:
+                    value = tl.load(chunk_ptrs)
                 weight = tl.load(weights + slot)
                 accumulator += value.to(tl.float32) * weight
-        tl.store(output_ptrs, accumulator)
+        if NEED_HIDDEN_MASK:
+            tl.store(output_ptrs, accumulator, mask=hidden_mask)
+        else:
+            tl.store(output_ptrs, accumulator)
 
 
 @torch.no_grad()
@@ -204,24 +218,28 @@ def ep_gather_chunk(
     """
     topk = recv_src_metadata.shape[1] - 2
     block_d = 1024
-    assert chunk.shape[1] == output.shape[1] and output.shape[1] % block_d == 0
+    hidden_size = output.shape[1]
+    assert chunk.shape[1] == hidden_size
     grid = (triton.cdiv(output.shape[1], block_d), min(output.shape[0], 1024))
     _ep_gather_chunk_kernel[grid](
-        output.shape[0],
-        chunk,
-        chunk.stride(0),
-        chunk.stride(1),
-        chunk_start,
-        chunk_start + chunk.shape[0],
-        weights,
-        recv_src_metadata,
-        recv_src_metadata.stride(0),
-        recv_src_metadata.stride(1),
-        output,
-        output.stride(0),
-        output.stride(1),
+        total_recv_tokens=output.shape[0],
+        chunk=chunk,
+        chunk_stride_m=chunk.stride(0),
+        chunk_stride_k=chunk.stride(1),
+        chunk_start=chunk_start,
+        chunk_end=chunk_start + chunk.shape[0],
+        weights=weights,
+        recv_src_metadata=recv_src_metadata,
+        metadata_stride_m=recv_src_metadata.stride(0),
+        metadata_stride_k=recv_src_metadata.stride(1),
+        output=output,
+        output_stride_m=output.stride(0),
+        output_stride_k=output.stride(1),
+        hidden_size=hidden_size,
         TOPK=topk,
         BLOCK_D=block_d,
+        # 常见整块 hidden size 保持原来的无 mask kernel；仅尾块不完整时启用边界保护。
+        NEED_HIDDEN_MASK=hidden_size % block_d != 0,
         num_warps=2,
     )
 
