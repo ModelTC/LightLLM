@@ -234,6 +234,7 @@ class DistributeGroupManager:
             num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
+            # TODO: 评估是否应在部分场景下设置 num_nvl_bytes，以提升单机性能。
             self.ep_low_latency_buffer = deep_ep.Buffer(
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
