@@ -393,7 +393,9 @@ def _launch_subprocesses(args: StartArgs):
 
 
 def _hypercorn_config_args(args: StartArgs):
-    return ["--config", args.hypercorn_config] if args.hypercorn_config is not None else []
+    if args.hypercorn_config is not None:
+        return ["--config", args.hypercorn_config]
+    return ["--keep-alive", "10"]
 
 
 def normal_or_p_d_start(args: StartArgs):
