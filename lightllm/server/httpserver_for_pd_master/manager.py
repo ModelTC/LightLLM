@@ -160,35 +160,66 @@ class HttpServerManagerForPDMaster:
             self, prompt_ids=fake_prompt_ids, sampling_params=sampling_params
         )
 
+        origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
+        origin_group_request_id = self.id_gen.generate_id()
+
+        # Record one user request even when it is expanded into multiple independent
+        # n=1 requests below. The externally visible ids remain in the same request
+        # group so OpenAI streaming can derive choice_index from the sub request id.
+        await self._log_req_header(request, origin_group_request_id)
+        self.metric_client.counter_inc("lightllm_request_count")
+        self.metric_client.histogram_observe("lightllm_request_max_new_tokens", origin_sampling_params.max_new_tokens)
+
+        choice_count = origin_sampling_params.n
+        generators = []
+        for choice_index in range(choice_count):
+            choice_sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
+            choice_sampling_params.n = 1
+            choice_sampling_params.best_of = 1
+            generators.append(
+                self._generate_one(
+                    prompt,
+                    choice_sampling_params,
+                    multimodal_params,
+                    request,
+                    start_time,
+                    origin_group_request_id + choice_index,
+                )
+            )
+
+        async for result in self._merge_choice_generators(generators):
+            yield result
+        self.metric_client.counter_inc("lightllm_request_success")
+        return
+
+    async def _generate_one(
+        self,
+        prompt: str,
+        origin_sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        start_time: float,
+        origin_request_id: int,
+    ):
         # 先将请求根据max_new_tokens 参数进行分块操作，主要是 pd 分离场景中，
         # 只能使用保守调度，但是如果用户都设置一个很大的 max_new_tokens 值，会
         # 导致极大显存预留，照成系统的吞吐能力下降，所以我们将请求分割成几段进行
         # 推理，只要保证分块合理，实际分段推理是极少发生的情况，系统吞吐就不会受
         # 到影响。
-        origin_sampling_params = SamplingParams.from_buffer_copy(sampling_params)
-        origin_group_request_id = self.id_gen.generate_id()
         max_new_tokens_list = self._split_max_new_tokens(max_new_tokens=origin_sampling_params.max_new_tokens)
 
-        block_group_request_id = origin_group_request_id
+        block_group_request_id = origin_request_id
         p_node = None
         d_node = None
 
         try:
-            # 记录请求到达的相关信息
-            await self._log_req_header(request, origin_group_request_id)
-            # 监控
-            self.metric_client.counter_inc("lightllm_request_count")
-            self.metric_client.histogram_observe(
-                "lightllm_request_max_new_tokens", origin_sampling_params.max_new_tokens
-            )
-
             p_node, d_node = await self.select_p_d_node(prompt, origin_sampling_params, multimodal_params)
 
             history_gen_token_strs = []
 
             if not p_node or not d_node:
-                logger.error(f"{origin_group_request_id}: No p_node or d_node found")
-                raise Exception(f"{origin_group_request_id}: No p_node or d_node found")
+                logger.error(f"{origin_request_id}: No p_node or d_node found")
+                raise Exception(f"{origin_request_id}: No p_node or d_node found")
 
             origin_prompt_cache_len = None
 
@@ -196,7 +227,7 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_group_request_id}")
+                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = block_max_new_tokens
 
                 results_generator = self._wait_to_token_package(
@@ -221,7 +252,7 @@ class HttpServerManagerForPDMaster:
                     if iter_index == 0 and origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
-                    yield origin_group_request_id, request_output, metadata, finish_status
+                    yield origin_request_id, request_output, metadata, finish_status
 
                 await self.remove_req(group_request_id=block_group_request_id)
 
@@ -229,7 +260,7 @@ class HttpServerManagerForPDMaster:
             logger.error(f"has exception {str(e)}")
 
             if isinstance(e, ClientDisconnected):
-                logger.warning(f"group_request_id: {origin_group_request_id} {e.reason}")
+                logger.warning(f"group_request_id: {origin_request_id} {e.reason}")
 
             try:
                 await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
@@ -240,6 +271,38 @@ class HttpServerManagerForPDMaster:
         finally:
             await self.remove_req(block_group_request_id)
         return
+
+    async def _merge_choice_generators(self, generators):
+        """Merge independent n=1 PD generators into one multi-choice stream."""
+        result_queue = asyncio.Queue()
+        generator_done = object()
+
+        async def forward_results(generator):
+            try:
+                async with aclosing(generator):
+                    async for result in generator:
+                        await result_queue.put(result)
+
+                await result_queue.put(generator_done)
+            except BaseException as error:
+                await result_queue.put(error)
+
+        tasks = [asyncio.create_task(forward_results(generator)) for generator in generators]
+        remaining_generators = len(tasks)
+
+        try:
+            while remaining_generators:
+                result = await result_queue.get()
+                if result is generator_done:
+                    remaining_generators -= 1
+                elif isinstance(result, BaseException):
+                    raise result
+                else:
+                    yield result
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _wait_for_event_or_disconnect(
         self,
@@ -446,7 +509,6 @@ class HttpServerManagerForPDMaster:
         )
         self.metric_client.histogram_observe("lightllm_request_first_token_duration", first_token_cost_ms / 1000.0)
         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
-        self.metric_client.counter_inc("lightllm_request_success")
         self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
         return
 
