@@ -113,16 +113,15 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 .cpu()
                 .tolist()
             )
-            req_idx = None
         elif page_kind == "linear_att_state":
             mem_indexes = []
-            req_idx = req_obj.req_idx
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")
         trans_task = PDChunckedTransTask(
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
+            request_kv_len=req_obj.shm_req.input_len,
             time_out_secs=182,
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=self.dp_rank_in_node,
@@ -141,7 +140,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             first_gen_token_id=None,
             first_gen_token_logprob=None,
             page_kind=page_kind,
-            req_idx=req_idx,
+            req_idx=req_obj.req_idx,
         )
         req_obj.pd_task_num += 1
         return trans_task

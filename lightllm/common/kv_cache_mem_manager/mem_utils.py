@@ -21,6 +21,15 @@ def select_mem_manager_class():
     # 先判断是否是 deepseek 系列的模型
     model_class = get_llm_model_class()
 
+    from lightllm.models import DeepseekV4TpPartModel
+
+    if issubclass(model_class, DeepseekV4TpPartModel):
+        from . import DeepseekV4MemoryManager
+
+        mem_class = DeepseekV4MemoryManager
+        logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
+        return mem_class
+
     from lightllm.models import Deepseek3_2TpPartModel
 
     if issubclass(model_class, Deepseek3_2TpPartModel):

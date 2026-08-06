@@ -12,6 +12,7 @@ from ...infer_batch import InferReq
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 import torch.distributed as dist
+from lightllm.models.deepseek_v4.triton_kernel.dp_cache_io import copy_dsv4_dp_cache
 
 
 class DPKVSharedMoudle:
@@ -34,11 +35,17 @@ class DPKVSharedMoudle:
         self.dp_rank_in_node = get_dp_rank_in_node()
         assert get_env_start_args().diverse_mode is False
 
+        if self.backend.is_deepseek_v4:
+            from lightllm.utils.device_utils import kv_trans_use_p2p
+
+            assert kv_trans_use_p2p(), "DeepSeek-V4 DP prompt-cache fetch requires P2P KV transfer"
+
     def fill_reqs_info(self, reqs: List[InferReq]):
         """
         填充请求的 kv 信息到共享内存中
         """
-        dist.barrier(group=self.backend.node_nccl_group)
+        if not self.backend.is_deepseek_v4:
+            dist.barrier(group=self.backend.node_nccl_group)
         if self.backend.is_master_in_dp:
             self.shared_req_infos.arr[0 : len(reqs), self.dp_rank_in_node, self._KV_LEN_INDEX] = [
                 req.cur_kv_len for req in reqs
@@ -59,6 +66,15 @@ class DPKVSharedMoudle:
         dist.barrier(group=self.backend.node_nccl_group)
 
         trans_tasks: List[TransTask] = []
+        if self.backend.is_deepseek_v4:
+            dsv4_mem_manager = self.backend.model.mem_manager
+            (
+                dsv4_swa_capacity,
+                dsv4_c4_capacity,
+                dsv4_c128_capacity,
+            ) = g_infer_context.get_can_alloc_dsv4_page_and_slot_num()
+            dsv4_prompt_page_size = self.backend.model.req_manager.get_prompt_cache_page_size()
+
         rank_max_radix_cache_lens = np.max(
             self.shared_req_infos.arr[0 : len(reqs), :, self._KV_LEN_INDEX], axis=1, keepdims=False
         )
@@ -71,9 +87,29 @@ class DPKVSharedMoudle:
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_req_radix_cache_len, req.get_cur_total_len() - 1) - req.cur_kv_len
 
-            if is_current_dp_handle and trans_size > 0 and g_infer_context.get_can_alloc_token_num() > trans_size:
+            can_alloc_dsv4_cache = True
+            if self.backend.is_deepseek_v4 and trans_size > 0:
+                need_swa_pages = dsv4_prompt_page_size // dsv4_mem_manager.swa_pool.page_size
+                need_c4_pages = trans_size // dsv4_prompt_page_size if dsv4_mem_manager.c4_pool is not None else 0
+                need_c128_slots = trans_size // 128 if dsv4_mem_manager.c128_pool is not None else 0
+                can_alloc_dsv4_cache = (
+                    dsv4_swa_capacity >= need_swa_pages
+                    and dsv4_c4_capacity >= need_c4_pages
+                    and dsv4_c128_capacity >= need_c128_slots
+                )
+
+            if (
+                is_current_dp_handle
+                and trans_size > 0
+                and g_infer_context.get_can_alloc_token_num() > trans_size
+                and can_alloc_dsv4_cache
+            ):
                 g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(trans_size)
                 mem_indexes = self.backend.model.mem_manager.alloc(trans_size)
+                if self.backend.is_deepseek_v4:
+                    dsv4_swa_capacity -= need_swa_pages
+                    dsv4_c4_capacity -= need_c4_pages
+                    dsv4_c128_capacity -= need_c128_slots
                 max_kv_len_dp_rank = self.shared_req_infos.arr[req_index, :, self._KV_LEN_INDEX].argmax()
                 max_kv_len_req_idx = int(self.shared_req_infos.arr[req_index, max_kv_len_dp_rank, self._REQ_IDX_INDEX])
                 max_kv_len_mem_manager_index = max_kv_len_dp_rank * self.backend.dp_world_size + self.backend.rank_in_dp
@@ -98,33 +134,63 @@ class DPKVSharedMoudle:
 
         # kv 传输
         if len(trans_tasks) > 0:
-            max_kv_len_mem_indexes = []
-            max_kv_len_dp_ranks = []
-            mem_indexes = []
+            if self.backend.is_deepseek_v4:
+                req_manager = g_infer_context.req_manager
+                for trans_task in trans_tasks:
+                    start = trans_task.req.cur_kv_len
+                    end = start + len(trans_task.mem_indexes)
+                    dst_full_slots = req_manager.req_to_token_indexs[trans_task.req.req_idx, start:end]
+                    dst_full_slots.copy_(trans_task.mem_indexes, non_blocking=True)
+                    req_manager.prepare_pd_decode_cache(
+                        req_idx=trans_task.req.req_idx,
+                        ready_cache_len=start,
+                        input_len=end,
+                        new_full_slots=dst_full_slots,
+                    )
+                dst_mem_manager = self.backend.model.mem_manager
+                dst_req_to_token = self.backend.model.req_manager.req_to_token_indexs
+                for trans_task in trans_tasks:
+                    src_mem_manager = self.backend.mem_managers[trans_task.max_kv_len_mem_manager_index]
+                    start = trans_task.req.cur_kv_len
+                    end = start + len(trans_task.mem_indexes)
+                    src_mem_indexes = trans_task.max_kv_len_mem_indexes
+                    dst_mem_indexes = dst_req_to_token[trans_task.req.req_idx, start:end]
+                    copy_dsv4_dp_cache(src_mem_manager, dst_mem_manager, src_mem_indexes, dst_mem_indexes)
+            else:
+                max_kv_len_mem_indexes = []
+                max_kv_len_dp_ranks = []
+                mem_indexes = []
 
-            for i, trans_task in enumerate(trans_tasks):
-                max_kv_len_mem_indexes.append(trans_task.max_kv_len_mem_indexes)
-                max_kv_len_dp_ranks.extend([trans_task.max_kv_len_dp_rank] * len(trans_task.max_kv_len_mem_indexes))
-                mem_indexes.append(trans_task.mem_indexes)
+                for i, trans_task in enumerate(trans_tasks):
+                    max_kv_len_mem_indexes.append(trans_task.max_kv_len_mem_indexes)
+                    max_kv_len_dp_ranks.extend([trans_task.max_kv_len_dp_rank] * len(trans_task.max_kv_len_mem_indexes))
+                    mem_indexes.append(trans_task.mem_indexes)
 
-            max_kv_len_mem_indexes_tensor = torch.cat(max_kv_len_mem_indexes).to(dtype=torch.int64, device="cuda")
-            max_kv_len_dp_ranks_tensor = torch.tensor(max_kv_len_dp_ranks, dtype=torch.int32, device="cuda")
-            mem_indexes_tensor = torch.cat(mem_indexes).to(dtype=torch.int64, device="cuda")
-            self.backend.model.mem_manager.operator.copy_kv_from_other_dp_ranks(
-                mem_managers=self.backend.mem_managers,
-                move_token_indexes=max_kv_len_mem_indexes_tensor,
-                token_dp_indexes=max_kv_len_dp_ranks_tensor,
-                mem_indexes=mem_indexes_tensor,
-                dp_size_in_node=self.backend.dp_size_in_node,
-                rank_in_dp=self.backend.rank_in_dp,
-            )
-            self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
+                max_kv_len_mem_indexes_tensor = torch.cat(max_kv_len_mem_indexes).to(dtype=torch.int64, device="cuda")
+                max_kv_len_dp_ranks_tensor = torch.tensor(max_kv_len_dp_ranks, dtype=torch.int32, device="cuda")
+                mem_indexes_tensor = torch.cat(mem_indexes).to(dtype=torch.int64, device="cuda")
+                self.backend.model.mem_manager.operator.copy_kv_from_other_dp_ranks(
+                    mem_managers=self.backend.mem_managers,
+                    move_token_indexes=max_kv_len_mem_indexes_tensor,
+                    token_dp_indexes=max_kv_len_dp_ranks_tensor,
+                    mem_indexes=mem_indexes_tensor,
+                    dp_size_in_node=self.backend.dp_size_in_node,
+                    rank_in_dp=self.backend.rank_in_dp,
+                )
+
+            transfer_token_num = sum(len(trans_task.mem_indexes) for trans_task in trans_tasks)
+            self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {transfer_token_num}")
+
+        if self.backend.is_deepseek_v4:
+            # Source radix mappings stay alive until every peer copy on the current stream finishes.
+            dist.barrier(group=self.backend.node_nccl_group)
 
         for trans_task in trans_tasks:
-            g_infer_context.req_manager.req_to_token_indexs[
-                trans_task.req.req_idx,
-                trans_task.req.cur_kv_len : (trans_task.req.cur_kv_len + len(trans_task.mem_indexes)),
-            ] = trans_task.mem_indexes
+            if not self.backend.is_deepseek_v4:
+                g_infer_context.req_manager.req_to_token_indexs[
+                    trans_task.req.req_idx,
+                    trans_task.req.cur_kv_len : (trans_task.req.cur_kv_len + len(trans_task.mem_indexes)),
+                ] = trans_task.mem_indexes
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
             if self.backend.is_master_in_dp:
                 trans_task.req.shm_req.shm_cur_kv_len = trans_task.req.cur_kv_len
