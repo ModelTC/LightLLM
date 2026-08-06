@@ -252,17 +252,21 @@ def _ep_compact_metadata_kernel(
     recv_src_metadata,
     metadata_stride_m,
     metadata_stride_k,
+    num_recv_tokens,
     TOPK: tl.constexpr,
+    BLOCK_TOKEN: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
 ):
-    recv_token_id = tl.program_id(0)
-    topk_id = tl.arange(0, BLOCK_TOPK)
-    slot = tl.where(topk_id == 0, recv_token_id, -1)
-    tl.store(
-        recv_src_metadata + recv_token_id * metadata_stride_m + (topk_id + 2) * metadata_stride_k,
-        slot,
-        mask=topk_id < TOPK,
-    )
+    token_offsets = tl.program_id(0) * BLOCK_TOKEN + tl.arange(0, BLOCK_TOKEN)
+    topk_offsets = tl.arange(0, BLOCK_TOPK)
+    metadata_offsets = token_offsets[:, None] * metadata_stride_m + (topk_offsets[None, :] + 2) * metadata_stride_k
+    valid_token_mask = token_offsets < num_recv_tokens
+    valid_topk_mask = topk_offsets < TOPK
+    metadata_mask = valid_token_mask[:, None] & valid_topk_mask[None, :]
+
+    # 每个 token 只保留其在稠密输出中的同序行号，其余 top-k 位置全部置为无效。
+    slots = tl.where(topk_offsets[None, :] == 0, token_offsets[:, None], -1)
+    tl.store(recv_src_metadata + metadata_offsets, slots, mask=metadata_mask)
 
 
 @torch.no_grad()
@@ -278,11 +282,15 @@ def ep_compact_metadata(
     topk = recv_src_metadata.shape[1] - 2
     if recv_src_metadata.shape[0] == 0:
         return
-    _ep_compact_metadata_kernel[(recv_src_metadata.shape[0],)](
-        recv_src_metadata,
-        recv_src_metadata.stride(0),
-        recv_src_metadata.stride(1),
+    block_token = 128
+    grid = (triton.cdiv(recv_src_metadata.shape[0], block_token),)
+    _ep_compact_metadata_kernel[grid](
+        recv_src_metadata=recv_src_metadata,
+        metadata_stride_m=recv_src_metadata.stride(0),
+        metadata_stride_k=recv_src_metadata.stride(1),
+        num_recv_tokens=recv_src_metadata.shape[0],
         TOPK=topk,
+        BLOCK_TOKEN=block_token,
         BLOCK_TOPK=triton.next_power_of_2(topk),
-        num_warps=1,
+        num_warps=4,
     )
