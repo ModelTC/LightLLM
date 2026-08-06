@@ -16,7 +16,6 @@ def gated_rmsnorm_forward_kernel(
     W,  # pointer to the weights
     B,  # pointer to the biases
     Z,  # pointer to the other branch (required, not optional)
-    Rstd,  # pointer to the 1/std
     stride_x_row,  # how much to increase the pointer when moving by 1 row
     stride_y_row,
     stride_z_row,
@@ -33,7 +32,6 @@ def gated_rmsnorm_forward_kernel(
     X += row * stride_x_row + group * N
     Y += row * stride_y_row + group * N
     Z += row * stride_z_row + group * N
-    Rstd += group * M
     W += group * N
     if HAS_BIAS:
         B += group * N
@@ -47,7 +45,6 @@ def gated_rmsnorm_forward_kernel(
     xbar = tl.where(cols < N, x, 0.0)
     var = tl.sum(xbar * xbar, axis=0) / N
     rstd = 1 / tl.sqrt(var + eps)
-    tl.store(Rstd + row, rstd)
     # Normalize and apply linear transformation
     mask = cols < N
     w = tl.load(W + cols, mask=mask).to(tl.float32)
@@ -128,9 +125,6 @@ def gated_rmsnorm_forward(
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    # For RMS norm, we still need rstd for the kernel
-    rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-
     # Default heuristic when autotune is disabled or no config provided
     if not run_config:
         # Less than 64KB per feature: enqueue fused kernel
@@ -160,7 +154,6 @@ def gated_rmsnorm_forward(
         weight,
         bias,
         z,
-        rstd,
         x.stride(0),
         out.stride(0),
         z.stride(0),

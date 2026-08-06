@@ -10,6 +10,7 @@ from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
 
+
 # 节点的行为
 class NodeRole(enum.Enum):
     P = "prefill"
@@ -39,6 +40,7 @@ class ObjType(enum.Enum):
     TOKEN_PACKS = 3
     PD_UPLOAD_PREFILL_PROMPT_IDS = 4  # prefill 节点上报生成的 prompt ids 信息。
     PD_REQ_DECODE_NODE_INFO = 5  # pd master 节点下发给 prefill 节点的请求对应的 decode 节点信息。
+    HEARTBEAT = 6  # P/D 节点向 pd master 上报的心跳。
 
 
 @dataclass
@@ -54,6 +56,8 @@ class PD_Client_Obj:
     start_args: object  # 节点的启动参数信息，用于做匹配性的校验，防止运行过程中出现问题。
     websocket: WebSocket = None  # 用于通信的 websocket 连接对象
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
+    # cache-aware 选点用：累计派发到该节点的 prompt 字符数（只增不减，非实时负载）。
+    dispatched_prompt_chars: int = 0
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:

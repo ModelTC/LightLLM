@@ -153,6 +153,44 @@ def auto_set_max_req_total_len(args) -> None:
     logger.info(f"auto derived max_req_total_len={args.max_req_total_len} from model config")
 
 
+def auto_set_fused_shared_experts(args) -> None:
+    """
+    Route fused shared experts to supported model families and write the final
+    decision to `args.enable_fused_shared_experts`.
+    """
+
+    if args.enable_fused_shared_experts:
+        logger.info("skip auto setting fused shared experts: already enabled")
+        return
+
+    if args.enable_ep_moe:
+        logger.info("do not enable fused shared experts: EP MoE uses a separate implementation")
+        return
+
+    model_dir = args.model_dir
+    if not model_dir:
+        logger.info("do not enable fused shared experts: model_dir is empty")
+        return
+
+    model_type = get_model_type(model_dir)
+    supported_model_types = {
+        "deepseek_v3",
+        "deepseek_v31",
+        "deepseek_v32",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+    if model_type not in supported_model_types:
+        logger.info(f"do not enable fused shared experts: unsupported model_type={model_type}")
+        return
+
+    args.enable_fused_shared_experts = True
+    logger.info(f"auto enable fused shared experts for model_type={model_type}")
+
+
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
     for key in key_name:
@@ -456,7 +494,15 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return "qwen3_coder"
 
     # Qwen3 series
-    if model_type in ["qwen3", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe", "qwen3_vl_text", "qwen3_vl_moe_text"]:
+    if model_type in [
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_omni_moe",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+        "qwen3_vl_text",
+        "qwen3_vl_moe_text",
+    ]:
         return "qwen25"
 
     # DeepSeek V3
@@ -492,6 +538,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe",
         "qwen3_vl_text",
         "qwen3_vl_moe_text",
+        "qwen3_omni_moe",
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
@@ -512,6 +559,19 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         return "gemma4"
 
     return None
+
+
+def auto_set_response_parsers(args) -> None:
+    """Infer response parsers from model config unless explicitly configured."""
+    if args.tool_call_parser is None:
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    if args.reasoning_parser is None:
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
 
 
 @lru_cache(maxsize=None)

@@ -300,6 +300,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
             topk_group=None,
             num_expert_group=None,
             is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
         )
         moe_out = self._tpsp_reduce(input=moe_out, infer_state=infer_state)
         return moe_out

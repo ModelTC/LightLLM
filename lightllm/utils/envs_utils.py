@@ -108,17 +108,13 @@ def get_deepep_num_max_dispatch_tokens_per_rank_decode():
     return max(configured, required)
 
 
-def get_lightllm_gunicorn_keep_alive():
-    return int(os.getenv("LIGHTLMM_GUNICORN_KEEP_ALIVE", 10))
-
-
 @lru_cache(maxsize=None)
 def get_lightllm_websocket_max_message_size():
     """
     Get the maximum size of the WebSocket message.
     :return: Maximum size in bytes.
     """
-    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 16 * 1024 * 1024))
+    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 128 * 1024 * 1024))
 
 
 # get_redundancy_expert_ids and get_redundancy_expert_num are primarily
@@ -184,6 +180,18 @@ def get_redundancy_expert_update_max_load_count():
 @lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
+
+
+@lru_cache(maxsize=None)
+def enable_full_att_decode_tune() -> bool:
+    """
+    Whether to run FA3 full-attention decode num_splits warmup/autotune at model init.
+
+    Env: ENABLE_FULL_ATT_DECODE_TUNE
+      - ON / TRUE / 1: enable
+      - otherwise (default False): skip this operator-specific tuning
+    """
+    return enable_env_vars("ENABLE_FULL_ATT_DECODE_TUNE")
 
 
 g_model_init_done = False
@@ -253,6 +261,12 @@ def enable_huge_page():
 
 
 @lru_cache(maxsize=None)
+def enable_cpu_cache_numa_interleave() -> bool:
+    """是否启用 CPU KV cache 共享内存的 NUMA 交错分配策略。"""
+    return enable_env_vars("LIGHTLLM_ENABLE_NUMA_INTERLEAVE")
+
+
+@lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
     # mtp 模式下需要在mem manger上扩展draft model使用的layer
     added_mtp_layer_num = 0
@@ -267,3 +281,8 @@ def get_added_mtp_kv_layer_num() -> int:
 @lru_cache(maxsize=None)
 def get_pd_split_max_new_tokens() -> int:
     return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
+
+
+@lru_cache(maxsize=None)
+def get_lightllm_url_pool_maxsize() -> int:
+    return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

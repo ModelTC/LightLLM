@@ -128,7 +128,7 @@ def silu_and_mul_fwd(
     alpha=None,
     run_config=None,
 ):
-    assert input.is_contiguous()
+    assert input.stride(-1) == 1
     assert output.is_contiguous()
     # limit+alpha: gpt-oss 语义 (up+1)*silu(alpha*gate); 仅 limit: clamp 后标准 silu (DeepSeek-V4)
     assert alpha is None or limit is not None

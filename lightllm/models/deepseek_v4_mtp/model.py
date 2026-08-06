@@ -110,7 +110,10 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
             )
         }
 
-    def _load_hf_weights(self):
+    def load_weights(self, weight_dict: dict):
+        if weight_dict:
+            return super().load_weights(weight_dict)
+
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
         assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 MTP requires model.safetensors.index.json."
         weight_map = utils.PetrelHelper.load_json(index_file)["weight_map"]

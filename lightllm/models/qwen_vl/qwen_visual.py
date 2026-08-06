@@ -12,6 +12,7 @@ from PIL import Image
 from typing import Callable, Optional, Sequence, Tuple, List, Union
 import numpy as np
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
+from lightllm.server.multimodal_params import ImageItem
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -413,21 +414,26 @@ class QWenVisionTransformer(nn.Module):
 
         return x
 
-    def encode(self, image_uuids: List):
+    def encode(self, images: List[Union[int, ImageItem]]):
         img_tensors = []
         uuids = []
         valid_id = 0
         valid_ids = []
 
-        for i, item in enumerate(image_uuids):
-            if isinstance(item, int):
-                uuids.append(item)
-                image_data = read_shm(get_shm_name_data(item))
-                image_data = Image.open(BytesIO(image_data)).convert("RGB")
-                t = self.image_transform(image_data)
-                img_tensors.append(t)
+        for i, item in enumerate(images):
+            # Legacy path: uuid int. Current visualserver / peak-hold path: ImageItem.
+            if isinstance(item, ImageItem):
+                uuid = item.uuid
+            elif isinstance(item, int):
+                uuid = item
             else:
                 raise Exception("Unsupported input types: {} for {}".format(type(item), item))
+
+            uuids.append(uuid)
+            image_data = read_shm(get_shm_name_data(uuid))
+            image_data = Image.open(BytesIO(image_data)).convert("RGB")
+            t = self.image_transform(image_data)
+            img_tensors.append(t)
 
             valid_ids.append([valid_id, valid_id + 1])
             valid_id += 1

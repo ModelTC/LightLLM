@@ -21,6 +21,7 @@ from ..pd_io_struct import PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.utils.error_utils import PDPrefillNodeStopGenToken
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -82,10 +83,13 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
     while True:
         forwarding_tokens_task = None
+        heartbeat_task = None
         try:
             uri = f"ws://{pd_master_obj.host_ip_port}/pd_register"
             async with websockets.connect(
-                uri, max_size=get_lightllm_websocket_max_message_size(), max_queue=(2048 * 1024, 2048 * 1023)  # 关键修改
+                uri,
+                max_size=get_lightllm_websocket_max_message_size(),
+                max_queue=(2048 * 1024, 2048 * 1023),  # 关键修改
             ) as websocket:
 
                 sock = websocket.transport.get_extra_info("socket")
@@ -96,7 +100,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 发送注册信息
                 regist_json = {
                     "node_id": manager.args.pd_node_id,
-                    "client_ip_port": f"{manager.host_ip}:{manager.args.port}",
+                    "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
                     "mode": manager.pd_mode.value,
                     "start_args": args_dict,
                 }
@@ -106,6 +110,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
                 # 转发任务
                 forwarding_tokens_task = asyncio.create_task(_up_tokens_to_pd_master(forwarding_queue, websocket))
+                heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -154,19 +159,22 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
         except asyncio.CancelledError:
             # 如果任务被取消，则退出循环
-            logger.warning(f"forwarding_tokens_task {pd_master_obj} cancelled")
-            if forwarding_tokens_task is not None:
-                forwarding_tokens_task.cancel()
+            logger.warning(f"pd_handle_task {pd_master_obj} cancelled")
             return
 
         except Exception as e:
             logger.error("connetion to pd_master has error")
             logger.exception(str(e))
-            if forwarding_tokens_task is not None:
-                forwarding_tokens_task.cancel()
-            await asyncio.sleep(10)
-            await forwarding_queue.get_all_data()
-            logger.info("reconnection to pd_master")
+        finally:
+            child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
+            for task in child_tasks:
+                task.cancel()
+            if child_tasks:
+                await asyncio.gather(*child_tasks, return_exceptions=True)
+
+        await asyncio.sleep(10)
+        await forwarding_queue.get_all_data()
+        logger.info("reconnection to pd_master")
 
 
 async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_Obj]]:
@@ -180,11 +188,11 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
     # node_id 为 0
     if not use_config_server:
         ans = dict()
-        ans[0] = PD_Master_Obj(node_id=0, host_ip_port=f"{args.pd_master_ip}:{args.pd_master_port}")
+        ans[0] = PD_Master_Obj(node_id=0, host_ip_port=f"{args.pd_master_ip}:{get_shm_port_args().pd_master_port}")
         return ans
 
     # 使用 config_server 服务来发现所有的 pd_master 节点。
-    uri = f"ws://{args.config_server_host}:{args.config_server_port}/registered_objects"
+    uri = f"ws://{args.config_server_host}:{get_shm_port_args().config_server_port}/registered_objects"
 
     try:
         async with httpx.AsyncClient() as client:
@@ -239,6 +247,13 @@ async def _up_tokens_to_pd_master(forwarding_queue: AsyncQueue, websocket: Clien
             await websocket.send(pickle.dumps((ObjType.TOKEN_PACKS, handle_list, load_info)))
 
 
+async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
+    heartbeat_interval_seconds = 15
+    while True:
+        await websocket.send(pickle.dumps((ObjType.HEARTBEAT,)))
+        await asyncio.sleep(heartbeat_interval_seconds)
+
+
 # 获取节点负载信息
 def _get_load_info() -> dict:
 
@@ -256,6 +271,6 @@ def _get_load_info() -> dict:
     mean_node_load = sum(current_load) / len(current_load)
     load_info = {
         "total_token_usage_rate": mean_node_load,
-        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{g_objs.args.port}",
+        "client_ip_port": f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}",
     }
     return load_info

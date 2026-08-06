@@ -132,4 +132,5 @@ class FlashInferAllReduce:
             input=inp,
             workspace=self._workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
+            # launch_with_pdl=True, # TODO: learn pdl and ensure no other side effects.
         )

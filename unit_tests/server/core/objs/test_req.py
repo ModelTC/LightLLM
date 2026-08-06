@@ -1,6 +1,7 @@
 import pytest
 import easydict
 from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
+from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
 from lightllm.utils.envs_utils import set_env_start_args
 
 
@@ -14,6 +15,7 @@ def setup_module_env():
                 "llm_decode_att_backend": ["None"],
                 "cpu_cache_token_page_size": 256,
                 "enable_cpu_cache": False,
+                "model_dir": "",
             }
         )
     )
@@ -40,6 +42,23 @@ def test_get_used_tokens(req):
     assert req.get_used_tokens() == 5
 
 
+def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
+    req.sample_params.prompt_logprobs = 0
+    req.shm_logprobs.arr["logprob"][1] = -0.5
+    req.shm_logprobs.arr["logprob"][2] = -1.25
+    req.shm_logprobs.arr["rank"][1] = 315
+    req.shm_logprobs.arr["rank"][2] = 4
+
+    metadata = ReqFinalTokenMetadata(req).read()
+
+    assert metadata["prompt_token_ids"] == [1, 2, 3]
+    assert metadata["prompt_logprobs"] == [
+        None,
+        {2: {"logprob": -0.5, "rank": 315, "decoded_token": None}},
+        {3: {"logprob": -1.25, "rank": 4, "decoded_token": None}},
+    ]
+
+
 def test_token_healing_req_post_init():
     token_healing_req = TokenHealingReq()
     token_healing_req.init(1, [1, 2, 3, 4], {"max_new_tokens": 1}, None)
@@ -56,6 +75,12 @@ def test_token_healing_req_post_init():
 def test_finish_status(req):
     req.finish_status.set_status(req.finish_status.FINISHED_STOP)
     assert req.finish_status.is_finished()
+    assert req.finish_status.get_finish_reason() == "stop"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_ERROR)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_finished_error()
+    assert req.finish_status.get_finish_reason() == "error"
 
 
 if __name__ == "__main__":

@@ -25,7 +25,6 @@ import requests
 import base64
 import os
 from io import BytesIO
-import pickle
 import setproctitle
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -37,7 +36,7 @@ import multiprocessing as mp
 from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
-from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
@@ -45,12 +44,13 @@ from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
-from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
-from dataclasses import dataclass
+from lightllm.utils.shm_port_args import get_shm_port_args
+from dataclasses import asdict, dataclass, is_dataclass
 
 from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
@@ -93,22 +93,24 @@ class G_Objs:
 
         setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::api_server")
 
+        init_tokenizer(args)  # for openai api
+        SamplingParams.load_generation_cfg(args.model_dir)
+        CompletionRequest.load_generation_cfg(args.model_dir)
+        ChatCompletionRequest.load_generation_cfg(args.model_dir)
+
+        if self.model_created is None:
+            self.model_created = int(time.time())
+
         if args.run_mode == "pd_master":
-            self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManagerForPDMaster(
                 args=args,
             )
         else:
-            init_tokenizer(args)  # for openai api
-            SamplingParams.load_generation_cfg(args.model_dir)
-            CompletionRequest.load_generation_cfg(args.model_dir)
-            ChatCompletionRequest.load_generation_cfg(args.model_dir)
-            self.metric_client = MetricClient(args.metric_port)
+            self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
             dp_size_in_node = max(1, args.dp // args.nnodes)  # 兼容多机纯tp的运行模式，这时候 1 // 2 == 0, 需要兼容
             self.shared_token_load = TokenLoad(f"{get_unique_server_name()}_shared_token_load", dp_size_in_node)
-            if self.model_created is None:
-                self.model_created = int(time.time())
 
 
 g_objs = G_Objs()
@@ -116,7 +118,6 @@ g_objs = G_Objs()
 app = FastAPI()
 g_objs.app = app
 
-_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
 _ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
 _ACCESS_LOG_RESET = "\033[0m"
 
@@ -179,6 +180,12 @@ def liveness():
 @app.get("/readiness")
 @app.post("/readiness")
 def readiness():
+    if g_objs.args.run_mode == "pd_master":
+        pd_nodes_are_ready = g_objs.httpserver_manager.pd_manager.is_pd_nodes_ready()
+        return JSONResponse(
+            {"status": "ok" if pd_nodes_are_ready else "not ready"},
+            status_code=200 if pd_nodes_are_ready else 503,
+        )
     return {"status": "ok"}
 
 
@@ -188,15 +195,63 @@ def get_model_name():
     return {"model_name": g_objs.args.model_name}
 
 
+@app.get("/get_server_info")
+@app.post("/get_server_info")
+def get_server_info():
+    if is_dataclass(g_objs.args):
+        return asdict(g_objs.args)
+
+    # HTTP workers restore StartArgs from the environment as an EasyDict.
+    return dict(g_objs.args)
+
+
+@app.get("/get_weight_version")
+@app.post("/get_weight_version")
+def get_weight_version():
+    return {"weight_version": g_objs.args.weight_version}
+
+
 @app.get("/healthz", summary="Check server health")
 @app.get("/health", summary="Check server health")
 @app.head("/health", summary="Check server health")
 async def healthcheck(request: Request):
-    if g_objs.args.run_mode == "pd_master":
-        return JSONResponse({"message": "Ok"}, status_code=200)
-
     if os.environ.get("DEBUG_HEALTHCHECK_RETURN_FAIL") == "true":
         return JSONResponse({"message": "Error"}, status_code=503)
+
+    if g_objs.args.run_mode == "pd_master":
+        httpserver_manager = g_objs.httpserver_manager
+        pd_manager = httpserver_manager.pd_manager
+        if g_objs.args.pd_master_mode == "elastic":
+            inference_is_healthy = httpserver_manager.is_healthy()
+            pd_nodes_are_ready = pd_manager.is_pd_nodes_ready()
+            is_healthy = inference_is_healthy and pd_nodes_are_ready
+            health_info = {
+                "inference_healthy": inference_is_healthy,
+                "pd_nodes_ready": pd_nodes_are_ready,
+            }
+        else:
+            inference_is_healthy = httpserver_manager.is_healthy()
+            pd_nodes_are_ready = pd_manager.is_pd_nodes_ready()
+            pd_nodes_are_healthy = (
+                inference_is_healthy and pd_nodes_are_ready and await pd_manager.check_pd_nodes_health()
+            )
+            is_healthy = pd_nodes_are_healthy
+            health_info = {
+                "inference_healthy": inference_is_healthy,
+                "pd_nodes_ready": pd_nodes_are_ready,
+                "pd_nodes_healthy": pd_nodes_are_healthy,
+            }
+
+        health_info.update(
+            {
+                "message": "Ok" if is_healthy else "Error",
+                "pd_master_mode": g_objs.args.pd_master_mode,
+                "registered_prefill_nodes": len(pd_manager.prefill_nodes),
+                "registered_decode_nodes": len(pd_manager.decode_nodes),
+            }
+        )
+        return JSONResponse(health_info, status_code=200 if is_healthy else 503)
+
     from lightllm.utils.health_check import health_check
 
     is_healthy = health_check(g_objs.httpserver_manager.shm_req_manager)
@@ -315,6 +370,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         resp = await chat_completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -332,6 +390,9 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         resp = await completions_impl(request, raw_request)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+    except ServerBusyError as e:
+        logger.warning(str(e))
+        return create_error_response(HTTPStatus.SERVICE_UNAVAILABLE, str(e))
     except ClientDisconnected as e:
         logger.warning(str(e))
         return Response(status_code=499)
@@ -434,48 +495,15 @@ async def metrics() -> Response:
     return response
 
 
-@app.websocket("/pd_register")
-async def register_and_keep_alive(websocket: WebSocket):
-    await websocket.accept()
-    websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
-    client_ip, client_port = websocket.client
-    logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
-    regist_json = json.loads(await websocket.receive_text())
-    logger.info(f"received regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
+# RL 控制面接口（abort / pause / flush / memory / weight update），见 api_http_rl.py
+from .api_http_rl import router as rl_router
 
-    try:
-        while True:
-            # 等待接收消息，设置超时为10秒
-            data = await websocket.receive_bytes()
-            obj = pickle.loads(data)
-            await g_objs.httpserver_manager.put_to_handle_queue(obj)
+app.include_router(rl_router)
 
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"client {regist_json} has error {str(e)}")
-        logger.exception(str(e))
-    finally:
-        logger.error(f"client {regist_json} removed")
-        await g_objs.httpserver_manager.remove_pd(regist_json)
-    return
+# PD 分离控制面接口（P/D 注册与 KV 状态上报），见 api_http_pd.py
+from .api_http_pd import router as pd_router
 
-
-@app.websocket("/kv_move_status")
-async def kv_move_status(websocket: WebSocket):
-    await websocket.accept()
-    client_ip, client_port = websocket.client
-    logger.info(f"kv_move_status Client connected from IP: {client_ip}, Port: {client_port}")
-    try:
-        while True:
-            # 等待接收消息，设置超时为10秒
-            data = await websocket.receive_bytes()
-            upkv_status = pickle.loads(data)
-            logger.info(f"received upkv_status {upkv_status} from {(client_ip, client_port)}")
-            await g_objs.httpserver_manager.update_req_status(upkv_status)
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
-        logger.exception(str(e))
-    return
+app.include_router(pd_router)
 
 
 @app.get("/profiler_start")

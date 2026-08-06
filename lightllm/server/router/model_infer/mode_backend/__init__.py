@@ -1,7 +1,6 @@
 from .chunked_prefill.impl import ChunkedPrefillBackend
 from .chunked_prefill.impl_for_first_token_constraint_mode import FirstTokenConstraintBackend
 from .chunked_prefill.impl_for_outlines_constraint_mode import OutlinesConstraintBackend
-from .chunked_prefill.impl_for_return_all_prompt_logprobs import ReturnPromptLogProbBackend
 from .chunked_prefill.impl_for_reward_model import RewardModelBackend
 from .chunked_prefill.impl_for_token_healing import TokenHealingBackend
 from .chunked_prefill.impl_for_xgrammar_mode import XgrammarBackend

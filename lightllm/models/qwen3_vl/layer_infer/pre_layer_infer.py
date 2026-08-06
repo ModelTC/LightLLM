@@ -23,6 +23,10 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         hidden_size = layer_weight.wte_weight_.weight.shape[1]
 
         for batch_id, p in enumerate(infer_state.multimodal_params):
+            # images 与 audios 共用后续 multimodal_emb / apply_deepstack 的定位信息。
+            # embedding 只取 cache[:, 0, :]，音频写入后这里是正确的；deepstack 阶段会
+            # 再按同一批 loc 叠加 cache[:, 1:, :]，因此音频占用的 slot 在写入时必须把
+            # 无用的 deepstack 层清零（见 offload_embed_tensor_to_cache），否则会叠加上脏数据。
             for img in p["images"] + p["audios"]:
                 # skip the same image
                 if img["token_id"] in img_start_token_ids:

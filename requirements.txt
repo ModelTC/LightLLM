@@ -70,7 +70,7 @@ wheel==0.40.0
 zstandard==0.23.0
 safetensors==0.4.5
 Pillow==10.4.0
-tiktoken==0.7.0
+tiktoken==0.8.0
 matplotlib==3.10.0
 psutil==5.9.4
 prometheus_client==0.20.0
@@ -97,4 +97,5 @@ cupy-cuda13x==14.0.1
 nixl==1.2.0
 xformers==0.0.35
 redis==7.3.0
-litellm>=1.52.0,<1.85
+litellm>=1.84.8,<1.85
+torch_memory_saver==0.0.9.post1

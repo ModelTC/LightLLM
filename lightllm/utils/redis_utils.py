@@ -1,5 +1,6 @@
 import subprocess
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -8,7 +9,7 @@ def start_redis_service(args):
     """launch redis service"""
 
     config_server_host = args.config_server_host
-    redis_port = args.config_server_visual_redis_port
+    redis_port = get_shm_port_args().config_server_visual_redis_port
     try:
         subprocess.run(
             ["redis-cli", "-h", config_server_host, "-p", str(redis_port), "FLUSHALL", "ASYNC"], check=False, timeout=2

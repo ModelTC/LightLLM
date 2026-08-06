@@ -6,10 +6,45 @@ from PIL import Image
 from io import BytesIO
 from fastapi import Request
 from functools import lru_cache
+from collections import OrderedDict
+from typing import Optional, Tuple
 from lightllm.utils.error_utils import ClientDisconnected
+from lightllm.utils.envs_utils import get_env_start_args, get_lightllm_url_pool_maxsize
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+class UrlResourcePool:
+    """Cache image, video, and audio URL content to avoid repeated downloads."""
+
+    def __init__(self, maxsize: int = 256):
+        self._maxsize = maxsize
+        self._cache: "OrderedDict[Tuple[str, Optional[str]], bytes]" = OrderedDict()
+
+    def get(self, url: str, proxy: Optional[str]) -> Optional[bytes]:
+        if not get_env_start_args().enable_multimodal_url_cache:
+            return None
+
+        key = (url.strip(), proxy)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            logger.info("url_pool hit")
+        return cached
+
+    def put(self, url: str, proxy: Optional[str], content: bytes) -> None:
+        if not get_env_start_args().enable_multimodal_url_cache or self._maxsize <= 0:
+            return
+
+        key = (url.strip(), proxy)
+        self._cache[key] = content
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+
+
+URL_RESOURCE_POOL = UrlResourcePool(maxsize=get_lightllm_url_pool_maxsize())
 
 
 def _httpx_async_client_proxy_kwargs(proxy) -> dict:
@@ -46,6 +81,10 @@ def _get_xhttp_client(proxy=None):
 
 async def fetch_resource(url, request: Request, timeout, proxy=None):
     logger.info(f"Begin to download resource from url: {url}")
+    cached = URL_RESOURCE_POOL.get(url, proxy)
+    if cached is not None:
+        return cached
+
     start_time = time.time()
     client = _get_xhttp_client(proxy)
     async with client.stream("GET", url, timeout=timeout) as response:
@@ -64,4 +103,5 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
     end_time = time.time()
     cost_time = end_time - start_time
     logger.info(f"Download url {url} resource cost time: {cost_time} seconds")
+    URL_RESOURCE_POOL.put(url, proxy, content)
     return content

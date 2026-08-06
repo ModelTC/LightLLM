@@ -28,11 +28,18 @@ from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.common.triton_utils.autotuner import AutotuneLevel
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status, enable_diverse_mode_gqa_decode_fast_kernel
+from lightllm.utils.envs_utils import (
+    set_model_init_status,
+    enable_diverse_mode_gqa_decode_fast_kernel,
+    enable_full_att_decode_tune,
+)
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.utils.torch_memory_saver_utils import (
+    TorchMemorySaverWrapper,
+    MemoryTag,
+)
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
 
@@ -92,6 +99,7 @@ class TpPartBaseModel:
         self.tp_world_size_ = get_dp_world_size()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
 
+        self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.is_mtp_mode = self.args.mtp_mode in [
             "vanilla_with_att",
             "eagle_with_att",
@@ -105,18 +113,21 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
-        self._init_weights()
-        self._init_req_manager()
-        self._init_mem_manager()
+        enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
+        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
+            self._init_weights()
+        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            self._init_req_manager()
+            self._init_mem_manager()
+
         # 因为类似 qwen3.5 的linear 架构的模型，其 req_manager 会存储运行时使用的大量 linear state
         # 这可能会占用大量的显存，所以，req_manger 中保存的 mem_manger 是mem manager 初始化后再赋值
         self.req_manager.mem_manager = self.mem_manager
-
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
-        self._load_hf_weights()
+        self.load_weights(self.weight_dict)
 
         self._init_att_backend()
         self._init_att_backend1()
@@ -128,6 +139,7 @@ class TpPartBaseModel:
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
         self._autotune_warmup()
+        self._full_att_decode_autotune()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
@@ -174,13 +186,14 @@ class TpPartBaseModel:
         ]
         return
 
-    def _load_hf_weights(self):
+    def load_weights(self, weight_dict: dict):
+        assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
-            self.data_type,
+            data_type=self.data_type,
             weight_dir=self.weight_dir_,
             pre_post_layer=self.pre_post_weight,
             transformer_layer_list=self.trans_layers_weight,
-            weight_dict=self.weight_dict,
+            weight_dict=weight_dict,
         )
         self.pre_post_weight.verify_load()
         [weight.verify_load() for weight in self.trans_layers_weight]
@@ -288,6 +301,52 @@ class TpPartBaseModel:
             else:
                 self.prefill_graph.warmup(self)
 
+    @final
+    @torch.no_grad()
+    @post_empty_cache
+    def _full_att_decode_autotune(self):
+        """
+        Warm up / autotune FA3 full-attention decode ``num_splits`` before CUDA Graph capture.
+
+        Runs only when all of the following hold:
+          - CUDA Graph is enabled (``disable_cudagraph`` is False)
+          - this is the main model (MTP draft models are skipped)
+          - ``ENABLE_FULL_ATT_DECODE_TUNE`` is set to 1/ON/TRUE (default off)
+          - decode attention backend is ``Fa3AttBackend``
+
+        Candidate batch sizes follow the same schedule as CUDA Graph capture.
+        Actual benchmarking is delegated to ``fa3_decode_autotune`` in ``sgl_utils``.
+        """
+        if self.disable_cudagraph:
+            return
+        # Only tune on the main model; MTP draft models skip this path.
+        if getattr(self, "is_mtp_draft_model", False):
+            return
+
+        # Opt-in switch for FA3 full-attention decode num_splits tuning.
+        # Set ENABLE_FULL_ATT_DECODE_TUNE=1/ON/TRUE to enable; default is off.
+        if not enable_full_att_decode_tune():
+            return
+
+        # Only Fa3AttBackend decode path needs this num_splits warmup.
+        decode_backends = [
+            self.decode_att_backend,
+            getattr(self, "decode_att_backend1", None),
+        ]
+        if not any(
+            backend is not None and backend.__class__.__name__ == "Fa3AttBackend" for backend in decode_backends
+        ):
+            return
+
+        from lightllm.utils.sgl_utils import fa3_decode_autotune
+
+        cuda_graph_batch_sizes = CudaGraph.gen_cuda_graph_batch_sizes(
+            max_batch_size=self.graph_max_batch_size,
+            tp_world_size=self.tp_world_size_,
+        )
+        fa3_decode_autotune(self, cuda_graph_batch_sizes)
+        return
+
     def _init_custom(self):
         pass
 
@@ -317,6 +376,7 @@ class TpPartBaseModel:
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
         infer_state.b_mtp_index = model_input.b_mtp_index
+        infer_state.b_position_delta = model_input.b_position_delta
         if model_input.is_prefill:
             if model_input.b_ready_cache_len is not None:
                 infer_state.b_ready_cache_len = model_input.b_ready_cache_len
@@ -373,6 +433,10 @@ class TpPartBaseModel:
             new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
         )
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
+        if new_model_input.b_position_delta is not None:
+            new_model_input.b_position_delta = F.pad(
+                new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0
+            )
         new_model_input.mem_indexes = F.pad(
             new_model_input.mem_indexes,
             (0, padded_batch_size),
@@ -467,13 +531,13 @@ class TpPartBaseModel:
     def _create_unpad_prefill_model_output(
         self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
     ):
-        if self.return_all_prompt_logics:
-            new_model_output = copy.copy(padded_model_output)
-            new_model_output.logits = new_model_output.logits[0:origin_handle_token_num]
-        else:
-            new_model_output = copy.copy(padded_model_output)
-            # 移除多余的pad 的那个 req 对应的 logics
-            new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output = copy.copy(padded_model_output)
+        # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
+        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
+        # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
+        if new_model_output.prompt_logics is not None:
+            new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
 
         # 特殊模型，特殊模式的特殊变量的特殊 unpad
         if new_model_output.mtp_main_output_hiddens is not None:
@@ -566,6 +630,8 @@ class TpPartBaseModel:
                 model_input=model_input, new_batch_size=infer_batch_size
             )
             infer_state = self._create_inferstate(model_input)
+            need_capture = self.graph.need_capture(infer_batch_size)
+            infer_state.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
                 infer_state.b_req_idx,
@@ -575,8 +641,7 @@ class TpPartBaseModel:
             infer_state.init_some_extra_state(self)
             infer_state.init_att_state()
 
-            if self.graph.need_capture(infer_batch_size):
-                infer_state.is_cuda_graph = True
+            if need_capture:
                 model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
             else:
                 model_output: ModelOutput = self.graph.replay(infer_state)
@@ -653,7 +718,7 @@ class TpPartBaseModel:
         mtp_main_output_hiddens = None
         if isinstance(predict_logits, tuple):
             predict_logits, mtp_main_output_hiddens = predict_logits
-        model_output = ModelOutput(logits=predict_logits)
+        model_output = ModelOutput(logits=predict_logits, prompt_logics=infer_state.prompt_logics)
 
         # 特殊模型特殊模式的额外输出
         if self.is_mtp_mode:
@@ -826,11 +891,13 @@ class TpPartBaseModel:
 
         if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
             infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
+            need_capture = self.graph.need_capture(infer_batch_size)
             # TODO 如果支持动态步数的 mtp，在不同的mtp步上，model_input0 和 model_input1 的内部batch size可能不
             # 一致，需要按照较高 batch size 进行graph的寻找，同时，进行有效的恢复。
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
+            infer_state0.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
                 infer_state0.b_req_idx,
@@ -841,6 +908,7 @@ class TpPartBaseModel:
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
+            infer_state1.is_cuda_graph = need_capture
             copy_kv_index_to_req(
                 self.req_manager.req_to_token_indexs,
                 infer_state1.b_req_idx,
@@ -850,10 +918,7 @@ class TpPartBaseModel:
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
-            if self.graph.need_capture(infer_batch_size):
-                infer_state0.is_cuda_graph = True
-                infer_state1.is_cuda_graph = True
-
+            if need_capture:
                 model_output0, model_output1 = self.graph.capture_decode(
                     self._overlap_tpsp_token_forward,
                     infer_state0,
@@ -942,8 +1007,8 @@ class TpPartBaseModel:
         if isinstance(predict_logits1, tuple):
             predict_logits1, mtp_main_output_hiddens1 = predict_logits1
 
-        model_output = ModelOutput(logits=predict_logits.contiguous())
-        model_output1 = ModelOutput(logits=predict_logits1.contiguous())
+        model_output = ModelOutput(logits=predict_logits.contiguous(), prompt_logics=infer_state.prompt_logics)
+        model_output1 = ModelOutput(logits=predict_logits1.contiguous(), prompt_logics=infer_state1.prompt_logics)
 
         if self.is_mtp_mode:
             if mtp_main_output_hiddens is not None:
@@ -1028,7 +1093,7 @@ class TpPartBaseModel:
         # 模拟最大长度进行 prefill，观察是否出现 OOM
         try:
             logger.info("begin check max_len infer")
-            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int32, device="cuda")
+            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
             mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
@@ -1074,6 +1139,7 @@ class TpPartBaseModel:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
+        torch.cuda.empty_cache()
         return
 
     def autotune_layers(self):
@@ -1087,7 +1153,7 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup()
         torch.distributed.barrier()
 
-        warmup_lengths = [1, 8, 16, 32, 64, 100, 128, 256, 1024, 2048, 4096]
+        warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
         if self.batch_max_tokens not in warmup_lengths:
             warmup_lengths.append(self.batch_max_tokens)
@@ -1103,7 +1169,7 @@ class TpPartBaseModel:
                 rand_gen = torch.Generator(device="cuda")
                 rand_gen.manual_seed(input_len)
                 dummy_input_ids = torch.randint(
-                    0, 10000, (input_len,), dtype=torch.int32, device="cuda", generator=rand_gen
+                    0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 mem_indexes = self.mem_manager.alloc(len(dummy_input_ids)).cuda()
@@ -1165,7 +1231,7 @@ class TpPartBaseModel:
         # prefill init padding req.
         prefill_input_len = 1
         batch_size = 1
-        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int64, device="cuda")
         b_req_idx = torch.tensor(
             [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
         )
@@ -1208,13 +1274,17 @@ class TpPartBaseModel:
         del b_seq_len
         del b_ready_cache_len
         del model_output
+        del b_mtp_index
+        del b_prefill_start_loc
+        del b_q_seq_len
         torch.cuda.empty_cache()
         return
 
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}
 
-        if self.is_mtp_draft_model:
+        is_mtp_draft_model = getattr(self, "is_mtp_draft_model", False)
+        if is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
                 token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
             )

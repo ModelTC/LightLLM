@@ -62,11 +62,7 @@ class DecodeReq:
         return False
 
     def need_detoken(self):
-        if (
-            (not self.req.is_aborted)
-            and (not self.req.stop_str_matched)
-            and len(self.output_ids) < self.req.candetoken_out_len
-        ):
+        if (not self.req.stop_str_matched) and len(self.output_ids) < self.req.candetoken_out_len:
             return True
         return False
 
@@ -83,8 +79,6 @@ class DecodeReq:
         return prefix_tokens, read_tokens
 
     def can_set_release_mark(self):
-        if self.req.is_aborted:
-            return True
         if self.req.stop_str_matched:
             return True
         if (

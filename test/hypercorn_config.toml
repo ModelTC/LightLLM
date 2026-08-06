@@ -1,0 +1,3 @@
+h2_max_concurrent_streams = 2147483647
+keep_alive_max_requests = 2147483647
+keep_alive_timeout = 2147483647

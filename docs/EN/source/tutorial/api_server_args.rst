@@ -40,6 +40,12 @@ Basic Configuration Parameters
 
     HTTP server worker process count, default is ``1``
 
+.. option:: --hypercorn_config
+
+    Path to a Hypercorn TOML configuration file. Only TOML configuration files are supported.
+    See ``test/hypercorn_config.toml`` for an example. Default: ``None``. The bind address and HTTP worker
+    count explicitly set by LightLLM override the corresponding values in the configuration file.
+
 .. option:: --zmq_mode
 
     ZMQ communication mode, optional values:
@@ -64,9 +70,24 @@ PD disaggregation Mode Parameters
     
     This parameter needs to be set when run_mode is set to prefill or decode
 
-.. option:: --pd_decode_rpyc_port
+.. option:: --pd_master_mode
 
-    Port used by decode nodes for kv move manager rpyc server in PD mode, default is ``42000``
+    PD master topology mode, optional values:
+
+    * ``elastic``: The number of Prefill and Decode nodes can change dynamically (default)
+    * ``<P>p<D>d``: The numbers of Prefill and Decode nodes are fixed. For example,
+      ``2p4d`` expects exactly 2 Prefill nodes and 4 Decode nodes.
+
+    This parameter is used when ``run_mode`` is set to ``pd_master``.
+    In ``elastic`` mode, PD Master becomes ready after at least one Prefill and one Decode node are registered;
+    additional nodes do not make it unready. In a fixed mode, PD Master is ready only when the registered node
+    counts exactly match the configured topology. ``/health``, ``/healthz``, and ``/readiness`` return HTTP 503
+    while the nodes are not ready. In a fixed topology mode, PD Master also requests ``/health`` concurrently
+    from every connected Prefill and Decode node. A failed or timed-out request, or any response other than
+    HTTP 200, makes the PD Master health endpoints return HTTP 503. Independently of the topology mode,
+    PD Master also applies the regular inference-progress health check: while requests remain in flight,
+    the endpoints return HTTP 503 if no request on the PD Master successfully returns a token for
+    ``HEALTH_TIMEOUT`` consecutive seconds.
 
 .. option:: --config_server_host
 
@@ -273,6 +294,10 @@ Multimodal Parameters
 
     If the model is a multimodal model, set this to not load the audio part model (default is None, auto-detected based on model)
 
+.. option:: --enable_multimodal_url_cache
+
+    Cache image, video, and audio URL content in the local process to avoid repeated downloads. Disabled by default. The maximum number of cached resources defaults to ``512`` and can be configured with ``LIGHTLLM_URL_POOL_MAXSIZE``.
+
 .. option:: --enable_mps
 
     Whether to enable nvidia mps for multimodal services
@@ -293,6 +318,14 @@ Multimodal Parameters
 
     If an input image exceeds this threshold, LightLLM automatically resizes it down to this pixel budget before continuing.
 
+    In multimodal PD disaggregation mode, PD Master and every Prefill node must use the same value; otherwise Prefill registration is rejected.
+
+.. option:: --disable_image_resize
+
+    Disable automatic resize for images exceeding ``--max_image_pixels``. Resize is enabled by default.
+
+    In multimodal PD disaggregation mode, PD Master and every Prefill node must use the same value.
+
 .. option:: --visual_infer_batch_size
 
     Number of images processed in each inference batch, default is ``1``
@@ -308,10 +341,6 @@ Multimodal Parameters
 .. option:: --visual_dp
 
     Number of data parallel instances for ViT, default is ``1``
-
-.. option:: --visual_nccl_ports
-
-    List of NCCL ports for ViT, e.g., 29500 29501 29502, default is [29500]
 
 .. option:: --vit_att_backend
 
@@ -446,18 +475,76 @@ Quantization Parameters
 
 .. option:: --quant_type
 
-    Quantization method, optional values:
+    ``W`` denotes weights and ``A`` denotes activations. The available values are listed below.
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
-    * ``vllm-fp8w8a8-b128``
-    * ``deepgemm-fp8w8a8-b128``
-    * ``triton-fp8w8a8-block128``
-    * ``triton-fp8w8a8g128``: weight per-channel quant and activation per-group 128 quant
-    * ``triton-fp8w8a8g64``: weight per-channel quantization with group size 64
-    * ``awq``
-    * ``awq_marlin``
-    * ``none`` (default)
+    .. list-table::
+       :header-rows: 1
+       :widths: 35 45 20
+       :align: left
+
+       * - ``quant_type``
+         - Quantization
+         - Implementation backend
+       * - ``w8a8``
+         - INT8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8``
+         - FP8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-pt``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - Triton
+       * - ``fp8w8a8-b128``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128``
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64``
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
+         - Triton
+       * - ``awq``
+         - INT4 weight-only; group size comes from the checkpoint
+         - vLLM
+       * - ``awq_marlin``
+         - INT4 weight-only; group size comes from the checkpoint
+         - vLLM
+       * - ``none``
+         - No quantization
+         - -
+       * - ``w8a8-vllm``
+         - INT8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-vllm``
+         - FP8 W8A8; W: per-channel, A: per-token
+         - vLLM
+       * - ``fp8w8a8-pt-vllm``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - vLLM
+       * - ``fp8w8a8-pt-sgl``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - SGL
+       * - ``fp8w8a8-pt-triton``
+         - FP8 W8A8; W: per-tensor, A: per-token
+         - Triton
+       * - ``fp8w8a8-b128-vllm``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - vLLM
+       * - ``fp8w8a8-b128-deepgemm``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - DeepGEMM
+       * - ``fp8w8a8-b128-triton``
+         - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g128-triton``
+         - FP8 W8A8; W: per-channel, A: per-token-group 128
+         - Triton
+       * - ``fp8w8a8g64-triton``
+         - FP8 W8A8; W: per-channel, A: per-token-group 64
+         - Triton
+       * - ``fp4fp8-b32-deepgemm``
+         - FP4/FP8 mixed quantization; fused MoE expert weights only (SM100)
+         - DeepGEMM
 
 .. option:: --quant_cfg
 
@@ -477,8 +564,8 @@ Quantization Parameters
 
     ViT quantization method, optional values:
 
-    * ``vllm-w8a8``
-    * ``vllm-fp8w8a8``
+    * ``w8a8``
+    * ``fp8w8a8``
     * ``none`` (default)
 
 .. option:: --vit_quant_cfg
@@ -497,9 +584,9 @@ Sampling and Generation Parameters
     * ``triton``: Use torch and triton kernel (default)
     * ``sglang_kernel``: Use sglang_kernel implementation
 
-.. option:: --return_all_prompt_logprobs
+.. option:: --enable_prompt_logprobs
 
-    Return logprobs for all prompt tokens
+    Enable prompt top-k logprobs capture
 
 .. option:: --use_reward_model
 
@@ -549,14 +636,6 @@ DeepSeek Redundant Expert Parameters
 
 Monitoring and Logging Parameters
 ---------------------------------
-
-.. option:: --disable_log_stats
-
-    Disable throughput statistics logging
-
-.. option:: --log_stats_interval
-
-    Interval for recording statistics (seconds), default is ``10``
 
 .. option:: --health_monitor
 

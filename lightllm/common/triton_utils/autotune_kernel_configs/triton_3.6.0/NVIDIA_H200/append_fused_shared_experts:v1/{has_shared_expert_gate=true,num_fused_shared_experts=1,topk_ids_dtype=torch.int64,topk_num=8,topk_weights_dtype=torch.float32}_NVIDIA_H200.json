@@ -1,0 +1,50 @@
+{
+  "1": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "100": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "1024": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "128": {
+    "BLOCK_TOKEN": 4,
+    "num_warps": 8
+  },
+  "16": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "16384": {
+    "BLOCK_TOKEN": 32,
+    "num_warps": 2
+  },
+  "2048": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "256": {
+    "BLOCK_TOKEN": 4,
+    "num_warps": 8
+  },
+  "32": {
+    "BLOCK_TOKEN": 4,
+    "num_warps": 8
+  },
+  "4096": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "64": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  },
+  "8": {
+    "BLOCK_TOKEN": 16,
+    "num_warps": 8
+  }
+}

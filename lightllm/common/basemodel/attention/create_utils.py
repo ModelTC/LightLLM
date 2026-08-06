@@ -1,4 +1,5 @@
 """Attention backend selection utilities."""
+
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
@@ -90,6 +91,14 @@ def _auto_select_backend(
     return backend_map[llm_dtype]["triton"]
 
 
+def _get_decode_backend_priority(priority_list: list, mtp_step: int) -> list:
+    """Return the auto-selection priority for decode attention."""
+    # With MTP, FA3 can make better use of Tensor Core compute and delivers better decode performance.
+    if mtp_step <= 0 or "fa3" not in priority_list:
+        return priority_list
+    return ["fa3"] + [backend_name for backend_name in priority_list if backend_name != "fa3"]
+
+
 def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
@@ -107,6 +116,7 @@ def get_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "
     if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
+        priority_list = _get_decode_backend_priority(priority_list, args.mtp_step)
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
 
@@ -127,6 +137,7 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["flashinfer
     if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
+        priority_list = _get_decode_backend_priority(priority_list, args.mtp_step)
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 

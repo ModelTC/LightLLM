@@ -23,6 +23,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from .manager import VisualManager
@@ -43,10 +44,11 @@ class ProxyVisualManager(VisualManager):
 
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False, pin_shm=False)
 
+        ports = get_shm_port_args()
         self.afs_handler = SepEmbedHandler(
             afs_embed_dir=self.args.afs_image_embed_dir,
             redis_host=self.args.config_server_host,
-            redis_port=self.args.config_server_visual_redis_port,
+            redis_port=ports.config_server_visual_redis_port,
             capacity=self.args.afs_embed_capacity,
         )
 
@@ -140,7 +142,8 @@ class ProxyVisualManager(VisualManager):
         counter = 0
         error_counter = 0
         while True:
-            uri = f"http://{self.args.config_server_host}:{self.args.config_server_port}/registered_visual_objects"
+            config_server_port = get_shm_port_args().config_server_port
+            uri = f"http://{self.args.config_server_host}:{config_server_port}/registered_visual_objects"
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.get(uri)

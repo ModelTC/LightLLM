@@ -11,7 +11,7 @@ from tqdm import tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
-from typing import Callable, Optional, Union, List
+from typing import Callable, List
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
@@ -106,14 +106,6 @@ class Autotuner:
 
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
-        self.cache_dir = os.path.join(
-            Path(__file__).parent,
-            "autotune_kernel_configs",
-            get_triton_version(),
-            get_current_device_name(),
-            self.kernel_name,
-        )
-        os.makedirs(self.cache_dir, exist_ok=True)
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -208,6 +200,25 @@ class Autotuner:
             self.fast_match_configs[static_key][run_key] = closest_config
 
         return self.fn(*args, **kwargs)
+
+    @property
+    def cache_dir(self) -> str:
+        if not hasattr(self, "_cache_dir"):
+            device_name = get_current_device_name()
+            if device_name is None:
+                raise RuntimeError(
+                    f"Autotuner for kernel {self.kernel_name} requires a visible CUDA/MUSA device "
+                    f"to resolve its cache directory, but torch.cuda.is_available() is False."
+                )
+            self._cache_dir = os.path.join(
+                Path(__file__).parent,
+                "autotune_kernel_configs",
+                get_triton_version(),
+                device_name,
+                self.kernel_name,
+            )
+            os.makedirs(self._cache_dir, exist_ok=True)
+        return self._cache_dir
 
     def _try_load_cache(self, static_key):
         if static_key in self.cached_configs:

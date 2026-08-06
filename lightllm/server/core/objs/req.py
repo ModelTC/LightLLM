@@ -1,6 +1,7 @@
 import os
 import math
 import ctypes
+import asyncio
 import numpy as np
 import time
 from .sampling_params import SamplingParams
@@ -12,32 +13,48 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_linear_att_mixed_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
-from typing import List, Any, Union
+from typing import Any, Dict, List, Union
 from lightllm.utils.log_utils import init_logger
+from .logprob_utils import logprob_info
+from .token_metadata import ReqFinalTokenMetadata
 
 logger = init_logger(__name__)
 
 
 class FinishStatus(ctypes.Structure):
+    """请求结束状态。API 侧通过 ``get_finish_reason()`` 映射为字符串。
+
+    - ``NO_FINISH``: 未结束
+    - ``FINISHED_STOP``: 正常停止（EOS / stop 序列等），finish_reason=``stop``
+    - ``FINISHED_LENGTH``: 达到 max_new_tokens 等长度上限，finish_reason=``length``
+    - ``FINISHED_ABORTED``: 客户端/调度主动 abort，finish_reason=``abort``
+    - ``FINISHED_ERROR``: 服务端内部错误导致无法继续生成，finish_reason=``error``。
+      典型场景：PD 分离 decode 节点 KV 传输失败。与 abort 区分：非用户取消，
+      而是传输/系统故障；若同一请求已 abort，应优先标 ``FINISHED_ABORTED``。
+    """
+
     _pack_ = 4
     _fields_ = [("status", ctypes.c_int)]
 
     NO_FINISH = 0
     FINISHED_STOP = 1
     FINISHED_LENGTH = 2
+    FINISHED_ABORTED = 3
+    # 内部错误结束（如 PD KV 传输失败）；见类文档。
+    FINISHED_ERROR = 4
 
     def __init__(self, init_state=NO_FINISH):
         self.status = init_state
 
     def set_status(self, new_status):
-        assert 0 <= new_status <= 2
+        assert 0 <= new_status <= 4
         self.status = new_status
 
     def get_status(self):
         return self.status
 
     def is_finished(self):
-        return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
+        return self.FINISHED_STOP <= self.status <= self.FINISHED_ERROR
 
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
@@ -45,11 +62,18 @@ class FinishStatus(ctypes.Structure):
     def is_finished_length(self):
         return self.status == self.FINISHED_LENGTH
 
+    def is_finished_error(self):
+        return self.status == self.FINISHED_ERROR
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
         elif self.status == self.FINISHED_LENGTH:
             return "length"
+        elif self.status == self.FINISHED_ABORTED:
+            return "abort"
+        elif self.status == self.FINISHED_ERROR:
+            return "error"
         return None
 
 
@@ -266,15 +290,67 @@ class Req(ctypes.Structure):
     def create_logprobs_shm_array(self):
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
-        self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
+        self.shm_logprobs = ShmArray(
+            name,
+            (self.alloc_shm_numpy_len,),
+            dtype=[("logprob", np.float32), ("rank", np.int32)],
+        )
         self.shm_logprobs.create_shm()
+        # rank=-1 表示该位置没有请求或没有计算 rank 元信息。
+        self.shm_logprobs.arr["logprob"][:] = 0.0
+        self.shm_logprobs.arr["rank"][:] = -1
         return
 
     def link_logprobs_shm_array(self):
         service_uni_name = get_unique_server_name()
         name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
-        self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
+        self.shm_logprobs = ShmArray(
+            name,
+            (self.alloc_shm_numpy_len,),
+            dtype=[("logprob", np.float32), ("rank", np.int32)],
+        )
         self.shm_logprobs.link_shm()
+        return
+
+    async def merge_final_token_metadata(
+        self,
+        metadata: Dict[str, Any],
+        tokenizer: Any,
+        enable_return_routed_experts: bool = False,
+        timeout: float = 60.0,
+    ) -> None:
+        """等待并读取 final token metadata，按需合并进 HTTP 输出 ``metadata``。
+
+        仅在需要 ``prompt_logprobs`` / ``routed_experts`` 时执行；失败或超时
+        不改动 ``metadata``（仅打 warning）。
+        """
+        # 阶段 1：判断本请求是否需要 final token metadata。
+        need_prompt_logprobs = self.sample_params.prompt_logprobs >= 0
+        if not (need_prompt_logprobs or enable_return_routed_experts):
+            return
+
+        # 阶段 2：等待 Infer 写完 metadata 并释放。
+        # Infer 在 dump 之后才会置 shm_infer_released=True，以此作为可读信号。
+        start_time = time.time()
+        while not self.shm_infer_released:
+            if time.time() - start_time > timeout:
+                logger.warning(f"wait final_token_metadata ready timeout, req_id={self.request_id}, timeout={timeout}s")
+                return
+            await asyncio.sleep(0.005)
+
+        # 阶段 3：从 shm 读取并解码（read 内部已尽量吞掉 shm 缺失等错误）。
+        try:
+            meta = ReqFinalTokenMetadata(self).read(tokenizer)
+        except Exception as e:
+            logger.warning(f"Failed to read final token metadata for req {self.request_id}: {e}")
+            return
+
+        # 阶段 4：按需合并进 HTTP 输出 metadata。
+        if need_prompt_logprobs:
+            metadata["prompt_logprobs"] = meta["prompt_logprobs"]
+            metadata["prompt_token_ids"] = meta["prompt_token_ids"]
+        if meta.get("routed_experts") is not None:
+            metadata["routed_experts"] = meta["routed_experts"]
         return
 
     def get_prompt_ids(self):
@@ -292,17 +368,57 @@ class Req(ctypes.Structure):
             self.sample_params.suggested_dp_index,
         )
 
+    def mark_simulated_finished(
+        self,
+        finish_status: int = FinishStatus.FINISHED_ABORTED,
+        output_len: int = 0,
+    ) -> bool:
+        """模拟/强制结束：补齐 finish token 与 finish_status，供 detoken / HTTP 收尾。
+
+        用于 waiting abort、Infer abort 释放兜底、PD KV 失败强制结束等路径。
+
+        注意：会写 ``finish_status`` / ``candetoken_out_len`` 等 shm 字段，Infer 侧仅
+        ``is_master_in_dp`` 节点可调用；router waiting abort 由调度进程独占写，同理。
+
+        无论当前 ``output_len`` 为多少，都在已有输出末尾再追加一个 EOS 作为 finish token，
+        最终输出长度变为 ``output_len + 1``。``candetoken_out_len`` 最后写，避免 detoken
+        读到不完整状态。
+
+        Returns:
+            是否实际写入了结束状态；shm 已 finished 时不覆盖，返回 False。
+        """
+        if self.finish_status.is_finished():
+            return False
+
+        if not hasattr(self, "shm_prompt_ids"):
+            self.link_prompt_ids_shm_array()
+        if not hasattr(self, "shm_logprobs"):
+            self.link_logprobs_shm_array()
+
+        # Append one EOS after existing outputs: [...prompt][...gen][eos]
+        new_output_len = output_len + 1
+        finish_token_index = self.input_len + new_output_len - 1
+        eos_ids = get_env_start_args().eos_id
+        token_id = eos_ids[0] if eos_ids else 0
+        self.shm_prompt_ids.arr[finish_token_index] = token_id
+        self.shm_logprobs.arr["logprob"][finish_token_index] = 0.0
+        self.shm_logprobs.arr["rank"][finish_token_index] = -1
+
+        self.finish_token_index = finish_token_index
+        self.finish_status.set_status(finish_status)
+        self.shm_cur_output_len = new_output_len
+        # candetoken_out_len 最后写，避免 detoken 提前读到不完整状态
+        self.candetoken_out_len = new_output_len
+        return True
+
     def can_release(self):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        if self.is_aborted and can_released_mark and ref_count_ok:
-            return True
-
-        ok_finished_gen_req = self.finish_status.is_finished() or self.stop_str_matched
-
-        if ok_finished_gen_req and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
+        # Infer put_back 前会写好 finish_status；ref_count_ok 已保证 Infer 已退出，
+        # 无需再 or stop_str_matched。
+        if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
         return False
@@ -319,23 +435,18 @@ class Req(ctypes.Structure):
     def get_first_router_need_tokens(self):
         raise NotImplementedError("Subclasses should implement this method")
 
-    def get_all_prompt_metadata(self):
-        """
-        return_all_prompt_logprobs mode use to return all logprobs cacul ppl
-        """
-        if hasattr(self, "_cache_prompt_metadata"):
-            return self._cache_prompt_metadata
-        metadata = {}
-        cur_ids = self.shm_prompt_ids.arr[0 : self.input_len]
-        all_prompts = []
-        for index in range(len(cur_ids) - 1):
-            tmp_dict = {int(cur_ids[index + 1]): float(self.shm_logprobs.arr[index + 1])}
-            all_prompts.append([int(cur_ids[index]), tmp_dict])
-
-        metadata["prompt_logprobs"] = all_prompts
-        metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
-        self._cache_prompt_metadata = metadata
-        return metadata
+    def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
+        token_id = int(self.shm_prompt_ids.arr[src_index])
+        rank = int(self.shm_logprobs.arr["rank"][src_index])
+        rank = None if rank < 0 else rank
+        return {
+            token_id: logprob_info(
+                tokenizer,
+                token_id,
+                self.shm_logprobs.arr["logprob"][src_index],
+                rank,
+            )
+        }
 
     def is_infer_decode(self) -> bool:
         """

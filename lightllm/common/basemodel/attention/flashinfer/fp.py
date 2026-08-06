@@ -4,6 +4,7 @@ from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, 
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
 from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
+from .utils import should_init_decode_wrapper
 
 
 class FlashInferAttBackend(BaseAttBackend):
@@ -126,6 +127,9 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     kv_starts: torch.Tensor = None
     decode_wrapper: object = None
 
+    def _should_init_decode_wrapper(self) -> bool:
+        return should_init_decode_wrapper(self.backend.model, self.infer_state)
+
     def init_state(self):
         import flashinfer
 
@@ -156,6 +160,10 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             self.kv_indices,
         )
         self.kv_starts = self.infer_state.b1_cu_kv_seq_len.int()
+        if not self._should_init_decode_wrapper():
+            # 处于 graph replay 回放阶段，不需要特殊初始化 decode wrapper。
+            return
+
         assert self.decode_wrapper is None
         self.decode_wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
             self.backend.workspace_buffer,
@@ -182,18 +190,36 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
 
     def copy_for_decode_cuda_graph(self, new_state: "FlashInferDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
-        self.decode_wrapper.plan(
-            new_state.kv_starts,
-            new_state.kv_indices,
-            new_state.kv_last_page_len_buffer,
-            new_state.backend.tp_q_head_num,
-            new_state.backend.tp_kv_head_num,
-            new_state.backend.head_dim,
-            1,
-            q_data_type=new_state.backend.q_data_type,
-            kv_data_type=new_state.backend.kv_data_type,
-            non_blocking=True,
+        self._refresh_cuda_graph_decode_plan(new_state.infer_state.max_kv_seq_len)
+        return
+
+    def _refresh_cuda_graph_decode_plan(self, max_kv_len: int):
+        from flashinfer.decode import fast_decode_plan
+
+        uniform_kv_indptr_cpu = (
+            torch.arange(
+                self.infer_state.batch_size + 1,
+                dtype=torch.int32,
+                device="cpu",
+            )
+            * max_kv_len
         )
+
+        fast_decode_plan(
+            self.decode_wrapper,
+            indptr=self.kv_starts,
+            indices=self.kv_indices,
+            last_page_len=self.kv_last_page_len_buffer,
+            num_qo_heads=self.backend.tp_q_head_num,
+            num_kv_heads=self.backend.tp_kv_head_num,
+            head_dim=self.backend.head_dim,
+            page_size=1,
+            q_data_type=self.backend.q_data_type,
+            kv_data_type=self.backend.kv_data_type,
+            non_blocking=True,
+            global_override_indptr_cpu=uniform_kv_indptr_cpu,
+        )
+        return
 
     def decode_att(
         self,

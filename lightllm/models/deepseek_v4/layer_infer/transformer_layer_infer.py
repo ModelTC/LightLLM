@@ -522,6 +522,7 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
             topk_weights=weights,
             topk_ids=indices,
             is_prefill=infer_state.is_prefill,
+            infer_state=infer_state,
             clamp_limit=float(self.swiglu_limit),
             alloc_tensor_func=self.alloc_tensor,
         )

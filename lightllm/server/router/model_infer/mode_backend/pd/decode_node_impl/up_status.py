@@ -15,6 +15,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
 import torch.multiprocessing as mp
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.process_check import start_parent_check_thread
 
 logger = init_logger(__name__)
 
@@ -109,6 +110,7 @@ class UpStatusManager:
 
 
 def _init_env(args, task_in_queue: mp.SimpleQueue):
+    start_parent_check_thread()
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::pd_up_kv_status")
     up_kv_manager = UpStatusManager(args, task_in_queue)

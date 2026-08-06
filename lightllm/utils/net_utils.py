@@ -1,46 +1,9 @@
 import socket
 import subprocess
 import ipaddress
-import random
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
-
-
-def alloc_can_use_network_port(num=3, used_ports=None, from_port_num=10000):
-    port_list = []
-    for port in range(from_port_num, 65536):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            result = s.connect_ex(("localhost", port))
-            if result != 0 and port not in used_ports:
-                port_list.append(port)
-            if len(port_list) > num * 30:
-                break
-
-    if len(port_list) < num:
-        return None
-
-    random.shuffle(port_list)
-    return port_list[0:num]
-
-
-def alloc_can_use_port(min_port, max_port):
-    port_list = []
-    for port in range(min_port, max_port):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            result = s.connect_ex(("localhost", port))
-            if result != 0:
-                port_list.append(port)
-    return port_list
-
-
-def find_available_port(start_port, end_port):
-    for port in range(start_port, end_port + 1):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            result = sock.connect_ex(("localhost", port))
-            if result != 0:
-                return port
-    return None
 
 
 def get_hostname_ip():
@@ -63,22 +26,15 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
-class PortLocker:
-    def __init__(self, ports):
-        self.ports = ports
-        self.sockets = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(len(self.ports))]
-        for _socket in self.sockets:
-            _socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def validate_ports(ports: list):
+    """校验端口列表：列表内不重复，且当前均可 bind。"""
+    if len(ports) != len(set(ports)):
+        raise RuntimeError(f"conflicting ports in list: {ports}")
 
-    def lock_port(self):
-        for _socket, _port in zip(self.sockets, self.ports):
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             try:
-                _socket.bind(("", _port))
-                _socket.listen(1)
-            except Exception as e:
-                logger.error(f"port {_port} has been used")
-                raise e
-
-    def release_port(self):
-        for _socket in self.sockets:
-            _socket.close()
+                sock.bind(("", port))
+            except OSError as e:
+                raise RuntimeError(f"port {port} has been used") from e
+    logger.info(f"validated ports: {ports}")

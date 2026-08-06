@@ -107,14 +107,17 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
+        args = get_env_start_args()
         if not hasattr(self, "big_page_ids_buffer_store"):
             self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device="cuda")
+            # 多申请3个cpu cache token page size，用于处理碎页情况，碎页情况需要将对应的大页数据拷贝到临时的大页上，
+            # 再从大页上拷贝到对应的运行态页面上
             self.mem_indexes_buffer = torch.empty(
-                (get_env_start_args().max_req_total_len + 1024,), dtype=torch.int32, device="cuda"
+                (args.max_req_total_len + 3 * args.cpu_cache_token_page_size,), dtype=torch.int32, device="cuda"
             )
 
         assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
-        args = get_env_start_args()
+
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
 
@@ -134,6 +137,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         if len(mem_indexes) % args.cpu_cache_token_page_size != 0:
             # 存在不满大页的碎页的页面存在需要复制的情况
             dst_len = triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
+            assert dst_len <= self.mem_indexes_buffer.shape[0]
             dst_mem_indexes = self.mem_indexes_buffer[0:dst_len].fill_(-1)
             dst_mem_indexes[0 : len(mem_indexes)].copy_(mem_indexes, non_blocking=True)
             mem_indexes = dst_mem_indexes

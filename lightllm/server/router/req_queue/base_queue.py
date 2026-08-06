@@ -1,9 +1,13 @@
+import time
 from typing import List, Dict
 from lightllm.utils.infer_utils import calculate_time
 from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.config_utils import get_fixed_kv_len
 from lightllm.server.core.objs import StartArgs
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
 
 
 class BaseQueue:
@@ -31,6 +35,50 @@ class BaseQueue:
             self.router.cpu_cache_client.deref_pages(req.cpu_cache_match_page_indexes.get_all())
             req.cpu_cache_match_page_indexes.clear()
             self.router.cpu_cache_client.lock.release()
+
+    def should_release_aborted_req_in_queue(self, req: Req):
+        # 多节点 TP 的 waiting req abort 状态必须先由 rank 0 broadcast 对齐，
+        # 不能在各节点本地调度队列里提前按各自 shm 状态释放。
+        return req.is_aborted and not self.router.is_multinode_tp
+
+    def release_aborted_req(self, req: Req):
+        logger.debug(f"router abort req id {req.request_id} shm_index: {req.index_in_shm_mem}")
+        self.free_aborted_req_cpu_cache_pages(req)
+        # 未进 Infer：模拟 EOS + ABORTED；自行置 released，以免 HTTP 空等 metadata。
+        req.mark_simulated_finished(FinishStatus.FINISHED_ABORTED, output_len=0)
+        req.shm_infer_released = True
+        self.router.shm_req_manager.put_back_req_obj(req)
+        return
+
+    def filter_aborted_reqs(self):
+        # 只释放 should_release_aborted_req_in_queue 为真的请求。
+        # 采一波 → sleep 10ms → 再采；前后 request_id 集合完全一致才释放，
+        # 避免同组 abort 标记写全前提前摘掉。多机 TP 下门禁为 False，不进入释放路径。
+        aborted_reqs = [req for req in self.waiting_req_list if self.should_release_aborted_req_in_queue(req)]
+        if not aborted_reqs:
+            return
+
+        prev_ids = {req.request_id for req in aborted_reqs}
+        for _ in range(100):
+            time.sleep(0.01)
+            aborted_reqs = [req for req in self.waiting_req_list if self.should_release_aborted_req_in_queue(req)]
+            cur_ids = {req.request_id for req in aborted_reqs}
+            if prev_ids == cur_ids:
+                break
+            prev_ids = cur_ids
+        else:
+            # 100 次仍未稳定，本轮不释放，下轮调度再试
+            logger.warning(
+                f"aborted reqs not stable after 100 retries, skip release this round, "
+                f"aborted_ids={sorted(prev_ids)}"
+            )
+            return
+
+        aborted_ids = {req.request_id for req in aborted_reqs}
+        self.waiting_req_list = [req for req in self.waiting_req_list if req.request_id not in aborted_ids]
+        for req in aborted_reqs:
+            self.release_aborted_req(req)
+        return
 
     def extend(self, req_group: List[Req]):
         for req in req_group:

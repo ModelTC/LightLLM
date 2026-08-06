@@ -12,6 +12,7 @@ from ..trans_process_obj import KVTransProcess
 from ..base_kv_move_manager import BaseKVMoveManager
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.process_check import start_parent_check_thread
 
 logger = init_logger(__name__)
 
@@ -27,6 +28,7 @@ def start_decode_kv_move_manager_process(args, info_queue: mp.Queue):
 
 
 def _init_env(args, info_queue: mp.Queue, event: mp.Event):
+    start_parent_check_thread()
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理

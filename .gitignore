@@ -8,3 +8,6 @@ dist
 tmp/
 requirements-musa.txt
 logs/
+
+/benchmark/
+artifacts/

@@ -1,8 +1,8 @@
 import argparse
 
 
-def make_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.formatter_class = argparse.RawTextHelpFormatter
 
     parser.add_argument(
         "--run_mode",
@@ -35,6 +35,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--httpserver_workers", type=int, default=1)
     parser.add_argument(
+        "--hypercorn_config",
+        type=str,
+        default=None,
+        help="Path to a Hypercorn TOML configuration file. See test/hypercorn_config.toml for an example.",
+    )
+    parser.add_argument(
         "--zmq_mode",
         type=str,
         default="ipc:///tmp/",
@@ -54,11 +60,27 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="when run_mode set to prefill or decode, you need set this pd_mater_port",
     )
     parser.add_argument(
+        "--pd_master_mode",
+        type=str,
+        default="elastic",
+        help=(
+            "PD master topology mode: elastic allows the number of Prefill and Decode nodes to change "
+            "dynamically; use <P>p<D>d for a fixed topology, for example 2p4d. Default: elastic."
+        ),
+    )
+    parser.add_argument(
+        "--pd_trans_mode",
+        type=str,
+        choices=["nccl", "nixl"],
+        default="nccl",
+        help="KV transfer backend for PD disaggregation; default: nccl",
+    )
+    parser.add_argument(
         "--select_p_d_node_strategy",
         type=str,
-        default="round_robin",
-        choices=["random", "round_robin", "adaptive_load"],
-        help="pd master use this strategy to select p d node, can be round_robin, random or adaptive_load",
+        default="cache_aware",
+        choices=["random", "round_robin", "adaptive_load", "cache_aware"],
+        help="pd master use this strategy to select p d node; default cache_aware",
     )
     parser.add_argument(
         "--config_server_host",
@@ -271,8 +293,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
     parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
-    parser.add_argument("--disable_log_stats", action="store_true", help="disable logging throughput stats.")
-    parser.add_argument("--log_stats_interval", type=int, default=10, help="log stats interval in second.")
     parser.add_argument(
         "--disable_shm_warning",
         action="store_true",
@@ -350,6 +370,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="if the model is a multimodal model, set to not load audio part model.",
     )
     parser.add_argument(
+        "--enable_multimodal_url_cache",
+        action="store_true",
+        help="cache image, video, and audio URL content in the local process to avoid repeated downloads.",
+    )
+    parser.add_argument(
         "--enable_mps", action="store_true", help="Whether to enable nvidia mps for multimodal service."
     )
     parser.add_argument(
@@ -403,7 +428,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
-                (priority: flashinfer > fa3 > triton)""",
+                (priority when mtp_step > 0: fa3 > flashinfer > triton;
+                otherwise: flashinfer > fa3 > triton)""",
     )
     parser.add_argument(
         "--vit_att_backend",
@@ -452,8 +478,13 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_image_pixels",
         type=int,
-        default=8294400,
+        default=3686400,  # 8294400 is 4k, 3686400 is 2k
         help="maximum allowed pixel count for one image before resize preprocessing",
+    )
+    parser.add_argument(
+        "--disable_image_resize",
+        action="store_true",
+        help="disable automatic resize for images exceeding --max_image_pixels (enabled by default)",
     )
     parser.add_argument(
         "--embed_cache_storage_size",
@@ -468,7 +499,11 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="the data type of the model weight",
     )
-    parser.add_argument("--return_all_prompt_logprobs", action="store_true", help="return all prompt tokens logprobs")
+    parser.add_argument(
+        "--enable_prompt_logprobs",
+        action="store_true",
+        help="enable prompt top-k logprobs capture",
+    )
 
     parser.add_argument("--use_reward_model", action="store_true", help="use reward model")
 
@@ -500,13 +535,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visual_tp", type=int, default=1, help="number of tensort parallel instances for ViT")
     parser.add_argument("--visual_dp", type=int, default=1, help="number of data parallel instances for ViT")
     parser.add_argument(
-        "--visual_nccl_ports",
-        nargs="+",
-        type=int,
-        default=None,
-        help="List of NCCL ports to build a distributed environment for Vit, e.g., 29500 29501 29502",
-    )
-    parser.add_argument(
         "--visual_rpyc_port",
         type=int,
         default=None,
@@ -525,13 +553,6 @@ def make_argument_parser() -> argparse.ArgumentParser:
         help="Tensor parallel size for audio encoder (only 1 is supported; use audio_dp to scale)",
     )
     parser.add_argument("--audio_dp", type=int, default=1, help="Data parallel replicas for audio encoder")
-    parser.add_argument(
-        "--audio_nccl_ports",
-        nargs="+",
-        type=int,
-        default=None,
-        help="NCCL ports per audio DP group; if omitted, auto-allocated in api_start (reserved until audio_tp>1)",
-    )
     parser.add_argument(
         "--audio_infer_batch_size",
         type=int,
@@ -605,10 +626,30 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--quant_type",
         type=str,
         default="none",
-        help="""Quantization method: vllm-w8a8 | vllm-fp8w8a8 | vllm-fp8w8a8-b128
-                        | deepgemm-fp8w8a8-b128 | triton-fp8w8a8-block128 | awq | awq_marlin |
-                        | triton-fp8w8a8g128 (weight perchannel quant and act per group quant) |
-                        triton-fp8w8a8g64 (weight perchannel quantization with group size 64)""",
+        help=(
+            "Quantization methods (W = weight, A = activation):\n"
+            "  quant_type                     quantization                           implementation backend\n"
+            "  w8a8                           INT8; W per-channel, A per-token       vLLM\n"
+            "  fp8w8a8                        FP8; W per-channel, A per-token        vLLM\n"
+            "  fp8w8a8-pt                     FP8; W per-tensor, A per-token         Triton\n"
+            "  fp8w8a8-b128                   FP8; W block 128x128, A group 128      Triton\n"
+            "  fp8w8a8g128                    FP8; W per-channel, A group 128        Triton\n"
+            "  fp8w8a8g64                     FP8; W per-channel, A group 64         Triton\n"
+            "  awq                            INT4 weight-only; checkpoint group     vLLM\n"
+            "  awq_marlin                     INT4 weight-only; checkpoint group     vLLM\n"
+            "  none                           No quantization                        -\n"
+            "  w8a8-vllm                      INT8; W per-channel, A per-token       vLLM\n"
+            "  fp8w8a8-vllm                   FP8; W per-channel, A per-token        vLLM\n"
+            "  fp8w8a8-pt-vllm                FP8; W per-tensor, A per-token         vLLM\n"
+            "  fp8w8a8-pt-sgl                 FP8; W per-tensor, A per-token         SGL\n"
+            "  fp8w8a8-pt-triton              FP8; W per-tensor, A per-token         Triton\n"
+            "  fp8w8a8-b128-vllm              FP8; W block 128x128, A group 128      vLLM\n"
+            "  fp8w8a8-b128-deepgemm          FP8; W block 128x128, A group 128      DeepGEMM\n"
+            "  fp8w8a8-b128-triton            FP8; W block 128x128, A group 128      Triton\n"
+            "  fp8w8a8g128-triton             FP8; W per-channel, A group 128        Triton\n"
+            "  fp8w8a8g64-triton              FP8; W per-channel, A group 64         Triton\n"
+            "  fp4fp8-b32-deepgemm            FP4/FP8; fused MoE experts only        DeepGEMM"
+        ),
     )
     parser.add_argument(
         "--quant_cfg",
@@ -623,8 +664,8 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["fp8", "fp4"],
         help="""Requested dtype for MoE expert weights, fp8 or fp4. Resolves the fused_moe
-            quant method: fp8 -> deepgemm-fp8w8a8-b128; fp4 -> deepgemm-fp4fp8-b32 (online
-            quantization) on SM100 GPUs, or marlin-mxfp4w4a16-b32 (Marlin W4A16, TP only) on other GPUs.
+            quant method: fp8 -> fp8w8a8-b128-deepgemm; fp4 -> fp4fp8-b32-deepgemm (online
+            quantization) on SM100 GPUs, or mxfp4w4a16-b32-marlin (Marlin W4A16, TP only) on other GPUs.
             Defaults to `expert_dtype` in config.json if present. Per-layer override:
             --quant_cfg mix_bits with name `fused_moe`.""",
     )
@@ -632,7 +673,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--vit_quant_type",
         type=str,
         default="none",
-        help="""Quantization method for ViT: vllm-w8a8 | vllm-fp8w8a8""",
+        help="""Quantization method for ViT: w8a8 | fp8w8a8""",
     )
     parser.add_argument(
         "--vit_quant_cfg",
@@ -688,7 +729,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_fused_shared_experts",
         action="store_true",
-        help="""Whether to enable fused shared experts for deepseekv3 model. only work when tensor parallelism""",
+        help="""Whether to enable fused shared experts for supported MoE models. It is auto-enabled when supported.""",
     )
     parser.add_argument(
         "--mtp_mode",
@@ -775,6 +816,19 @@ def make_argument_parser() -> argparse.ArgumentParser:
         "--disk_cache_storage_size", type=float, default=10, help="""The capacity of disk cache. GB used."""
     )
     parser.add_argument(
+        "--enable_rl",
+        action="store_true",
+        default=False,
+        help="""enable RL control plane (HTTP APIs, router rl_rpyc, model RlBackendOps).
+        When disabled (default), RL routes/services are not started.""",
+    )
+    parser.add_argument(
+        "--enable_torch_memory_saver",
+        action="store_true",
+        help="""enable torch memory saver, which is used for release_memory and resume_memory during RL training.""",
+    )
+    parser.add_argument("--enable_weight_cpu_backup", action="store_true", help="""enable weight cpu backup.""")
+    parser.add_argument(
         "--disk_cache_dir",
         type=str,
         default=None,
@@ -848,6 +902,12 @@ def make_argument_parser() -> argparse.ArgumentParser:
         it will use triton implementation.""",
     )
     parser.add_argument(
+        "--enable_return_routed_experts",
+        action="store_true",
+        default=False,
+        help="Enable returning routed expert indices for MoE models (R3 feature).",
+    )
+    parser.add_argument(
         "--enable_profiling",
         type=str,
         choices=["torch_profiler", "nvtx"],
@@ -863,3 +923,7 @@ def make_argument_parser() -> argparse.ArgumentParser:
                 A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
     )
     return parser
+
+
+def make_argument_parser() -> argparse.ArgumentParser:
+    return add_cli_args(argparse.ArgumentParser())

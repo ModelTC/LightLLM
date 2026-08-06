@@ -11,6 +11,7 @@ from functools import lru_cache
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     enable_huge_page,
+    enable_cpu_cache_numa_interleave,
     get_llm_data_type,
     get_added_mtp_kv_layer_num,
 )
@@ -149,8 +150,11 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
     if args.mtp_mode is not None and mem_manager_class is not DeepseekV4MemoryManager:
         # TODO 可能会存在不同mtp模式的精度问题
-        assert is_linear_att_mixed_model(args.model_dir) is False, "linear att mixed model does not support mtp mode"
-        cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
+        if not is_linear_att_mixed_model(args.model_dir):
+            # 对于非 linear att 混合模型，需要额外增加 mtp 的 kv 层数，
+            # 对于 linear att 混合模型，如qwen 3.5 mtp，已经将 kv 数据
+            # 打包成一个块了，所以不需要额外增加，其 layer_num 一直都保持为 1
+            cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
 
     cpu_cache_page_num = int(
         (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())
@@ -221,20 +225,6 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     requested_size = size
     use_hugetlb = enable_huge_page()
 
-    # 计算大页大小（默认从 /proc/meminfo 读取 Hugepagesize）
-    def _get_default_hugepage_size() -> int:
-        try:
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if line.startswith("Hugepagesize:"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            kb = int(parts[1])
-                            return kb * 1024
-        except Exception:
-            pass
-        return 2 * 1024 * 1024  # fallback 2MB
-
     shmflg = 0o666 | 0o1000  # 权限和 IPC_CREAT 标志
     if use_hugetlb:
         # 向上对齐到大页大小
@@ -273,6 +263,8 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
     if shm_addr == ctypes.c_void_p(-1).value:
         raise Exception("Error attaching shared memory")
     logger.info(f"Shared cpu kv cache tensor memory at address: {shm_addr}")
+
+    interleave_pages_across_numa_nodes(libc, shm_addr, size_to_alloc)
 
     # Best-effort memory prefaulting in background to speed up subsequent cudaHostRegister
     def _pre_warm_memory():
@@ -367,4 +359,111 @@ def attach_shm_kv_cache_ptr(key: int, size: int) -> int:
         raise Exception(f"Error attaching shared memory (errno={err})")
 
     logger.info(f"Attached to SHM key={key}, shmid={shmid}, addr={shm_addr}")
+
+    interleave_pages_across_numa_nodes(libc, shm_addr, size)
     return shm_addr
+
+
+def _get_default_hugepage_size() -> int:
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("Hugepagesize:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        kb = int(parts[1])
+                        return kb * 1024
+    except Exception:
+        pass
+    return 2 * 1024 * 1024
+
+
+def _get_online_numa_nodes() -> List[int]:
+    for path in ("/sys/devices/system/node/has_memory", "/sys/devices/system/node/online"):
+        try:
+            with open(path, "r") as f:
+                online = f.read().strip()
+            nodes: List[int] = []
+            for part in online.split(","):
+                if "-" in part:
+                    start, end = part.split("-")
+                    nodes.extend(range(int(start), int(end) + 1))
+                else:
+                    nodes.append(int(part))
+            return nodes
+        except Exception:
+            continue
+    return [0]
+
+
+def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
+    """为 CPU KV cache 的共享内存映射设置 NUMA 交错分配策略。
+
+    CPU KV cache 使用 SysV SHM 在多个进程间共享。默认的 first-touch 策略会把物理页分配到
+    首次触页线程所在的 NUMA 节点；在多 Socket 机器上，后台 prefault 线程的调度位置可能导致
+    大量 cache 页集中到单个内存控制器，限制多个 GPU 并发 load/offload 的主机内存带宽。
+
+    本函数通过 ``mbind(MPOL_INTERLEAVE)`` 将映射范围内尚未分配的物理页按页偏移交错放置到
+    可用 NUMA 节点。调用方应在首次触页前设置策略：creator 在启动 prefault 线程前调用；
+    HugeTLB 的共享策略不会可靠地传播到其他进程的 VMA，因此 attacher 也需要在访问映射前调用。
+
+    调用未设置 ``MPOL_MF_MOVE``，所以只影响后续缺页分配，不迁移已经分配的物理页。该功能默认
+    关闭，只有设置 ``LIGHTLLM_ENABLE_NUMA_INTERLEAVE`` 后才会启用；未启用、单 NUMA、不支持的
+    架构或 syscall 失败都会安全回退到原有 first-touch 行为。
+
+    Args:
+        libc: 使用 ``use_errno=True`` 加载的 libc 对象，用于发起 raw ``mbind`` syscall。
+        addr: ``shmat`` 返回的、按页对齐的映射起始虚拟地址。
+        size: 需要设置策略的映射长度；HugeTLB 模式下会向上对齐到默认大页大小。
+
+    Returns:
+        策略成功安装时返回 ``True``；跳过或安装失败时返回 ``False``。
+    """
+    MPOL_INTERLEAVE = 3
+    SYS_MBIND = {"x86_64": 237, "aarch64": 235}.get(os.uname().machine)
+
+    if not enable_cpu_cache_numa_interleave():
+        return False
+
+    if SYS_MBIND is None:
+        logger.warning(f"unsupported architecture {os.uname().machine}, skip cpu cache numa interleave")
+        return False
+
+    if enable_huge_page():
+        huge_sz = _get_default_hugepage_size()
+        size = triton.cdiv(size, huge_sz) * huge_sz
+
+    def _mbind(mode, mask):
+        nodemask = ctypes.c_ulong(mask)
+        libc.syscall.restype = ctypes.c_long
+        return libc.syscall(
+            ctypes.c_long(SYS_MBIND),
+            ctypes.c_void_p(addr),
+            ctypes.c_ulong(size),
+            ctypes.c_int(mode),
+            ctypes.byref(nodemask),
+            # Raw syscall ABI decrements maxnode before copying the bitmap.
+            # Passing mask width + 1 preserves every bit while copying exactly one c_ulong.
+            ctypes.c_ulong(ctypes.sizeof(nodemask) * 8 + 1),
+            ctypes.c_uint(0),
+        )
+
+    nodes = _get_online_numa_nodes()
+    if len(nodes) <= 1:
+        return False
+    if max(nodes) >= 64:
+        logger.warning(f"more than 64 numa nodes ({nodes}), skip cpu cache numa interleave")
+        return False
+    try:
+        ret = _mbind(MPOL_INTERLEAVE, sum(1 << n for n in nodes))
+        if ret != 0:
+            logger.warning(
+                f"mbind MPOL_INTERLEAVE failed (errno={ctypes.get_errno()}), "
+                f"cpu kv cache pages will use default first-touch numa policy"
+            )
+            return False
+        logger.info(f"cpu kv cache pages interleaved across numa nodes {nodes}")
+        return True
+    except Exception as e:
+        logger.warning(f"cpu cache numa interleave skipped: {e}")
+        return False

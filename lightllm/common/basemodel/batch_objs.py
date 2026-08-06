@@ -39,6 +39,9 @@ class ModelInput:
     mem_indexes: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
+    # 只会在继承 Qwen2VLInferStateInfo 的 MRoPE 模型 decode 阶段使用，如
+    # Qwen2/2.5-VL、Qwen3-VL/MOE/Omni、Qwen3.5；普通模型不会使用。
+    b_position_delta: torch.Tensor = None
     b_prefill_start_loc: torch.Tensor = None
     multimodal_params: list = None
     # cpu 变量
@@ -106,6 +109,7 @@ class ModelInput:
         return
 
     def to_cuda(self):
+        self.check_input()
         if self.input_ids is not None:
             self.input_ids = self.input_ids.cuda(non_blocking=True)
         if self.mem_indexes is None:
@@ -120,6 +124,12 @@ class ModelInput:
         self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
         if self.b_ready_cache_len is not None:
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+        if self.b_position_delta is not None:
+            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
+            assert self.is_prefill is False, "b_position_delta should only be used in decode phase."
+        else:
+            assert self.is_prefill is True, "decode ModelInput should provide b_position_delta."
+
         if self.b_prefill_start_loc is not None:
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
         if not self.is_prefill and enable_diverse_mode_gqa_decode_fast_kernel():
@@ -139,6 +149,10 @@ class ModelInput:
 
     def check_input(self):
         assert len(self.multimodal_params) == self.batch_size
+        if self.input_ids is not None:
+            assert (
+                self.input_ids.dtype == torch.int64
+            ), f"model input_ids must use torch.int64, got {self.input_ids.dtype}"
 
 
 @dataclass
@@ -155,6 +169,12 @@ class ModelOutput:
     # 输出最后一层的hidden state 状态用于 draft 模型的 mtp_draft_input_hiddens
     # 输入
     mtp_main_output_hiddens: Optional[torch.Tensor] = None
+
+    # prompt_logics 用于在开启 return_all_prompt_logics 模式（如 enable_prompt_logprobs）时，
+    # 保存整个 prefill 阶段每一个 token 位置对应的 logits（而非仅最后一个位置的 logits）。
+    # 此时 logits 依然只保存每个请求最后一个位置的 logits，prompt_logics 为可选项，仅在
+    # 需要返回 prompt logprobs 信息时才会非空。
+    prompt_logics: Optional[torch.Tensor] = None
 
     def to_no_ref_tensor(self):
         self.logits = tensor_to_no_ref_tensor(self.logits)

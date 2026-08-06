@@ -2,7 +2,7 @@
 name: test-model-qwen3-8b-gsm8k-scenarios
 description: >-
   LightLLM Qwen3-8B GSM8K multi-scenario regression: seven isolated api_server configs
-  (baseline, vllm-fp8w8a8 quant, tpsp mix, tpsp with dp2 and dp prefill balance, cpu cache,
+  (baseline, fp8w8a8 quant, tpsp mix, tpsp with dp2 and dp prefill balance, cpu cache,
   int8kv on top of cpu cache, disk cache with LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH).
   Each scenario then lm_eval gsm8k batch 500. Scenarios 5–7 run lm_eval twice for cache
   hit. Per-scenario LOG_DIR, server.log, eval logs, summary.txt. Default MODEL_DIR
@@ -24,7 +24,7 @@ description: >-
 | # | 名称 | `api_server` 要点 | `lm_eval` |
 |---|------|-------------------|-----------|
 | 1 | 基线 | **`--tp 2`**，无额外开关 | 1 次 |
-| 2 | FP8 量化 | **`--quant_type vllm-fp8w8a8`**（在场景 1 基础上） | 1 次 |
+| 2 | FP8 量化 | **`--quant_type fp8w8a8`**（在场景 1 基础上） | 1 次 |
 | 3 | TP-SP 混合 | **`--enable_tpsp_mix_mode`**（**`--tp 2`**，无 **`--dp`**） | 1 次 |
 | 4 | TP-SP + DP2 + DP prefill 均衡 | **`--tp 2 --dp 2`**、**`--enable_tpsp_mix_mode`**、**`--enable_dp_prefill_balance`** | 1 次 |
 | 5 | CPU Cache | **`--tp 2 --dp 2`**，**`--max_total_token_num 200000`**，**`--enable_cpu_cache`**，**`--cpu_cache_storage_size 128`**，**`--cpu_cache_token_page_size 128`** | **2 次** |
@@ -107,14 +107,14 @@ python -m lightllm.server.api_server \
   --port 8089
 ```
 
-### 场景 2：FP8 量化（`vllm-fp8w8a8`）
+### 场景 2：FP8 量化（`fp8w8a8`）
 
 ```bash
 python -m lightllm.server.api_server \
   --model_dir "${MODEL_DIR}" \
   --tp 2 \
   --port 8089 \
-  --quant_type vllm-fp8w8a8
+  --quant_type fp8w8a8
 ```
 
 ### 场景 3：TP-SP 混合

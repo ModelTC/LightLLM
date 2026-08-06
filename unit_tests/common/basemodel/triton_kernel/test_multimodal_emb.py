@@ -7,9 +7,12 @@ logger = init_logger(__name__)
 
 
 def test_mark_multimodal_obj():
-    obj_start_ids = torch.tensor([1, 4, 100], device="cuda", dtype=torch.int64)
+    virtual_token_base = 2 ** 62
+    obj_start_ids = torch.tensor(
+        [virtual_token_base, virtual_token_base + 3, virtual_token_base + 99], device="cuda", dtype=torch.int64
+    )
     obj_token_lens = torch.tensor([1, 3, 2], device="cuda", dtype=torch.int64)
-    input_ids = torch.tensor([1, 7, 9, 333], device="cuda", dtype=torch.int64)
+    input_ids = torch.tensor([virtual_token_base, virtual_token_base + 6, 9, 333], device="cuda", dtype=torch.int64)
 
     mark_obj = mark_multimodal_obj(
         obj_start_token_ids=obj_start_ids, obj_token_lens=obj_token_lens, input_ids=input_ids
@@ -23,18 +26,20 @@ def test_multimodal_emb():
     vob_size = 3200
     image_size = 10
     image_token_size = 512
+    virtual_token_base = 2 ** 62
 
     text_weight = torch.randn((vob_size, D), device="cuda", dtype=torch.float16)
     img_weight = torch.randn((image_size * image_token_size, 1, D), device="cuda", dtype=torch.float16)
     img_token_lens = torch.full((image_size,), image_token_size, device="cuda", dtype=torch.long)
     img_start_token_ids = (
-        (torch.arange(0, image_size * image_token_size, image_token_size) + vob_size * 10).cuda().long()
+        torch.arange(0, image_size * image_token_size, image_token_size, dtype=torch.int64, device="cuda")
+        + virtual_token_base
     )
     img_start_locs = torch.arange(0, image_size * image_token_size, image_token_size).cuda().long()
 
     prompt_ids = torch.arange(0, S, 1).cuda().long()
-    prompt_ids[0 : image_size * image_token_size] = (
-        (vob_size * 10 + torch.arange(0, image_size * image_token_size, 1)).cuda().long()
+    prompt_ids[0 : image_size * image_token_size] = virtual_token_base + torch.arange(
+        0, image_size * image_token_size, 1, dtype=torch.int64, device="cuda"
     )
 
     out = torch.zeros((S, D), dtype=torch.float16, device="cuda")

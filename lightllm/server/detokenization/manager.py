@@ -17,6 +17,7 @@ import pickle
 import time
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -27,12 +28,13 @@ class DeTokenizationManager:
         args: StartArgs,
     ):
         self.args = args
+        ports = get_shm_port_args()
         context = zmq.Context(2)
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.detokenization_port}")
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.detokenization_port}")
 
         self.pub_to_httpserver = context.socket(zmq.PUB)
-        self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port}")
+        self.pub_to_httpserver.bind(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port}")
         logger.info(f"pub_to_httpserver sendhwm {self.pub_to_httpserver.getsockopt(zmq.SNDHWM)}")
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
         self.all_special_ids = set(self.tokenizer.all_special_ids)

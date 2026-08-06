@@ -38,6 +38,8 @@ class InferStateInfo:
         self.b_mark_shared_group: torch.Tensor = None  # only for diverse mode used in decode phase.
 
         self.b_mtp_index: torch.Tensor = None
+        # only for mrope model in decode phase used.
+        self.b_position_delta: torch.Tensor = None
 
         self.b_seq_len: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
@@ -54,6 +56,10 @@ class InferStateInfo:
 
         self.is_token_healing: bool = False
         self.return_all_prompt_logics: bool = False
+        # 在开启 return_all_prompt_logics 模式时，保存整个 prefill 阶段每一个
+        # token 位置的 logits，供后续回传 prompt logprobs 信息使用。
+        # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
+        self.prompt_logics: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
         self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
         self.dist_group: CustomProcessGroup = None
