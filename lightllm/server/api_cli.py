@@ -870,6 +870,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="the data type of linear att smm data type",
     )
     parser.add_argument(
+        "--gdn_prefill_backend",
+        type=str,
+        choices=["fla", "flashqla"],
+        default="fla",
+        help="""GDN chunked-prefill kernel backend for hybrid linear-attention models.
+        'fla' uses the vendored flash-linear-attention Triton kernel. 'flashqla' uses the
+        TileLang FlashQLA kernel on SM90+ and falls back to 'fla' if FlashQLA is unavailable.""",
+    )
+    parser.add_argument(
         "--disable_linear_att_small_page_cpu_cache",
         action="store_true",
         default=False,

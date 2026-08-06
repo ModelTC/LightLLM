@@ -231,3 +231,4 @@ class StartArgs:
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+    gdn_prefill_backend: str = field(default="fla", metadata={"choices": ["fla", "flashqla"]})
