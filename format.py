@@ -1,6 +1,6 @@
-import os
 import glob
+import subprocess
 
 for filename in glob.glob('./**/*.py', recursive=True):
     print(filename)
-    os.system(f"autopep8 --max-line-length 140 --in-place --aggressive --aggressive {filename}")
+    subprocess.run(['autopep8', '--max-line-length', '140', '--in-place', '--aggressive', '--aggressive', filename])
