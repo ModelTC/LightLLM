@@ -183,7 +183,7 @@ class NcclKVTransporter:
         new_trans_task.prefill_num_pages = self.num_pages
         new_trans_task.prefill_page_reg_desc = self.local_page_mem_desc
         self._send_task_notif(trans_task.decode_agent_name, new_trans_task)
-        return
+        return True
 
     def write_blocks_paged(self, trans_task: PDChunckedTransTask) -> "_NcclXferHandle":
         assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None

@@ -140,6 +140,7 @@ class _DecodeTransModule:
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
+        self.quarantined_dict: Dict[str, PDChunckedTransTask] = {}
         self.request_page_task_queue = queue.Queue()
         self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
@@ -200,7 +201,7 @@ class _DecodeTransModule:
 
         for trans_task in aborted_tasks:
             trans_task.error_info = error_info
-            self.failed_queue.put(trans_task)
+            self._queue_failed_task(trans_task)
         return
 
     @log_exception
@@ -265,15 +266,20 @@ class _DecodeTransModule:
 
                         # 请求有错误
                         if notify_obj.error_info is not None:
-                            # 直接清理掉所有的相关请求。
+                            quarantined_task = None
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
+                                if notify_obj.transfer_quiesced:
+                                    quarantined_task = self.quarantined_dict.pop(notify_obj.get_key(), None)
                                 if local_trans_task is not None:
                                     local_trans_task.error_info = notify_obj.error_info
-                                    # 软性的调整超时时间，防止一些特殊情况，过快的释放task
-                                    # 占用的page 页面，导致多p 复写引起脏内容的问题。
-                                    local_trans_task.transfer_time_out_secs = 12
-                                    self.failed_queue.put(local_trans_task)
+                                    local_trans_task.transfer_quiesced = notify_obj.transfer_quiesced
+
+                            if local_trans_task is not None:
+                                self._queue_failed_task(local_trans_task)
+
+                            if quarantined_task is not None:
+                                self._recycle_quarantined_page(quarantined_task)
 
                             self._abort(
                                 request_id=notify_obj.request_id,
@@ -313,13 +319,18 @@ class _DecodeTransModule:
 
                         # prefill 写完数据到了 done 阶段
                         if remote_trans_task.write_stage == "done":
+                            quarantined_task = None
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                                if local_trans_task is None:
+                                    quarantined_task = self.quarantined_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
                                 logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                            elif quarantined_task is not None:
+                                self._recycle_quarantined_page(quarantined_task)
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -348,7 +359,7 @@ class _DecodeTransModule:
 
         for trans_task in timeout_tasks:
             trans_task.error_info = "time out in accept_peer_task_loop"
-            self.failed_queue.put(trans_task)
+            self._queue_failed_task(trans_task)
         return
 
     @log_exception
@@ -371,7 +382,7 @@ class _DecodeTransModule:
                 logger.exception(str(e))
                 self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
                 trans_task.error_info = f"send write ready task to prefill node failed: {str(e)}"
-                self.failed_queue.put(trans_task)
+                self._queue_failed_task(trans_task)
                 continue
 
         return
@@ -434,9 +445,10 @@ class _DecodeTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 
-            # 回收页面
             if trans_task.dst_page_index is not None:
-                self.page_index_queue.put(trans_task.dst_page_index)
+                if trans_task.transfer_quiesced:
+                    self.page_index_queue.put(trans_task.dst_page_index)
+                    trans_task.dst_page_index = None
 
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
@@ -451,4 +463,18 @@ class _DecodeTransModule:
                     request_id=trans_task.request_id,
                     error_info=trans_task.error_info,
                 )
-                self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
+                if not trans_task.transfer_quiesced:
+                    self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
+
+    def _recycle_quarantined_page(self, trans_task: PDChunckedTransTask):
+        if trans_task.dst_page_index is not None:
+            self.page_index_queue.put(trans_task.dst_page_index)
+            trans_task.dst_page_index = None
+        trans_task.transfer_quiesced = True
+        logger.info(f"recycle quiesced decode page for failed task: {trans_task.to_str()}")
+
+    def _queue_failed_task(self, trans_task: PDChunckedTransTask):
+        if trans_task.dst_page_index is not None and not trans_task.transfer_quiesced:
+            with self.waiting_dict_lock:
+                self.quarantined_dict[trans_task.get_key()] = trans_task
+        self.failed_queue.put(trans_task)
