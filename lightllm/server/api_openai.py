@@ -23,7 +23,7 @@ from typing import Any, AsyncGenerator, Optional, Union, List, Dict, Tuple
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .httpserver.manager import HttpServerManager
@@ -37,6 +37,8 @@ from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
 
+from .api_errors import create_error_response
+from .api_stream_obj import CustomStreamingResponse
 from .api_models import (
     ChatCompletionRequest,
     CompletionRequest,
@@ -60,46 +62,18 @@ from .api_models import (
 logger = init_logger(__name__)
 
 
-async def prime_pd_master_streaming_response(response: Response) -> Response:
-    """In PD-master mode, read the first stream item before sending the HTTP status."""
-    if not isinstance(response, StreamingResponse):
-        return response
-    if get_env_start_args().run_mode != "pd_master":
-        return response
-
-    body_iterator = response.body_iterator
-    try:
-        first_item = await body_iterator.__anext__()
-    except StopAsyncIteration:
-        return response
-
-    async def replay_stream():
-        try:
-            yield first_item
-            async for item in body_iterator:
-                yield item
-        finally:
-            close = getattr(body_iterator, "aclose", None)
-            if close is not None:
-                await close()
-
-    response.body_iterator = replay_stream()
-    return response
-
-
 async def _safe_stream_wrapper(stream_generator):
-    """Wrap a streaming generator to catch ValueError (e.g. input too long) and yield an SSE error
-    event instead of letting the exception propagate to Starlette which prints a long traceback."""
-    stream_started = False
+    """Convert generation errors to SSE events after the response has started."""
+    first_chunk_sent = False
     try:
         async for item in stream_generator:
+            first_chunk_sent = True
             yield item
-            stream_started = True
     except ValueError as e:
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
     except ServerBusyError as e:
-        if not stream_started:
+        if not first_chunk_sent:
             raise
         logger.error("Generation interrupted after the stream started: %s", e.message)
         error_data = json.dumps(
@@ -123,26 +97,6 @@ def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
     for field in response_nulls:
         d[field] = None
     return json.dumps(d, ensure_ascii=False)
-
-
-def create_error_response(
-    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
-) -> JSONResponse:
-    from .api_http import g_objs
-
-    if err_type is None:
-        if status_code.value >= 500:
-            err_type = "InternalServerError"
-        elif status_code == HTTPStatus.NOT_FOUND:
-            err_type = "NotFoundError"
-        else:
-            err_type = "BadRequestError"
-
-    g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse(
-        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
-        status_code=status_code.value,
-    )
 
 
 def _process_tool_call_id(
@@ -412,18 +366,18 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 prompt_cache_len_dict[sub_req_id] = metadata.get("prompt_cache_len", 0)
         choices = []
         sub_ids = list(final_output_dict.keys())[: request.n]
+        prompt_tokens = prompt_tokens_dict[sub_ids[0]]
+        completion_tokens = sum(count_output_tokens_dict[sub_req_id] for sub_req_id in sub_ids)
+        cached_tokens = prompt_cache_len_dict.get(sub_ids[0], 0)
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
+        )
+
         for i in range(request.n):
             sub_req_id = sub_ids[i]
-            prompt_tokens = prompt_tokens_dict[sub_req_id]
-            completion_tokens = count_output_tokens_dict[sub_req_id]
-            cached_tokens = prompt_cache_len_dict.get(sub_req_id, 0)
-            usage = UsageInfo(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=cached_tokens),
-            )
-
             finish_reason = finish_reason_dict[sub_req_id]
             text = "".join(final_output_dict[sub_req_id])
 
@@ -802,7 +756,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         yield "data: [DONE]\n\n".encode("utf-8")
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(
+    return CustomStreamingResponse(
         _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
     )
 
@@ -913,7 +867,7 @@ async def _process_prompts_completion(
             prompts[0], sampling_params, multimodal_params, raw_request, request, created_time
         )
 
-    async def process_single_prompt(prompt: Union[str, List[int]], prompt_index: int):
+    async def process_single_prompt(prompt: Union[str, List[int]]):
         if len(prompts) > 1:
             individual_sampling_params = SamplingParams()
             individual_sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
@@ -930,14 +884,12 @@ async def _process_prompts_completion(
             prompt, individual_sampling_params, multimodal_params, request=raw_request
         )
 
-        return await _collect_generation_results(
-            generator, request, prompt_str, prompt_index, individual_sampling_params
-        )
+        return await _collect_generation_results(generator, request, prompt_str, individual_sampling_params)
 
-    tasks = [asyncio.create_task(process_single_prompt(prompt, i)) for i, prompt in enumerate(prompts)]
+    tasks = [asyncio.create_task(process_single_prompt(prompt)) for prompt in prompts]
 
-    results = await asyncio.gather(*tasks)
-    return _build_completion_response(results, request, created_time, len(prompts) > 1)
+    results_by_prompt = await asyncio.gather(*tasks)
+    return _build_completion_response(results_by_prompt, request, created_time, len(prompts) > 1)
 
 
 async def _handle_streaming_completion(
@@ -1010,72 +962,82 @@ async def _handle_streaming_completion(
         yield "data: [DONE]\n\n"
 
     background_tasks = BackgroundTasks()
-    return StreamingResponse(
+    return CustomStreamingResponse(
         _safe_stream_wrapper(stream_results()), media_type="text/event-stream", background=background_tasks
     )
 
 
 async def _collect_generation_results(
-    generator, request: CompletionRequest, prompt: str, prompt_index: int, sampling_params: SamplingParams
+    generator, request: CompletionRequest, prompt: str, sampling_params: SamplingParams
 ):
-    final_output = []
-    count_output_tokens = 0
-    finish_reason = None
-    prompt_tokens = 0
-    prompt_cache_len = 0
-    token_infos = [] if request.logprobs is not None else None
-    prompt_logprobs = None
-    prompt_token_ids = None
-    is_first_metadata = True
+    final_outputs = collections.defaultdict(list)
+    output_token_counts = collections.defaultdict(int)
+    finish_reasons = {}
+    prompt_tokens = {}
+    prompt_cache_lens = {}
+    token_infos = collections.defaultdict(list)
+    prompt_logprobs = {}
+    prompt_token_ids = {}
 
     async for sub_req_id, request_output, metadata, finish_status in generator:
-        if is_first_metadata:
-            prompt_logprobs = metadata.get("prompt_logprobs", None)
-            prompt_token_ids = metadata.get("prompt_token_ids", None)
-            is_first_metadata = False
+        if sub_req_id not in prompt_token_ids:
+            prompt_logprobs[sub_req_id] = metadata.get("prompt_logprobs")
+            prompt_token_ids[sub_req_id] = metadata.get("prompt_token_ids")
 
-        count_output_tokens += 1
-        final_output.append(request_output)
+        output_token_counts[sub_req_id] += 1
+        final_outputs[sub_req_id].append(request_output)
 
-        if request.logprobs is not None and token_infos is not None:
-            token_info = {
-                "text": request_output,
-                "logprob": metadata.get("logprob", None),
-                "id": metadata.get("id", None),
-            }
-            token_infos.append(token_info)
+        if request.logprobs is not None:
+            token_infos[sub_req_id].append(
+                {
+                    "text": request_output,
+                    "logprob": metadata.get("logprob"),
+                    "id": metadata.get("id"),
+                }
+            )
 
         if finish_status.is_finished():
-            finish_reason = finish_status.get_finish_reason()
-            prompt_tokens = metadata["prompt_tokens"]
-            prompt_cache_len = metadata.get("prompt_cache_len", 0)
+            finish_reasons[sub_req_id] = finish_status.get_finish_reason()
+            prompt_tokens[sub_req_id] = metadata["prompt_tokens"]
+            prompt_cache_lens[sub_req_id] = metadata.get("prompt_cache_len", 0)
 
-    # 处理停止序列剔除
-    final_text = "".join(final_output)
-    if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
-        valid_stop_strings = sampling_params.stop_sequences.to_strings()
-        for stop_str in valid_stop_strings:
-            stop_index = final_text.rfind(stop_str, max(0, len(final_text) - len(stop_str) - 20), len(final_text))
-            if stop_index != -1:
-                logger.debug(f"removed stop sequence in tail: '{final_text[stop_index:]}'")
-                final_text = final_text[:stop_index]
-                break
+    results = []
+    for sub_req_id in sorted(final_outputs)[: request.n]:
+        final_text = "".join(final_outputs[sub_req_id])
+        finish_reason = finish_reasons.get(sub_req_id)
 
-    return {
-        "index": prompt_index,
-        "text": final_text,
-        "finish_reason": finish_reason,
-        "prompt_tokens": prompt_tokens,
-        "prompt_cache_len": prompt_cache_len,
-        "completion_tokens": count_output_tokens,
-        "token_infos": token_infos,
-        "prompt_logprobs": prompt_logprobs,
-        "prompt_token_ids": prompt_token_ids,
-        "prompt_text": prompt,
-    }
+        if finish_reason == "stop" and sampling_params.stop_sequences.size > 0:
+            for stop_str in sampling_params.stop_sequences.to_strings():
+                stop_index = final_text.rfind(
+                    stop_str,
+                    max(0, len(final_text) - len(stop_str) - 20),
+                    len(final_text),
+                )
+                if stop_index != -1:
+                    logger.debug("removed stop sequence in tail: '%s'", final_text[stop_index:])
+                    final_text = final_text[:stop_index]
+                    break
+
+        results.append(
+            {
+                "text": final_text,
+                "finish_reason": finish_reason,
+                "prompt_tokens": prompt_tokens.get(sub_req_id, 0),
+                "prompt_cache_len": prompt_cache_lens.get(sub_req_id, 0),
+                "completion_tokens": output_token_counts[sub_req_id],
+                "token_infos": (token_infos[sub_req_id] if request.logprobs is not None else None),
+                "prompt_logprobs": prompt_logprobs[sub_req_id],
+                "prompt_token_ids": prompt_token_ids[sub_req_id],
+                "prompt_text": prompt,
+            }
+        )
+
+    return results
 
 
-def _build_completion_response(results: List[Dict], request: CompletionRequest, created_time: int, is_batch: bool):
+def _build_completion_response(
+    results_by_prompt: List[List[Dict]], request: CompletionRequest, created_time: int, is_batch: bool
+):
     from .api_http import g_objs
 
     choices = []
@@ -1083,24 +1045,28 @@ def _build_completion_response(results: List[Dict], request: CompletionRequest, 
     total_completion_tokens = 0
     total_cached_tokens = 0
 
-    for result in results:
-        text = result["text"]
-        if request.echo:
-            text = result["prompt_text"] + text
+    for prompt_results in results_by_prompt:
+        if not prompt_results:
+            continue
 
-        logprobs_data = _build_logprobs_data(result, request, g_objs.httpserver_manager.tokenizer)
+        total_prompt_tokens += prompt_results[0]["prompt_tokens"]
+        total_cached_tokens += prompt_results[0].get("prompt_cache_len", 0)
 
-        choice = CompletionChoice(
-            index=result["index"],
-            text=text,
-            finish_reason=result["finish_reason"],
-            logprobs=CompletionLogprobs(**logprobs_data) if logprobs_data else None,
-        )
-        choices.append(choice)
+        for result in prompt_results:
+            text = result["text"]
+            if request.echo:
+                text = result["prompt_text"] + text
 
-        total_prompt_tokens += result["prompt_tokens"]
-        total_completion_tokens += result["completion_tokens"]
-        total_cached_tokens += result.get("prompt_cache_len", 0)
+            logprobs_data = _build_logprobs_data(result, request, g_objs.httpserver_manager.tokenizer)
+            choices.append(
+                CompletionChoice(
+                    index=len(choices),
+                    text=text,
+                    finish_reason=result["finish_reason"],
+                    logprobs=CompletionLogprobs(**logprobs_data) if logprobs_data else None,
+                )
+            )
+            total_completion_tokens += result["completion_tokens"]
 
     usage = UsageInfo(
         prompt_tokens=total_prompt_tokens,

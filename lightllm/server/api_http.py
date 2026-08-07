@@ -37,7 +37,7 @@ from typing import AsyncGenerator, Union
 from typing import Callable
 from lightllm.server import TokenLoad
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import Response, JSONResponse
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.core.objs import StartArgs
 from .multimodal_params import MultimodalParams
@@ -52,7 +52,8 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from dataclasses import asdict, dataclass, is_dataclass
 
-from .api_openai import chat_completions_impl, completions_impl, prime_pd_master_streaming_response
+from .api_errors import create_error_response, create_server_busy_response
+from .api_openai import chat_completions_impl, completions_impl
 from .api_models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -153,34 +154,19 @@ class _AccessLogMiddleware:
 app.add_middleware(_AccessLogMiddleware)
 
 
-def create_error_response(
-    status_code: HTTPStatus, message: str, err_type: str = None, param: str = None
-) -> JSONResponse:
-    if err_type is None:
-        if status_code.value >= 500:
-            err_type = "InternalServerError"
-        elif status_code == HTTPStatus.NOT_FOUND:
-            err_type = "NotFoundError"
-        elif status_code == HTTPStatus.TOO_MANY_REQUESTS:
-            err_type = "RateLimitError"
-        else:
-            err_type = "BadRequestError"
-
-    g_objs.metric_client.counter_inc("lightllm_request_failure")
-    return JSONResponse(
-        {"error": {"message": message, "type": err_type, "param": param, "code": status_code.value}},
-        status_code=status_code.value,
-    )
-
-
-def create_server_busy_response(exc: ServerBusyError) -> JSONResponse:
-    status = HTTPStatus(exc.status_code)
-    return create_error_response(status, str(exc), err_type="RateLimitError")
-
-
 @app.exception_handler(ServerBusyError)
 async def server_busy_exception_handler(request: Request, exc: ServerBusyError) -> JSONResponse:
     logger.warning(str(exc))
+
+    # Streaming responses can raise during their first body iteration, after
+    # the route handler has already returned. Preserve the Anthropic error
+    # envelope for that deferred failure path as well.
+    if request.url.path == "/v1/messages":
+        from .api_anthropic import _anthropic_error_response
+
+        g_objs.metric_client.counter_inc("lightllm_request_failure")
+        return _anthropic_error_response(HTTPStatus(exc.status_code), str(exc))
+
     return create_server_busy_response(exc)
 
 
@@ -327,8 +313,7 @@ async def generate_stream(request: Request) -> Response:
         )
 
     try:
-        response = await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
-        return await prime_pd_master_streaming_response(response)
+        return await g_objs.g_generate_stream_func(request, g_objs.httpserver_manager)
     except ServerBusyError as e:
         logger.warning(str(e))
         return create_server_busy_response(e)
@@ -385,7 +370,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     try:
         resp = await chat_completions_impl(request, raw_request)
-        resp = await prime_pd_master_streaming_response(resp)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
@@ -406,7 +390,6 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
 
     try:
         resp = await completions_impl(request, raw_request)
-        resp = await prime_pd_master_streaming_response(resp)
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ServerBusyError as e:
@@ -427,8 +410,7 @@ async def anthropic_messages(raw_request: Request) -> Response:
     from .api_anthropic import _anthropic_error_response, anthropic_messages_impl
 
     try:
-        response = await anthropic_messages_impl(raw_request)
-        return await prime_pd_master_streaming_response(response)
+        return await anthropic_messages_impl(raw_request)
     except ServerBusyError as e:
         logger.warning(str(e))
         g_objs.metric_client.counter_inc("lightllm_request_failure")
@@ -447,8 +429,7 @@ async def openai_responses(raw_request: Request) -> Response:
     from .api_responses import responses_impl
 
     try:
-        response = await responses_impl(raw_request)
-        return await prime_pd_master_streaming_response(response)
+        return await responses_impl(raw_request)
     except ServerBusyError as e:
         logger.warning(str(e))
         return create_server_busy_response(e)

@@ -7,7 +7,7 @@
        → (多数) RlOpReq → Router → Model RlBackendOps
 
 路由在模块级 ``router`` 上注册，由 ``api_http`` ``include_router`` 挂载。
-``g_objs`` / ``create_error_response`` 在 handler 内懒导入，避免与 api_http 循环依赖。
+``g_objs`` 在 handler 内懒导入，避免与 api_http 循环依赖。
 """
 
 from http import HTTPStatus
@@ -29,14 +29,14 @@ from lightllm.server.io_struct import (
 )
 from lightllm.utils.log_utils import init_logger
 
+from .api_errors import create_error_response
+
 logger = init_logger(__name__)
 
 router = APIRouter()
 
 
 async def handle_request_common(request_obj, handler):
-    from .api_http import create_error_response
-
     try:
         ret: RlOpRsp = await handler(request_obj)
         if ret.success:
@@ -51,7 +51,7 @@ async def handle_request_common(request_obj, handler):
 @router.post("/abort_request")
 async def abort_request(request: AbortReq, raw_request: Request):
     """Abort a request."""
-    from .api_http import create_error_response, g_objs
+    from .api_http import g_objs
 
     try:
         success, msg = await g_objs.httpserver_manager.abort_request(request)

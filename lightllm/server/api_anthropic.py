@@ -8,6 +8,7 @@ The streaming path intercepts the OpenAI-format SSE stream from
 chat_completions_impl and re-emits it as the Anthropic event sequence
 (message_start, content_block_*, message_delta, message_stop).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +33,8 @@ from fastapi.responses import JSONResponse, Response
 
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
+
+from .api_errors import is_rate_limit_error
 
 logger = init_logger(__name__)
 
@@ -780,6 +783,15 @@ def _sse_event(event_type: str, data_obj: Dict[str, Any]) -> bytes:
     return f"event: {event_type}\ndata: {json.dumps(data_obj)}\n\n".encode("utf-8")
 
 
+def _anthropic_error_type(error: Dict[str, Any]) -> str:
+    error_type = error.get("type")
+    if is_rate_limit_error(error):
+        return "rate_limit_error"
+    if error_type == "invalid_request_error":
+        return error_type
+    return "api_error"
+
+
 async def _openai_sse_to_anthropic_events(
     openai_body_iterator,
     requested_model: str,
@@ -842,16 +854,14 @@ async def _openai_sse_to_anthropic_events(
 
             if "error" in chunk and "choices" not in chunk:
                 error = chunk["error"]
-                error_type = error.get("type")
-                if error.get("code") == 429 or error_type in ("RateLimitError", "rate_limit_error"):
-                    error_type = "rate_limit_error"
-                elif error_type != "invalid_request_error":
-                    error_type = "api_error"
                 yield _sse_event(
                     "error",
                     {
                         "type": "error",
-                        "error": {"type": error_type, "message": error.get("message", "generation failed")},
+                        "error": {
+                            "type": _anthropic_error_type(error),
+                            "message": error.get("message", "generation failed"),
+                        },
                     },
                 )
                 return
@@ -1112,7 +1122,7 @@ def _rewrap_openai_error_as_anthropic(resp: JSONResponse) -> JSONResponse:
 async def anthropic_messages_impl(raw_request: Request) -> Response:
     # Lazy imports to avoid pulling in heavy server deps at module import time.
     from .api_models import ChatCompletionRequest, ChatCompletionResponse
-    from .api_openai import chat_completions_impl, prime_pd_master_streaming_response
+    from .api_openai import chat_completions_impl
 
     try:
         raw_body = await raw_request.json()
@@ -1143,21 +1153,19 @@ async def anthropic_messages_impl(raw_request: Request) -> Response:
     downstream = await chat_completions_impl(chat_request, raw_request)
 
     if is_stream:
-        from fastapi.responses import StreamingResponse
+        from .api_stream_obj import CustomStreamingResponse
 
-        if not isinstance(downstream, StreamingResponse):
+        if not isinstance(downstream, CustomStreamingResponse):
             # chat_completions_impl returned an OpenAI-format error — rewrap it.
             if isinstance(downstream, JSONResponse):
                 return _rewrap_openai_error_as_anthropic(downstream)
             return downstream
 
-        downstream = await prime_pd_master_streaming_response(downstream)
-
         message_id = f"msg_{uuid.uuid4().hex[:24]}"
         anthropic_stream = _openai_sse_to_anthropic_events(
             downstream.body_iterator, requested_model=requested_model, message_id=message_id
         )
-        return StreamingResponse(anthropic_stream, media_type="text/event-stream")
+        return CustomStreamingResponse(anthropic_stream, media_type="text/event-stream")
 
     if not isinstance(downstream, ChatCompletionResponse):
         if isinstance(downstream, JSONResponse):
