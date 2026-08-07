@@ -10,13 +10,15 @@ PD Master 的 cache-aware prefill 选点策略。
   - 用前缀树（见 PromptCacheTree）记录「历史 prompt -> 处理它的 worker」；
   - 树中的 prefill_node 对应 worker.client_ip_port；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
-  - 用 worker.dispatched_prompt_chars（累计派发的 prompt 字符数）做粗粒度均衡。
+  - 用 worker.recent_dispatched_chars（按 balance_half_life_secs 半衰期衰减的近期派发
+    prompt 字符数）做粗粒度均衡，避免冷启动累计值掩盖「曾经忙、现在闲」的节点。
 
 选点流程见 CacheAwarePolicy.select_worker。
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -37,6 +39,7 @@ class CacheAwareConfig:
     cache_threshold: float = 0.5
     # 派发量不均衡判定：max > min * balance_rel_threshold 时强制选派发量最少的节点。
     balance_rel_threshold: float = 1.2
+    balance_half_life_secs: float = 60.0
     # 前缀树允许的最大节点数（不含 root）。
     max_node_count: int = 1_000_000
     # 每次 LRU 驱逐的叶节点数量。
@@ -66,13 +69,23 @@ class CacheAwarePolicy:
             recursion_limit=self.config.recursion_limit,
         )
 
+    def _decay_recent(self, workers: List[PD_Client_Obj]) -> None:
+        now = time.monotonic()
+        half_life = self.config.balance_half_life_secs
+        for worker in workers:
+            if half_life > 0 and worker.last_decay_ts > 0:
+                elapsed = now - worker.last_decay_ts
+                if elapsed > 0:
+                    worker.recent_dispatched_chars *= 0.5 ** (elapsed / half_life)
+            worker.last_decay_ts = now
+
     def _select_worker_min_dispatched(
         self,
         workers: List[PD_Client_Obj],
         request_text: str,
     ) -> PD_Client_Obj:
-        """派发量优先兜底：选择累计 dispatched_prompt_chars 最小的 worker，并写入前缀树。"""
-        min_dispatched_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
+        """派发量优先兜底：选择近期 dispatched 最小的 worker，并写入前缀树。"""
+        min_dispatched_worker = min(workers, key=lambda worker: worker.recent_dispatched_chars)
         self.prompt_cache_tree.insert(request_text, min_dispatched_worker.client_ip_port)
         return min_dispatched_worker
 
@@ -89,28 +102,30 @@ class CacheAwarePolicy:
 
         决策顺序：
           1) workers 为空 -> 返回 None；
-          2) 若 max(dispatched) > min(dispatched) * balance_rel_threshold，
-             认为派发不均衡，直接选派发量最少的节点；
-          3) 否则对 request_text 做前缀匹配，计算
+          2) 先按半衰期衰减各 worker 的 recent_dispatched_chars；
+          3) 若 max(recent) > min(recent) * balance_rel_threshold，
+             认为近期派发不均衡，直接选近期派发量最少的节点；
+          4) 否则对 request_text 做前缀匹配，计算
              match_rate = matched_char_count / input_char_count；
-          4) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 路由到该节点并更新树；
-          5) 未命中阈值或 prefill_node 不在当前 workers 中 -> 回退到派发量最少选择。
+          5) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 路由到该节点并更新树；
+          6) 未命中阈值或 prefill_node 不在当前 workers 中 -> 回退到近期派发量最少选择。
         """
         if not workers:
             return None
         if len(request_text) <= 1:
             raise ValueError(f"request_text length must be > 1, got {len(request_text)}")
 
-        # ---- 1. 派发均衡门闩：差距过大时不再追求 cache 亲和 ----
-        dispatched_chars = [worker.dispatched_prompt_chars for worker in workers]
+        self._decay_recent(workers)
+        dispatched_chars = [worker.recent_dispatched_chars for worker in workers]
         min_dispatched = min(dispatched_chars) if dispatched_chars else 0
         max_dispatched = max(dispatched_chars) if dispatched_chars else 0
 
         is_imbalanced = max_dispatched > (min_dispatched * self.config.balance_rel_threshold)
 
         logger.info(
-            f"CacheAwarePolicy: min_dispatched={min_dispatched}, max_dispatched={max_dispatched}, "
+            f"CacheAwarePolicy: min_dispatched={min_dispatched:.0f}, max_dispatched={max_dispatched:.0f}, "
             f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
+            f"balance_half_life_secs={self.config.balance_half_life_secs:.1f}, "
             f"is_imbalanced={is_imbalanced}"
         )
 

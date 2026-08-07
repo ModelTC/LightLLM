@@ -58,6 +58,8 @@ class PD_Client_Obj:
     run_status: _PD_Client_RunStatus = field(default_factory=_PD_Client_RunStatus)
     # cache-aware 选点用：累计派发到该节点的 prompt 字符数（只增不减，非实时负载）。
     dispatched_prompt_chars: int = 0
+    recent_dispatched_chars: float = 0.0
+    last_decay_ts: float = 0.0
 
     def __post_init__(self):
         if self.mode not in ["prefill", "decode"]:

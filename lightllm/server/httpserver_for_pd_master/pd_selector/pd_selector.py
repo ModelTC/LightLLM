@@ -89,6 +89,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
 
         # 累计派发字符数，供后续 cache-aware 做派发均衡判断。
         p_node.dispatched_prompt_chars += len(prompt)
+        p_node.recent_dispatched_chars += len(prompt)
 
         logger.info(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "

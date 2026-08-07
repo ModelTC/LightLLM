@@ -737,6 +737,8 @@ class PDManager:
             # stale history does not bias CacheAware toward the zero-valued node.
             for prefill_node in self.prefill_nodes:
                 prefill_node.dispatched_prompt_chars = 0
+                prefill_node.recent_dispatched_chars = 0.0
+                prefill_node.last_decay_ts = 0.0
         elif pd_client.mode == "decode":
             self.decode_nodes = [e for e in self.decode_nodes if e.client_ip_port != pd_client.client_ip_port]
             self.decode_nodes.append(pd_client)
